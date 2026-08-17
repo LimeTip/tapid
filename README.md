@@ -197,4 +197,18 @@ Detailed implementation and future ecosystem plans are maintained outside versio
 
 ## Contributing
 
-The project is not yet ready for external contributions. Contribution guidance, development environment instructions, compatibility targets, and code-of-conduct decisions will be added when the first implementation milestone starts.
+Tapid is intended to benefit from community participation. People are welcome to inspect the project, propose improvements, open issues, submit pull requests, and continue building on the code under the MIT License.
+
+The MIT License permits commercial use, commercial distribution, resale, modification, and the creation of competing or complementary products. This is intentional: Tapid should be easy to adopt and improve, and contributors should not be afraid that the licensing model prevents useful work.
+
+Submitting a contribution does not automatically transfer copyright ownership to LimeTip. Contributors must have the right to submit their work and grant the project the rights required to use, modify, distribute, and maintain the contribution under the MIT License. LimeTip may introduce a separate Contributor License Agreement before accepting contributions where additional licensing rights are required.
+
+## Ownership, license, and trademarks
+
+Tapid is developed and maintained by LimeTip Company. The Tapid name, logo, brand assets, domains, and LimeTip trademarks are separate from the copyright license for the source code.
+
+The source code is licensed under the MIT License. The MIT License permits use, modification, distribution, and resale of the code, but it does not grant permission to imply endorsement by LimeTip, use LimeTip trademarks, or present a modified project as the official Tapid project.
+
+Forks and derivative products should use their own names, logos, and domains, and should clearly identify their relationship to the original Tapid project. LimeTip retains the right to protect the Tapid and LimeTip names and marks under applicable trademark law.
+
+See the `LICENSE` file for the complete license text. LimeTip may offer separate commercial services, hosted registries, verification services, and support around Tapid.
