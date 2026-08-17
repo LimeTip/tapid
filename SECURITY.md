@@ -6,7 +6,7 @@ Tapid is currently in the design and planning stage. There is no production Tapi
 
 Please do not disclose security vulnerabilities in public issues, discussions, pull requests, or social media.
 
-Use the private security advisory mechanism for the [`tapid-dev/tapid`](https://github.com/tapid-dev/tapid) repository when available. If it is unavailable, use the official private contact method listed on [tapid.dev](https://tapid.dev).
+Use the private security advisory mechanism for the [`limetip/tapid`](https://github.com/limetip/tapid) repository when available. If it is unavailable, use the official private contact method listed on [tapid.dev](https://tapid.dev).
 
 A useful report includes:
 
