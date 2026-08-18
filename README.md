@@ -4,7 +4,7 @@ Tapid is a planned package manager, package runner, and registry ecosystem for J
 
 The project starts with npm compatibility so it can be useful before a native package ecosystem exists. Its intended destination is broader: a Tapid-native package format, public and private registries, safer one-shot execution, explainable package risk evidence, easier publishing, controlled release revocation, and independent package audits.
 
-> Status: design and planning. Tapid is not yet implemented or ready to install.
+> Status: early implementation. The Rust workspace and initial CLI are now available, but Tapid is not yet ready for package installation or production use.
 
 ## Why Tapid
 
@@ -161,7 +161,7 @@ Tapid distinguishes package availability from artifact existence:
 
 ## Development
 
-The repository currently contains planning material only. Build and test commands will be added when the Rust workspace is bootstrapped.
+The repository contains the initial Rust workspace under `crates/`. The `tapid` CLI currently provides help and version commands, while `tapid-core` and `tapid-store` contain the first tested domain and local-store foundations. Package installation and registry access are not implemented yet.
 
 The intended quality gates are:
 
@@ -193,7 +193,7 @@ A security reporting process and `SECURITY.md` will be added before any public r
 
 ## Project documentation
 
-Detailed implementation and future ecosystem plans are maintained outside version control during the initial design phase. Stable architecture decisions and specifications should move into repository-owned `docs/`, `schemas/`, and `openapi/` directories once implementation begins.
+Detailed implementation and future ecosystem plans are maintained outside version control. Stable architecture decisions and specifications belong in repository-owned `docs/`, `schemas/`, and `openapi/` directories.
 
 ## Contributing
 

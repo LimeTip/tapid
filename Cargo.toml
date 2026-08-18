@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/tapid-core",
+    "crates/tapid-store",
+    "crates/tapid-cli",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/LimeTip/tapid"
+rust-version = "1.85"
+authors = ["LimeTip"]

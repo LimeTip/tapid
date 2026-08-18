@@ -1,0 +1,16 @@
+[package]
+name = "tapid"
+description = "A deterministic JavaScript and TypeScript package manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tapid"
+path = "src/main.rs"
+
+[dependencies]
+tapid-core = { version = "0.0.1", path = "../tapid-core" }
+tapid-store = { version = "0.0.1", path = "../tapid-store" }
