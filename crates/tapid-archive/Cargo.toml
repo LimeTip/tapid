@@ -1,5 +1,6 @@
 [package]
 name = "tapid-archive"
+readme = "README.md"
 description = "Package archive validation foundations for Tapid"
 version.workspace = true
 edition.workspace = true

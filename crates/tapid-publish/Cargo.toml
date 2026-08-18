@@ -1,5 +1,6 @@
 [package]
 name = "tapid-publish"
+readme = "README.md"
 description = "Package packing and publishing foundations for Tapid"
 version.workspace = true
 edition.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "tapid-attestations"
+readme = "README.md"
 description = "Artifact-bound attestation foundations for Tapid"
 version.workspace = true
 edition.workspace = true

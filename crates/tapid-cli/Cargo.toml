@@ -1,5 +1,6 @@
 [package]
 name = "tapid"
+readme = "README.md"
 description = "A deterministic JavaScript and TypeScript package manager"
 version.workspace = true
 edition.workspace = true

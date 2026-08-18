@@ -1,5 +1,6 @@
 [package]
 name = "tapid-test-support"
+readme = "README.md"
 description = "Test fixtures and support utilities for Tapid"
 version.workspace = true
 edition.workspace = true

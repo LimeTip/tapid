@@ -1,5 +1,6 @@
 [package]
 name = "tapid-registry-client"
+readme = "README.md"
 description = "Registry client foundations for the Tapid package manager"
 version.workspace = true
 edition.workspace = true

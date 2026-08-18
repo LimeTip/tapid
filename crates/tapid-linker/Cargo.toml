@@ -1,5 +1,6 @@
 [package]
 name = "tapid-linker"
+readme = "README.md"
 description = "Project dependency linking foundations for Tapid"
 version.workspace = true
 edition.workspace = true

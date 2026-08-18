@@ -1,5 +1,6 @@
 [package]
 name = "tapid-runner"
+readme = "README.md"
 description = "Policy-aware package execution foundations for Tapid"
 version.workspace = true
 edition.workspace = true

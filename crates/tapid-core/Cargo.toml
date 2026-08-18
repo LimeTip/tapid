@@ -1,5 +1,6 @@
 [package]
 name = "tapid-core"
+readme = "README.md"
 description = "Core domain types and deterministic validation for the Tapid package manager"
 version.workspace = true
 edition.workspace = true

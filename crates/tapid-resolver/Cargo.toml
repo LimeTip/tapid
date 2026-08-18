@@ -1,5 +1,6 @@
 [package]
 name = "tapid-resolver"
+readme = "README.md"
 description = "Deterministic dependency resolution foundations for Tapid"
 version.workspace = true
 edition.workspace = true

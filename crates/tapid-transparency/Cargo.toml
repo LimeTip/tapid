@@ -1,5 +1,6 @@
 [package]
 name = "tapid-transparency"
+readme = "README.md"
 description = "Transparency record foundations for Tapid"
 version.workspace = true
 edition.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "tapid-signatures"
+readme = "README.md"
 description = "Signing and verification foundations for Tapid"
 version.workspace = true
 edition.workspace = true

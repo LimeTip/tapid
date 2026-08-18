@@ -1,5 +1,6 @@
 [package]
 name = "tapid-protocol"
+readme = "README.md"
 description = "Shared protocol types for the Tapid package ecosystem"
 version.workspace = true
 edition.workspace = true

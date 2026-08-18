@@ -1,5 +1,6 @@
 [package]
 name = "tapid-store"
+readme = "README.md"
 description = "Local content-addressed package store foundations for Tapid"
 version.workspace = true
 edition.workspace = true

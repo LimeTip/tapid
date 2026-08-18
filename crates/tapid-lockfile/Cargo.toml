@@ -1,5 +1,6 @@
 [package]
 name = "tapid-lockfile"
+readme = "README.md"
 description = "Deterministic lockfile models and serialization for Tapid"
 version.workspace = true
 edition.workspace = true

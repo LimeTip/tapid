@@ -1,5 +1,6 @@
 [package]
 name = "tapid-policy"
+readme = "README.md"
 description = "Evidence and policy decision foundations for Tapid"
 version.workspace = true
 edition.workspace = true
