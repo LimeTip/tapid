@@ -1,0 +1,12 @@
+[package]
+name = "tapid-manifest"
+description = "Manifest parsing and package metadata models for Tapid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"

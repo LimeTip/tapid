@@ -4,6 +4,20 @@ members = [
     "crates/tapid-core",
     "crates/tapid-store",
     "crates/tapid-cli",
+    "crates/tapid-manifest",
+    "crates/tapid-lockfile",
+    "crates/tapid-resolver",
+    "crates/tapid-registry-client",
+    "crates/tapid-archive",
+    "crates/tapid-linker",
+    "crates/tapid-policy",
+    "crates/tapid-runner",
+    "crates/tapid-publish",
+    "crates/tapid-test-support",
+    "crates/tapid-protocol",
+    "crates/tapid-signatures",
+    "crates/tapid-attestations",
+    "crates/tapid-transparency",
 ]
 
 [workspace.package]

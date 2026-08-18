@@ -25,7 +25,7 @@ tapid-cli -> tapid-store
 tapid-store -> tapid-core
 ```
 
-Future crates may include manifest parsing, resolution, lockfiles, registry clients, linking, and policy evaluation. They should be added when they provide real behavior, not as empty placeholders.
+Future crates may include manifest parsing, lockfiles, resolution, registry clients, archive validation, linking, policy, execution, publishing, protocol, signatures, attestations, and transparency support. The current workspace contains minimal scaffolds for these planned boundaries so names and ownership are clear. They should gain real behavior incrementally, not remain empty placeholders.
 
 ## Registry boundary
 

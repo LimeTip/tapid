@@ -1,0 +1,12 @@
+[package]
+name = "tapid-attestations"
+description = "Artifact-bound attestation foundations for Tapid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"

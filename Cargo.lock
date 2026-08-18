@@ -11,7 +11,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "tapid-archive"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-attestations"
+version = "0.0.1"
+
+[[package]]
 name = "tapid-core"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-linker"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-lockfile"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-manifest"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-policy"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-protocol"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-publish"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-registry-client"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-resolver"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-runner"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-signatures"
 version = "0.0.1"
 
 [[package]]
@@ -20,3 +68,11 @@ version = "0.0.1"
 dependencies = [
  "tapid-core",
 ]
+
+[[package]]
+name = "tapid-test-support"
+version = "0.0.1"
+
+[[package]]
+name = "tapid-transparency"
+version = "0.0.1"
