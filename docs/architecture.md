@@ -8,7 +8,8 @@ Tapid starts as a Rust workspace in one public repository. The workspace provide
 crates/
 ├── tapid-cli
 ├── tapid-core
-└── tapid-store
+├── tapid-store
+└── tapid-manifest
 ```
 
 `tapid-cli` owns command-line parsing, terminal output, and process exit behavior.
@@ -21,11 +22,13 @@ crates/
 
 ```text
 tapid-cli -> tapid-core
+tapid-cli -> tapid-manifest
 tapid-cli -> tapid-store
+tapid-manifest -> tapid-core
 tapid-store -> tapid-core
 ```
 
-Future crates may include manifest parsing, lockfiles, resolution, registry clients, archive validation, linking, policy, execution, publishing, protocol, signatures, attestations, and transparency support. The current workspace contains minimal scaffolds for these planned boundaries so names and ownership are clear. They should gain real behavior incrementally, not remain empty placeholders.
+Future crates may include lockfiles, resolution, registry clients, archive validation, linking, policy, execution, publishing, protocol, signatures, attestations, and transparency support. The manifest crate now owns parsing and validation for the supported `package.json` fields, while filesystem mutation remains in the CLI. Other planned boundaries should gain real behavior incrementally, not remain empty placeholders.
 
 ## Registry boundary
 

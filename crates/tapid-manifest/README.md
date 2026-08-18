@@ -1,5 +1,7 @@
 # tapid-manifest
 
-Manifest parsing foundations for Tapid.
+Parsing and validation for npm-compatible `package.json` manifests.
 
-This crate will handle package metadata from package.json and Tapid metadata files. The current release is a workspace scaffold.
+The current implementation validates the required `name` and `version` fields, the optional `private` flag, and string-valued `dependencies`. It also provides deterministic serialization for the supported fields.
+
+This crate is intentionally independent of the CLI. Filesystem mutation and user-facing command behavior belong to `tapid`, while manifest parsing and validation belong here.
