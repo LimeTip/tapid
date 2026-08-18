@@ -33,6 +33,7 @@ The first useful version will focus on:
 - Existing `package.json` projects.
 - Deterministic `tapid init` project initialization.
 - Strict validation of required package metadata.
+- Supported dependency groups and lifecycle script metadata.
 - npm registry metadata and package artifacts.
 - Deterministic dependency resolution.
 - A versioned `tapid.lock` file.

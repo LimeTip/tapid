@@ -1,7 +1,14 @@
 # tapid-manifest
 
-Parsing and validation for npm-compatible `package.json` manifests.
+Parsing and validation for selected npm-compatible `package.json` fields.
 
-The current implementation validates the required `name` and `version` fields, the optional `private` flag, and string-valued `dependencies`. It also provides deterministic serialization for the supported fields.
+The current implementation validates:
 
-This crate is intentionally independent of the CLI. Filesystem mutation and user-facing command behavior belong to `tapid`, while manifest parsing and validation belong here.
+- Required `name` and `version`.
+- Optional `private`, `description`, and `license`.
+- String-valued `dependencies`, `devDependencies`, `optionalDependencies`, and `peerDependencies`.
+- String-valued `scripts` entries.
+
+Dependency names are validated through `tapid-core`, and supported fields serialize deterministically with stable field ordering and sorted map keys.
+
+This crate is intentionally independent of the CLI. Filesystem mutation and user-facing command behavior belong to `tapid`, while manifest parsing and validation belong here. Unsupported `package.json` fields are currently ignored rather than interpreted.
