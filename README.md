@@ -1,5 +1,7 @@
 # Tapid
 
+[![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
+
 Tapid is a planned package manager, package runner, and registry ecosystem for JavaScript and TypeScript, written in Rust.
 
 The project starts with npm compatibility so it can be useful before a native package ecosystem exists. Its intended destination is broader: a Tapid-native package format, public and private registries, safer one-shot execution, explainable package risk evidence, easier publishing, controlled release revocation, and independent package audits.
