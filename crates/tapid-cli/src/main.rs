@@ -9,6 +9,35 @@ fn main() {
     match args.next().as_deref() {
         None | Some("--help") | Some("-h") => print_help(),
         Some("--version") | Some("-V") => println!("tapid {VERSION}"),
+        Some("manifest") => match args.next().as_deref() {
+            Some("validate") => {
+                let path = args
+                    .next()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| Path::new("package.json").to_owned());
+                if args.next().is_some() {
+                    eprintln!("error: tapid manifest validate accepts at most one path");
+                    std::process::exit(2);
+                }
+                match validate_manifest(&path) {
+                    Ok(manifest) => {
+                        println!("Valid manifest: {}@{}", manifest.name(), manifest.version())
+                    }
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Some(command) => {
+                eprintln!("error: unknown manifest command '{command}'");
+                std::process::exit(2);
+            }
+            None => {
+                eprintln!("error: missing manifest command");
+                std::process::exit(2);
+            }
+        },
         Some("init") => {
             let path = args.next().unwrap_or_else(|| ".".to_owned());
             if args.next().is_some() {
@@ -40,8 +69,12 @@ fn main() {
 
 fn print_help() {
     println!(
-        "Tapid, a deterministic JavaScript and TypeScript package manager\n\nUsage:\n  tapid [OPTIONS]\n  tapid init [PATH]\n\nCommands:\n  init [PATH]       Create a private package.json manifest\n\nOptions:\n  -h, --help       Print help information\n  -V, --version    Print version information"
+        "Tapid, a deterministic JavaScript and TypeScript package manager\n\nUsage:\n  tapid [OPTIONS]\n  tapid init [PATH]\n  tapid manifest validate [PATH]\n\nCommands:\n  init [PATH]                 Create a private package.json manifest\n  manifest validate [PATH]    Validate a package.json manifest\n\nOptions:\n  -h, --help                 Print help information\n  -V, --version              Print version information"
     );
+}
+
+fn validate_manifest(path: &Path) -> Result<PackageManifest, ValidateError> {
+    PackageManifest::from_path(path).map_err(ValidateError::Manifest)
 }
 
 fn init_project(directory: &Path) -> Result<(), InitError> {
@@ -106,11 +139,26 @@ impl fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
+#[derive(Debug)]
+enum ValidateError {
+    Manifest(tapid_manifest::ManifestError),
+}
+
+impl fmt::Display for ValidateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Manifest(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ValidateError {}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use super::init_project;
+    use super::{init_project, validate_manifest};
 
     #[test]
     fn package_version_is_set() {
@@ -144,6 +192,20 @@ mod tests {
         assert_eq!(
             fs::read_to_string(directory.join("package.json")).unwrap(),
             "original\n"
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn manifest_validation_loads_a_valid_manifest() {
+        let directory = test_directory("validate");
+        let path = directory.join("package.json");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(&path, r#"{"name":"validated","version":"1.0.0"}"#).unwrap();
+
+        assert_eq!(
+            validate_manifest(&path).unwrap().name().as_str(),
+            "validated"
         );
         let _ = fs::remove_dir_all(directory);
     }

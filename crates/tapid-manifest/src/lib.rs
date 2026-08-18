@@ -2,7 +2,7 @@
 
 #![deny(unsafe_code)]
 
-use std::{collections::BTreeMap, fmt, str::FromStr};
+use std::{collections::BTreeMap, fmt, fs, path::Path, str::FromStr};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -76,6 +76,16 @@ impl PackageManifest {
         manifest.license = optional_string(object, "license")?;
 
         Ok(manifest)
+    }
+
+    /// Reads and validates a `package.json` file from disk.
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, ManifestError> {
+        let path = path.as_ref();
+        let input = fs::read_to_string(path).map_err(|source| ManifestError::ReadFile {
+            path: path.to_owned(),
+            source,
+        })?;
+        Self::parse(&input)
     }
 
     /// Serializes the supported fields in a stable, human-readable format.
@@ -225,11 +235,18 @@ fn parse_string_map(
 pub enum ManifestError {
     InvalidJson(serde_json::Error),
     RootMustBeObject,
+    ReadFile {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
     RequiredString(&'static str),
     ExpectedString(&'static str),
     ExpectedBoolean(&'static str),
     ExpectedMap(&'static str),
-    ExpectedMapValueString { field: &'static str, key: String },
+    ExpectedMapValueString {
+        field: &'static str,
+        key: String,
+    },
     InvalidPackageName(tapid_core::DomainError),
     InvalidPackageVersion(tapid_core::DomainError),
     InvalidDependencyName(tapid_core::DomainError),
@@ -240,6 +257,9 @@ impl fmt::Display for ManifestError {
         match self {
             Self::InvalidJson(error) => write!(f, "invalid package.json: {error}"),
             Self::RootMustBeObject => write!(f, "package.json root must be an object"),
+            Self::ReadFile { path, source } => {
+                write!(f, "cannot read manifest {}: {source}", path.display())
+            }
             Self::RequiredString(key) => write!(f, "package.json field '{key}' must be a string"),
             Self::ExpectedString(key) => write!(f, "package.json field '{key}' must be a string"),
             Self::ExpectedBoolean(key) => write!(f, "package.json field '{key}' must be a boolean"),
@@ -263,6 +283,8 @@ impl std::error::Error for ManifestError {}
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::PathBuf};
+
     use super::*;
 
     #[test]
@@ -334,11 +356,33 @@ mod tests {
     }
 
     #[test]
+    fn loads_a_manifest_from_a_path() {
+        let path = test_path("valid");
+        fs::write(&path, r#"{"name":"from-disk","version":"1.0.0"}"#).unwrap();
+
+        let manifest = PackageManifest::from_path(&path).unwrap();
+
+        assert_eq!(manifest.name().as_str(), "from-disk");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reports_missing_manifest_files() {
+        let path = test_path("missing");
+        let error = PackageManifest::from_path(&path).unwrap_err();
+        assert!(error.to_string().contains("cannot read manifest"));
+    }
+
+    #[test]
     fn renders_a_deterministic_minimal_manifest() {
         let manifest = PackageManifest::new("example-app", "0.1.0", true).unwrap();
         assert_eq!(
             manifest.to_json(),
             "{\n  \"name\": \"example-app\",\n  \"version\": \"0.1.0\",\n  \"private\": true\n}\n"
         );
+    }
+
+    fn test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("tapid-manifest-{name}-{}", std::process::id()))
     }
 }

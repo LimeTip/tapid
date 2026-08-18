@@ -32,6 +32,7 @@ The first useful version will focus on:
 
 - Existing `package.json` projects.
 - Deterministic `tapid init` project initialization.
+- `tapid manifest validate` for direct manifest checks, defaulting to `package.json`.
 - Strict validation of required package metadata.
 - Supported dependency groups and lifecycle script metadata.
 - npm registry metadata and package artifacts.
@@ -96,6 +97,7 @@ The exact interface may evolve, but the intended CLI includes:
 
 ```text
 tapid init
+tapid manifest validate [path]
 tapid install
 tapid add <package-spec>
 tapid remove <package>

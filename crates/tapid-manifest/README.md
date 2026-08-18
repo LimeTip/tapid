@@ -8,6 +8,7 @@ The current implementation validates:
 - Optional `private`, `description`, and `license`.
 - String-valued `dependencies`, `devDependencies`, `optionalDependencies`, and `peerDependencies`.
 - String-valued `scripts` entries.
+- Manifest files loaded directly from disk with `PackageManifest::from_path`.
 
 Dependency names are validated through `tapid-core`, and supported fields serialize deterministically with stable field ordering and sorted map keys.
 
