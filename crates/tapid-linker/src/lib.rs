@@ -75,6 +75,36 @@ pub struct PackageInstance {
     pub tree: VerifiedTreeReference,
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct InstanceKey {
+    pub id: PackageInstanceId,
+    pub peer_context: PeerContext,
+    pub platform_context: PlatformContext,
+}
+
+impl From<&PackageInstance> for InstanceKey {
+    fn from(instance: &PackageInstance) -> Self {
+        Self {
+            id: instance.id.clone(),
+            peer_context: instance.peer_context.clone(),
+            platform_context: instance.platform_context.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DependencyEdge {
+    pub parent: InstanceKey,
+    pub child: InstanceKey,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LayoutInput {
+    pub instances: Vec<PackageInstance>,
+    pub root_dependencies: Vec<InstanceKey>,
+    pub dependency_edges: Vec<DependencyEdge>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterializationInput {
     pub instances: Vec<PackageInstance>,
@@ -176,6 +206,114 @@ pub fn plan_materialization(
     })
 }
 
+pub fn plan_layout(
+    root: ManagedRoot,
+    input: LayoutInput,
+    platform: Platform,
+) -> Result<MaterializationPlan, PlanError> {
+    let kind = match platform {
+        Platform::Unix => LinkKind::Symlink,
+        Platform::Windows => LinkKind::Junction,
+        Platform::Other => return Err(PlanError::UnsupportedPlatform(platform)),
+    };
+    let mut instances = input.instances;
+    instances.sort_by_key(|instance| InstanceKey::from(instance));
+    let mut by_key = std::collections::BTreeMap::new();
+    for instance in &instances {
+        let key = InstanceKey::from(instance);
+        if by_key.insert(key.clone(), instance).is_some() {
+            return Err(PlanError::DuplicateInstance(key.id));
+        }
+    }
+    let mut entries = Vec::with_capacity(instances.len());
+    let mut storage = std::collections::BTreeMap::new();
+    for instance in &instances {
+        let key = InstanceKey::from(instance);
+        let path = root
+            .path
+            .join(".tapid")
+            .join("instances")
+            .join(safe_component(instance.id.name.as_str()))
+            .join(instance.id.version.to_string())
+            .join(context_suffix(
+                &instance.peer_context,
+                &instance.platform_context,
+            ));
+        if !root.contains(&path) {
+            return Err(PlanError::PathOutsideManagedRoot(path));
+        }
+        storage.insert(key.clone(), path.clone());
+        entries.push(MaterializationEntry {
+            instance: key.id,
+            peer_context: key.peer_context.to_string(),
+            platform_context: key.platform_context.to_string(),
+            source: instance.tree.root.clone(),
+            target: path,
+        });
+    }
+    let mut locations: std::collections::BTreeMap<InstanceKey, PathBuf> =
+        std::collections::BTreeMap::new();
+    let mut requests = Vec::new();
+    let mut roots = input.root_dependencies;
+    roots.sort();
+    for child in roots {
+        if !by_key.contains_key(&child) {
+            return Err(PlanError::UnknownInstance(child.id));
+        }
+        requests.push((None, child));
+    }
+    let mut edges = input.dependency_edges;
+    edges.sort_by(|a, b| {
+        (a.parent.clone(), a.child.clone()).cmp(&(b.parent.clone(), b.child.clone()))
+    });
+    for edge in edges {
+        if !by_key.contains_key(&edge.parent) {
+            return Err(PlanError::UnknownInstance(edge.parent.id));
+        }
+        if !by_key.contains_key(&edge.child) {
+            return Err(PlanError::UnknownInstance(edge.child.id));
+        }
+        requests.push((Some(edge.parent), edge.child));
+    }
+    let mut activation = Vec::new();
+    for (parent, child) in requests {
+        let base = match parent {
+            None => root.path.join("node_modules"),
+            Some(parent) => locations
+                .get(&parent)
+                .cloned()
+                .ok_or(PlanError::UnknownParent(parent.id))?
+                .join("node_modules"),
+        };
+        let target = base.join(child.id.name.as_str().split('/').collect::<PathBuf>());
+        if !root.contains(&target) {
+            return Err(PlanError::PathOutsideManagedRoot(target));
+        }
+        if let Some(existing) = activation
+            .iter()
+            .find(|step: &&ActivationStep| step.target == target)
+        {
+            if existing.source != storage[&child] {
+                return Err(PlanError::ConflictingTarget(target));
+            }
+            continue;
+        }
+        locations.insert(child.clone(), target.clone());
+        activation.push(ActivationStep {
+            kind: kind.clone(),
+            source: storage[&child].clone(),
+            target,
+        });
+    }
+    activation.sort_by(|a, b| a.target.cmp(&b.target));
+    Ok(MaterializationPlan {
+        ownership_marker: root.ownership_marker.clone(),
+        managed_root: root,
+        entries,
+        activation: StagedActivationPlan { steps: activation },
+    })
+}
+
 fn context_suffix(peer: &PeerContext, platform: &PlatformContext) -> String {
     let peer = if peer.to_string().is_empty() {
         "no-peer".to_owned()
@@ -266,6 +404,10 @@ pub enum PlanError {
     InvalidManagedRoot(PathBuf),
     PathOutsideManagedRoot(PathBuf),
     DuplicateInstance(PackageInstanceId),
+    UnknownInstance(PackageInstanceId),
+    UnknownParent(PackageInstanceId),
+    ConflictingTarget(PathBuf),
+    UnsupportedPlatform(Platform),
 }
 impl fmt::Display for PlanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -279,6 +421,12 @@ impl fmt::Display for PlanError {
                 write!(f, "planned path escapes managed root: {}", v.display())
             }
             Self::DuplicateInstance(v) => write!(f, "duplicate package instance: {v:?}"),
+            Self::UnknownInstance(v) => write!(f, "unknown package instance: {v:?}"),
+            Self::UnknownParent(v) => write!(f, "dependency parent was not placed: {v:?}"),
+            Self::ConflictingTarget(v) => {
+                write!(f, "conflicting activation target: {}", v.display())
+            }
+            Self::UnsupportedPlatform(v) => write!(f, "unsupported linker platform: {v:?}"),
         }
     }
 }
@@ -369,5 +517,95 @@ mod tests {
         assert_eq!(caps.symlink, Capability::Unsupported);
         assert_eq!(caps.process_sandbox, Capability::Unsupported);
         assert!(!caps.limitations.is_empty());
+    }
+
+    #[test]
+    fn root_edges_and_nested_edges_get_distinct_node_modules_targets() {
+        let app = instance("app", "1.0.0", PeerContext::default());
+        let dep_v1 = instance("dep", "1.0.0", PeerContext::default());
+        let dep_v2 = instance("dep", "2.0.0", PeerContext::default());
+        let input = LayoutInput {
+            instances: vec![app.clone(), dep_v1.clone(), dep_v2.clone()],
+            root_dependencies: vec![key(&app), key(&dep_v1)],
+            dependency_edges: vec![DependencyEdge {
+                parent: key(&app),
+                child: key(&dep_v2),
+            }],
+        };
+        let plan = plan_layout(
+            ManagedRoot::new("/tmp/project").unwrap(),
+            input,
+            Platform::Unix,
+        )
+        .unwrap();
+        let targets: Vec<_> = plan
+            .activation
+            .steps
+            .iter()
+            .map(|step| step.target.clone())
+            .collect();
+        assert!(
+            targets
+                .iter()
+                .any(|p| p == Path::new("/tmp/project/node_modules/dep"))
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|p| p == Path::new("/tmp/project/node_modules/app/node_modules/dep"))
+        );
+    }
+
+    #[test]
+    fn conflicting_edges_are_rejected_instead_of_overwriting_a_target() {
+        let app = instance("app", "1.0.0", PeerContext::default());
+        let first = instance("dep", "1.0.0", PeerContext::default());
+        let second = instance("dep", "2.0.0", PeerContext::default());
+        let input = LayoutInput {
+            instances: vec![app.clone(), first.clone(), second.clone()],
+            root_dependencies: vec![key(&app), key(&first), key(&second)],
+            dependency_edges: vec![],
+        };
+        assert!(matches!(
+            plan_layout(
+                ManagedRoot::new("/tmp/project").unwrap(),
+                input,
+                Platform::Unix
+            ),
+            Err(PlanError::ConflictingTarget(_))
+        ));
+    }
+
+    #[test]
+    fn platform_strategy_is_explicit_and_other_platforms_are_unsupported() {
+        let app = instance("app", "1.0.0", PeerContext::default());
+        let input = LayoutInput {
+            instances: vec![app.clone()],
+            root_dependencies: vec![key(&app)],
+            dependency_edges: vec![],
+        };
+        let windows = plan_layout(
+            ManagedRoot::new("/tmp/project").unwrap(),
+            input.clone(),
+            Platform::Windows,
+        )
+        .unwrap();
+        assert_eq!(windows.activation.steps[0].kind, LinkKind::Junction);
+        assert!(matches!(
+            plan_layout(
+                ManagedRoot::new("/tmp/project").unwrap(),
+                input,
+                Platform::Other
+            ),
+            Err(PlanError::UnsupportedPlatform(Platform::Other))
+        ));
+    }
+
+    fn key(package: &PackageInstance) -> InstanceKey {
+        InstanceKey {
+            id: package.id.clone(),
+            peer_context: package.peer_context.clone(),
+            platform_context: package.platform_context.clone(),
+        }
     }
 }
