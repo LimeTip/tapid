@@ -56,6 +56,48 @@ impl Store {
         self.root.join("artifacts").join(digest.as_str())
     }
 
+    /// Returns a verified package tree. A tree is activated by store tooling
+    /// with a `.tapid-tree` marker containing the exact digest; install never
+    /// trusts an unmarked directory or a symlink.
+    pub fn verified_tree_path(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
+        let path = self.root.join("trees").join(digest.as_str());
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_dir() {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "tree is not a directory").into(),
+            );
+        }
+        let marker = path.join(".tapid-tree");
+        let marker_meta = fs::symlink_metadata(&marker)?;
+        if !marker_meta.file_type().is_file()
+            || fs::read_to_string(marker)?.trim() != digest.as_str()
+        {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "store tree is not verified").into(),
+            );
+        }
+        Ok(path)
+    }
+
+    /// Test/support and store-ingestion contract for activating a verified tree.
+    pub fn activate_verified_tree(
+        &self,
+        digest: &ArtifactDigest,
+        source: &Path,
+    ) -> Result<PathBuf, IngestError> {
+        let destination = self.root.join("trees").join(digest.as_str());
+        fs::create_dir_all(&destination)?;
+        if !source.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tree source is not a directory",
+            )
+            .into());
+        }
+        fs::write(destination.join(".tapid-tree"), digest.as_str())?;
+        Ok(destination)
+    }
+
     /// Stream bytes into a private staging file, verify SHA-256, then atomically
     /// activate it under the digest path. Existing activated bytes are never
     /// replaced: the filesystem is the source of truth for idempotency.

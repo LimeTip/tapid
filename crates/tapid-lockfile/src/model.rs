@@ -189,6 +189,8 @@ pub struct LockedPackage {
     version: String,
     artifact_integrity: String,
     unpacked_digest: String,
+    /// Explicit replay identity for the verified unpacked store tree.
+    tree_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_url: Option<String>,
     #[serde(skip_serializing_if = "String::is_empty", default)]
@@ -247,6 +249,7 @@ impl LockedPackage {
                 .parse::<ArtifactDigest>()
                 .map_err(LockfileError::Domain)?
                 .to_string(),
+            tree_digest: unpacked_digest.to_owned(),
             artifact_url: None,
             peer_context: peer_context.to_string(),
             platform_context: platform_context.to_string(),
@@ -278,6 +281,14 @@ impl LockedPackage {
         )
     }
 
+    pub fn tree_digest(&self) -> &str {
+        &self.tree_digest
+    }
+
+    pub fn dependencies(&self) -> &BTreeMap<String, String> {
+        &self.dependencies
+    }
+
     fn validate(&self) -> Result<(), LockfileError> {
         self.registry
             .parse::<RegistryOrigin>()
@@ -292,6 +303,9 @@ impl LockedPackage {
             .parse::<PackageIntegrity>()
             .map_err(LockfileError::Domain)?;
         self.unpacked_digest
+            .parse::<ArtifactDigest>()
+            .map_err(LockfileError::Domain)?;
+        self.tree_digest
             .parse::<ArtifactDigest>()
             .map_err(LockfileError::Domain)?;
         validation::validate_url(&self.registry)?;
