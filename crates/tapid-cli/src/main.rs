@@ -1,3 +1,5 @@
+mod online;
+
 use clap::{Parser, Subcommand};
 use std::{
     collections::BTreeMap,
@@ -47,6 +49,9 @@ enum Command {
         /// Store root containing verified `trees/<sha256-...>` directories.
         #[arg(long)]
         store_dir: Option<PathBuf>,
+        /// Local JSON registry fixture used by tests and air-gapped development.
+        #[arg(long)]
+        registry_fixture: Option<PathBuf>,
     },
 }
 #[derive(Debug, Subcommand)]
@@ -79,11 +84,24 @@ fn dispatch(cli: Cli) -> ExitCode {
             frozen,
             project_dir,
             store_dir,
-        }) => install(&project_dir, store_dir.as_deref(), offline, frozen),
+            registry_fixture,
+        }) => install(
+            &project_dir,
+            store_dir.as_deref(),
+            offline,
+            frozen,
+            registry_fixture.as_deref(),
+        ),
     }
 }
 
-fn install(project_dir: &Path, store_root: Option<&Path>, offline: bool, frozen: bool) -> ExitCode {
+fn install(
+    project_dir: &Path,
+    store_root: Option<&Path>,
+    offline: bool,
+    frozen: bool,
+    registry_fixture: Option<&Path>,
+) -> ExitCode {
     let project_dir = match fs::canonicalize(project_dir) {
         Ok(path) if path.is_dir() => path,
         Ok(path) => {
@@ -109,6 +127,30 @@ fn install(project_dir: &Path, store_root: Option<&Path>, offline: bool, frozen:
         }
     };
     let lock_path = project_dir.join("tapid.lock");
+    if !offline && !frozen {
+        let store = Store::new(
+            store_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| project_dir.join(".tapid-store")),
+        );
+        let (lock, input, trees) = match online::resolve_and_fetch(
+            &project_dir,
+            &manifest,
+            &store,
+            registry_fixture,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(error) = fs::write(&lock_path, lock.to_json().unwrap_or_default()) {
+            eprintln!("error: cannot write lockfile {}: {error}", lock_path.display());
+            return ExitCode::from(1);
+        }
+        return materialize_install(&project_dir, &lock, input, trees);
+    }
     if !lock_path.is_file() {
         let message = if offline {
             "offline install requires tapid.lock"
@@ -142,7 +184,26 @@ fn install(project_dir: &Path, store_root: Option<&Path>, offline: bool, frozen:
             return ExitCode::from(1);
         }
     };
-    let root = match ManagedRoot::new(&project_dir) {
+    materialize_with_lock(&project_dir, &lock, input, trees, true)
+}
+
+fn materialize_install(
+    project_dir: &Path,
+    lock: &Lockfile,
+    input: LayoutInput,
+    trees: BTreeMap<String, PathBuf>,
+) -> ExitCode {
+    materialize_with_lock(project_dir, lock, input, trees, false)
+}
+
+fn materialize_with_lock(
+    project_dir: &Path,
+    lock: &Lockfile,
+    input: LayoutInput,
+    trees: BTreeMap<String, PathBuf>,
+    replayed: bool,
+) -> ExitCode {
+    let root = match ManagedRoot::new(project_dir) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("error: {error}");
@@ -166,7 +227,11 @@ fn install(project_dir: &Path, store_root: Option<&Path>, offline: bool, frozen:
         eprintln!("error: {error}");
         return ExitCode::from(1);
     }
-    println!("Replayed lockfile: {} package(s)", lock.packages().len());
+    if replayed {
+        println!("Replayed lockfile: {} package(s)", lock.packages().len());
+    } else {
+        println!("Installed {} package(s)", lock.packages().len());
+    }
     ExitCode::SUCCESS
 }
 
