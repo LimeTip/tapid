@@ -235,9 +235,15 @@ fn collect_files(
         {
             continue;
         }
-        if full.is_dir() {
+        let metadata = fs::symlink_metadata(&full)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.file_type().is_file() && !metadata.file_type().is_dir()
+        {
+            return Err(PublishError::UnsafePath(rel));
+        }
+        if metadata.file_type().is_dir() {
             collect_files(root, &full, rules, out)?;
-        } else if full.is_file() {
+        } else if metadata.file_type().is_file() {
             out.push((rel, full));
         }
     }

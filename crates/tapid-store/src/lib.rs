@@ -68,8 +68,22 @@ impl Store {
             return Err(IngestError::InvalidRoot);
         }
         let destination = self.artifact_path(expected);
-        if destination.is_file() {
-            return Ok(IngestResult::AlreadyPresent(destination));
+        if let Ok(metadata) = fs::symlink_metadata(&destination) {
+            if !metadata.file_type().is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "artifact path is not a regular file",
+                )
+                .into());
+            }
+            let actual = digest_file(&destination)?;
+            if actual == expected.as_str() {
+                return Ok(IngestResult::AlreadyPresent(destination));
+            }
+            return Err(IngestError::DigestMismatch {
+                expected: expected.clone(),
+                actual,
+            });
         }
         if destination.exists() {
             return Err(io::Error::new(
@@ -138,6 +152,20 @@ fn create_staging_file(dir: &Path) -> io::Result<(PathBuf, File)> {
     ))
 }
 
+fn digest_file(path: &Path) -> io::Result<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("sha256-{}", hex::encode(hasher.finalize())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +225,22 @@ mod tests {
         );
         let _ = fs::remove_dir_all(root);
     }
+    #[test]
+    fn existing_wrong_bytes_are_rejected() {
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let store = Store::new(&root);
+        let expected = digest(b"expected");
+        let path = store.artifact_path(&expected);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"tampered").unwrap();
+        assert!(matches!(
+            store.ingest(&expected, Cursor::new(b"expected")),
+            Err(IngestError::DigestMismatch { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn reader_failure_does_not_activate_partial_file() {
         struct Failing;

@@ -52,6 +52,7 @@ pub struct Resolution {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveError {
     InvalidRequirement(String),
+    UnsupportedMode(&'static str),
     MissingCandidate {
         registry: String,
         name: String,
@@ -68,8 +69,18 @@ impl std::error::Error for ResolveError {}
 pub fn resolve(
     ds: &[Dependency],
     ss: &[RegistrySnapshot],
-    _o: ResolutionOptions,
+    options: ResolutionOptions,
 ) -> Result<Resolution, ResolveError> {
+    if options.offline {
+        return Err(ResolveError::UnsupportedMode(
+            "offline resolution requires a cached snapshot",
+        ));
+    }
+    if options.frozen {
+        return Err(ResolveError::UnsupportedMode(
+            "frozen resolution requires a lockfile replay input",
+        ));
+    }
     let mut out = Vec::new();
     for d in ds {
         let mut c: Vec<&PackageMetadata> = ss
@@ -78,7 +89,19 @@ pub fn resolve(
             .flat_map(|s| s.candidates(&d.name))
             .filter(|p| ok(p.identity.version, &d.requirement.raw))
             .collect();
-        c.sort_by_key(|candidate| std::cmp::Reverse(candidate.identity.version));
+        c.sort_by(|left, right| {
+            right
+                .identity
+                .version
+                .cmp(&left.identity.version)
+                .then_with(|| left.identity.cmp(&right.identity))
+                .then_with(|| {
+                    left.integrity
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .cmp(&right.integrity.as_ref().map(ToString::to_string))
+                })
+        });
         if let Some(p) = c.first() {
             out.push(p.identity.clone())
         } else {
@@ -86,12 +109,17 @@ pub fn resolve(
                 registry: d.registry.to_string(),
                 name: d.name.to_string(),
                 requirement: d.requirement.raw.clone(),
-                available: ss
-                    .iter()
-                    .filter(|s| s.registry() == &d.registry)
-                    .flat_map(|s| s.candidates(&d.name))
-                    .map(|p| p.identity.version.to_string())
-                    .collect(),
+                available: {
+                    let mut available: Vec<_> = ss
+                        .iter()
+                        .filter(|s| s.registry() == &d.registry)
+                        .flat_map(|s| s.candidates(&d.name))
+                        .map(|p| p.identity.version.to_string())
+                        .collect();
+                    available.sort();
+                    available.dedup();
+                    available
+                },
             });
         }
     }
