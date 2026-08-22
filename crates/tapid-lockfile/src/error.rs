@@ -11,6 +11,17 @@ pub enum LockfileError {
     UnsupportedVersion(u32),
     DuplicatePackage(String),
     PackageKeyMismatch(String),
+    InvalidPackageKey(String),
+    DanglingDependency {
+        package: String,
+        dependency: String,
+    },
+    DependencyNameMismatch {
+        package: String,
+        dependency: String,
+        target: String,
+    },
+    SelfDependency(String),
 }
 
 impl fmt::Display for LockfileError {
@@ -29,6 +40,24 @@ impl fmt::Display for LockfileError {
             Self::PackageKeyMismatch(key) => {
                 write!(f, "lockfile package key does not match package: {key}")
             }
+            Self::InvalidPackageKey(key) => {
+                write!(f, "invalid canonical lockfile package key: {key}")
+            }
+            Self::DanglingDependency {
+                package,
+                dependency,
+            } => {
+                write!(f, "package {package} has dangling dependency {dependency}")
+            }
+            Self::DependencyNameMismatch {
+                package,
+                dependency,
+                target,
+            } => write!(
+                f,
+                "package {package} dependency {dependency} targets package {target}"
+            ),
+            Self::SelfDependency(key) => write!(f, "package cannot depend on itself: {key}"),
         }
     }
 }
