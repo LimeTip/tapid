@@ -11,4 +11,4 @@ authors.workspace = true
 
 [dependencies]
 sha2 = "0.10"
-tapid-core = { version = "0.0.1", path = "../tapid-core" }
+tapid-core = { version = "0.0.2", path = "../tapid-core" }

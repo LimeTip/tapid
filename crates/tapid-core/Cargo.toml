@@ -2,7 +2,7 @@
 name = "tapid-core"
 readme = "README.md"
 description = "Core domain types and deterministic validation for the Tapid package manager"
-version.workspace = true
+version = "0.0.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
