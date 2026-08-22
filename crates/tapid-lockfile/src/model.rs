@@ -56,6 +56,30 @@ impl std::fmt::Display for LockfilePackageKey {
     }
 }
 
+impl std::str::FromStr for LockfilePackageKey {
+    type Err = LockfileError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let p: Vec<_> = value.split('|').collect();
+        if p.len() != 5 || !p[3].starts_with("peer=") || !p[4].starts_with("platform=") {
+            return Err(LockfileError::InvalidPackageKey(value.into()));
+        }
+        let (name, version) = p[1]
+            .rsplit_once('@')
+            .ok_or_else(|| LockfileError::InvalidPackageKey(value.into()))?;
+        let key = Self {
+            registry: p[0].parse().map_err(LockfileError::Domain)?,
+            name: name.parse().map_err(LockfileError::Domain)?,
+            version: version.parse().map_err(LockfileError::Domain)?,
+            peer_context: p[3][5..].replace('-', ""),
+            platform_context: p[4][9..].to_owned(),
+        };
+        if key.peer_context.contains(' ') || key.platform_context.contains(' ') {
+            return Err(LockfileError::InvalidPackageKey(value.into()));
+        }
+        Ok(key)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Lockfile {
@@ -81,10 +105,31 @@ impl Lockfile {
     }
 
     pub fn insert_package(&mut self, package: LockedPackage) -> Result<(), LockfileError> {
+        package.validate()?;
         let key = package.key();
-        if self.packages.insert(key.clone(), package).is_some() {
+        if self.packages.contains_key(&key) {
             return Err(LockfileError::DuplicatePackage(key));
         }
+        for (name, dependency) in &package.dependencies {
+            let target = dependency.parse::<LockfilePackageKey>()?;
+            if dependency == &key {
+                return Err(LockfileError::SelfDependency(key));
+            }
+            if target.name.to_string() != *name {
+                return Err(LockfileError::DependencyNameMismatch {
+                    package: package.key(),
+                    dependency: name.clone(),
+                    target: target.name.to_string(),
+                });
+            }
+            if !self.packages.contains_key(dependency) {
+                return Err(LockfileError::DanglingDependency {
+                    package: package.key(),
+                    dependency: dependency.clone(),
+                });
+            }
+        }
+        self.packages.insert(key, package);
         Ok(())
     }
 
@@ -112,6 +157,25 @@ impl Lockfile {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));
             }
             package.validate()?;
+            for (name, dependency) in &package.dependencies {
+                let target = dependency.parse::<LockfilePackageKey>()?;
+                if dependency == key {
+                    return Err(LockfileError::SelfDependency(key.clone()));
+                }
+                if target.name.to_string() != *name {
+                    return Err(LockfileError::DependencyNameMismatch {
+                        package: key.clone(),
+                        dependency: name.clone(),
+                        target: target.name.to_string(),
+                    });
+                }
+                if !lockfile.packages.contains_key(dependency) {
+                    return Err(LockfileError::DanglingDependency {
+                        package: key.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
+            }
         }
         Ok(lockfile)
     }
@@ -243,8 +307,19 @@ impl LockedPackage {
         Ok(())
     }
     pub fn add_dependency(&mut self, name: &str, key: &str) -> Result<(), LockfileError> {
-        name.parse::<PackageName>().map_err(LockfileError::Domain)?;
-        self.dependencies.insert(name.to_owned(), key.to_owned());
+        let name = name.parse::<PackageName>().map_err(LockfileError::Domain)?;
+        let parsed = key.parse::<LockfilePackageKey>()?;
+        if parsed.name != name {
+            return Err(LockfileError::DependencyNameMismatch {
+                package: self.key(),
+                dependency: name.to_string(),
+                target: parsed.name.to_string(),
+            });
+        }
+        if key == self.key() {
+            return Err(LockfileError::SelfDependency(key.to_owned()));
+        }
+        self.dependencies.insert(name.to_string(), key.to_owned());
         Ok(())
     }
 }
