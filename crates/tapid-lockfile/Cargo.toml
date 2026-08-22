@@ -2,12 +2,17 @@
 name = "tapid-lockfile"
 readme = "README.md"
 description = "Deterministic lockfile models and serialization for Tapid"
-version.workspace = true
+version = "0.0.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tapid-core = { version = "0.0.1", path = "../tapid-core" }
 
 [lib]
 path = "src/lib.rs"

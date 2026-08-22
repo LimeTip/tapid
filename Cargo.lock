@@ -88,9 +88,10 @@ dependencies = [
 
 [[package]]
 name = "tapid"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "tapid-core",
+ "tapid-lockfile",
  "tapid-manifest",
  "tapid-store",
 ]
@@ -113,7 +114,12 @@ version = "0.0.1"
 
 [[package]]
 name = "tapid-lockfile"
-version = "0.0.1"
+version = "0.0.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tapid-core",
+]
 
 [[package]]
 name = "tapid-manifest"

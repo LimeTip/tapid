@@ -1,5 +1,6 @@
 use std::{env, fmt, fs, io, path::Path};
 
+use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -59,6 +60,30 @@ fn main() {
                 }
             }
         }
+        Some("lock") => match args.next().as_deref() {
+            Some("verify") => {
+                let path = Path::new("tapid.lock");
+                match fs::read_to_string(path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|input| {
+                        Lockfile::from_json(&input).map_err(|error| error.to_string())
+                    }) {
+                    Ok(_) => println!("Valid lockfile: {}", path.display()),
+                    Err(error) => {
+                        eprintln!("error: cannot verify {}: {error}", path.display());
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Some(command) => {
+                eprintln!("error: unknown lock command '{command}'");
+                std::process::exit(2);
+            }
+            None => {
+                eprintln!("error: missing lock command");
+                std::process::exit(2);
+            }
+        },
         Some(command) => {
             eprintln!("error: unknown command '{command}'");
             eprintln!("run 'tapid --help' for usage");
@@ -69,7 +94,7 @@ fn main() {
 
 fn print_help() {
     println!(
-        "Tapid, a deterministic JavaScript and TypeScript package manager\n\nUsage:\n  tapid [OPTIONS]\n  tapid init [PATH]\n  tapid manifest validate [PATH]\n\nCommands:\n  init [PATH]                 Create a private package.json manifest\n  manifest validate [PATH]    Validate a package.json manifest\n\nOptions:\n  -h, --help                 Print help information\n  -V, --version              Print version information"
+        "Tapid, a deterministic JavaScript and TypeScript package manager\n\nUsage:\n  tapid [OPTIONS]\n  tapid init [PATH]\n  tapid manifest validate [PATH]\n  tapid lock verify\n\nCommands:\n  init [PATH]                 Create a private package.json manifest\n  manifest validate [PATH]    Validate a package.json manifest\n  lock verify                 Validate tapid.lock in the current directory\n\nOptions:\n  -h, --help                 Print help information\n  -V, --version              Print version information"
     );
 }
 
