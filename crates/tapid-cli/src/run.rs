@@ -255,11 +255,9 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
         );
+        fs::write(dir.join("cwd-marker"), "").unwrap();
         let script = if cfg!(windows) {
-            format!(
-                r#"if /I "%CD%"=="{}" (exit /b 0) else (exit /b 1)"#,
-                fs::canonicalize(&dir).unwrap().display()
-            )
+            r#"if exist cwd-marker (exit /b 0) else (exit /b 1)"#.into()
         } else {
             r#"test "$(pwd)" = "$TAPID_EXPECTED_CWD""#.into()
         };
