@@ -26,6 +26,11 @@ pub enum IngestError {
         actual: String,
     },
     InvalidRoot,
+    Archive(tapid_archive::ExtractError),
+    TreeDigestMismatch {
+        expected: ArtifactDigest,
+        actual: String,
+    },
 }
 impl fmt::Display for IngestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -35,6 +40,10 @@ impl fmt::Display for IngestError {
                 write!(f, "digest mismatch: expected {expected}, got {actual}")
             }
             Self::InvalidRoot => f.write_str("store root must not be empty"),
+            Self::Archive(e) => write!(f, "archive extraction error: {e}"),
+            Self::TreeDigestMismatch { expected, actual } => {
+                write!(f, "tree digest mismatch: expected {expected}, got {actual}")
+            }
         }
     }
 }
@@ -42,6 +51,12 @@ impl std::error::Error for IngestError {}
 impl From<io::Error> for IngestError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+impl From<tapid_archive::ExtractError> for IngestError {
+    fn from(e: tapid_archive::ExtractError) -> Self {
+        Self::Archive(e)
     }
 }
 
@@ -54,6 +69,56 @@ impl Store {
     }
     pub fn artifact_path(&self, digest: &ArtifactDigest) -> PathBuf {
         self.root.join("artifacts").join(digest.as_str())
+    }
+
+    pub fn ingest_archive(
+        &self,
+        bytes: &[u8],
+        expected_archive: &ArtifactDigest,
+        expected_tree: &ArtifactDigest,
+        format: tapid_archive::ArchiveFormat,
+        limits: tapid_archive::ArchiveLimits,
+    ) -> Result<IngestResult, IngestError> {
+        let actual_archive = digest_bytes(bytes);
+        if actual_archive != expected_archive.as_str() {
+            return Err(IngestError::DigestMismatch {
+                expected: expected_archive.clone(),
+                actual: actual_archive,
+            });
+        }
+        let destination = self.root.join("trees").join(expected_tree.as_str());
+        if destination.exists() {
+            self.verified_tree_path(expected_tree)?;
+            return Ok(IngestResult::AlreadyPresent(destination));
+        }
+        let staging_dir = self.root.join(".staging");
+        fs::create_dir_all(&staging_dir)?;
+        let staging = staging_dir.join(format!("tree-{}-{}", std::process::id(), unique_nonce()));
+        tapid_archive::extract_to(bytes, format, &staging, limits)?;
+        let actual_tree = tapid_archive::canonical_tree_digest(&staging)?;
+        if actual_tree != expected_tree.as_str() {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(IngestError::TreeDigestMismatch {
+                expected: expected_tree.clone(),
+                actual: actual_tree,
+            });
+        }
+        fs::write(staging.join(".tapid-tree"), expected_tree.as_str())?;
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::rename(&staging, &destination) {
+            Ok(()) => Ok(IngestResult::Activated(destination)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_dir_all(&staging);
+                self.verified_tree_path(expected_tree)?;
+                Ok(IngestResult::AlreadyPresent(destination))
+            }
+            Err(e) => {
+                let _ = fs::remove_dir_all(&staging);
+                Err(e.into())
+            }
+        }
     }
 
     /// Returns a verified package tree. A tree is activated by store tooling
@@ -206,6 +271,17 @@ fn digest_file(path: &Path) -> io::Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("sha256-{}", hex::encode(hasher.finalize())))
+}
+
+fn digest_bytes(data: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(data);
+    format!("sha256-{}", hex::encode(h.finalize()))
+}
+fn unique_nonce() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
 }
 
 #[cfg(test)]

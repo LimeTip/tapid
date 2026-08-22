@@ -11,3 +11,9 @@ authors.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+flate2 = "1"
+hex = "0.4"
+sha2 = "0.10"
+tar = "0.4"
