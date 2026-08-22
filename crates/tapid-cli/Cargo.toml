@@ -13,7 +13,6 @@ name = "tapid"
 path = "src/main.rs"
 
 [dependencies]
-tapid-core = { version = "0.0.1", path = "../tapid-core" }
+clap = { version = "4", features = ["derive"] }
 tapid-lockfile = { version = "0.0.3", path = "../tapid-lockfile" }
 tapid-manifest = { version = "0.0.2", path = "../tapid-manifest" }
-tapid-store = { version = "0.0.1", path = "../tapid-store" }
