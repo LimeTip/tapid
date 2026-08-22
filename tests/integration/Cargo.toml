@@ -1,0 +1,26 @@
+[package]
+name = "tapid-contract-integration"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[test]]
+name = "contracts"
+path = "contracts.rs"
+
+[dependencies]
+serde_json = "1"
+tapid-archive = { path = "../../crates/tapid-archive" }
+tapid-core = { path = "../../crates/tapid-core" }
+tapid-linker = { path = "../../crates/tapid-linker" }
+tapid-manifest = { path = "../../crates/tapid-manifest" }
+tapid-policy = { path = "../../crates/tapid-policy" }
+tapid-publish = { path = "../../crates/tapid-publish" }
+tapid-registry-client = { path = "../../crates/tapid-registry-client" }
+tapid-resolver = { path = "../../crates/tapid-resolver" }
+tapid-runner = { path = "../../crates/tapid-runner" }
+tapid-signatures = { path = "../../crates/tapid-signatures" }
+tapid-store = { path = "../../crates/tapid-store" }
+tapid-test-support = { path = "../../crates/tapid-test-support" }
