@@ -102,6 +102,7 @@ jobs:
           & $bin run --project-dir $env:TAPID_FIXTURE_PROJECT test -- wrong 0
           if ($LASTEXITCODE -ne 41) { throw "Unexpected child exit code: $LASTEXITCODE" }
           Write-Host 'Windows root-script, argument, exit-code, and lifecycle checks passed.'
+          exit 0
 
   security:
     name: Dependency security checks

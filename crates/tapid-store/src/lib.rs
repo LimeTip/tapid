@@ -352,7 +352,7 @@ mod tests {
         std::env::temp_dir().join(format!(
             "tapid-store-test-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("x")
+            unique_nonce()
         ))
     }
     #[test]
