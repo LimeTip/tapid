@@ -1,79 +1,47 @@
 # Contributing to Tapid
 
-Thank you for your interest in Tapid.
-
-Tapid is a small project in the design and planning stage. The best contributions right now are thoughtful documentation, architecture reviews, security feedback, compatibility research, tests, and small focused implementation changes once the Rust workspace is available.
+Thank you for contributing to Tapid. Keep changes focused, testable, and explicit about security and platform assumptions.
 
 ## Before contributing
 
-Please read:
-
-- `README.md`
-- `SECURITY.md`
-- The relevant issue or discussion
-
-For a substantial change, open an issue or discussion first. Explain the problem, proposed solution, affected product phase, and how the change will be verified.
+Please read `README.md`, `SECURITY.md`, and the relevant issue or discussion. For a substantial change, open an issue or discussion first with the problem, proposed solution, affected product phase, and verification plan.
 
 ## Pull requests
 
-Please keep pull requests focused and easy to review. A good pull request should:
+A good pull request:
 
-- Explain the problem and intended behavior.
-- Include tests for changed behavior.
-- Include security tests when a trust boundary is affected.
-- Update documentation when behavior or decisions change.
-- Avoid unrelated refactoring.
-- State known limitations and platform-specific behavior.
-- Contain no credentials, private package data, customer information, or confidential security details.
+- Explains the problem and intended behavior.
+- Includes tests for changed behavior, including trust-boundary and adversarial cases where relevant.
+- Updates documentation when behavior or decisions change.
+- Avoids unrelated refactoring.
+- States known limitations and platform-specific behavior.
+- Contains no credentials, private package data, customer information, or confidential security details.
 
-Suggested branch names:
-
-```text
-feat/lockfile-schema
-fix/archive-path-validation
-docs/contributing-guide
-security/private-registry-routing
-```
-
-Suggested commit style:
-
-```text
-docs: improve contribution guide
-feat: add deterministic lockfile validation
-security: reject cross-origin registry credentials
-```
+Use focused branch names such as `feat/lockfile-schema`, `fix/archive-path-validation`, or `ci/security-gates`. Prefer concise conventional commits (`test: add isolated project fixture`, `ci: add dependency audit`).
 
 ## Development principles
 
-Tapid favors:
+Tapid favors small vertical slices, tests before production implementation, deterministic machine-readable behavior, explicit security assumptions, and cross-platform verification on macOS, Linux, and Windows. Treat registry metadata, package archives, lifecycle scripts, native binaries, and executable code as untrusted.
 
-- Small, reviewable vertical slices.
-- Tests before production implementation.
-- Deterministic behavior and stable machine-readable output.
-- Explicit security assumptions.
-- Cross-platform testing on macOS, Linux, and Windows.
-- Honest documentation of compatibility differences and limitations.
+Integration tests must use `tapid-test-support` temporary projects and homes. Do not use the current checkout, a fixed absolute path, the real user home, the network, or real credentials. Fake registry fixtures are in-memory and must remain independent of production crates.
 
-Treat registry metadata, package archives, lifecycle scripts, native binaries, and executable code as untrusted.
+## Local verification
 
-## Verification
-
-When the Rust workspace is available, run the relevant focused tests followed by:
+Run the narrowest relevant test first, then the full checks that are available in your environment:
 
 ```text
+cargo test -p tapid-test-support
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+cargo metadata --no-deps --format-version 1 --locked
+cargo package --workspace --locked
 cargo deny check
 cargo audit
 ```
 
-Integration tests must use temporary homes and isolated registries. Never use real credentials in tests.
+`cargo-deny` and `cargo-audit` are CI security gates. Install them with their upstream installers or skip only when documenting why the local tool is unavailable; do not weaken the CI jobs.
 
-## License
+## License and security
 
-Tapid source code is licensed under the MIT License. Contributions must be submitted by people who have the right to submit them and must be compatible with that license.
-
-Submitting a contribution does not automatically transfer copyright ownership to LimeTip Company. LimeTip may introduce a Contributor License Agreement in the future if additional rights are required.
-
-For security vulnerabilities, do not open a public issue. Follow `SECURITY.md`.
+Tapid source code is licensed under the MIT License. For security vulnerabilities, do not open a public issue; follow `SECURITY.md`.

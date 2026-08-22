@@ -2,64 +2,79 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  quality:
-    name: Quality (${{ matrix.os }})
+  test:
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
-
       - name: Check formatting
         run: cargo fmt --all --check
-
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
       - name: Run tests
         run: cargo test --workspace --all-features --locked
+
+  security:
+    name: Dependency security checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Check dependency policy and licenses
+        run: cargo deny check
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit Rust dependencies
+        run: cargo audit
 
   package:
     name: Package workspace
     runs-on: ubuntu-latest
-    needs: quality
-
+    needs: [test, security]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
-
+      - name: Validate workspace metadata
+        run: cargo metadata --no-deps --format-version 1 --locked
       - name: Package all crates
         run: cargo package --workspace --locked
