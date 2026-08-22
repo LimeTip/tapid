@@ -255,11 +255,15 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
         );
-        let request = RunRequest::new(
-            dir,
-            Some("test \"$(pwd)\" = \"$TAPID_EXPECTED_CWD\"".into()),
-        )
-        .with_environment(environment);
+        let script = if cfg!(windows) {
+            format!(
+                r#"if /I "%CD%"=="{}" (exit /b 0) else (exit /b 1)"#,
+                fs::canonicalize(&dir).unwrap().display()
+            )
+        } else {
+            r#"test "$(pwd)" = "$TAPID_EXPECTED_CWD""#.into()
+        };
+        let request = RunRequest::new(dir, Some(script)).with_environment(environment);
         let result = execute(request).unwrap();
         assert_eq!(result.exit_code(), Some(0));
     }
