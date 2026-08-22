@@ -88,3 +88,91 @@ fn clap_rejects_unknown_commands_with_usage_error() {
     assert!(output.stdout.is_empty());
     cleanup(dir);
 }
+#[test]
+fn install_rejects_malformed_lockfile_before_creating_output() {
+    let dir = temp_dir("bad-install");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.lock"), "not json").unwrap();
+    let output = run(&dir, &["install", "--offline"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid lockfile"));
+    assert!(!dir.join("node_modules").exists());
+    cleanup(dir);
+}
+
+#[test]
+fn install_requires_lockfile_in_offline_and_frozen_modes() {
+    for mode in ["offline", "frozen"] {
+        let dir = temp_dir(mode);
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"demo","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let output = run(&dir, &["install", &format!("--{mode}")]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("requires tapid.lock"));
+        assert!(!dir.join("node_modules").exists());
+        cleanup(dir);
+    }
+}
+
+#[test]
+fn install_supports_an_explicit_dynamic_project_directory() {
+    let parent = temp_dir("parent");
+    let project = parent.join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(
+        project.join("package.json"),
+        r#"{"name":"dynamic-app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let lock =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    fs::write(project.join("tapid.lock"), lock.to_json().unwrap()).unwrap();
+    let output = run(
+        &parent,
+        &[
+            "install",
+            "--project-dir",
+            project.to_str().unwrap(),
+            "--frozen",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(project.join("node_modules").is_dir());
+    cleanup(parent);
+}
+
+#[test]
+fn install_replays_valid_lockfile_without_running_scripts() {
+    let dir = temp_dir("install");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"preinstall":"touch SHOULD_NOT_EXIST"}}"#,
+    )
+    .unwrap();
+    let lock =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    fs::write(dir.join("tapid.lock"), lock.to_json().unwrap()).unwrap();
+    let output = run(&dir, &["install", "--offline", "--frozen"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.join("node_modules").is_dir());
+    assert!(!dir.join("SHOULD_NOT_EXIST").exists());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Replayed lockfile"));
+    cleanup(dir);
+}

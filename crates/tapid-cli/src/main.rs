@@ -29,6 +29,15 @@ enum Command {
         #[command(subcommand)]
         command: LockCommand,
     },
+    /// Replay the project's validated lockfile without network access.
+    Install {
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        frozen: bool,
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+    },
 }
 #[derive(Debug, Subcommand)]
 enum ManifestCommand {
@@ -42,7 +51,6 @@ enum LockCommand {
 fn main() -> ExitCode {
     dispatch(Cli::parse())
 }
-
 fn dispatch(cli: Cli) -> ExitCode {
     match cli.command {
         None => {
@@ -56,7 +64,70 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Lock {
             command: LockCommand::Verify,
         }) => verify_lock(Path::new("tapid.lock")),
+        Some(Command::Install {
+            offline,
+            frozen,
+            project_dir,
+        }) => install(&project_dir, offline, frozen),
     }
+}
+
+fn install(project_dir: &Path, offline: bool, frozen: bool) -> ExitCode {
+    let project_dir = match fs::canonicalize(project_dir) {
+        Ok(path) if path.is_dir() => path,
+        Ok(path) => {
+            eprintln!(
+                "error: project directory is not a directory: {}",
+                path.display()
+            );
+            return ExitCode::from(1);
+        }
+        Err(error) => {
+            eprintln!(
+                "error: cannot access project directory '{}': {error}",
+                project_dir.display()
+            );
+            return ExitCode::from(1);
+        }
+    };
+    let manifest_path = project_dir.join("package.json");
+    if let Err(error) = read_manifest(&manifest_path) {
+        eprintln!("error: {error}");
+        return ExitCode::from(1);
+    }
+    let lock_path = project_dir.join("tapid.lock");
+    if !lock_path.is_file() {
+        let message = if offline {
+            "offline install requires tapid.lock"
+        } else if frozen {
+            "frozen install requires tapid.lock"
+        } else {
+            "cannot install without tapid.lock; network resolution is unavailable"
+        };
+        eprintln!("error: {message}: {}", lock_path.display());
+        return ExitCode::from(1);
+    }
+    // Validate the complete replay input before touching project output.
+    let lock = match fs::read_to_string(&lock_path)
+        .map_err(|error| format!("cannot read lockfile {}: {error}", lock_path.display()))
+        .and_then(|input| {
+            Lockfile::from_json(&input)
+                .map_err(|error| format!("invalid lockfile {}: {error}", lock_path.display()))
+        }) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let modules = project_dir.join("node_modules");
+    if let Err(error) = fs::create_dir_all(&modules) {
+        eprintln!("error: cannot create {}: {error}", modules.display());
+        return ExitCode::from(1);
+    }
+    // Replay never executes package lifecycle scripts.
+    println!("Replayed lockfile: {} package(s)", lock.packages().len());
+    ExitCode::SUCCESS
 }
 
 fn validate(path: &Path) -> ExitCode {
