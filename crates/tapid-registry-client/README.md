@@ -1,5 +1,8 @@
 # tapid-registry-client
 
+
+[Crates.io](https://crates.io/crates/tapid-registry-client) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-registry-client)
+
 Read-only, validated registry metadata and artifact-download boundary for Tapid.
 
 ## npm

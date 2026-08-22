@@ -193,7 +193,7 @@ pub fn execute(request: RunRequest) -> Result<ChildResult, RunError> {
 fn windows_command_with_arguments(script: &str, arguments: &[String]) -> String {
     let suffix = arguments
         .iter()
-        .map(|argument| format!(" \"{}\"", argument.replace('"', "\\\"")))
+        .map(|argument| format!(" \"{}\"", argument.replace('"', "\"\"")))
         .collect::<String>();
     format!("{script}{suffix}")
 }

@@ -1,5 +1,8 @@
 # tapid-publish
 
+
+[Crates.io](https://crates.io/crates/tapid-publish) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-publish)
+
 Deterministic package packing and staged publication foundations for Tapid.
 
 `PackageSource` describes a package root, immutable version label, and explicit

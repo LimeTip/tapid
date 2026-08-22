@@ -1,5 +1,8 @@
 # tapid-resolver
 
+
+[Crates.io](https://crates.io/crates/tapid-resolver) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-resolver)
+
 Pure deterministic resolution for normalized npm- and JSR-compatible registry metadata.
 
 Registry adapters own network access and normalize metadata. The resolver accepts only those values and performs no HTTP, archive, or filesystem work. Package identities retain registry origin, so equal names and versions from npm and JSR remain distinct.

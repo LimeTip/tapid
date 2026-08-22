@@ -1,5 +1,8 @@
 # tapid-lockfile
 
+
+[Crates.io](https://crates.io/crates/tapid-lockfile) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-lockfile)
+
 Deterministic lockfile models and canonical JSON serialization for Tapid.
 
 The current contract provides:

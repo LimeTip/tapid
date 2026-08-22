@@ -1,5 +1,8 @@
 # tapid-cli
 
+
+[Crates.io](https://crates.io/crates/tapid-cli) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-cli)
+
 The `tapid` command-line package manager and package runner.
 
 ## Commands
