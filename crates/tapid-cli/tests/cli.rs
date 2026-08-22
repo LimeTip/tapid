@@ -104,6 +104,63 @@ fn clap_rejects_unknown_commands_with_usage_error() {
     cleanup(dir);
 }
 #[test]
+fn run_executes_root_script_and_forwards_arguments() {
+    let dir = temp_dir("run");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"init":"printf '%s' \"$1\" > forwarded","dev":"exit 37"}}"#,
+    )
+    .unwrap();
+    let output = run(&dir, &["run", "init", "--", "hello world"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("forwarded")).unwrap(),
+        "hello world"
+    );
+    let child = run(&dir, &["run", "dev"]);
+    assert_eq!(child.status.code(), Some(37));
+    cleanup(dir);
+}
+
+#[test]
+fn run_resolves_installed_bin_and_rejects_missing_script_stably() {
+    let dir = temp_dir("run-bin");
+    fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"init":"helper > bin-output"}}"#,
+    )
+    .unwrap();
+    let helper = dir.join("node_modules/.bin/helper");
+    fs::write(&helper, "#!/bin/sh\nprintf bin-ok\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let ok = run(&dir, &["run", "init"]);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("bin-output")).unwrap(),
+        "bin-ok"
+    );
+    let missing = run(&dir, &["run", "missing"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&missing.stderr),
+        "error: root package script is missing: missing\n"
+    );
+    cleanup(dir);
+}
+#[test]
 fn install_rejects_malformed_lockfile_before_creating_output() {
     let dir = temp_dir("bad-install");
     fs::write(

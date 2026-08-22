@@ -1,4 +1,6 @@
 mod online;
+#[allow(dead_code)]
+mod run;
 
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
@@ -40,6 +42,16 @@ enum Command {
         command: LockCommand,
     },
     /// Replay the project's validated lockfile without network access.
+    Run {
+        /// Root package script name.
+        script: String,
+        /// Project directory containing package.json.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+        /// Arguments forwarded after `--` to the script.
+        #[arg(last = true)]
+        arguments: Vec<String>,
+    },
     Install {
         #[arg(long)]
         offline: bool,
@@ -80,6 +92,11 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Lock {
             command: LockCommand::Verify,
         }) => verify_lock(Path::new("tapid.lock")),
+        Some(Command::Run {
+            script,
+            project_dir,
+            arguments,
+        }) => run_script(&project_dir, &script, arguments),
         Some(Command::Install {
             offline,
             frozen,
@@ -93,6 +110,46 @@ fn dispatch(cli: Cli) -> ExitCode {
             frozen,
             registry_fixture.as_deref(),
         ),
+    }
+}
+
+fn run_script(project_dir: &Path, script_name: &str, arguments: Vec<String>) -> ExitCode {
+    let project_dir = match fs::canonicalize(project_dir) {
+        Ok(path) if path.is_dir() => path,
+        Ok(path) => {
+            eprintln!(
+                "error: project directory is not a directory: {}",
+                path.display()
+            );
+            return ExitCode::from(1);
+        }
+        Err(error) => {
+            eprintln!(
+                "error: cannot access project directory '{}': {error}",
+                project_dir.display()
+            );
+            return ExitCode::from(1);
+        }
+    };
+    let manifest = match read_manifest(&project_dir.join("package.json")) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let Some(script) = manifest.scripts().get(script_name).cloned() else {
+        eprintln!("error: root package script is missing: {script_name}");
+        return ExitCode::from(1);
+    };
+    match run::execute(run::RunRequest::new(project_dir, Some(script)).with_arguments(arguments)) {
+        Ok(result) => result
+            .exit_code()
+            .map_or(ExitCode::from(1), |code| ExitCode::from(code as u8)),
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -412,8 +469,87 @@ fn materialize_stage(
         );
         copy_tree(source, &target)?;
     }
+    materialize_package_shims(stage, plan)?;
     Ok(())
 }
+
+fn materialize_package_shims(
+    stage: &Path,
+    plan: &tapid_linker::MaterializationPlan,
+) -> Result<(), String> {
+    let managed = ManagedRoot::new(stage.join("node_modules")).map_err(|e| e.to_string())?;
+    let mut packages = Vec::new();
+    for step in &plan.activation.steps {
+        let package_dir = stage.join("node_modules").join(
+            step.target
+                .strip_prefix(plan.managed_root.path.join("node_modules"))
+                .map_err(|_| "invalid package activation target")?,
+        );
+        let package_root = if package_dir.join("package").is_dir() {
+            package_dir.join("package")
+        } else {
+            package_dir.clone()
+        };
+        let package_json = fs::read_to_string(package_root.join("package.json"))
+            .map_err(|e| format!("cannot read installed package manifest: {e}"))?;
+        packages.push(tapid_linker::ShimPackage {
+            tree_root: package_root,
+            package_json,
+            bin_dir: package_dir
+                .parent()
+                .ok_or_else(|| "installed package has no node_modules parent".to_owned())?
+                .to_path_buf(),
+        });
+    }
+    let shims = tapid_linker::plan_shims(managed, packages, current_platform())
+        .map_err(|e| e.to_string())?;
+    for entry in shims.entries {
+        let parent = entry
+            .target
+            .parent()
+            .ok_or_else(|| "shim target has no parent".to_owned())?;
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        match entry.strategy {
+            tapid_linker::ShimStrategy::UnixSymlink => {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(relative_path(parent, &entry.source), &entry.target)
+                    .map_err(|e| format!("cannot materialize package bin shim: {e}"))?;
+                #[cfg(not(unix))]
+                return Err("package bin shims are unsupported on this platform".into());
+            }
+            tapid_linker::ShimStrategy::WindowsCmdAndPowerShell => {
+                let cmd = entry.target.with_extension("cmd");
+                let ps1 = entry.target.with_extension("ps1");
+                fs::write(
+                    cmd,
+                    format!("@echo off\r\n\"{}\" %*\r\n", entry.source.display()),
+                )
+                .map_err(|e| e.to_string())?;
+                fs::write(ps1, format!("& '{}' $args\r\n", entry.source.display()))
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+fn relative_path(from: &Path, to: &Path) -> PathBuf {
+    let from_components: Vec<_> = from.components().collect();
+    let to_components: Vec<_> = to.components().collect();
+    let common = from_components
+        .iter()
+        .zip(&to_components)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut result = PathBuf::new();
+    for _ in common..from_components.len() {
+        result.push("..");
+    }
+    for component in &to_components[common..] {
+        result.push(component.as_os_str());
+    }
+    result
+}
+
 fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     let package = source.join("package");
     let root = if package.is_dir() { &package } else { source };
