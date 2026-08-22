@@ -1,5 +1,3 @@
 # tapid-attestations
 
-Artifact-bound attestation foundations for Tapid.
-
-This crate will model provenance, analysis, audit, and verification attestations. The current release is a workspace scaffold.
+Typed artifact-bound claims covering issuer, methodology, scope, issue/expiry, findings, confidence, limitations, and payment disclosure. Claims validate before conversion to an unsigned canonical trust envelope.

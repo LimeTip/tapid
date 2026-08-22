@@ -299,6 +299,11 @@ version = "0.0.1"
 [[package]]
 name = "tapid-attestations"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tapid-signatures",
+]
 
 [[package]]
 name = "tapid-core"
@@ -332,6 +337,10 @@ dependencies = [
 [[package]]
 name = "tapid-policy"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "tapid-protocol"
@@ -344,6 +353,10 @@ dependencies = [
 [[package]]
 name = "tapid-publish"
 version = "0.0.1"
+dependencies = [
+ "sha2",
+ "tapid-core",
+]
 
 [[package]]
 name = "tapid-registry-client"
@@ -364,10 +377,19 @@ dependencies = [
 [[package]]
 name = "tapid-runner"
 version = "0.0.1"
+dependencies = [
+ "sha2",
+ "tapid-policy",
+]
 
 [[package]]
 name = "tapid-signatures"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "tapid-store"
@@ -385,6 +407,11 @@ version = "0.0.1"
 [[package]]
 name = "tapid-transparency"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tapid-signatures",
+]
 
 [[package]]
 name = "typenum"
