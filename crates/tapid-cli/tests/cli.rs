@@ -155,7 +155,6 @@ fn install_supports_an_explicit_dynamic_project_directory() {
 
 #[test]
 fn install_replays_valid_lockfile_without_running_scripts() {
-
     let dir = temp_dir("install");
     fs::write(
         dir.join("package.json"),
