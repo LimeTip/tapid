@@ -106,11 +106,11 @@ fn clap_rejects_unknown_commands_with_usage_error() {
 #[test]
 fn run_executes_root_script_and_forwards_arguments() {
     let dir = temp_dir("run");
-    fs::write(
-        dir.join("package.json"),
-        r#"{"name":"demo","version":"1.0.0","scripts":{"init":"printf '%s' \"$1\" > forwarded","dev":"exit 37"}}"#,
-    )
-    .unwrap();
+    #[cfg(unix)]
+    let manifest = r#"{"name":"demo","version":"1.0.0","scripts":{"init":"printf '%s' \"$1\" > forwarded","dev":"exit 37"}}"#;
+    #[cfg(windows)]
+    let manifest = r#"{"name":"demo","version":"1.0.0","scripts":{"init":"echo %1>forwarded","dev":"exit /b 37"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
     let output = run(&dir, &["run", "init", "--", "hello world"]);
     assert!(
         output.status.success(),
@@ -118,7 +118,7 @@ fn run_executes_root_script_and_forwards_arguments() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        fs::read_to_string(dir.join("forwarded")).unwrap(),
+        fs::read_to_string(dir.join("forwarded")).unwrap().trim(),
         "hello world"
     );
     let child = run(&dir, &["run", "dev"]);
@@ -135,8 +135,14 @@ fn run_resolves_installed_bin_and_rejects_missing_script_stably() {
         r#"{"name":"demo","version":"1.0.0","scripts":{"init":"helper > bin-output"}}"#,
     )
     .unwrap();
+    #[cfg(unix)]
     let helper = dir.join("node_modules/.bin/helper");
+    #[cfg(windows)]
+    let helper = dir.join("node_modules/.bin/helper.cmd");
+    #[cfg(unix)]
     fs::write(&helper, "#!/bin/sh\nprintf bin-ok\n").unwrap();
+    #[cfg(windows)]
+    fs::write(&helper, "@echo off\r\necho bin-ok\r\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
