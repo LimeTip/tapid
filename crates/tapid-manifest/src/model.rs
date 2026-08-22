@@ -1,6 +1,6 @@
 use crate::ManifestError;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 use tapid_core::{PackageName, PackageVersion};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -15,6 +15,31 @@ pub struct PackageManifest {
     pub(crate) optional_dependencies: BTreeMap<String, String>,
     pub(crate) peer_dependencies: BTreeMap<String, String>,
     pub(crate) scripts: BTreeMap<String, String>,
+    pub(crate) bin: Option<PackageBin>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BinTarget {
+    pub command: String,
+    pub target: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageBin {
+    pub package_name: PackageName,
+    pub(crate) targets: Vec<BinTarget>,
+}
+
+impl PackageBin {
+    pub fn targets(&self) -> &[BinTarget] {
+        &self.targets
+    }
+    pub fn command_names(&self) -> Vec<&str> {
+        self.targets
+            .iter()
+            .map(|target| target.command.as_str())
+            .collect()
+    }
 }
 
 impl PackageManifest {
@@ -32,6 +57,7 @@ impl PackageManifest {
             optional_dependencies: BTreeMap::new(),
             peer_dependencies: BTreeMap::new(),
             scripts: BTreeMap::new(),
+            bin: None,
         })
     }
 
@@ -64,6 +90,9 @@ impl PackageManifest {
     }
     pub fn scripts(&self) -> &BTreeMap<String, String> {
         &self.scripts
+    }
+    pub fn bin(&self) -> Option<&PackageBin> {
+        self.bin.as_ref()
     }
 
     pub fn to_json(&self) -> String {

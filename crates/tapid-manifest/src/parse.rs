@@ -1,6 +1,10 @@
 use crate::{ManifestError, PackageManifest};
 use serde_json::Value;
-use std::{collections::BTreeMap, str::FromStr};
+use std::{
+    collections::BTreeMap,
+    path::{Component, Path, PathBuf},
+    str::FromStr,
+};
 use tapid_core::PackageName;
 
 impl PackageManifest {
@@ -28,8 +32,89 @@ impl PackageManifest {
         if let Some(value) = object.get("scripts") {
             manifest.scripts = parse_string_map(value, "scripts", false)?;
         }
+        if let Some(value) = object.get("bin") {
+            manifest.bin = Some(parse_bin(value, &manifest.name)?);
+        }
         Ok(manifest)
     }
+}
+
+fn parse_bin(
+    value: &Value,
+    package_name: &PackageName,
+) -> Result<crate::PackageBin, ManifestError> {
+    let mut entries = Vec::new();
+    match value {
+        Value::String(target) => entries.push((
+            package_name
+                .to_string()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_owned(),
+            target.clone(),
+        )),
+        Value::Object(map) if !map.is_empty() => {
+            for (command, target) in map {
+                entries.push((
+                    command.clone(),
+                    target
+                        .as_str()
+                        .ok_or_else(|| ManifestError::ExpectedBinString(command.clone()))?
+                        .to_owned(),
+                ));
+            }
+        }
+        _ => {
+            return Err(ManifestError::InvalidBin {
+                command: "<bin>".into(),
+                target: value.to_string(),
+            });
+        }
+    }
+    let mut targets = entries
+        .into_iter()
+        .map(|(command, target)| {
+            if !valid_command(&command) || !valid_target(&target) {
+                return Err(ManifestError::InvalidBin { command, target });
+            }
+            Ok(crate::BinTarget {
+                command,
+                target: PathBuf::from(target.trim_start_matches("./")),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    targets.sort_by(|a, b| a.command.cmp(&b.command));
+    Ok(crate::PackageBin {
+        package_name: package_name.clone(),
+        targets,
+    })
+}
+
+fn valid_command(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.chars().any(|c| c == '\0' || c.is_control())
+}
+
+fn valid_target(value: &str) -> bool {
+    if value.is_empty() || value.contains('\0') || value.contains('\\') {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let windows_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if windows_drive || value.starts_with("//") {
+        return false;
+    }
+    let path = Path::new(value);
+    !path.is_absolute()
+        && path.components().all(|component| {
+            !matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
 }
 
 fn required_string<'a>(

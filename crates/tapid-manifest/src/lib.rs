@@ -7,7 +7,7 @@ mod model;
 mod parse;
 
 pub use error::ManifestError;
-pub use model::PackageManifest;
+pub use model::{BinTarget, PackageBin, PackageManifest};
 
 /// Returns the current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -40,5 +40,49 @@ mod tests {
             manifest.to_json(),
             "{\n  \"name\": \"example-app\",\n  \"version\": \"0.1.0\",\n  \"private\": true\n}\n"
         );
+    }
+
+    #[test]
+    fn parses_string_and_object_bin_forms_deterministically() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"@scope/tool","version":"1.0.0","bin":{"z":"./z.js","tool":"bin/tool.js"}}"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.bin().unwrap().command_names(), &["tool", "z"]);
+        assert_eq!(
+            manifest.bin().unwrap().targets()[0].target,
+            std::path::Path::new("bin/tool.js")
+        );
+
+        let manifest =
+            PackageManifest::parse(r#"{"name":"tool","version":"1.0.0","bin":"./cli.js"}"#)
+                .unwrap();
+        assert_eq!(manifest.bin().unwrap().command_names(), &["tool"]);
+    }
+
+    #[test]
+    fn rejects_malformed_bin_values_commands_and_targets() {
+        for bin in ["null", "[]", "true", "{}"] {
+            assert!(
+                PackageManifest::parse(&format!(
+                    r#"{{"name":"tool","version":"1.0.0","bin":{bin}}}"#
+                ))
+                .is_err()
+            );
+        }
+        for bin in [
+            r#"{"tool":"../escape.js"}"#,
+            r#"{"tool":"/absolute.js"}"#,
+            r#"{"tool":""}"#,
+            r#"{"tool":123}"#,
+            r#"{"tool/name":"cli.js"}"#,
+        ] {
+            assert!(
+                PackageManifest::parse(&format!(
+                    r#"{{"name":"tool","version":"1.0.0","bin":{bin}}}"#
+                ))
+                .is_err()
+            );
+        }
     }
 }

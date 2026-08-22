@@ -12,6 +12,8 @@ pub enum ManifestError {
     InvalidPackageName(tapid_core::DomainError),
     InvalidPackageVersion(tapid_core::DomainError),
     InvalidDependencyName(tapid_core::DomainError),
+    InvalidBin { command: String, target: String },
+    ExpectedBinString(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -31,6 +33,12 @@ impl fmt::Display for ManifestError {
             Self::InvalidPackageName(error)
             | Self::InvalidDependencyName(error)
             | Self::InvalidPackageVersion(error) => error.fmt(f),
+            Self::InvalidBin { command, target } => {
+                write!(f, "invalid package bin '{command}' -> '{target}'")
+            }
+            Self::ExpectedBinString(key) => {
+                write!(f, "package.json bin entry '{key}' must be a string")
+            }
         }
     }
 }
