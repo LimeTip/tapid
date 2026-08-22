@@ -54,6 +54,14 @@ pub fn plan_shims(
     };
     let mut entries = Vec::new();
     for package in packages {
+        if !package.tree_root.is_absolute()
+            || package
+                .tree_root
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(PlanError::PathOutsideManagedRoot(package.tree_root));
+        }
         if !managed_root.contains(&package.bin_dir) {
             return Err(PlanError::PathOutsideManagedRoot(package.bin_dir));
         }

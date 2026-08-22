@@ -93,6 +93,8 @@ fn parse_bin(
 
 fn valid_command(value: &str) -> bool {
     !value.is_empty()
+        && value != "."
+        && value != ".."
         && !value.contains('/')
         && !value.contains('\\')
         && !value.chars().any(|c| c == '\0' || c.is_control())
