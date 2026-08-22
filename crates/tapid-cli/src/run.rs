@@ -157,8 +157,21 @@ pub fn execute(request: RunRequest) -> Result<ChildResult, RunError> {
 
     let invocation = request.shell.invocation(&script, &request.arguments);
     let mut command = Command::new(invocation.program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        if matches!(request.shell, ShellBackend::WindowsCmd) {
+            command
+                .args(&invocation.arguments[..3])
+                .raw_arg(&invocation.arguments[3]);
+        } else {
+            command.args(&invocation.arguments);
+        }
+    }
+    #[cfg(not(windows))]
+    command.args(&invocation.arguments);
     command
-        .args(invocation.arguments)
         .current_dir(&request.project_dir)
         .env_clear()
         .stdin(Stdio::inherit())
