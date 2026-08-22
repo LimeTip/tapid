@@ -539,6 +539,19 @@ impl std::error::Error for PlanError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_project_root() -> PathBuf {
+        std::env::temp_dir().join("tapid-linker-test-project")
+    }
+
+    fn test_tree_root() -> PathBuf {
+        test_project_root().join("store").join("tree")
+    }
+
+    fn test_managed_root() -> ManagedRoot {
+        ManagedRoot::new(test_project_root()).unwrap()
+    }
+
     fn instance(name: &str, version: &str, peer: PeerContext) -> PackageInstance {
         PackageInstance {
             id: PackageInstanceId::new(
@@ -551,14 +564,14 @@ mod tests {
                 .unwrap(),
             tree: VerifiedTreeReference::new(
                 &format!("sha256-{}", "a".repeat(64)),
-                "/tmp/store/tree",
+                test_tree_root(),
             )
             .unwrap(),
         }
     }
     #[test]
     fn duplicate_versions_remain_distinct_instances() {
-        let root = ManagedRoot::new("/tmp/project").unwrap();
+        let root = test_managed_root();
         let plan = plan_materialization(
             root,
             MaterializationInput {
@@ -577,7 +590,7 @@ mod tests {
         let mut peer = PeerContext::default();
         peer = peer.with("react".parse().unwrap(), "18.2.0".parse().unwrap());
         let plan = plan_materialization(
-            ManagedRoot::new("/tmp/project").unwrap(),
+            test_managed_root(),
             MaterializationInput {
                 instances: vec![
                     instance("plugin", "1.0.0", PeerContext::default()),
@@ -593,14 +606,14 @@ mod tests {
         let a = instance("z", "1.0.0", PeerContext::default());
         let b = instance("a", "1.0.0", PeerContext::default());
         let p1 = plan_materialization(
-            ManagedRoot::new("/tmp/project").unwrap(),
+            test_managed_root(),
             MaterializationInput {
                 instances: vec![a.clone(), b.clone()],
             },
         )
         .unwrap();
         let p2 = plan_materialization(
-            ManagedRoot::new("/tmp/project").unwrap(),
+            test_managed_root(),
             MaterializationInput {
                 instances: vec![b, a],
             },
@@ -611,9 +624,9 @@ mod tests {
     #[test]
     fn managed_paths_cannot_escape_root() {
         assert!(ManagedRoot::new("relative").is_err());
-        let root = ManagedRoot::new("/tmp/project").unwrap();
-        assert!(root.contains(Path::new("/tmp/project/.tapid/instances")));
-        assert!(!root.contains(Path::new("/tmp/project/../else")));
+        let root = test_managed_root();
+        assert!(root.contains(&test_project_root().join(".tapid").join("instances")));
+        assert!(!root.contains(&test_project_root().join("..").join("else")));
     }
     #[test]
     fn unsupported_platform_reports_limitations() {
@@ -636,28 +649,27 @@ mod tests {
                 child: key(&dep_v2),
             }],
         };
-        let plan = plan_layout(
-            ManagedRoot::new("/tmp/project").unwrap(),
-            input,
-            Platform::Unix,
-        )
-        .unwrap();
+        let plan = plan_layout(test_managed_root(), input, Platform::Unix).unwrap();
         let targets: Vec<_> = plan
             .activation
             .steps
             .iter()
             .map(|step| step.target.clone())
             .collect();
-        assert!(
-            targets
-                .iter()
-                .any(|p| p == Path::new("/tmp/project/node_modules/dep"))
-        );
-        assert!(
-            targets
-                .iter()
-                .any(|p| p == Path::new("/tmp/project/node_modules/app/node_modules/dep"))
-        );
+        assert!(targets.iter().any(|p| {
+            p == test_project_root()
+                .join("node_modules")
+                .join("dep")
+                .as_path()
+        }));
+        assert!(targets.iter().any(|p| {
+            p == test_project_root()
+                .join("node_modules")
+                .join("app")
+                .join("node_modules")
+                .join("dep")
+                .as_path()
+        }));
     }
 
     #[test]
@@ -671,11 +683,7 @@ mod tests {
             dependency_edges: vec![],
         };
         assert!(matches!(
-            plan_layout(
-                ManagedRoot::new("/tmp/project").unwrap(),
-                input,
-                Platform::Unix
-            ),
+            plan_layout(test_managed_root(), input, Platform::Unix),
             Err(PlanError::ConflictingTarget(_))
         ));
     }
@@ -688,19 +696,10 @@ mod tests {
             root_dependencies: vec![key(&app)],
             dependency_edges: vec![],
         };
-        let windows = plan_layout(
-            ManagedRoot::new("/tmp/project").unwrap(),
-            input.clone(),
-            Platform::Windows,
-        )
-        .unwrap();
+        let windows = plan_layout(test_managed_root(), input.clone(), Platform::Windows).unwrap();
         assert_eq!(windows.activation.steps[0].kind, LinkKind::Junction);
         assert!(matches!(
-            plan_layout(
-                ManagedRoot::new("/tmp/project").unwrap(),
-                input,
-                Platform::Other
-            ),
+            plan_layout(test_managed_root(), input, Platform::Other),
             Err(PlanError::UnsupportedPlatform(Platform::Other))
         ));
     }
