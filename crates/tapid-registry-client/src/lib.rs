@@ -539,12 +539,12 @@ fn parse_npm(
     body: &[u8],
 ) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
     let root = json_object(body).map_err(RegistryClientError::Metadata)?;
-    if let Some(n) = root.get("name").and_then(|v| v.as_str()) {
-        if n != name.to_string() {
-            return Err(RegistryClientError::Metadata(
-                MetadataError::ConflictingField("name".into()),
-            ));
-        }
+    if let Some(n) = root.get("name").and_then(|v| v.as_str())
+        && n != name.to_string()
+    {
+        return Err(RegistryClientError::Metadata(
+            MetadataError::ConflictingField("name".into()),
+        ));
     }
     let versions = root
         .get("versions")
