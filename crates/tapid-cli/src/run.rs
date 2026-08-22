@@ -85,11 +85,13 @@ impl ShellBackend {
                     "/D".to_owned(),
                     "/S".to_owned(),
                     "/C".to_owned(),
-                    script.to_owned(),
+                    windows_command_with_arguments(script, arguments),
                 ],
             ),
         };
-        command_arguments.extend(arguments.iter().cloned());
+        if matches!(self, Self::UnixSh) {
+            command_arguments.extend(arguments.iter().cloned());
+        }
         ShellInvocation {
             program,
             arguments: command_arguments,
@@ -169,20 +171,36 @@ pub fn execute(request: RunRequest) -> Result<ChildResult, RunError> {
     }
     let managed_bin = request.project_dir.join("node_modules").join(".bin");
     let separator = if cfg!(windows) { ";" } else { ":" };
-    let inherited_path = environment
-        .get(&OsString::from("PATH"))
+    let path_key = environment
+        .keys()
+        .find(|key| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_else(|| OsString::from("PATH"));
+    let inherited_path = environment.get(&path_key).cloned().unwrap_or_default();
     let mut path = managed_bin.into_os_string();
     if !inherited_path.is_empty() {
         path.push(separator);
         path.push(inherited_path);
     }
-    environment.insert(OsString::from("PATH"), path);
+    environment.insert(path_key, path);
     command.envs(environment);
 
     let status = command.status().map_err(RunError::Spawn)?;
     Ok(ChildResult { status })
+}
+
+#[cfg(windows)]
+fn windows_command_with_arguments(script: &str, arguments: &[String]) -> String {
+    let suffix = arguments
+        .iter()
+        .map(|argument| format!(" \"{}\"", argument.replace('"', "\\\"")))
+        .collect::<String>();
+    format!("{script}{suffix}")
+}
+
+#[cfg(not(windows))]
+fn windows_command_with_arguments(script: &str, _arguments: &[String]) -> String {
+    script.to_owned()
 }
 
 #[cfg(test)]
@@ -286,6 +304,9 @@ mod tests {
         );
         let windows = ShellBackend::WindowsCmd.invocation("echo hi", &["a".into()]);
         assert_eq!(windows.program, PathBuf::from("cmd.exe"));
-        assert_eq!(windows.arguments, vec!["/D", "/S", "/C", "echo hi", "a"]);
+        #[cfg(windows)]
+        assert_eq!(windows.arguments, vec!["/D", "/S", "/C", "echo hi \"a\""]);
+        #[cfg(not(windows))]
+        assert_eq!(windows.arguments, vec!["/D", "/S", "/C", "echo hi"]);
     }
 }

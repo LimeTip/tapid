@@ -109,7 +109,7 @@ fn run_executes_root_script_and_forwards_arguments() {
     #[cfg(unix)]
     let manifest = r#"{"name":"demo","version":"1.0.0","scripts":{"init":"printf '%s' \"$1\" > forwarded","dev":"exit 37"}}"#;
     #[cfg(windows)]
-    let manifest = r#"{"name":"demo","version":"1.0.0","scripts":{"init":"echo %1>forwarded","dev":"exit /b 37"}}"#;
+    let manifest = r#"{"name":"demo","version":"1.0.0","scripts":{"init":"echo > forwarded","dev":"exit /b 37"}}"#;
     fs::write(dir.join("package.json"), manifest).unwrap();
     let output = run(&dir, &["run", "init", "--", "hello world"]);
     assert!(
