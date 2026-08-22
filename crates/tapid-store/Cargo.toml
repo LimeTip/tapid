@@ -10,3 +10,5 @@ rust-version.workspace = true
 
 [dependencies]
 tapid-core = { version = "0.0.1", path = "../tapid-core" }
+sha2 = "0.10"
+hex = "0.4"
