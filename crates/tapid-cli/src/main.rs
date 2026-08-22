@@ -532,6 +532,7 @@ fn materialize_package_shims(
     }
     Ok(())
 }
+#[cfg(unix)]
 fn relative_path(from: &Path, to: &Path) -> PathBuf {
     let from_components: Vec<_> = from.components().collect();
     let to_components: Vec<_> = to.components().collect();
