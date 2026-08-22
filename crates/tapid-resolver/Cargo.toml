@@ -1,13 +1,15 @@
 [package]
 name = "tapid-resolver"
 readme = "README.md"
-description = "Deterministic dependency resolution foundations for Tapid"
+description = "Deterministic dependency resolution for Tapid"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-
+[dependencies]
+tapid-core = { version = "0.0.1", path = "../tapid-core" }
+tapid-registry-client = { version = "0.0.1", path = "../tapid-registry-client" }
 [lib]
 path = "src/lib.rs"

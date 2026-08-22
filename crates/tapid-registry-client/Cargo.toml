@@ -1,13 +1,15 @@
 [package]
 name = "tapid-registry-client"
 readme = "README.md"
-description = "Registry client foundations for the Tapid package manager"
+description = "Registry metadata snapshots and transport-independent clients for Tapid"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tapid-core = { version = "0.0.1", path = "../tapid-core" }
 [lib]
 path = "src/lib.rs"
