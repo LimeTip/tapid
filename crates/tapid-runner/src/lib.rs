@@ -1,22 +1,177 @@
-//! Policy-aware package execution foundations for Tapid.
-//!
-//! This crate is an experimental workspace boundary. Public APIs will be added
-//! only when the corresponding Tapid behavior is implemented and tested.
+use sha2::{Digest, Sha256};
+use std::fmt;
+use tapid_policy::{Decision, Evidence, PolicyDecision, ReasonCode};
 
-#![deny(unsafe_code)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ScriptHash(String);
+impl ScriptHash {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl fmt::Display for ScriptHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
-/// Returns the current crate version.
-///
-/// This small API keeps the initial scaffold non-empty while the crate
-/// boundary is being established.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub fn normalize_script(script: &str) -> String {
+    script
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_owned()
+}
+pub fn normalized_script_hash(script: &str) -> ScriptHash {
+    let digest = Sha256::digest(normalize_script(script).as_bytes());
+    ScriptHash(format!("sha256-{}", hex_lower(&digest)))
+}
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerRequest {
+    pub artifact_digest: String,
+    pub script: String,
+    pub unattended: bool,
+    pub os: String,
+}
+impl RunnerRequest {
+    pub fn script_hash(&self) -> ScriptHash {
+        normalized_script_hash(&self.script)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Approval {
+    pub artifact_digest: String,
+    pub script_hash: ScriptHash,
+}
+impl Approval {
+    pub fn for_request(request: &RunnerRequest) -> Self {
+        Self {
+            artifact_digest: request.artifact_digest.clone(),
+            script_hash: request.script_hash(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidationError {
+    ArtifactDigestMismatch,
+    ScriptHashMismatch,
+    MissingApproval,
+    UnsupportedOs,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerPlan {
+    pub policy: PolicyDecision,
+    pub approval_required: bool,
+    pub containment_available: bool,
+}
+impl RunnerPlan {
+    pub fn validate_approval(
+        &self,
+        request: &RunnerRequest,
+        approval: Option<&Approval>,
+    ) -> Result<(), ValidationError> {
+        let Some(approval) = approval else {
+            return if self.approval_required {
+                Err(ValidationError::MissingApproval)
+            } else {
+                Ok(())
+            };
+        };
+        if approval.artifact_digest != request.artifact_digest {
+            return Err(ValidationError::ArtifactDigestMismatch);
+        }
+        if approval.script_hash != request.script_hash() {
+            return Err(ValidationError::ScriptHashMismatch);
+        }
+        Ok(())
+    }
+}
+
+pub fn plan(request: &RunnerRequest, evidence: Vec<Evidence>) -> RunnerPlan {
+    let mut policy = PolicyDecision::from_evidence(evidence, request.unattended);
+    if !matches!(request.os.as_str(), "linux" | "macos" | "windows") {
+        policy = PolicyDecision::new(
+            Decision::Deny,
+            vec![ReasonCode::UnsupportedOs],
+            policy.evidence().to_vec(),
+        );
+    }
+    let approval_required = !matches!(policy.decision(), Decision::Allow);
+    RunnerPlan {
+        policy,
+        approval_required,
+        containment_available: false,
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::VERSION;
-
+    use super::*;
+    use tapid_policy::{Capability, Evidence};
+    fn request() -> RunnerRequest {
+        RunnerRequest {
+            artifact_digest: "sha256-aaaa".into(),
+            script: " echo hi\r\n".into(),
+            unattended: false,
+            os: "linux".into(),
+        }
+    }
     #[test]
-    fn version_is_present() {
-        assert!(!VERSION.is_empty());
+    fn approval_binds_exact_artifact_and_normalized_script() {
+        let r = request();
+        let p = plan(&r, vec![]);
+        assert!(
+            p.validate_approval(&r, Some(&Approval::for_request(&r)))
+                .is_ok()
+        );
+        let mut changed = r.clone();
+        changed.artifact_digest = "sha256-bbbb".into();
+        assert_eq!(
+            p.validate_approval(&changed, Some(&Approval::for_request(&r))),
+            Err(ValidationError::ArtifactDigestMismatch)
+        );
+    }
+    #[test]
+    fn changed_script_cannot_reuse_approval() {
+        let r = request();
+        let p = plan(&r, vec![]);
+        let approval = Approval::for_request(&r);
+        let mut changed = r.clone();
+        changed.script.push_str(" && whoami");
+        assert_eq!(
+            p.validate_approval(&changed, Some(&approval)),
+            Err(ValidationError::ScriptHashMismatch)
+        );
+    }
+    #[test]
+    fn unattended_promptable_evidence_fails_closed() {
+        let r = RunnerRequest {
+            unattended: true,
+            ..request()
+        };
+        let p = plan(
+            &r,
+            vec![Evidence::inferred(Capability::Network, "heuristic")],
+        );
+        assert_eq!(p.policy.decision(), Decision::Deny);
+        assert!(p.approval_required);
+    }
+    #[test]
+    fn unsupported_os_is_explicit_and_not_containment() {
+        let r = RunnerRequest {
+            os: "plan9".into(),
+            ..request()
+        };
+        let p = plan(&r, vec![]);
+        assert_eq!(p.policy.decision(), Decision::Deny);
+        assert!(p.policy.reasons().contains(&ReasonCode::UnsupportedOs));
+        assert!(!p.containment_available);
     }
 }

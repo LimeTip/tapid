@@ -9,5 +9,9 @@ repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
+[dependencies]
+sha2 = "0.10"
+tapid-policy = { path = "../tapid-policy" }
+
 [lib]
 path = "src/lib.rs"
