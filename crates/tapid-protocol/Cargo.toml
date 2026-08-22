@@ -11,3 +11,7 @@ authors.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tapid-core = { version = "0.0.1", path = "../tapid-core" }

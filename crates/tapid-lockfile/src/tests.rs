@@ -119,3 +119,53 @@ fn package_fixture() -> LockedPackage {
     )
     .unwrap()
 }
+
+#[test]
+fn same_name_and_version_from_two_registries_are_distinct() {
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    for registry in ["https://one.example", "https://two.example"] {
+        lockfile
+            .insert_package(
+                LockedPackage::new(
+                    registry,
+                    "tapid",
+                    "1.0.0",
+                    &format!("sha512-{}", "A".repeat(86)),
+                    "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    assert_eq!(lockfile.packages().len(), 2);
+}
+
+#[test]
+fn peer_and_platform_contexts_change_key_deterministically() {
+    let peer = tapid_core::PeerContext::default()
+        .with("react".parse().unwrap(), "18.2.0".parse().unwrap());
+    let platform =
+        tapid_core::PlatformContext::new(Some("linux"), Some("x86_64"), Some("gnu")).unwrap();
+    let package = LockedPackage::new_with_context(
+        "https://registry.example.test",
+        "tapid",
+        "1.0.0",
+        &format!("sha512-{}", "A".repeat(86)),
+        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        &peer,
+        &platform,
+    )
+    .unwrap();
+    assert_eq!(
+        package.key(),
+        "https://registry.example.test|tapid@1.0.0|peer=react@18.2.0|platform=linux-x86_64-gnu"
+    );
+}
+
+#[test]
+fn lockfile_v1_is_not_implicitly_accepted() {
+    let input = r#"{"lockfileVersion":1,"rootManifestDigest":"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resolverVersion":"0","linkerVersion":"0","packages":{}}"#;
+    assert!(Lockfile::from_json(input).is_err());
+}

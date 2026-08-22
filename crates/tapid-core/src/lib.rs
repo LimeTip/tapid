@@ -121,11 +121,170 @@ impl fmt::Display for ArtifactDigest {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RegistryOrigin(String);
+
+impl RegistryOrigin {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for RegistryOrigin {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let trimmed = value.trim_end_matches('/');
+        let valid = trimmed.starts_with("https://")
+            && trimmed.len() > "https://".len()
+            && !trimmed.contains(['@', '?', '#'])
+            && trimmed[8..]
+                .split('/')
+                .next()
+                .is_some_and(|host| !host.is_empty());
+        if !valid {
+            return Err(DomainError::InvalidRegistryOrigin(value.to_owned()));
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+}
+
+impl fmt::Display for RegistryOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PackageInstanceId {
+    pub registry: RegistryOrigin,
+    pub name: PackageName,
+    pub version: PackageVersion,
+}
+
+impl PackageInstanceId {
+    pub fn new(registry: RegistryOrigin, name: PackageName, version: PackageVersion) -> Self {
+        Self {
+            registry,
+            name,
+            version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PackageIntegrity(String);
+
+impl PackageIntegrity {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for PackageIntegrity {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let Some(encoded) = value.strip_prefix("sha512-") else {
+            return Err(DomainError::InvalidPackageIntegrity(value.to_owned()));
+        };
+        let valid_length = encoded.len() == 86 || encoded.len() == 88;
+        let valid_characters = encoded
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='));
+        if !valid_length || !valid_characters || (encoded.contains('=') && !encoded.ends_with("=="))
+        {
+            return Err(DomainError::InvalidPackageIntegrity(value.to_owned()));
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl fmt::Display for PackageIntegrity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PeerContext(std::collections::BTreeMap<PackageName, PackageVersion>);
+
+impl PeerContext {
+    pub fn with(mut self, name: PackageName, version: PackageVersion) -> Self {
+        self.0.insert(name, version);
+        self
+    }
+    pub fn entries(&self) -> &std::collections::BTreeMap<PackageName, PackageVersion> {
+        &self.0
+    }
+}
+
+impl fmt::Display for PeerContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for (name, version) in &self.0 {
+            if !first {
+                f.write_str(",")?;
+            }
+            first = false;
+            write!(f, "{name}@{version}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PlatformContext {
+    pub os: Option<String>,
+    pub cpu: Option<String>,
+    pub libc: Option<String>,
+}
+
+impl PlatformContext {
+    pub fn new(
+        os: Option<&str>,
+        cpu: Option<&str>,
+        libc: Option<&str>,
+    ) -> Result<Self, DomainError> {
+        let context = Self {
+            os: os.map(str::to_owned),
+            cpu: cpu.map(str::to_owned),
+            libc: libc.map(str::to_owned),
+        };
+        if [&context.os, &context.cpu, &context.libc]
+            .into_iter()
+            .flatten()
+            .any(|v| v.is_empty() || v.chars().any(char::is_whitespace))
+        {
+            return Err(DomainError::InvalidPlatformContext);
+        }
+        Ok(context)
+    }
+}
+
+impl fmt::Display for PlatformContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let values = [&self.os, &self.cpu, &self.libc];
+        let mut first = true;
+        for value in values.into_iter().flatten() {
+            if !first {
+                f.write_str("-")?;
+            }
+            first = false;
+            f.write_str(value)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DomainError {
     InvalidPackageName(String),
     InvalidPackageVersion(String),
     InvalidArtifactDigest(String),
+    InvalidRegistryOrigin(String),
+    InvalidPackageIntegrity(String),
+    InvalidPlatformContext,
 }
 
 impl fmt::Display for DomainError {
@@ -134,6 +293,9 @@ impl fmt::Display for DomainError {
             Self::InvalidPackageName(value) => write!(f, "invalid package name: {value}"),
             Self::InvalidPackageVersion(value) => write!(f, "invalid package version: {value}"),
             Self::InvalidArtifactDigest(value) => write!(f, "invalid artifact digest: {value}"),
+            Self::InvalidRegistryOrigin(value) => write!(f, "invalid registry origin: {value}"),
+            Self::InvalidPackageIntegrity(value) => write!(f, "invalid package integrity: {value}"),
+            Self::InvalidPlatformContext => f.write_str("invalid platform context"),
         }
     }
 }
@@ -182,5 +344,51 @@ mod tests {
             .unwrap();
         assert_eq!(digest.to_string(), format!("sha256-{}", "a".repeat(64)));
         assert!("sha512-deadbeef".parse::<ArtifactDigest>().is_err());
+    }
+
+    #[test]
+    fn registry_origin_is_typed_and_canonical_without_secrets() {
+        let origin = "https://REGISTRY.example.test/"
+            .parse::<RegistryOrigin>()
+            .unwrap();
+        assert_eq!(origin.as_str(), "https://REGISTRY.example.test");
+        assert!(
+            "http://registry.example.test"
+                .parse::<RegistryOrigin>()
+                .is_err()
+        );
+        assert!(
+            "https://user:pass@registry.example.test"
+                .parse::<RegistryOrigin>()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn integrity_preserves_mixed_case_wire_encoding() {
+        let value = format!("sha512-{}", "AbCdEfGh".repeat(11));
+        let integrity = value.parse::<PackageIntegrity>().unwrap();
+        assert_eq!(integrity.to_string(), value);
+    }
+
+    #[test]
+    fn package_instance_identity_includes_registry() {
+        let name: PackageName = "tapid".parse().unwrap();
+        let version: PackageVersion = "1.0.0".parse().unwrap();
+        let first = PackageInstanceId::new(
+            "https://one.example".parse().unwrap(),
+            name.clone(),
+            version,
+        );
+        let second = PackageInstanceId::new("https://two.example".parse().unwrap(), name, version);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn contexts_have_deterministic_empty_and_nonempty_forms() {
+        let peer = PeerContext::default().with("react".parse().unwrap(), "18.2.0".parse().unwrap());
+        assert_eq!(peer.to_string(), "react@18.2.0");
+        let platform = PlatformContext::new(Some("linux"), Some("x86_64"), Some("gnu")).unwrap();
+        assert_eq!(platform.to_string(), "linux-x86_64-gnu");
     }
 }

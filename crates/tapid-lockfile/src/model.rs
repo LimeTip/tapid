@@ -1,9 +1,60 @@
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
-use tapid_core::{ArtifactDigest, PackageName, PackageVersion};
+use std::collections::BTreeMap;
+use tapid_core::{
+    ArtifactDigest, PackageIntegrity, PackageName, PackageVersion, PeerContext, PlatformContext,
+    RegistryOrigin,
+};
 
 use crate::{LOCKFILE_VERSION, LockfileError, validation};
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LockfilePackageKey {
+    pub registry: RegistryOrigin,
+    pub name: PackageName,
+    pub version: PackageVersion,
+    pub peer_context: String,
+    pub platform_context: String,
+}
+
+impl LockfilePackageKey {
+    pub fn new(
+        registry: RegistryOrigin,
+        name: PackageName,
+        version: PackageVersion,
+        peer_context: &PeerContext,
+        platform_context: &PlatformContext,
+    ) -> Self {
+        Self {
+            registry,
+            name,
+            version,
+            peer_context: peer_context.to_string(),
+            platform_context: platform_context.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for LockfilePackageKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}|{}@{}|peer={}|platform={}",
+            self.registry,
+            self.name,
+            self.version,
+            if self.peer_context.is_empty() {
+                "-"
+            } else {
+                &self.peer_context
+            },
+            if self.platform_context.is_empty() {
+                "-"
+            } else {
+                &self.platform_context
+            }
+        )
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,23 +111,7 @@ impl Lockfile {
             if key != &package.key() {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));
             }
-            validation::validate_url(package.registry.as_str())?;
-            package
-                .name
-                .parse::<PackageName>()
-                .map_err(LockfileError::Domain)?;
-            package
-                .version
-                .parse::<PackageVersion>()
-                .map_err(LockfileError::Domain)?;
-            package
-                .unpacked_digest
-                .parse::<ArtifactDigest>()
-                .map_err(LockfileError::Domain)?;
-            validation::validate_sha512(&package.artifact_integrity)?;
-            if let Some(url) = &package.artifact_url {
-                validation::validate_url(url)?;
-            }
+            package.validate()?;
         }
         Ok(lockfile)
     }
@@ -92,6 +127,10 @@ pub struct LockedPackage {
     unpacked_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_url: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    peer_context: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    platform_context: String,
     dependencies: BTreeMap<String, String>,
 }
 
@@ -103,10 +142,31 @@ impl LockedPackage {
         artifact_integrity: &str,
         unpacked_digest: &str,
     ) -> Result<Self, LockfileError> {
-        validation::validate_url(registry)?;
-        validation::validate_sha512(artifact_integrity)?;
-        Ok(Self {
-            registry: registry.to_owned(),
+        Self::new_with_context(
+            registry,
+            name,
+            version,
+            artifact_integrity,
+            unpacked_digest,
+            &PeerContext::default(),
+            &PlatformContext::new(None, None, None).unwrap(),
+        )
+    }
+
+    pub fn new_with_context(
+        registry: &str,
+        name: &str,
+        version: &str,
+        artifact_integrity: &str,
+        unpacked_digest: &str,
+        peer_context: &PeerContext,
+        platform_context: &PlatformContext,
+    ) -> Result<Self, LockfileError> {
+        let package = Self {
+            registry: registry
+                .parse::<RegistryOrigin>()
+                .map_err(LockfileError::Domain)?
+                .to_string(),
             name: name
                 .parse::<PackageName>()
                 .map_err(LockfileError::Domain)?
@@ -115,18 +175,66 @@ impl LockedPackage {
                 .parse::<PackageVersion>()
                 .map_err(LockfileError::Domain)?
                 .to_string(),
-            artifact_integrity: artifact_integrity.to_owned(),
+            artifact_integrity: artifact_integrity
+                .parse::<PackageIntegrity>()
+                .map_err(LockfileError::Domain)?
+                .to_string(),
             unpacked_digest: unpacked_digest
                 .parse::<ArtifactDigest>()
                 .map_err(LockfileError::Domain)?
                 .to_string(),
             artifact_url: None,
+            peer_context: peer_context.to_string(),
+            platform_context: platform_context.to_string(),
             dependencies: BTreeMap::new(),
-        })
+        };
+        package.validate()?;
+        Ok(package)
     }
 
     pub fn key(&self) -> String {
-        format!("{}@{}", self.name, self.version)
+        let registry: RegistryOrigin = self.registry.parse().expect("validated registry origin");
+        let name: PackageName = self.name.parse().expect("validated package name");
+        let version: PackageVersion = self.version.parse().expect("validated package version");
+        format!(
+            "{}|{}@{}|peer={}|platform={}",
+            registry,
+            name,
+            version,
+            if self.peer_context.is_empty() {
+                "-"
+            } else {
+                &self.peer_context
+            },
+            if self.platform_context.is_empty() {
+                "-"
+            } else {
+                &self.platform_context
+            }
+        )
+    }
+
+    fn validate(&self) -> Result<(), LockfileError> {
+        self.registry
+            .parse::<RegistryOrigin>()
+            .map_err(LockfileError::Domain)?;
+        self.name
+            .parse::<PackageName>()
+            .map_err(LockfileError::Domain)?;
+        self.version
+            .parse::<PackageVersion>()
+            .map_err(LockfileError::Domain)?;
+        self.artifact_integrity
+            .parse::<PackageIntegrity>()
+            .map_err(LockfileError::Domain)?;
+        self.unpacked_digest
+            .parse::<ArtifactDigest>()
+            .map_err(LockfileError::Domain)?;
+        validation::validate_url(&self.registry)?;
+        if let Some(url) = &self.artifact_url {
+            validation::validate_url(url)?;
+        }
+        Ok(())
     }
 
     pub fn set_artifact_url(&mut self, url: &str) -> Result<(), LockfileError> {
@@ -134,7 +242,6 @@ impl LockedPackage {
         self.artifact_url = Some(url.to_owned());
         Ok(())
     }
-
     pub fn add_dependency(&mut self, name: &str, key: &str) -> Result<(), LockfileError> {
         name.parse::<PackageName>().map_err(LockfileError::Domain)?;
         self.dependencies.insert(name.to_owned(), key.to_owned());

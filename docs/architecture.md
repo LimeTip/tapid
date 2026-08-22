@@ -36,7 +36,10 @@ Current examples include:
 - `PackageName`, including scoped and unscoped package identity.
 - `PackageVersion`, including semantic version validation.
 - `ArtifactDigest`, including validated SHA-256 artifact identity.
-- Pure comparison, formatting, and domain errors for those primitives.
+- `RegistryOrigin`, `PackageInstanceId`, and lossless `PackageIntegrity` for
+  registry-qualified package identity and integrity metadata.
+- `PeerContext` and `PlatformContext`, deterministic context primitives used by
+  dependency resolution and lockfile identity.
 
 `tapid-core` must not depend on the CLI, filesystem, network, operating system, registry implementation, process execution, clock, environment, or global mutable state. It must not become a general utility crate or a place to hide ambiguity between focused boundaries.
 

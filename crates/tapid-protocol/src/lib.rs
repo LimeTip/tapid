@@ -1,22 +1,67 @@
-//! Shared protocol types for the Tapid package ecosystem.
+//! Wire-facing contracts for Tapid package identity.
 //!
-//! This crate is an experimental workspace boundary. Public APIs will be added
-//! only when the corresponding Tapid behavior is implemented and tested.
+//! These DTOs intentionally keep transport strings separate from the validated
+//! domain types in `tapid-core`.
 
 #![deny(unsafe_code)]
 
-/// Returns the current crate version.
-///
-/// This small API keeps the initial scaffold non-empty while the crate
-/// boundary is being established.
+use serde::{Deserialize, Serialize};
+use tapid_core::{PackageInstanceId, PackageName, PackageVersion, RegistryOrigin};
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageInstanceWire {
+    pub registry: String,
+    pub name: String,
+    pub version: String,
+}
+
+impl From<&PackageInstanceId> for PackageInstanceWire {
+    fn from(value: &PackageInstanceId) -> Self {
+        Self {
+            registry: value.registry.to_string(),
+            name: value.name.to_string(),
+            version: value.version.to_string(),
+        }
+    }
+}
+
+impl TryFrom<PackageInstanceWire> for PackageInstanceId {
+    type Error = tapid_core::DomainError;
+
+    fn try_from(value: PackageInstanceWire) -> Result<Self, Self::Error> {
+        Ok(Self::new(
+            value.registry.parse::<RegistryOrigin>()?,
+            value.name.parse::<PackageName>()?,
+            value.version.parse::<PackageVersion>()?,
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::VERSION;
+    use super::*;
 
     #[test]
-    fn version_is_present() {
-        assert!(!VERSION.is_empty());
+    fn wire_round_trip_validates_at_boundary() {
+        let domain = PackageInstanceId::new(
+            "https://registry.example".parse().unwrap(),
+            "tapid".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+        );
+        let wire = PackageInstanceWire::from(&domain);
+        assert_eq!(PackageInstanceId::try_from(wire).unwrap(), domain);
+    }
+
+    #[test]
+    fn wire_rejects_untrusted_identity_strings() {
+        let wire = PackageInstanceWire {
+            registry: "file:///tmp".into(),
+            name: "../escape".into(),
+            version: "latest".into(),
+        };
+        assert!(PackageInstanceId::try_from(wire).is_err());
     }
 }
