@@ -10,11 +10,16 @@ publish = false
 name = "contracts"
 path = "contracts.rs"
 
+[[test]]
+name = "consumer_install"
+path = "consumer_install.rs"
+
 [dependencies]
 serde_json = "1"
 tapid-archive = { path = "../../crates/tapid-archive" }
 tapid-core = { path = "../../crates/tapid-core" }
 tapid-linker = { path = "../../crates/tapid-linker" }
+tapid-lockfile = { path = "../../crates/tapid-lockfile" }
 tapid-manifest = { path = "../../crates/tapid-manifest" }
 tapid-policy = { path = "../../crates/tapid-policy" }
 tapid-publish = { path = "../../crates/tapid-publish" }
@@ -24,3 +29,4 @@ tapid-runner = { path = "../../crates/tapid-runner" }
 tapid-signatures = { path = "../../crates/tapid-signatures" }
 tapid-store = { path = "../../crates/tapid-store" }
 tapid-test-support = { path = "../../crates/tapid-test-support" }
+url = "2"
