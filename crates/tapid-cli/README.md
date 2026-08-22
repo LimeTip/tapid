@@ -1,13 +1,62 @@
-# Tapid
+# tapid-cli
 
-The Tapid command-line package manager, implemented with Clap parsing and a separate command-dispatch layer.
+The `tapid` command-line package manager and package runner.
 
-Supported commands:
+## Commands
 
-- `tapid init [PATH]` safely creates a private `package.json` without overwriting an existing file.
-- `tapid manifest validate [PATH]` validates a manifest from disk and defaults to `package.json` in the current directory.
-- `tapid lock verify` validates `tapid.lock` in the current directory.
-- `tapid install [--offline] [--frozen]` validates `package.json` and replays a local `tapid.lock` into `node_modules` without network access or lifecycle scripts. Use `--project-dir PATH` for a dynamic project location.
+```text
+tapid init [PATH]
+tapid manifest validate [PATH]
+tapid lock verify
+tapid install [OPTIONS]
+tapid run <SCRIPT> [-- <ARGS>...]
+```
 
-Install is deliberately fail-closed: offline and frozen modes require a lockfile, malformed lockfiles are rejected before `node_modules` is created, and this vertical slice never executes package scripts or performs network resolution.
-Parsing errors use Clap's standard exit code `2`; command execution and input failures use exit code `1`. Filesystem orchestration stays in this crate while `tapid-manifest` remains a pure document parser.
+`tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
+
+## Install
+
+An online install is the default:
+
+```text
+tapid install
+tapid install --project-dir ./example
+tapid install --registry-fixture ./fixture.json --project-dir ./example
+```
+
+Online install reads the root manifest, resolves the supported dependency subset, downloads npm artifacts through the registry client, verifies archive and integrity constraints, writes `tapid.lock`, populates a verified store, and atomically activates `node_modules`. The default store is `<project>/.tapid-store`; `--store-dir PATH` selects a dynamic alternate root. Dependency lifecycle scripts are never executed.
+
+The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature.
+
+## Offline and frozen
+
+```text
+tapid install --offline --project-dir ./example
+tapid install --frozen --project-dir ./example
+tapid install --offline --frozen --store-dir ./verified-store
+```
+
+Both flags require `tapid.lock` and all referenced verified trees. Replay validates the root manifest digest, exact package identities, tree digests, regular `.tapid-tree` markers, and available store content before staging. It performs no network resolution or archive download. Activation replaces managed `node_modules` atomically; failed validation or staging does not intentionally activate partial output.
+
+`--frozen` currently selects the same no-network replay path as `--offline`. It does not yet implement the complete npm frozen-lockfile policy.
+
+## Run and `.bin`
+
+```text
+tapid run init
+tapid run dev -- --host 127.0.0.1
+tapid run --project-dir ./example test -- --runInBand
+```
+
+The command reads a root script from `package.json`, runs in the canonical project directory, prepends `<project>/node_modules/.bin` to `PATH`, preserves inherited environment variables, forwards arguments after `--`, and propagates the child exit code. Missing scripts fail with exit code `1`. Clap parsing errors use exit code `2`.
+
+Install derives executable shims from verified package `bin` metadata. Unix uses symlinks. Windows writes `.cmd` and PowerShell wrappers. The planner rejects malformed metadata, absolute or traversal targets, symlink and special-file targets, collisions, and unsupported platforms. Root scripts may execute arbitrary code through the platform shell. The runner is not a sandbox and does not approve or contain scripts.
+
+## Lifecycle policy and limitations
+
+- Dependency lifecycle scripts are disabled during every install path.
+- Root scripts run only after the explicit `tapid run` command.
+- Full npm semver, aliases, tags, git/file/workspace specs, peer and optional dependency semantics, workspaces, and complete lockfile compatibility are not implemented.
+- `add`, `remove`, `update`, `prune`, script approval, private-registry authentication, and package publishing are outside this slice.
+- JSR installation remains fail-closed unless metadata provides both an HTTPS npm tarball URL and a valid SHA-512 SRI value. Live JSR integrity behavior is unsupported and unverified.
+- Linux and Windows execution is configured in CI, but must not be described as locally verified until those jobs have run. macOS local execution does not prove Windows or Linux behavior.

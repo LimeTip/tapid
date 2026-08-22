@@ -1,29 +1,9 @@
 # tapid-linker
 
-`tapid-linker` owns the pure planning contract for materializing verified package
-instances into a project layout. It accepts registry-qualified identities,
-peer/platform context, and verified content-addressed tree references, then
-returns stable, sorted paths under an explicitly managed root.
+`tapid-linker` owns deterministic planning for materializing verified package instances and executable shims into a project layout. It accepts registry-qualified identities, peer and platform context, verified content-addressed tree references, and package metadata. Plans are sorted and constrained to an explicitly managed absolute root with a `.tapid-managed` marker path.
 
-The plan includes an ownership-marker path (`.tapid-managed`), instance
-materialization entries, and staged activation steps. It does **not** create
-symlinks or junctions, mutate the filesystem, execute package scripts, or
-provide an OS/process sandbox. Those effects belong to a future privileged
-adapter and the policy/runner boundaries. `PlatformCapabilities` reports these
-limitations explicitly, including unsupported platforms.
+`plan_layout` places root dependencies at `<project>/node_modules/<name>` and nested edges under the parent package's `node_modules`. `InstanceKey` includes package identity plus peer and platform context. Conflicting targets, duplicate instances, unknown edges, escaping paths, unsupported platforms, malformed `bin` metadata, missing targets, symlinks, special files, and shim collisions are rejected.
 
-The newer `plan_layout` API accepts `LayoutInput`: root dependency keys become
-`<root>/node_modules/<name>`, while `DependencyEdge` entries are placed below
-their parent's package directory (`.../<parent>/node_modules/<name>`). An
-`InstanceKey` includes package identity plus peer and platform context, so
-multiple versions and peer-context instances remain distinct. Conflicting
-requests for one target are rejected rather than overwritten, and all planned
-paths stay inside the managed root.
+`plan_shims` selects Unix symlinks or Windows command and PowerShell wrappers. The planner validates that each bin target is a regular file inside its verified tree. The CLI materializes the plan during staged install and atomically activates the managed layout.
 
-`plan_layout` selects `LinkKind::Symlink` on Unix and
-`LinkKind::Junction` on Windows. Other platforms return an explicit
-`UnsupportedPlatform` error. This is still a planner-only contract: no
-filesystem mutation is performed.
-
-Paths are lexical and deterministic; consumers must still perform their own
-runtime checks before applying a plan.
+This crate does not execute scripts, enforce a process sandbox, authenticate registries, or itself mutate the filesystem. Runtime platform checks remain required. Other platforms have no supported link strategy in this release.

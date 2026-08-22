@@ -1,22 +1,37 @@
 # Linux and Windows platform validation
 
-The `platform-consumer-validation` GitHub Actions job runs only on `ubuntu-latest` and `windows-latest`. It builds the `tapid` binary, creates a fresh Node.js project under the runner's temporary directory, writes a lockfile whose manifest digest is calculated from that project, and invokes the built binary with the platform-native shell (`bash` on Linux and PowerShell on Windows). No macOS result is implied by this job.
+The repository configures a `platform-consumer-validation` GitHub Actions job for `ubuntu-latest` and `windows-latest`. Each job builds the `tapid` binary, creates a Node fixture under the runner's temporary directory, and invokes the binary with the native runner shell. The workflow is configuration, not execution evidence. No CI run was available to this documentation change, so Linux and Windows remain configured but unverified here. A local macOS result cannot substitute for either platform.
 
-## Validated today
+## Configured validation
 
-- `tapid install --offline --frozen` accepts a dynamic project directory and creates managed `node_modules`.
-- The fixture's `preinstall` script would create `LIFECYCLE_SHOULD_NOT_RUN`; the file must remain absent, proving lifecycle suppression for this install path.
-- The same binary is probed for the `run` command on both platforms. The workflow requires the current stable failure (`unrecognized subcommand`) rather than treating an unsupported command as a passing script test.
+The workflow is intended to run these exact checks on both platforms:
 
-## Exact prerequisite for the remaining consumer checks
+```text
+cargo build --bin tapid --locked
+tapid install --project-dir "$TAPID_FIXTURE_PROJECT" --offline --frozen
+tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 0
+tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- wrong 0
+```
 
-The current `tapid-cli` binary does not expose a root-script execution subcommand. `crates/tapid-cli/src/run.rs` contains the process-execution contract and unit tests, but `crates/tapid-cli/src/main.rs` has no `run`/`exec` command wired into `Cli`/`dispatch`. Therefore the built binary cannot currently exercise, on either Linux or Windows:
+The fixture checks that:
 
-1. root `scripts.test` execution,
-2. executable `node_modules/.bin` shims from a consumer install,
-3. argument forwarding through the CLI boundary, or
-4. child exit-code propagation.
+- install creates managed `node_modules`;
+- the dependency lifecycle marker remains absent;
+- the root script runs in the project directory;
+- arguments after `--` are forwarded;
+- the child exit code is propagated;
+- package executable behavior can be extended through the fixture's declared `bin` contract.
 
-The required follow-up is to add a user-facing CLI command that constructs `RunRequest` from a project directory, selected root script, and trailing arguments, then returns the child status as the CLI exit code. It must use `ShellBackend::default_for_platform()` (Unix `/bin/sh`; Windows `cmd.exe`) and preserve the existing managed `.bin` `PATH` behavior. After that source change, replace the expected `unrecognized subcommand` probe with assertions that run the generated root script, invoke its `.bin` command with forwarded arguments, and verify a deliberate non-zero child status. That source work is intentionally outside this platform-validation change.
+Linux uses Bash and Unix shell behavior. Windows uses PowerShell to invoke the binary and `cmd.exe` for the child script backend, with `.cmd` and PowerShell shim formats selected by the linker.
 
-The fixture metadata includes the complete intended check set (`install`, `root-script`, `bin-shim`, `argument-forwarding`, `exit-code`, and `lifecycle-suppression`) so the follow-up can extend the existing dynamic project without developer-specific paths. macOS is deliberately not included in, or claimed by, these Linux/Windows checks.
+## Local evidence
+
+Local macOS unit and integration tests can exercise resolver, archive, store, lockfile, linker planning, install replay, root-script execution, and Unix shim behavior. They do not verify Windows wrappers, Windows path handling, Windows junction activation, or Linux runtime behavior. Do not report those as passed based on macOS output.
+
+## JSR status
+
+No live JSR integrity result is claimed. Local fixtures cover the parser and fail-closed behavior only. Live JSR installation is unsupported until the service supplies an explicit HTTPS npm tarball URL and valid SHA-512 SRI that can be verified by a read-only smoke test.
+
+## Required evidence for updating this document
+
+After a successful workflow run, record the workflow URL or run identifier and platform-specific output before changing the status above. Until then, describe the checks as configured, not verified. The configured job must not be weakened to make unsupported behavior pass.
