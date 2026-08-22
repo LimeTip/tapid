@@ -28,11 +28,12 @@ mod tests {
 
     #[test]
     fn derives_stable_paths_from_verified_digests() {
-        let store = Store::new("/tmp/tapid");
+        let root = std::env::temp_dir().join(format!("tapid-store-{}", std::process::id()));
+        let store = Store::new(&root);
         let digest = ArtifactDigest::from_str(&format!("sha256-{}", "a".repeat(64))).unwrap();
         assert_eq!(
             store.artifact_path(&digest),
-            PathBuf::from("/tmp/tapid/artifacts/").join(digest.as_str())
+            root.join("artifacts").join(digest.as_str())
         );
     }
 }

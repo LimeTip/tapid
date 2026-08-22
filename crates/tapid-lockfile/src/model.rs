@@ -115,7 +115,7 @@ impl LockedPackage {
                 .parse::<PackageVersion>()
                 .map_err(LockfileError::Domain)?
                 .to_string(),
-            artifact_integrity: artifact_integrity.to_ascii_lowercase(),
+            artifact_integrity: artifact_integrity.to_owned(),
             unpacked_digest: unpacked_digest
                 .parse::<ArtifactDigest>()
                 .map_err(LockfileError::Domain)?

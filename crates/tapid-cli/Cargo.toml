@@ -2,7 +2,7 @@
 name = "tapid"
 readme = "README.md"
 description = "A deterministic JavaScript and TypeScript package manager"
-version = "0.0.3"
+version = "0.0.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,6 +14,6 @@ path = "src/main.rs"
 
 [dependencies]
 tapid-core = { version = "0.0.1", path = "../tapid-core" }
-tapid-lockfile = { version = "0.0.2", path = "../tapid-lockfile" }
+tapid-lockfile = { version = "0.0.3", path = "../tapid-lockfile" }
 tapid-manifest = { version = "0.0.2", path = "../tapid-manifest" }
 tapid-store = { version = "0.0.1", path = "../tapid-store" }

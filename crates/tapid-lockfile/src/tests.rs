@@ -78,6 +78,27 @@ fn constructors_validate_domain_values() {
 }
 
 #[test]
+fn preserves_case_sensitive_sha512_integrity_values() {
+    let integrity = format!("sha512-{}", "AbCdEfGh".repeat(10) + "AbCdEf");
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile
+        .insert_package(
+            LockedPackage::new(
+                "https://registry.example.test",
+                "tapid",
+                "1.0.0",
+                &integrity,
+                "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(lockfile.to_json().unwrap().contains(&integrity));
+}
+
+#[test]
 fn rejects_invalid_root_manifest_digest() {
     assert!(Lockfile::new("not-a-digest").is_err());
 }
