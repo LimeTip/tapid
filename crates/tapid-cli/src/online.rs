@@ -157,10 +157,26 @@ pub fn resolve_and_fetch(
 }
 
 fn fetch_remote(registry: &RegistryOrigin, name: &PackageName) -> Result<Vec<FixturePackage>, String> {
-    Err(format!("online registry metadata for {registry}:{name} requires a registry-client dependency graph API"))
+    let _ = (registry, name);
+    Err("online install unavailable: tapid-registry-client does not expose dependency maps for NpmRegistry::fetch/JsrRegistry::fetch; JsrRegistry also does not expose artifact integrity".into())
 }
 
 #[allow(dead_code)]
 fn _client_types_are_linked<T: HttpTransport>(transport: T, origin: RegistryOrigin, name: &str) {
     let _ = NpmRegistry::new(transport, origin).fetch(name);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_install_fails_closed_when_registry_contract_lacks_dependencies() {
+        let registry: RegistryOrigin = NPM.parse().unwrap();
+        let name: PackageName = "example".parse().unwrap();
+        assert_eq!(
+            fetch_remote(&registry, &name).unwrap_err(),
+            "online install unavailable: tapid-registry-client does not expose dependency maps for NpmRegistry::fetch/JsrRegistry::fetch; JsrRegistry also does not expose artifact integrity"
+        );
+    }
 }
