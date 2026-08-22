@@ -137,6 +137,31 @@ impl Lockfile {
         &self.packages
     }
 
+    /// Returns package entries with their validated typed keys.
+    pub fn packages_typed(
+        &self,
+    ) -> Result<Vec<(LockfilePackageKey, &LockedPackage)>, LockfileError> {
+        self.packages
+            .iter()
+            .map(|(encoded, package)| encoded.parse().map(|key| (key, package)))
+            .collect()
+    }
+
+    pub fn root_manifest_digest(&self) -> &str {
+        &self.root_manifest_digest
+    }
+
+    /// Checks that this lockfile belongs to the current root manifest.
+    pub fn validate_replay(&self, current_root_manifest_digest: &str) -> Result<(), LockfileError> {
+        if self.root_manifest_digest != current_root_manifest_digest {
+            return Err(LockfileError::RootManifestDigestMismatch {
+                expected: self.root_manifest_digest.clone(),
+                actual: current_root_manifest_digest.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn to_json(&self) -> Result<String, LockfileError> {
         serde_json::to_string_pretty(self)
             .map(|json| format!("{json}\n"))

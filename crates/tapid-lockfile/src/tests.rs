@@ -104,6 +104,17 @@ fn rejects_invalid_root_manifest_digest() {
 }
 
 #[test]
+fn replay_validation_requires_current_root_manifest_digest() {
+    let digest = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let lock = Lockfile::new(digest).unwrap();
+    assert!(lock.validate_replay(digest).is_ok());
+    let error = lock
+        .validate_replay("sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .unwrap_err();
+    assert!(error.to_string().contains("root manifest digest mismatch"));
+}
+
+#[test]
 fn rejects_invalid_artifact_urls_at_construction_time() {
     let mut package = package_fixture();
     assert!(package.set_artifact_url("file:///tmp/package.tgz").is_err());

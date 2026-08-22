@@ -22,6 +22,10 @@ pub enum LockfileError {
         target: String,
     },
     SelfDependency(String),
+    RootManifestDigestMismatch {
+        expected: String,
+        actual: String,
+    },
 }
 
 impl fmt::Display for LockfileError {
@@ -58,6 +62,10 @@ impl fmt::Display for LockfileError {
                 "package {package} dependency {dependency} targets package {target}"
             ),
             Self::SelfDependency(key) => write!(f, "package cannot depend on itself: {key}"),
+            Self::RootManifestDigestMismatch { expected, actual } => write!(
+                f,
+                "lockfile root manifest digest mismatch: expected {expected}, got {actual}"
+            ),
         }
     }
 }

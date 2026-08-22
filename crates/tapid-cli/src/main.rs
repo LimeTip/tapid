@@ -1,6 +1,7 @@
 mod online;
 
 use clap::{Parser, Subcommand};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs, io,
@@ -12,7 +13,7 @@ use tapid_linker::{
     DependencyEdge, InstanceKey, LayoutInput, ManagedRoot, PackageInstance, Platform,
     VerifiedTreeReference, plan_layout,
 };
-use tapid_lockfile::{Lockfile, LockfilePackageKey};
+use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 use tapid_store::Store;
 
@@ -141,14 +142,30 @@ fn install(
                     return ExitCode::from(1);
                 }
             };
-        if let Err(error) = fs::write(&lock_path, lock.to_json().unwrap_or_default()) {
-            eprintln!(
-                "error: cannot write lockfile {}: {error}",
-                lock_path.display()
-            );
-            return ExitCode::from(1);
+        let lock_json = match lock.to_json() {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: cannot serialize lockfile: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let lock_backup = match replace_lockfile(&lock_path, &lock_json) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!(
+                    "error: cannot replace lockfile {}: {error}",
+                    lock_path.display()
+                );
+                return ExitCode::from(1);
+            }
+        };
+        let result = materialize_install(&project_dir, &lock, input, trees);
+        if result != ExitCode::SUCCESS {
+            let _ = rollback_lockfile(&lock_path, lock_backup.as_deref());
+            return result;
         }
-        return materialize_install(&project_dir, &lock, input, trees);
+        let _ = discard_lockfile_backup(lock_backup.as_deref());
+        return result;
     }
     if !lock_path.is_file() {
         let message = if offline {
@@ -171,6 +188,17 @@ fn install(
             return ExitCode::from(1);
         }
     };
+    let current_manifest_digest = match fs::read(project_dir.join("package.json")) {
+        Ok(bytes) => digest_bytes(&bytes),
+        Err(error) => {
+            eprintln!("error: cannot read root manifest for lockfile replay: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(error) = lock.validate_replay(&current_manifest_digest) {
+        eprintln!("error: invalid lockfile {}: {error}", lock_path.display());
+        return ExitCode::from(1);
+    }
     let store = Store::new(
         store_root
             .map(PathBuf::from)
@@ -242,10 +270,9 @@ fn replay_input(
     let mut instances = Vec::new();
     let mut keys = BTreeMap::new();
     let mut trees = BTreeMap::new();
-    for (encoded, package) in lock.packages() {
-        let key: LockfilePackageKey = encoded
-            .parse()
-            .map_err(|e: tapid_lockfile::LockfileError| e.to_string())?;
+    let typed_packages = lock.packages_typed().map_err(|e| e.to_string())?;
+    for (key, package) in &typed_packages {
+        let encoded = key.to_string();
         let digest: ArtifactDigest = package
             .tree_digest()
             .parse()
@@ -264,7 +291,7 @@ fn replay_input(
                 .map_err(|e| e.to_string())?,
         };
         keys.insert(encoded.clone(), InstanceKey::from(&instance));
-        trees.insert(encoded.clone(), tree);
+        trees.insert(encoded, tree);
         instances.push(instance);
     }
     let mut roots = Vec::new();
@@ -278,19 +305,18 @@ fn replay_input(
             root_names.insert(name.clone(), ());
         }
     }
-    for encoded in lock.packages().keys() {
-        let key: LockfilePackageKey = encoded
-            .parse()
-            .map_err(|e: tapid_lockfile::LockfileError| e.to_string())?;
+    for (key, _) in &typed_packages {
+        let encoded = key.to_string();
         if root_names.is_empty() || root_names.contains_key(&key.name.to_string()) {
-            roots.push(keys[encoded].clone());
+            roots.push(keys[&encoded].clone());
         }
     }
     let mut edges = Vec::new();
-    for (encoded, package) in lock.packages() {
+    for (key, package) in &typed_packages {
+        let encoded = key.to_string();
         for dependency in package.dependencies().values() {
             edges.push(DependencyEdge {
-                parent: keys[encoded].clone(),
+                parent: keys[&encoded].clone(),
                 child: keys
                     .get(dependency)
                     .cloned()
@@ -417,22 +443,55 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+const MANAGED_MARKER: &[u8] = b"tapid-managed-v1\n";
+
 fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
     let staged = stage.join("node_modules");
     if !staged.is_dir() {
-        return Err("lockfile produced an empty node_modules layout".into());
+        return Err("install transaction produced an empty node_modules layout".into());
     }
     let destination = project.join("node_modules");
+    let marker = project.join(".tapid-managed");
+    let marker_exists = marker.exists();
+    if destination.exists() && !marker_exists {
+        return Err(
+            "refusing to replace unmarked node_modules; create .tapid-managed to opt in".into(),
+        );
+    }
+    if marker_exists
+        && fs::read(&marker).map_err(|_| "cannot read .tapid-managed".to_owned())? != MANAGED_MARKER
+    {
+        return Err(
+            "refusing to replace node_modules with an invalid .tapid-managed marker".into(),
+        );
+    }
     let backup = project.join(format!(".tapid-node-modules-old-{}", std::process::id()));
     let _ = fs::remove_dir_all(&backup);
     if destination.exists() {
-        fs::rename(&destination, &backup).map_err(|e| e.to_string())?;
+        fs::rename(&destination, &backup)
+            .map_err(|_| "cannot stage existing node_modules for replacement".to_owned())?;
+    }
+    if std::env::var_os("TAPID_TEST_FAIL_ACTIVATION").is_some() {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &destination);
+        }
+        return Err("install activation failed (injected)".into());
     }
     if let Err(error) = fs::rename(&staged, &destination) {
         if backup.exists() {
             let _ = fs::rename(&backup, &destination);
         }
-        return Err(error.to_string());
+        return Err(format!("cannot activate node_modules: {error}"));
+    }
+    if let Err(error) = fs::write(&marker, MANAGED_MARKER) {
+        let _ = fs::remove_dir_all(&destination);
+        if backup.exists() {
+            let _ = fs::rename(&backup, &destination);
+        }
+        if !marker_exists {
+            let _ = fs::remove_file(&marker);
+        }
+        return Err(format!("cannot write .tapid-managed: {error}"));
     }
     let _ = fs::remove_dir_all(&backup);
     let _ = fs::remove_dir_all(stage);
@@ -456,6 +515,60 @@ fn read_manifest(path: &Path) -> Result<PackageManifest, String> {
         .map_err(|source| format!("cannot read manifest {}: {source}", path.display()))?;
     PackageManifest::parse(&input).map_err(|error| error.to_string())
 }
+fn replace_lockfile(path: &Path, contents: &str) -> Result<Option<PathBuf>, String> {
+    let nonce = format!("{}-{}", std::process::id(), unique_nonce());
+    let temp = path.with_file_name(format!(".tapid-lock-{nonce}.tmp"));
+    let backup = path.with_file_name(format!(".tapid-lock-{nonce}.bak"));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|e| e.to_string())?;
+    io::Write::write_all(&mut file, contents.as_bytes()).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    let had_old = path.exists();
+    if had_old {
+        fs::rename(path, &backup).map_err(|e| e.to_string())?;
+    }
+    if let Err(error) = fs::rename(&temp, path) {
+        if had_old {
+            let _ = fs::rename(&backup, path);
+        }
+        let _ = fs::remove_file(&temp);
+        return Err(error.to_string());
+    }
+    Ok(had_old.then_some(backup))
+}
+
+fn rollback_lockfile(path: &Path, backup: Option<&Path>) -> Result<(), String> {
+    if let Some(backup) = backup {
+        let _ = fs::remove_file(path);
+        fs::rename(backup, path).map_err(|e| e.to_string())?;
+    } else {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn discard_lockfile_backup(backup: Option<&Path>) -> Result<(), String> {
+    if let Some(backup) = backup {
+        fs::remove_file(backup).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn unique_nonce() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256-{}", hex::encode(hasher.finalize()))
+}
+
 fn init(path: Option<&Path>) -> ExitCode {
     let raw = path.unwrap_or_else(|| Path::new("."));
     let directory = match fs::canonicalize(raw) {

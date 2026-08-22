@@ -144,14 +144,14 @@ impl Store {
         Ok(path)
     }
 
-    /// Test/support and store-ingestion contract for activating a verified tree.
+    /// Activates a tree only after recomputing its canonical digest. This is
+    /// intentionally a copy operation: callers cannot mark arbitrary bytes as
+    /// verified merely by supplying a digest.
     pub fn activate_verified_tree(
         &self,
         digest: &ArtifactDigest,
         source: &Path,
     ) -> Result<PathBuf, IngestError> {
-        let destination = self.root.join("trees").join(digest.as_str());
-        fs::create_dir_all(&destination)?;
         if !source.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -159,8 +159,35 @@ impl Store {
             )
             .into());
         }
-        fs::write(destination.join(".tapid-tree"), digest.as_str())?;
-        Ok(destination)
+        let actual = tapid_archive::canonical_tree_digest(source)?;
+        if actual != digest.as_str() {
+            return Err(IngestError::TreeDigestMismatch {
+                expected: digest.clone(),
+                actual,
+            });
+        }
+        let destination = self.root.join("trees").join(digest.as_str());
+        if destination.exists() {
+            self.verified_tree_path(digest)?;
+            return Ok(destination);
+        }
+        let staging_dir = self.root.join(".staging");
+        fs::create_dir_all(&staging_dir)?;
+        let staging = staging_dir.join(format!("tree-{}-{}", std::process::id(), unique_nonce()));
+        copy_tree(source, &staging)?;
+        fs::write(staging.join(".tapid-tree"), digest.as_str())?;
+        fs::create_dir_all(destination.parent().expect("tree destination has parent"))?;
+        match fs::rename(&staging, &destination) {
+            Ok(()) => Ok(destination),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_dir_all(&staging);
+                self.verified_tree_path(digest)
+            }
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging);
+                Err(error.into())
+            }
+        }
     }
 
     /// Stream bytes into a private staging file, verify SHA-256, then atomically
@@ -242,6 +269,33 @@ impl Store {
         let _ = fs::remove_file(&staging);
         result
     }
+}
+
+fn copy_tree(source: &Path, target: &Path) -> io::Result<()> {
+    fs::create_dir_all(target)?;
+    for item in fs::read_dir(source)? {
+        let item = item?;
+        let src = item.path();
+        let dst = target.join(item.file_name());
+        let meta = fs::symlink_metadata(&src)?;
+        if meta.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "symlink in tree source",
+            ));
+        }
+        if meta.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else if meta.is_file() {
+            fs::copy(&src, &dst)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported tree entry",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn create_staging_file(dir: &Path) -> io::Result<(PathBuf, File)> {
@@ -356,6 +410,23 @@ mod tests {
             store.ingest(&expected, Cursor::new(b"expected")),
             Err(IngestError::DigestMismatch { .. })
         ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn activation_rejects_source_that_does_not_match_digest() {
+        let root = root();
+        let source = root.join("source");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"tampered").unwrap();
+        let store = Store::new(&root);
+        let expected = digest(b"not the canonical tree digest");
+        assert!(matches!(
+            store.activate_verified_tree(&expected, &source),
+            Err(IngestError::TreeDigestMismatch { .. })
+        ));
+        assert!(!store.artifact_path(&expected).exists());
         let _ = fs::remove_dir_all(root);
     }
 
