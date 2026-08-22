@@ -27,6 +27,8 @@ pub struct RawPackageMetadata {
     pub integrity: Option<String>,
     #[serde(default)]
     pub artifact: Option<String>,
+    #[serde(default)]
+    pub dependencies: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,7 +41,16 @@ pub struct PackageMetadata {
     pub identity: RegistryPackageId,
     pub integrity: Option<PackageIntegrity>,
     pub artifact: Option<String>,
+    pub dependencies: BTreeMap<PackageName, String>,
+    pub registry_kind: RegistryKind,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistryKind {
+    Npm,
+    Jsr,
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RegistryPackageId {
     pub registry: RegistryOrigin,
@@ -68,6 +79,8 @@ pub enum MetadataError {
     InvalidVersion(String),
     InvalidIntegrity(String),
     InvalidArtifact(String),
+    InvalidDependency(String),
+    UnsupportedIntegrity(String),
     InvalidJson(String),
     MissingField(String),
     ConflictingField(String),
@@ -86,6 +99,11 @@ impl RegistrySnapshot {
             .registry
             .parse()
             .map_err(|_| MetadataError::InvalidRegistry(raw.registry.clone()))?;
+        let registry_kind = if registry.to_string() == "https://jsr.io" {
+            RegistryKind::Jsr
+        } else {
+            RegistryKind::Npm
+        };
         let mut packages = BTreeMap::new();
         for entry in raw.packages {
             let name: PackageName = entry
@@ -117,10 +135,25 @@ impl RegistrySnapshot {
             if artifact.as_deref().is_some_and(|v| Url::parse(v).is_err()) {
                 return Err(MetadataError::InvalidArtifact(id.to_string()));
             }
+            let dependencies = entry
+                .dependencies
+                .into_iter()
+                .map(|(name, requirement)| {
+                    let package: PackageName = name
+                        .parse()
+                        .map_err(|_| MetadataError::InvalidDependency(name.clone()))?;
+                    if requirement.trim().is_empty() {
+                        return Err(MetadataError::InvalidDependency(name));
+                    }
+                    Ok((package, requirement))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
             candidates.push(PackageMetadata {
                 identity: id,
                 integrity,
                 artifact,
+                dependencies,
+                registry_kind,
             });
         }
         for candidates in packages.values_mut() {
@@ -341,6 +374,8 @@ pub struct RegistryArtifact {
     pub identity: RegistryPackageId,
     pub artifact_url: String,
     pub integrity: Option<PackageIntegrity>,
+    pub dependencies: BTreeMap<PackageName, String>,
+    pub registry_kind: RegistryKind,
 }
 
 pub struct NpmRegistry<T> {
@@ -361,6 +396,12 @@ impl<T: HttpTransport> NpmRegistry<T> {
             .get(&url)
             .map_err(RegistryClientError::Transport)?;
         parse_npm(&self.origin, &name, &response.body)
+    }
+    pub fn download_artifact(
+        &self,
+        artifact_url: &str,
+    ) -> Result<HttpResponse, RegistryClientError> {
+        download_artifact(&self.transport, artifact_url)
     }
 }
 
@@ -392,6 +433,12 @@ impl<T: HttpTransport> JsrRegistry<T> {
             .map_err(RegistryClientError::Transport)?;
         parse_jsr(&self.origin, &name, &response.body)
     }
+    pub fn download_artifact(
+        &self,
+        artifact_url: &str,
+    ) -> Result<HttpResponse, RegistryClientError> {
+        download_artifact(&self.transport, artifact_url)
+    }
 }
 #[derive(Debug)]
 pub enum RegistryClientError {
@@ -412,6 +459,23 @@ fn json_object(body: &[u8]) -> Result<serde_json::Map<String, serde_json::Value>
         .as_object()
         .cloned()
         .ok_or_else(|| MetadataError::InvalidJson("metadata must be an object".into()))
+}
+
+fn download_artifact<T: HttpTransport>(
+    transport: &T,
+    artifact_url: &str,
+) -> Result<HttpResponse, RegistryClientError> {
+    let url = Url::parse(artifact_url).map_err(|_| {
+        RegistryClientError::Metadata(MetadataError::InvalidArtifact(artifact_url.into()))
+    })?;
+    if url.scheme() != "https" {
+        return Err(RegistryClientError::Transport(
+            TransportError::OriginNotAllowed(artifact_url.into()),
+        ));
+    }
+    transport
+        .get(artifact_url)
+        .map_err(RegistryClientError::Transport)
 }
 fn required_str<'a>(
     obj: &'a serde_json::Map<String, serde_json::Value>,
@@ -491,6 +555,8 @@ fn parse_npm(
             identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
             artifact_url,
             integrity,
+            dependencies: parse_dependencies(v.get("dependencies"))?,
+            registry_kind: RegistryKind::Npm,
         });
     }
     out.sort_by_key(|b| std::cmp::Reverse(b.identity.version));
@@ -518,16 +584,58 @@ fn parse_jsr(
         let version: PackageVersion = key.parse().map_err(|_| {
             RegistryClientError::Metadata(MetadataError::InvalidVersion(key.clone()))
         })?;
+        let version_object = value.as_object().expect("checked above");
+        let integrity_value = version_object
+            .get("integrity")
+            .or_else(|| version_object.get("dist").and_then(|v| v.get("integrity")))
+            .or_else(|| version_object.get("npm").and_then(|v| v.get("integrity")));
+        let integrity = integrity_value
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::UnsupportedIntegrity(key.clone()))
+            })?
+            .parse()
+            .map_err(|_| {
+                RegistryClientError::Metadata(MetadataError::InvalidIntegrity(key.clone()))
+            })?;
         let encoded = name.to_string().trim_start_matches('@').replace('/', "__");
         let artifact_url = format!("https://npm.jsr.io/~/{encoded}/{key}.tgz");
         out.push(RegistryArtifact {
             identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
             artifact_url,
-            integrity: None,
+            integrity: Some(integrity),
+            dependencies: parse_dependencies(version_object.get("dependencies"))?,
+            registry_kind: RegistryKind::Jsr,
         });
     }
     out.sort_by_key(|b| std::cmp::Reverse(b.identity.version));
     Ok(out)
+}
+
+fn parse_dependencies(
+    value: Option<&serde_json::Value>,
+) -> Result<BTreeMap<PackageName, String>, RegistryClientError> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let object = value.as_object().ok_or_else(|| {
+        RegistryClientError::Metadata(MetadataError::InvalidDependency("dependencies".into()))
+    })?;
+    object
+        .iter()
+        .map(|(name, requirement)| {
+            let package = name.parse().map_err(|_| {
+                RegistryClientError::Metadata(MetadataError::InvalidDependency(name.clone()))
+            })?;
+            let requirement = requirement
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    RegistryClientError::Metadata(MetadataError::InvalidDependency(name.clone()))
+                })?;
+            Ok((package, requirement.to_owned()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -549,7 +657,7 @@ mod tests {
     }
     #[test]
     fn npm_metadata_maps_tarball_and_integrity() {
-        let b = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#.to_vec();
+        let b = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dependencies":{"bar":"^2.0.0"},"dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#.to_vec();
         let r: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
         let x = NpmRegistry::new(
             Fake {
@@ -562,6 +670,45 @@ mod tests {
         .unwrap();
         assert_eq!(x[0].artifact_url, "https://cdn.example/foo.tgz");
         assert!(x[0].integrity.is_some());
+        assert_eq!(
+            x[0].dependencies.get(&"bar".parse().unwrap()),
+            Some(&"^2.0.0".to_owned())
+        );
+    }
+    #[test]
+    fn jsr_without_sha512_integrity_fails_closed() {
+        let r: RegistryOrigin = "https://jsr.io".parse().unwrap();
+        let e = JsrRegistry::new(
+            Fake {
+                body: br#"{"versions":{"1.0.0":{}}}"#.to_vec(),
+                url: "https://jsr.io/std/path/meta.json".into(),
+            },
+            r,
+        )
+        .fetch("@std/path");
+        assert!(matches!(
+            e,
+            Err(RegistryClientError::Metadata(
+                MetadataError::UnsupportedIntegrity(_)
+            ))
+        ));
+    }
+    #[test]
+    fn artifact_download_rejects_non_https_before_transport() {
+        let r: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let client = NpmRegistry::new(
+            Fake {
+                body: vec![],
+                url: "unused".into(),
+            },
+            r,
+        );
+        assert!(matches!(
+            client.download_artifact("http://evil.example/a.tgz"),
+            Err(RegistryClientError::Transport(
+                TransportError::OriginNotAllowed(_)
+            ))
+        ));
     }
     #[test]
     fn malformed_npm_is_rejected() {
@@ -581,7 +728,7 @@ mod tests {
         let r: RegistryOrigin = "https://jsr.io".parse().unwrap();
         let x = JsrRegistry::new(
             Fake {
-                body: br#"{"versions":{"1.0.0":{}}}"#.to_vec(),
+                body: br#"{"versions":{"1.0.0":{"integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}"#.to_vec(),
                 url: "https://jsr.io/std/path/meta.json".into(),
             },
             r,
@@ -600,6 +747,7 @@ mod tests {
             version: v.into(),
             integrity: None,
             artifact: None,
+            dependencies: BTreeMap::new(),
         };
         let s = RegistrySnapshot::normalize(RawRegistrySnapshot {
             registry: "https://x".into(),
