@@ -1,12 +1,19 @@
-//! Pure deterministic resolver.
+//! Pure, deterministic resolution of normalized registry metadata.
 #![deny(unsafe_code)]
-use std::{fmt, str::FromStr};
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    str::FromStr,
+};
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
-use tapid_registry_client::{PackageMetadata, RegistryPackageId, RegistrySnapshot};
+use tapid_registry_client::{RegistryPackageId, RegistrySnapshot};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Requirement {
     pub raw: String,
 }
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dependency {
     pub registry: RegistryOrigin,
@@ -22,41 +29,86 @@ impl Dependency {
         }
     }
 }
+
 impl FromStr for Requirement {
     type Err = ResolveError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.trim().is_empty()
-            || s.split_whitespace().any(|t| {
-                t.trim_start_matches(['^', '~', '>', '<', '='])
-                    .parse::<PackageVersion>()
-                    .is_err()
-            })
-        {
-            Err(ResolveError::InvalidRequirement(s.into()))
-        } else {
-            Ok(Self {
-                raw: s.trim().into(),
-            })
+        let raw = s.trim();
+        if raw.is_empty() {
+            return Err(ResolveError::InvalidRequirement(s.into()));
         }
+        for token in raw.split_whitespace() {
+            let value = token.trim_start_matches(['^', '~', '=']);
+            if token.starts_with(['>', '<']) || value.parse::<PackageVersion>().is_err() {
+                return Err(ResolveError::UnsupportedRange(raw.into()));
+            }
+        }
+        Ok(Self { raw: raw.into() })
     }
 }
+
+/// Normalized metadata supplied by a registry adapter. The resolver never fetches it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageVersionMetadata {
+    pub name: PackageName,
+    pub version: PackageVersion,
+    pub dependencies: BTreeMap<PackageName, Requirement>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegistryMetadata {
+    pub registry: RegistryOrigin,
+    pub packages: Vec<PackageVersionMetadata>,
+}
+impl RegistryMetadata {
+    pub fn normalize(
+        registry: RegistryOrigin,
+        mut packages: Vec<PackageVersionMetadata>,
+    ) -> Result<Self, ResolveError> {
+        packages.sort_by(|a, b| a.name.cmp(&b.name).then(b.version.cmp(&a.version)));
+        for pair in packages.windows(2) {
+            if pair[0].name == pair[1].name && pair[0].version == pair[1].version {
+                return Err(ResolveError::DuplicateMetadata {
+                    package: format!("{}:{}@{}", registry, pair[0].name, pair[0].version),
+                });
+            }
+        }
+        Ok(Self { registry, packages })
+    }
+    fn candidates(&self, name: &PackageName) -> impl Iterator<Item = &PackageVersionMetadata> {
+        self.packages.iter().filter(move |p| &p.name == name)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ResolutionOptions {
     pub offline: bool,
     pub frozen: bool,
 }
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resolution {
     pub selected: Vec<RegistryPackageId>,
 }
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveError {
     InvalidRequirement(String),
+    UnsupportedRange(String),
     UnsupportedMode(&'static str),
+    DuplicateMetadata {
+        package: String,
+    },
     MissingCandidate {
         registry: String,
         name: String,
         requirement: String,
+        available: Vec<String>,
+    },
+    Conflict {
+        registry: String,
+        name: String,
+        requirements: Vec<String>,
         available: Vec<String>,
     },
 }
@@ -66,152 +118,334 @@ impl fmt::Display for ResolveError {
     }
 }
 impl std::error::Error for ResolveError {}
-pub fn resolve(
+
+/// Resolve a transitive graph from normalized metadata. No network or filesystem access occurs.
+pub fn resolve_graph(
     ds: &[Dependency],
-    ss: &[RegistrySnapshot],
+    metadata: &[RegistryMetadata],
     options: ResolutionOptions,
 ) -> Result<Resolution, ResolveError> {
-    if options.offline {
-        return Err(ResolveError::UnsupportedMode(
-            "offline resolution requires a cached snapshot",
-        ));
-    }
     if options.frozen {
         return Err(ResolveError::UnsupportedMode(
             "frozen resolution requires a lockfile replay input",
         ));
     }
-    let mut out = Vec::new();
-    for d in ds {
-        let mut c: Vec<&PackageMetadata> = ss
+    if options.offline && metadata.is_empty() {
+        return Err(ResolveError::UnsupportedMode(
+            "offline resolution requires a cached snapshot",
+        ));
+    }
+    let mut constraints: BTreeMap<(RegistryOrigin, PackageName), BTreeSet<String>> =
+        BTreeMap::new();
+    let mut selected = BTreeMap::new();
+    let mut queue = ds.to_vec();
+    while let Some(dep) = queue.pop() {
+        let key = (dep.registry.clone(), dep.name.clone());
+        constraints
+            .entry(key.clone())
+            .or_default()
+            .insert(dep.requirement.raw.clone());
+        let reqs: Vec<_> = constraints[&key].iter().cloned().collect();
+        let candidates: Vec<_> = metadata
             .iter()
-            .filter(|s| s.registry() == &d.registry)
-            .flat_map(|s| s.candidates(&d.name))
-            .filter(|p| ok(p.identity.version, &d.requirement.raw))
+            .filter(|m| m.registry == dep.registry)
+            .flat_map(|m| m.candidates(&dep.name))
+            .filter(|p| reqs.iter().all(|r| matches_requirement(p.version, r)))
             .collect();
-        c.sort_by(|left, right| {
-            right
-                .identity
-                .version
-                .cmp(&left.identity.version)
-                .then_with(|| left.identity.cmp(&right.identity))
-                .then_with(|| {
-                    left.integrity
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .cmp(&right.integrity.as_ref().map(ToString::to_string))
-                })
-        });
-        if let Some(p) = c.first() {
-            out.push(p.identity.clone())
-        } else {
-            return Err(ResolveError::MissingCandidate {
-                registry: d.registry.to_string(),
-                name: d.name.to_string(),
-                requirement: d.requirement.raw.clone(),
-                available: {
-                    let mut available: Vec<_> = ss
-                        .iter()
-                        .filter(|s| s.registry() == &d.registry)
-                        .flat_map(|s| s.candidates(&d.name))
-                        .map(|p| p.identity.version.to_string())
-                        .collect();
-                    available.sort();
-                    available.dedup();
-                    available
-                },
+        let available = available(metadata, &dep.registry, &dep.name);
+        let Some(package) = candidates
+            .into_iter()
+            .max_by(|a, b| a.version.cmp(&b.version))
+        else {
+            return Err(if reqs.len() > 1 {
+                ResolveError::Conflict {
+                    registry: dep.registry.to_string(),
+                    name: dep.name.to_string(),
+                    requirements: reqs,
+                    available,
+                }
+            } else {
+                ResolveError::MissingCandidate {
+                    registry: dep.registry.to_string(),
+                    name: dep.name.to_string(),
+                    requirement: dep.requirement.raw,
+                    available,
+                }
             });
+        };
+        let id = RegistryPackageId::new(dep.registry.clone(), dep.name.clone(), package.version);
+        let changed = selected.get(&key) != Some(&id);
+        selected.insert(key, id);
+        if changed {
+            queue.extend(package.dependencies.iter().map(|(name, requirement)| {
+                Dependency::new(dep.registry.clone(), name.clone(), requirement.clone())
+            }));
         }
     }
-    Ok(Resolution { selected: out })
+    Ok(Resolution {
+        selected: selected.into_values().collect(),
+    })
 }
-fn ok(v: PackageVersion, r: &str) -> bool {
-    r.split_whitespace().all(|t| {
-        let (op, x) = if let Some(x) = t.strip_prefix('^') {
-            ('^', x)
-        } else if let Some(x) = t.strip_prefix('~') {
-            ('~', x)
-        } else if let Some(x) = t.strip_prefix(">=") {
-            ('G', x)
-        } else if let Some(x) = t.strip_prefix("<=") {
-            ('L', x)
-        } else if let Some(x) = t.strip_prefix('>') {
-            ('>', x)
-        } else if let Some(x) = t.strip_prefix('<') {
-            ('<', x)
+
+fn available(
+    metadata: &[RegistryMetadata],
+    registry: &RegistryOrigin,
+    name: &PackageName,
+) -> Vec<String> {
+    let mut out: Vec<_> = metadata
+        .iter()
+        .filter(|m| &m.registry == registry)
+        .flat_map(|m| m.candidates(name))
+        .map(|p| p.version.to_string())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+fn matches_requirement(version: PackageVersion, raw: &str) -> bool {
+    raw.split_whitespace().all(|token| {
+        let (op, value) = if let Some(v) = token.strip_prefix('^') {
+            ('^', v)
+        } else if let Some(v) = token.strip_prefix('~') {
+            ('~', v)
         } else {
-            ('=', t.trim_start_matches('='))
+            ('=', token.trim_start_matches('='))
         };
-        let Ok(b) = x.parse() else { return false };
+        let Ok(base) = value.parse::<PackageVersion>() else {
+            return false;
+        };
         match op {
-            '=' => v == b,
-            '^' => v >= b && v.major == b.major,
-            '~' => v >= b && v.major == b.major && v.minor == b.minor,
-            'G' => v >= b,
-            'L' => v <= b,
-            '>' => v > b,
-            '<' => v < b,
+            '=' => version == base,
+            '^' => {
+                let upper = if base.major > 0 {
+                    PackageVersion {
+                        major: base.major + 1,
+                        minor: 0,
+                        patch: 0,
+                    }
+                } else if base.minor > 0 {
+                    PackageVersion {
+                        major: 0,
+                        minor: base.minor + 1,
+                        patch: 0,
+                    }
+                } else {
+                    PackageVersion {
+                        major: 0,
+                        minor: 0,
+                        patch: base.patch + 1,
+                    }
+                };
+                version >= base && version < upper
+            }
+            '~' => version >= base && version.major == base.major && version.minor == base.minor,
             _ => false,
         }
     })
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tapid_registry_client::*;
-    fn s(v: Vec<&str>) -> RegistrySnapshot {
-        RegistrySnapshot::normalize(RawRegistrySnapshot {
-            registry: "https://x".into(),
-            packages: v
-                .into_iter()
-                .map(|x| RawPackageMetadata {
-                    name: "foo".into(),
-                    version: x.into(),
-                    integrity: None,
-                    artifact: None,
+
+/// Compatibility entry point for metadata snapshots without dependency maps.
+pub fn resolve(
+    ds: &[Dependency],
+    snapshots: &[RegistrySnapshot],
+    options: ResolutionOptions,
+) -> Result<Resolution, ResolveError> {
+    let metadata = snapshots
+        .iter()
+        .map(|snapshot| RegistryMetadata {
+            registry: snapshot.registry().clone(),
+            packages: snapshot
+                .packages()
+                .values()
+                .flatten()
+                .map(|p| PackageVersionMetadata {
+                    name: p.identity.name.clone(),
+                    version: p.identity.version,
+                    dependencies: BTreeMap::new(),
                 })
                 .collect(),
         })
-        .unwrap()
+        .collect::<Vec<_>>();
+    resolve_graph(ds, &metadata, options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn req(s: &str) -> Requirement {
+        s.parse().unwrap()
     }
-    fn d(r: &str) -> Dependency {
-        Dependency::new(
-            "https://x".parse().unwrap(),
-            "foo".parse().unwrap(),
-            r.parse().unwrap(),
-        )
+    fn dep(registry: &str, name: &str, range: &str) -> Dependency {
+        Dependency::new(registry.parse().unwrap(), name.parse().unwrap(), req(range))
     }
+    fn package(name: &str, version: &str, dependencies: &[(&str, &str)]) -> PackageVersionMetadata {
+        PackageVersionMetadata {
+            name: name.parse().unwrap(),
+            version: version.parse().unwrap(),
+            dependencies: dependencies
+                .iter()
+                .map(|(n, r)| (n.parse().unwrap(), req(r)))
+                .collect(),
+        }
+    }
+    fn registry(url: &str, packages: Vec<PackageVersionMetadata>) -> RegistryMetadata {
+        RegistryMetadata::normalize(url.parse().unwrap(), packages).unwrap()
+    }
+
     #[test]
-    fn exact() {
+    fn exact_and_caret_are_deterministic() {
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![
+                package("foo", "1.1.0", &[]),
+                package("foo", "1.9.0", &[]),
+                package("foo", "2.0.0", &[]),
+            ],
+        );
+        let r = resolve_graph(
+            &[dep("https://registry.npmjs.org", "foo", "^1.0.0")],
+            &[m],
+            Default::default(),
+        )
+        .unwrap();
         assert_eq!(
-            resolve(&[d("1.0.0")], &[s(vec!["1.0.0"])], Default::default())
-                .unwrap()
-                .selected[0]
-                .version
-                .to_string(),
-            "1.0.0"
-        )
+            r.selected[0].to_string(),
+            "https://registry.npmjs.org:foo@1.9.0"
+        );
     }
+
     #[test]
-    fn range() {
+    fn npm_and_jsr_registries_remain_distinct() {
+        let npm = registry(
+            "https://registry.npmjs.org",
+            vec![package("foo", "1.0.0", &[])],
+        );
+        let jsr = registry("https://jsr.io", vec![package("foo", "1.0.0", &[])]);
+        let result = resolve_graph(
+            &[
+                dep("https://registry.npmjs.org", "foo", "1.0.0"),
+                dep("https://jsr.io", "foo", "1.0.0"),
+            ],
+            &[npm, jsr],
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(result.selected[0].registry.to_string(), "https://jsr.io");
         assert_eq!(
-            resolve(
-                &[d("^1.0.0")],
-                &[s(vec!["1.1.0", "1.9.0", "2.0.0"])],
-                Default::default()
-            )
-            .unwrap()
-            .selected[0]
-                .version
-                .to_string(),
-            "1.9.0"
-        )
+            result.selected[1].registry.to_string(),
+            "https://registry.npmjs.org"
+        );
     }
+
     #[test]
-    fn missing() {
+    fn shuffled_metadata_normalizes_and_tilde_is_supported() {
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![
+                package("foo", "1.2.1", &[]),
+                package("foo", "1.2.9", &[]),
+                package("foo", "1.3.0", &[]),
+            ],
+        );
+        let result = resolve_graph(
+            &[dep("https://registry.npmjs.org", "foo", "~1.2.0")],
+            &[m],
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(result.selected[0].version.to_string(), "1.2.9");
+    }
+
+    #[test]
+    fn transitive_dependencies_and_cycles_are_finite_and_sorted() {
+        let m = registry(
+            "https://jsr.io",
+            vec![
+                package("a", "1.0.0", &[("b", "1.0.0")]),
+                package("b", "1.0.0", &[("a", "1.0.0")]),
+            ],
+        );
+        let result = resolve_graph(
+            &[dep("https://jsr.io", "a", "1.0.0")],
+            &[m],
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            result
+                .selected
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["https://jsr.io:a@1.0.0", "https://jsr.io:b@1.0.0"]
+        );
+    }
+
+    #[test]
+    fn incompatible_constraints_are_structured_and_deterministic() {
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![package("foo", "1.0.0", &[]), package("foo", "2.0.0", &[])],
+        );
+        let result = resolve_graph(
+            &[
+                dep("https://registry.npmjs.org", "foo", "^1.0.0"),
+                dep("https://registry.npmjs.org", "foo", "^2.0.0"),
+            ],
+            &[m],
+            Default::default(),
+        );
+        assert!(
+            matches!(result, Err(ResolveError::Conflict { requirements, .. }) if requirements == vec!["^1.0.0", "^2.0.0"])
+        );
+    }
+
+    #[test]
+    fn npm_zero_major_caret_bounds_are_respected() {
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![
+                package("foo", "0.2.3", &[]),
+                package("foo", "0.2.9", &[]),
+                package("foo", "0.3.0", &[]),
+            ],
+        );
+        let result = resolve_graph(
+            &[dep("https://registry.npmjs.org", "foo", "^0.2.3")],
+            &[m],
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(result.selected[0].version.to_string(), "0.2.9");
+    }
+
+    #[test]
+    fn unsupported_ranges_and_modes_fail_closed() {
         assert!(matches!(
-            resolve(&[d("2.0.0")], &[s(vec!["1.0.0"])], Default::default()),
-            Err(ResolveError::MissingCandidate { .. })
-        ))
+            "<1.0.0".parse::<Requirement>(),
+            Err(ResolveError::UnsupportedRange(_))
+        ));
+        assert!(matches!(
+            resolve_graph(
+                &[],
+                &[],
+                ResolutionOptions {
+                    offline: true,
+                    frozen: false
+                }
+            ),
+            Err(ResolveError::UnsupportedMode(_))
+        ));
+        assert!(matches!(
+            resolve_graph(
+                &[],
+                &[],
+                ResolutionOptions {
+                    offline: false,
+                    frozen: true
+                }
+            ),
+            Err(ResolveError::UnsupportedMode(_))
+        ));
     }
 }
