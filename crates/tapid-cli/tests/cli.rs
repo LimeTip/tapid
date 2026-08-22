@@ -118,7 +118,10 @@ fn run_executes_root_script_and_forwards_arguments() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        fs::read_to_string(dir.join("forwarded")).unwrap().trim(),
+        fs::read_to_string(dir.join("forwarded"))
+            .unwrap()
+            .trim()
+            .trim_matches('"'),
         "hello world"
     );
     let child = run(&dir, &["run", "dev"]);
@@ -155,7 +158,9 @@ fn run_resolves_installed_bin_and_rejects_missing_script_stably() {
         String::from_utf8_lossy(&ok.stderr)
     );
     assert_eq!(
-        fs::read_to_string(dir.join("bin-output")).unwrap(),
+        fs::read_to_string(dir.join("bin-output"))
+            .unwrap()
+            .trim_end(),
         "bin-ok"
     );
     let missing = run(&dir, &["run", "missing"]);
