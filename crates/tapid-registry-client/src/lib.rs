@@ -261,6 +261,7 @@ impl HttpsTransport {
             }
         });
         let client = reqwest::blocking::Client::builder()
+            .user_agent("tapid/0.0.2")
             .timeout(timeout)
             .redirect(policy)
             .build()

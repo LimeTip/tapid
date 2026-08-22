@@ -381,7 +381,7 @@ pub fn resolve_and_fetch(
         for key in pending {
             let (mut locked, record, _) = packages.get(&key).cloned().unwrap();
             let mut ok = true;
-            for (name, _) in &record.dependencies {
+            for name in record.dependencies.keys() {
                 let (registry, package) = dep_parts(name)?;
                 let target = selected
                     .get(&(registry.to_string(), package.to_string()))
@@ -416,7 +416,7 @@ pub fn resolve_and_fetch(
     }
     let mut edge_list = Vec::new();
     let mut root_deps = Vec::new();
-    for (_, (_, record, id)) in &packages {
+    for (_, record, id) in packages.values() {
         let instance = instances
             .iter()
             .find(|i| {

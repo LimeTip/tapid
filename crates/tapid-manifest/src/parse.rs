@@ -72,7 +72,8 @@ fn parse_string_map(
         .iter()
         .map(|(name, version)| {
             if validate_names {
-                PackageName::from_str(name).map_err(ManifestError::InvalidDependencyName)?;
+                let candidate = name.strip_prefix("jsr:").unwrap_or(name);
+                PackageName::from_str(candidate).map_err(ManifestError::InvalidDependencyName)?;
             }
             let version = version
                 .as_str()

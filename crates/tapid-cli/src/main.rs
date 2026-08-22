@@ -133,20 +133,19 @@ fn install(
                 .map(PathBuf::from)
                 .unwrap_or_else(|| project_dir.join(".tapid-store")),
         );
-        let (lock, input, trees) = match online::resolve_and_fetch(
-            &project_dir,
-            &manifest,
-            &store,
-            registry_fixture,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return ExitCode::from(1);
-            }
-        };
+        let (lock, input, trees) =
+            match online::resolve_and_fetch(&project_dir, &manifest, &store, registry_fixture) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    return ExitCode::from(1);
+                }
+            };
         if let Err(error) = fs::write(&lock_path, lock.to_json().unwrap_or_default()) {
-            eprintln!("error: cannot write lockfile {}: {error}", lock_path.display());
+            eprintln!(
+                "error: cannot write lockfile {}: {error}",
+                lock_path.display()
+            );
             return ExitCode::from(1);
         }
         return materialize_install(&project_dir, &lock, input, trees);
@@ -221,7 +220,7 @@ fn materialize_with_lock(
     let stage = project_dir.join(format!(".tapid-install-stage-{}", std::process::id()));
     let _ = fs::remove_dir_all(&stage);
     let result = materialize_stage(&stage, &plan, &trees)
-        .and_then(|_| activate_node_modules(&project_dir, &stage));
+        .and_then(|_| activate_node_modules(project_dir, &stage));
     if let Err(error) = result {
         let _ = fs::remove_dir_all(&stage);
         eprintln!("error: {error}");
@@ -390,6 +389,12 @@ fn materialize_stage(
     Ok(())
 }
 fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
+    let package = source.join("package");
+    let root = if package.is_dir() { &package } else { source };
+    copy_tree_contents(root, target)
+}
+
+fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
     fs::create_dir_all(target).map_err(|e| e.to_string())?;
     for item in fs::read_dir(source).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;

@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "tapid"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "base64",
  "clap",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-archive"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "flate2",
  "hex",
@@ -1149,14 +1149,14 @@ version = "0.0.1"
 
 [[package]]
 name = "tapid-linker"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "tapid-core",
 ]
 
 [[package]]
 name = "tapid-lockfile"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-registry-client"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "reqwest",
  "serde",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-resolver"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "tapid-core",
  "tapid-registry-client",
@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-store"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "hex",
  "sha2",

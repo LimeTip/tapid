@@ -1,8 +1,8 @@
 [package]
 name = "tapid-linker"
 readme = "README.md"
-description = "Deterministic dependency materialization planning for Tapid"
-version.workspace = true
+description = "Deterministic node_modules layout planning for Tapid"
+version = "0.0.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

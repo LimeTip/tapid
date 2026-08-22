@@ -2,7 +2,7 @@
 name = "tapid-registry-client"
 readme = "README.md"
 description = "Registry metadata snapshots and transport-independent clients for Tapid"
-version.workspace = true
+version = "0.0.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
