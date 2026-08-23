@@ -27,6 +27,36 @@ tapid run --project-dir ./example test -- --runInBand
 
 `tapid run <script>` reads a root `package.json` script, runs it in the project directory, prepends the managed `node_modules/.bin` directory to `PATH`, forwards arguments after `--`, and returns the child exit status. Root scripts execute arbitrary project code. This is compatibility-oriented process execution, not a sandbox.
 
+## Installing the CLI
+
+Tapid does not yet publish platform release binaries. For contributor development, install a specific source ref:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \
+  | sh -s -- --source-ref main
+```
+
+Once stable GitHub releases exist, the same installer will default to the latest stable release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh | sh
+```
+
+Select a specific release explicitly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \
+  | sh -s -- --version v0.1.0
+```
+
+Remove only the Tapid CLI binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/uninstall.sh | sh
+```
+
+The installer uses the canonical `LimeTip/tapid` repository by default. Alternate repositories are explicit through `--repo` or `TAPID_REPO`. The uninstall script never removes project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Release installation currently verifies HTTPS-delivered SHA-256 checksums; independently signed release metadata, platform binaries, and self-upgrade support are planned follow-ups. Source installation is the supported developer path until those distribution artifacts exist.
+
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
 
 ## Offline and frozen replay

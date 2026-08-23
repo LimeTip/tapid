@@ -103,6 +103,7 @@ fn clap_rejects_unknown_commands_with_usage_error() {
     assert!(output.stdout.is_empty());
     cleanup(dir);
 }
+
 #[test]
 fn run_executes_root_script_and_forwards_arguments() {
     let dir = temp_dir("run");
