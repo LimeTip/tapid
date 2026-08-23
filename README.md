@@ -29,10 +29,10 @@ tapid run --project-dir ./example test -- --runInBand
 
 ## Installing the CLI
 
-Tapid is still pre-release and does not publish a stable binary yet. For contributor development, install a specific source ref:
+Tapid does not yet publish platform release binaries. For contributor development, install a specific source ref:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \\
+curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \
   | sh -s -- --source-ref main
 ```
 
@@ -45,20 +45,8 @@ curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.
 Select a specific release explicitly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \\
+curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \
   | sh -s -- --version v0.1.0
-```
-
-Upgrade to the latest stable release:
-
-```bash
-tapid upgrade
-```
-
-Upgrade to a specific stable release:
-
-```bash
-tapid upgrade --version v0.1.0
 ```
 
 Remove only the Tapid CLI binary:
@@ -67,9 +55,7 @@ Remove only the Tapid CLI binary:
 curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/uninstall.sh | sh
 ```
 
-The installer tries the primary `LimeTip/tapid` repository first and then falls back to `arvid-berndtsson/tapid` if the requested source ref or release assets are unavailable. Passing `--repo` or setting `TAPID_REPO` explicitly disables fallback and uses only the selected repository.
-
-The uninstall script never removes project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Release installation currently verifies HTTPS-delivered SHA-256 checksums; independently signed release metadata is a planned follow-up. Source installation is explicitly a development path until platform release assets are published.
+The installer uses the canonical `LimeTip/tapid` repository by default. Alternate repositories are explicit through `--repo` or `TAPID_REPO`. The uninstall script never removes project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Release installation currently verifies HTTPS-delivered SHA-256 checksums; independently signed release metadata, platform binaries, and self-upgrade support are planned follow-ups. Source installation is the supported developer path until those distribution artifacts exist.
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
 

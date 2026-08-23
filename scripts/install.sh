@@ -1,13 +1,7 @@
 #!/bin/sh
 set -eu
 
-if [ -n "${TAPID_REPO:-}" ]; then
-  REPOS="$TAPID_REPO"
-else
-  REPOS='LimeTip/tapid
-arvid-berndtsson/tapid'
-fi
-REPO=""
+REPO="${TAPID_REPO:-LimeTip/tapid}"
 INSTALL_DIR="${TAPID_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="latest"
 VERSION_SET=0
@@ -25,10 +19,7 @@ Options:
   --version VERSION     Install a specific stable release tag, e.g. v0.1.0
   --source-ref REF      Build from a source branch, tag, or commit (development)
   --install-dir DIR     Install the binary into DIR (default: ~/.local/bin)
-  --repo OWNER/REPO     GitHub repository (disables the fallback route)
-
-Default repositories:
-  LimeTip/tapid, then arvid-berndtsson/tapid
+  --repo OWNER/REPO     GitHub repository (default: LimeTip/tapid)
   -h, --help            Show this help
 
 Environment:
@@ -64,7 +55,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --repo)
       [ "$#" -ge 2 ] || fail "--repo requires a value"
-      REPOS="$2"
+      REPO="$2"
       shift 2
       ;;
     -h|--help)
@@ -77,10 +68,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for candidate in $REPOS; do
-  printf '%s' "$candidate" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || \
-    fail "repository must be OWNER/REPO"
-done
+case "$REPO" in
+  ''|*[!A-Za-z0-9_./-]*|*/*/*|/*|*/|.*|*/.*) fail "repository must be OWNER/REPO" ;;
+esac
+printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || \
+  fail "repository must be OWNER/REPO"
 
 if [ "$VERSION_SET" -eq 1 ] && [ "$SOURCE_REF_SET" -eq 1 ]; then
   fail "use either --version or --source-ref, not both"
@@ -107,17 +99,13 @@ if [ "$SOURCE_REF_SET" -eq 1 ]; then
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/tapid-install.XXXXXX")"
   cleanup() { rm -rf "$tmp_dir"; [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"; }
   trap cleanup 0 1 2 15
-  source_repo=""
-  for candidate in $REPOS; do
-    rm -rf "$tmp_dir/tapid"
-    if git clone --filter=blob:none --no-checkout "https://github.com/$candidate.git" "$tmp_dir/tapid" \
-      && git -C "$tmp_dir/tapid" checkout --detach "$SOURCE_REF"; then
-      source_repo="$candidate"
-      break
-    fi
-  done
-  [ -n "$source_repo" ] || fail "could not find source ref $SOURCE_REF in the configured Tapid repositories"
-  REPO="$source_repo"
+  git clone --filter=blob:none --no-checkout "https://github.com/$REPO.git" "$tmp_dir/tapid"
+  if ! git -C "$tmp_dir/tapid" checkout --detach "$SOURCE_REF"; then
+    git -C "$tmp_dir/tapid" fetch --filter=blob:none origin "$SOURCE_REF" || \
+      fail "could not find source ref $SOURCE_REF in $REPO"
+    git -C "$tmp_dir/tapid" checkout --detach "$SOURCE_REF" || \
+      fail "could not check out source ref $SOURCE_REF in $REPO"
+  fi
   cargo install --path "$tmp_dir/tapid/crates/tapid-cli" --locked --root "$tmp_dir/root"
   mkdir -p "$INSTALL_DIR"
   STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
@@ -133,21 +121,19 @@ command -v tar >/dev/null 2>&1 || fail "tar is required"
 
 case "$VERSION" in
   latest)
-    for candidate in $REPOS; do
-      release_url="https://github.com/$candidate/releases/latest"
-      resolved_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$release_url" 2>/dev/null || true)"
-      case "$resolved_url" in
-        */releases/tag/*)
-          VERSION="${resolved_url##*/tag/}"
-          REPO="$candidate"
-          break
-          ;;
-      esac
-    done
-    [ -n "$REPO" ] || fail "no stable Tapid release is published yet; use --source-ref REF for development installation"
+    release_url="https://github.com/$REPO/releases/latest"
+    resolved_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$release_url" 2>/dev/null)" || \
+      fail "could not contact GitHub to resolve the latest Tapid release"
+    case "$resolved_url" in
+      */releases/tag/*) VERSION="${resolved_url##*/tag/}" ;;
+      *) fail "no stable Tapid release is published yet; use --source-ref REF for development installation" ;;
+    esac
     ;;
 esac
 
+case "$VERSION" in
+  ''|*[!0-9.v]*) fail "version must be a stable release such as v0.1.0" ;;
+esac
 if ! printf '%s' "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
   fail "version must be a stable release such as v0.1.0"
 fi
@@ -171,22 +157,11 @@ tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/tapid-install.XXXXXX")"
 cleanup() { rm -rf "$tmp_dir"; [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"; }
 trap cleanup 0 1 2 15
 
-if [ -z "$REPO" ]; then
-  for candidate in $REPOS; do
-    base="https://github.com/$candidate/releases/download/$VERSION"
-    if curl -fsSL "$base/$archive" -o "$tmp_dir/$archive" 2>/dev/null \
-      && curl -fsSL "$base/$checksums" -o "$tmp_dir/$checksums" 2>/dev/null; then
-      REPO="$candidate"
-      break
-    fi
-    rm -f "$tmp_dir/$archive" "$tmp_dir/$checksums"
-  done
-else
-  base="https://github.com/$REPO/releases/download/$VERSION"
-  curl -fsSL "$base/$archive" -o "$tmp_dir/$archive" 2>/dev/null || true
-  curl -fsSL "$base/$checksums" -o "$tmp_dir/$checksums" 2>/dev/null || true
-fi
-[ -n "$REPO" ] || fail "stable release $VERSION has no $target binary and checksum assets in the configured Tapid repositories"
+base="https://github.com/$REPO/releases/download/$VERSION"
+curl -fsSL "$base/$archive" -o "$tmp_dir/$archive" 2>/dev/null || \
+  fail "stable release $VERSION has no $target binary asset in $REPO; use --source-ref REF for development installation"
+curl -fsSL "$base/$checksums" -o "$tmp_dir/$checksums" 2>/dev/null || \
+  fail "stable release $VERSION has no checksum manifest in $REPO"
 expected="$(awk -v name="$archive" '$2 == name || $2 == "*" name {print $1; exit}' "$tmp_dir/$checksums")"
 [ -n "$expected" ] || fail "checksum entry for $archive is missing"
 if command -v shasum >/dev/null 2>&1; then

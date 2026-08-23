@@ -1,5 +1,6 @@
 import os
 import subprocess
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,23 +11,38 @@ UNINSTALL = ROOT / "scripts" / "uninstall.sh"
 
 
 class InstallerScriptTests(unittest.TestCase):
+    def isolated_env(self, env=None):
+        isolated = dict(os.environ if env is None else env)
+        home = tempfile.mkdtemp(prefix="tapid-test-home-")
+        isolated.setdefault("HOME", home)
+        isolated.setdefault("TAPID_INSTALL_DIR", str(Path(home) / ".local" / "bin"))
+        return isolated, home
+
     def run_script(self, script: Path, *args, env=None):
-        return subprocess.run(
-            ["bash", str(script), *args],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            env=env,
-        )
+        isolated, home = self.isolated_env(env)
+        try:
+            return subprocess.run(
+                ["bash", str(script), *args],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                env=isolated,
+            )
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
 
     def run_posix_script(self, script: Path, *args, env=None):
-        return subprocess.run(
-            ["sh", str(script), *args],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            env=env,
-        )
+        isolated, home = self.isolated_env(env)
+        try:
+            return subprocess.run(
+                ["sh", str(script), *args],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                env=isolated,
+            )
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
 
 
     def test_install_help_documents_latest_and_explicit_version(self):
@@ -35,7 +51,7 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn("latest stable", result.stdout)
         self.assertIn("--version VERSION", result.stdout)
         self.assertIn("--source-ref REF", result.stdout)
-        self.assertIn("arvid-berndtsson/tapid", result.stdout)
+
 
     def test_install_help_runs_under_posix_sh(self):
         result = self.run_posix_script(INSTALL, "--help")
@@ -51,6 +67,16 @@ class InstallerScriptTests(unittest.TestCase):
         result = self.run_script(INSTALL, "--repo", "not-a-repository")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("repository must be OWNER/REPO", result.stderr)
+
+    def test_install_rejects_multiline_repository(self):
+        result = self.run_script(INSTALL, "--repo", "LimeTip/tapid\nother")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("repository must be OWNER/REPO", result.stderr)
+
+    def test_install_rejects_multiline_version(self):
+        result = self.run_script(INSTALL, "--version", "v0.1.0\nother")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("version must be a stable release", result.stderr)
 
     def test_uninstall_rejects_relative_install_directory(self):
         result = self.run_script(UNINSTALL, "--install-dir", "relative/bin")
@@ -107,6 +133,16 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue(binary.is_symlink())
             self.assertTrue(target.exists())
+
+    def test_uninstall_refuses_dangling_symlink_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            install_dir = Path(tmp) / "bin"
+            install_dir.mkdir()
+            binary = install_dir / "tapid"
+            binary.symlink_to(Path(tmp) / "missing-target")
+            result = self.run_script(UNINSTALL, "--install-dir", str(install_dir))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(binary.is_symlink())
 
 
 

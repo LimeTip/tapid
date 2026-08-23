@@ -31,7 +31,7 @@ case "$INSTALL_DIR" in
   *) printf 'uninstaller: install directory must be an absolute path\n' >&2; exit 1 ;;
 esac
 
-if [ -e "$BINARY" ]; then
+if [ -e "$BINARY" ] || [ -L "$BINARY" ]; then
   [ -L "$BINARY" ] && { printf 'uninstaller: refusing to remove symlink: %s\n' "$BINARY" >&2; exit 1; }
   [ -f "$BINARY" ] || { printf 'uninstaller: refusing to remove non-regular path: %s\n' "$BINARY" >&2; exit 1; }
   rm -f "$BINARY"
