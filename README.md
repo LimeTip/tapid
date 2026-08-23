@@ -58,7 +58,7 @@ Invoke-WebRequest https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/i
 Remove-Item $installer
 ```
 
-Remove only the Tapid CLI binary:
+Remove only the Tapid CLI binary on Unix:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/uninstall.sh | sh
