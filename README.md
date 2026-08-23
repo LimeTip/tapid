@@ -4,6 +4,28 @@
 
 Tapid is an early Rust package manager and package runner for JavaScript and TypeScript projects. The current consumer workflow targets a small, explicit npm-compatible subset. It is not production-ready and has not been published as a supported release.
 
+## Install Tapid
+
+Source installation is the supported developer path today.
+
+**macOS and Linux**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \
+  | sh -s -- --source-ref main
+```
+
+**Windows PowerShell**
+
+```powershell
+$installer = Join-Path $env:TEMP "tapid-install.ps1"
+Invoke-WebRequest https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.ps1 -OutFile $installer
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SourceRef main
+Remove-Item $installer
+```
+
+See [installation details](#installation-details) for release selection, alternate repositories, and uninstall instructions.
+
 ## Current consumer workflow
 
 From a project containing `package.json`:
@@ -27,7 +49,7 @@ tapid run --project-dir ./example test -- --runInBand
 
 `tapid run <script>` reads a root `package.json` script, runs it in the project directory, prepends the managed `node_modules/.bin` directory to `PATH`, forwards arguments after `--`, and returns the child exit status. Root scripts execute arbitrary project code. This is compatibility-oriented process execution, not a sandbox.
 
-## Installing the CLI
+## Installation details
 
 Tapid does not yet publish platform release binaries. For contributor development, install a specific source ref:
 
