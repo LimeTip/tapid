@@ -67,6 +67,8 @@ Remove only the Tapid CLI binary:
 curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/uninstall.sh | sh
 ```
 
+The installer tries the primary `LimeTip/tapid` repository first and then falls back to `arvid-berndtsson/tapid` if the requested source ref or release assets are unavailable. Passing `--repo` or setting `TAPID_REPO` explicitly disables fallback and uses only the selected repository.
+
 The uninstall script never removes project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Release installation currently verifies HTTPS-delivered SHA-256 checksums; independently signed release metadata is a planned follow-up. Source installation is explicitly a development path until platform release assets are published.
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.

@@ -35,6 +35,7 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn("latest stable", result.stdout)
         self.assertIn("--version VERSION", result.stdout)
         self.assertIn("--source-ref REF", result.stdout)
+        self.assertIn("arvid-berndtsson/tapid", result.stdout)
 
     def test_install_help_runs_under_posix_sh(self):
         result = self.run_posix_script(INSTALL, "--help")

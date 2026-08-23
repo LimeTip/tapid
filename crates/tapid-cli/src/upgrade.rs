@@ -5,7 +5,7 @@ use std::{
     process::{Command, ExitCode},
 };
 
-const DEFAULT_REPO: &str = "LimeTip/tapid";
+const DEFAULT_REPOS: [&str; 2] = ["LimeTip/tapid", "arvid-berndtsson/tapid"];
 
 pub fn upgrade(version: Option<&str>) -> ExitCode {
     if cfg!(windows) {
@@ -13,8 +13,15 @@ pub fn upgrade(version: Option<&str>) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let repo = env::var("TAPID_REPO").unwrap_or_else(|_| DEFAULT_REPO.to_owned());
-    if !valid_repo(&repo) {
+    let repos = env::var("TAPID_REPO")
+        .map(|repo| vec![repo])
+        .unwrap_or_else(|_| {
+            DEFAULT_REPOS
+                .iter()
+                .map(|repo| (*repo).to_owned())
+                .collect()
+        });
+    if repos.iter().any(|repo| !valid_repo(repo)) {
         eprintln!("error: repository must be OWNER/REPO");
         return ExitCode::from(1);
     }
@@ -27,12 +34,18 @@ pub fn upgrade(version: Option<&str>) -> ExitCode {
         }
     };
 
-    let url = format!("https://raw.githubusercontent.com/{repo}/main/scripts/install.sh");
-    let download = Command::new("curl")
-        .args(["-fsSL", &url, "-o"])
-        .arg(&path)
-        .status();
-    let download_ok = matches!(download, Ok(status) if status.success());
+    let mut download_ok = false;
+    for repo in &repos {
+        let url = format!("https://raw.githubusercontent.com/{repo}/main/scripts/install.sh");
+        let download = Command::new("curl")
+            .args(["-fsSL", &url, "-o"])
+            .arg(&path)
+            .status();
+        if matches!(download, Ok(status) if status.success()) {
+            download_ok = true;
+            break;
+        }
+    }
     if !download_ok {
         let _ = fs::remove_file(&path);
         eprintln!("error: could not download the Tapid installer");
@@ -79,7 +92,12 @@ fn temporary_script_path() -> std::io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_repo;
+    use super::{DEFAULT_REPOS, valid_repo};
+
+    #[test]
+    fn default_repositories_keep_primary_then_fallback_order() {
+        assert_eq!(DEFAULT_REPOS, ["LimeTip/tapid", "arvid-berndtsson/tapid"]);
+    }
 
     #[test]
     fn repository_validation_accepts_owner_and_name() {
