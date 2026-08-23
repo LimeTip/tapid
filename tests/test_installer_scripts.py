@@ -7,7 +7,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL = ROOT / "scripts" / "install.sh"
 UNINSTALL = ROOT / "scripts" / "uninstall.sh"
-UPGRADE = ROOT / "scripts" / "upgrade.sh"
 
 
 class InstallerScriptTests(unittest.TestCase):
@@ -29,18 +28,6 @@ class InstallerScriptTests(unittest.TestCase):
             env=env,
         )
 
-    def run_piped_script(self, script: Path, *args, env=None):
-        command = "cat %s | sh -s -- %s" % (
-            str(script),
-            " ".join("'" + arg.replace("'", "'\\''") + "'" for arg in args),
-        )
-        return subprocess.run(
-            ["sh", "-c", command],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            env=env,
-        )
 
     def test_install_help_documents_latest_and_explicit_version(self):
         result = self.run_script(INSTALL, "--help")
@@ -53,10 +40,6 @@ class InstallerScriptTests(unittest.TestCase):
         result = self.run_posix_script(INSTALL, "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_upgrade_help_runs_under_posix_sh(self):
-        result = self.run_posix_script(UPGRADE, "--help")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Install the latest stable Tapid release", result.stdout)
 
     def test_install_rejects_invalid_version_before_network_access(self):
         result = self.run_script(INSTALL, "--version", "not-a-version")
@@ -73,12 +56,6 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("absolute path", result.stderr)
 
-    def test_upgrade_rejects_malformed_repository(self):
-        result = self.run_piped_script(
-            UPGRADE, "--help", env={**os.environ, "TAPID_REPO": "not-a-repository"}
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("repository must be OWNER/REPO", result.stderr)
 
     def test_install_rejects_combining_release_and_source_selection(self):
         result = self.run_script(
@@ -130,10 +107,6 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertTrue(binary.is_symlink())
             self.assertTrue(target.exists())
 
-    def test_upgrade_delegates_to_installer_help(self):
-        result = self.run_script(UPGRADE, "--help")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Install the latest stable Tapid release", result.stdout)
 
 
 if __name__ == "__main__":

@@ -52,7 +52,13 @@ curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.
 Upgrade to the latest stable release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/upgrade.sh | sh
+tapid upgrade
+```
+
+Upgrade to a specific stable release:
+
+```bash
+tapid upgrade --version v0.1.0
 ```
 
 Remove only the Tapid CLI binary:

@@ -103,6 +103,15 @@ fn clap_rejects_unknown_commands_with_usage_error() {
     assert!(output.stdout.is_empty());
     cleanup(dir);
 }
+
+#[test]
+fn upgrade_is_a_native_subcommand() {
+    let dir = temp_dir("upgrade-help");
+    let output = run(&dir, &["upgrade", "--help"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Upgrade Tapid"));
+    cleanup(dir);
+}
 #[test]
 fn run_executes_root_script_and_forwards_arguments() {
     let dir = temp_dir("run");

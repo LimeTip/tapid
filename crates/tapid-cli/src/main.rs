@@ -1,6 +1,7 @@
 mod online;
 #[allow(dead_code)]
 mod run;
+mod upgrade;
 
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
@@ -66,6 +67,12 @@ enum Command {
         #[arg(long)]
         registry_fixture: Option<PathBuf>,
     },
+    /// Upgrade Tapid to the latest stable release.
+    Upgrade {
+        /// Install a specific stable release instead of the latest one.
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 #[derive(Debug, Subcommand)]
 enum ManifestCommand {
@@ -110,6 +117,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             frozen,
             registry_fixture.as_deref(),
         ),
+        Some(Command::Upgrade { version }) => upgrade::upgrade(version.as_deref()),
     }
 }
 
