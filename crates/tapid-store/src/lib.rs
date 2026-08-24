@@ -5,6 +5,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tapid_core::ArtifactDigest;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -333,9 +334,11 @@ fn digest_bytes(data: &[u8]) -> String {
     format!("sha256-{}", hex::encode(h.finalize()))
 }
 fn unique_nonce() -> u128 {
-    std::time::SystemTime::now()
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos())
+        .map_or(0, |d| d.as_nanos());
+    (timestamp << 32) | u128::from(COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
 #[cfg(test)]
