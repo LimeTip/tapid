@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
 
-Tapid is an early Rust package manager and package runner for JavaScript and TypeScript projects. The current consumer workflow targets a small, explicit npm-compatible subset. It is not production-ready and has not been published as a supported release.
+Tapid is an early Rust package manager and package runner for JavaScript and TypeScript projects. The current consumer workflow targets a small, explicit npm-compatible subset. Version 0.0.5 is published for development use, but Tapid is not a supported production release and does not yet provide signed platform binaries.
 
 ## Install Tapid
 
@@ -28,17 +28,29 @@ See [installation details](#installation-details) for release selection, alterna
 
 ## Current consumer workflow
 
-From a project containing `package.json`:
+The currently supported consumer path is the checked-in fixture and validated lockfile replay. It exercises deterministic installation, managed `node_modules`, root-script execution, argument forwarding, and lifecycle suppression without relying on a live registry.
+
+For a clean checkout, build Tapid and create the readable consumer fixture through the same helper used by CI:
 
 ```text
-tapid install
-tapid run init
-tapid run dev
-tapid run build
-tapid run test
+cargo build -p tapid
+node tests/fixtures/create_consumer_project.js
 ```
 
-`tapid install` resolves npm metadata and downloads npm tarballs over the configured HTTPS transport. It verifies npm SHA-512 integrity when metadata supplies it, validates archive entries, stores verified trees under a project-local `.tapid-store` by default, writes `tapid.lock`, and atomically activates `node_modules`. Dependency lifecycle scripts are disabled during install.
+The helper writes `TAPID_FIXTURE_PROJECT` to the `GITHUB_ENV` file supplied by CI. For a local smoke test, set that variable yourself and run the generated project path:
+
+```bash
+export GITHUB_ENV="$(mktemp)"
+node tests/fixtures/create_consumer_project.js
+. "$GITHUB_ENV"
+export TAPID_FIXTURE=1
+target/debug/tapid install --offline --frozen --project-dir "$TAPID_FIXTURE_PROJECT"
+target/debug/tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 0
+```
+
+The non-fixture online path is deliberately fail-closed for transitive projects until the registry-client metadata contract exposes verified per-version dependency maps and required SHA-512 integrity for all supported registries. Do not treat a successful fixture replay as evidence that general npm installation is production-ready.
+
+`tapid run <script>` reads a root `package.json` script, runs it in the project directory, prepends the managed `node_modules/.bin` directory to `PATH`, forwards arguments after `--`, and returns the child exit status. Root scripts execute arbitrary project code. This is compatibility-oriented process execution, not a sandbox.
 
 Use a project directory explicitly when running outside the project directory:
 
@@ -46,8 +58,6 @@ Use a project directory explicitly when running outside the project directory:
 tapid install --project-dir ./example
 tapid run --project-dir ./example test -- --runInBand
 ```
-
-`tapid run <script>` reads a root `package.json` script, runs it in the project directory, prepends the managed `node_modules/.bin` directory to `PATH`, forwards arguments after `--`, and returns the child exit status. Root scripts execute arbitrary project code. This is compatibility-oriented process execution, not a sandbox.
 
 ## Installation details
 
@@ -58,7 +68,9 @@ curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.
   | sh -s -- --source-ref main
 ```
 
-Once stable GitHub releases exist, the same installer will default to the latest stable release:
+When signed platform binaries and release metadata are available, the same installer will support a stable release path. Until then, the source-ref workflow above is the only supported installation path.
+
+Future stable-release example:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh | sh

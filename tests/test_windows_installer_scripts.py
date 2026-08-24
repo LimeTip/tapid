@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import unittest
@@ -22,18 +23,20 @@ class WindowsInstallerScriptTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell Core is not installed")
     def test_windows_scripts_parse_with_powershell(self):
         for script in (INSTALL, UNINSTALL):
+            environment = dict(os.environ)
+            environment["TAPID_SCRIPT_PATH"] = str(script)
             result = subprocess.run(
                 [
                     "pwsh",
                     "-NoProfile",
                     "-NonInteractive",
                     "-Command",
-                    "[scriptblock]::Create((Get-Content -Raw -LiteralPath $args[0])) | Out-Null",
-                    str(script),
+                    "[scriptblock]::Create((Get-Content -Raw -LiteralPath $env:TAPID_SCRIPT_PATH)) | Out-Null",
                 ],
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
+                env=environment,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
