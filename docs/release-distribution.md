@@ -6,7 +6,11 @@ Status: design contract for the next release-distribution implementation slice.
 
 Tapid's developer installers build from an explicitly selected source ref. They are not a release trust channel. Release installation must instead select an immutable version and verify signed metadata before downloading or replacing a client binary.
 
-The release manifest is `schemas/tapid-release-manifest-v1.json`. It binds a Tapid version and Git commit to platform artifacts, optional SBOM and provenance documents, and an Ed25519 signature over canonical manifest bytes.
+The release manifest is `schemas/tapid-release-manifest-v1.json`. It binds a Tapid version and Git commit to platform artifacts, optional SBOM and provenance documents, and an Ed25519 signature over the UTF-8 bytes of the manifest's JSON Canonicalization Scheme (JCS, RFC 8785) representation.
+
+The signed payload is a copy of the complete manifest object with the `signature` property removed. Object members are serialized using RFC 8785 JCS, arrays retain their declared order, and the resulting UTF-8 bytes are hashed with SHA-256. The `signature.signed_digest` value is `sha256-` followed by the lowercase hexadecimal digest of those exact bytes. The `signature.value` is the standard padded Base64 encoding of the 64-byte Ed25519 signature. The signature object is excluded from the signed payload to avoid circularity.
+
+Clients must also verify that each artifact filename's embedded version matches the manifest `version`; the schema constrains both to the supported `0.x.y` shape but JSON Schema does not express that cross-field equality.
 
 ## Verification order
 

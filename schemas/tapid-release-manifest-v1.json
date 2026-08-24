@@ -5,7 +5,7 @@
   "description": "Signed metadata describing immutable Tapid client release artifacts.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "product", "version", "tag", "commit", "artifacts", "signature"],
+  "required": ["schema", "product", "version", "tag", "commit", "created_at", "expires_at", "artifacts", "signature"],
   "properties": {
     "schema": {"const": "tapid-release-manifest-v1"},
     "product": {"const": "tapid"},
@@ -25,7 +25,7 @@
       "additionalProperties": false,
       "required": ["name", "target", "url", "sha256", "size"],
       "properties": {
-        "name": {"type": "string", "pattern": "^tapid-[0-9]+\\.[0-9]+\\.[0-9]+-[A-Za-z0-9._-]+\\.(tar\\.gz|zip)$"},
+        "name": {"type": "string", "pattern": "^tapid-0\\.[0-9]+\\.[0-9]+-[A-Za-z0-9._-]+\\.(tar\\.gz|zip)$"},
         "target": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
         "url": {"type": "string", "format": "uri", "pattern": "^https://"},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -50,7 +50,12 @@
         "algorithm": {"const": "ed25519"},
         "key_id": {"type": "string", "pattern": "^[A-Za-z0-9._:-]+$"},
         "signed_digest": {"type": "string", "pattern": "^sha256-[0-9a-f]{64}$"},
-        "value": {"type": "string", "minLength": 1}
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{86}={0,2}$",
+          "minLength": 86,
+          "maxLength": 88
+        }
       }
     }
   }
