@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
 
-Tapid is an early Rust package manager and package runner for JavaScript and TypeScript projects. The current consumer workflow targets a small, explicit npm-compatible subset. Version 0.0.5 is published for development use, but Tapid is not a supported production release and does not yet provide signed platform binaries.
+Tapid is a JavaScript and TypeScript package manager written in Rust. It provides deterministic dependency installation, verified package storage, Node-compatible `node_modules` materialization, lockfile replay, and explicit root-script execution. The current implementation targets a small, explicit npm-compatible subset. Version 0.0.5 is published for development use, but signed platform binaries and production support are not yet available.
 
 ## Install Tapid
 

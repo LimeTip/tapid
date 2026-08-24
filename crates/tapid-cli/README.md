@@ -1,9 +1,8 @@
 # tapid-cli
 
-
 [Crates.io](https://crates.io/crates/tapid-cli) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-cli)
 
-The `tapid` command-line package manager and package runner.
+The `tapid` command-line client for the Tapid JavaScript and TypeScript package manager, written in Rust. It provides deterministic installation and lockfile replay, verified package storage, Node-compatible linking, and explicit root-script execution.
 
 ## Commands
 
@@ -19,17 +18,14 @@ tapid run <SCRIPT> [-- <ARGS>...]
 
 ## Install
 
-An online install is the default:
+The currently supported install paths are validated lockfile replay and the local registry fixture:
 
 ```text
-tapid install
-tapid install --project-dir ./example
+tapid install --offline --frozen --project-dir ./example
 tapid install --registry-fixture ./fixture.json --project-dir ./example
 ```
 
-Online install reads the root manifest, resolves the supported dependency subset, downloads npm artifacts through the registry client, verifies archive and integrity constraints, writes `tapid.lock`, populates a verified store, and atomically activates `node_modules`. The default store is `<project>/.tapid-store`; `--store-dir PATH` selects a dynamic alternate root. Dependency lifecycle scripts are never executed.
-
-The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature.
+The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The non-fixture online path remains deliberately fail-closed for transitive projects until the registry client exposes verified per-version dependency maps and required SHA-512 integrity for all supported registries.
 
 ## Offline and frozen
 
