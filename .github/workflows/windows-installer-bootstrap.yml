@@ -1,0 +1,53 @@
+name: Windows installer bootstrap
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/install.ps1"
+      - "scripts/uninstall.ps1"
+      - ".github/workflows/windows-installer-bootstrap.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Windows installer bootstrap
+    runs-on: windows-latest
+    steps:
+      - name: Download documented installer
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'tapid-install.ps1'
+          $uninstaller = Join-Path $env:RUNNER_TEMP 'tapid-uninstall.ps1'
+          $installDir = Join-Path $env:RUNNER_TEMP 'tapid-bootstrap-install'
+          $installUrl = 'https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.ps1'
+          $uninstallUrl = 'https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/uninstall.ps1'
+
+          Invoke-WebRequest -UseBasicParsing $installUrl -OutFile $installer
+          Invoke-WebRequest -UseBasicParsing $uninstallUrl -OutFile $uninstaller
+
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SourceRef main -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $binary = Join-Path $installDir 'tapid.exe'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw 'Tapid was not installed'
+          }
+
+          & $binary --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SourceRef main -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $uninstaller -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          if (Test-Path -LiteralPath $binary) {
+            throw 'Tapid was not uninstalled'
+          }
+
+          Write-Host 'Windows installer bootstrap passed.'
