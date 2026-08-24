@@ -39,6 +39,21 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Run tests
         run: cargo test --workspace --all-features --locked
+      - name: Validate Windows developer installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP 'tapid-install'
+          & "$env:GITHUB_WORKSPACE\scripts\install.ps1" -Repo LimeTip/tapid -SourceRef main -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $installDir 'tapid.exe'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Tapid was not installed' }
+          & $binary --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\scripts\uninstall.ps1" -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path -LiteralPath $binary) { throw 'Tapid was not uninstalled' }
+          Write-Host 'Windows developer install and uninstall passed.'
 
   platform-consumer-validation:
     name: Consumer validation (${{ matrix.os }})
