@@ -1,10 +1,8 @@
-//! Canonical, artifact-bound trust envelopes.
-//!
-//! This crate deliberately does not claim to sign or verify a cryptographic
-//! signature yet. It provides the stable bytes and binding contract that a
-//! future, fully tested signature implementation must use.
+//! Canonical, artifact-bound trust envelopes with Ed25519 signing and verification.
 #![deny(unsafe_code)]
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -40,6 +38,7 @@ pub enum VerificationError {
     SubjectMismatch,
     ArtifactDigestMismatch,
     UnsupportedAlgorithm(String),
+    PublicKeyRequired,
     InvalidEnvelope(String),
 }
 
@@ -55,6 +54,9 @@ impl fmt::Display for VerificationError {
                 write!(f, "signature artifact digest does not match envelope")
             }
             Self::UnsupportedAlgorithm(a) => write!(f, "unsupported signature algorithm: {a}"),
+            Self::PublicKeyRequired => {
+                write!(f, "a trusted public key is required for verification")
+            }
             Self::InvalidEnvelope(e) => write!(f, "invalid envelope: {e}"),
         }
     }
@@ -88,6 +90,56 @@ impl TrustEnvelope {
         canonical_json(&Value::Object(value)).map(|s| s.into_bytes())
     }
 
+    /// Signs the canonical envelope payload with an Ed25519 seed.
+    pub fn sign(
+        &self,
+        key_id: impl Into<String>,
+        secret_key: &[u8; 32],
+    ) -> Result<Self, CanonicalError> {
+        let signing_key = SigningKey::from_bytes(secret_key);
+        let signature = signing_key.sign(&self.signing_bytes()?);
+        let mut signed = self.clone();
+        signed.signature = Some(DetachedSignature {
+            algorithm: "ed25519".into(),
+            key_id: key_id.into(),
+            subject: self.subject.clone(),
+            artifact_digest: self.artifact_digest.clone(),
+            value: BASE64.encode(signature.to_bytes()),
+        });
+        Ok(signed)
+    }
+
+    /// Verifies the binding fields and Ed25519 signature using a trusted key.
+    pub fn verify_with_public_key(&self, public_key: &[u8; 32]) -> Result<(), VerificationError> {
+        let signature = self.signature.as_ref().ok_or(VerificationError::Unsigned)?;
+        if signature.subject != self.subject {
+            return Err(VerificationError::SubjectMismatch);
+        }
+        if signature.artifact_digest != self.artifact_digest {
+            return Err(VerificationError::ArtifactDigestMismatch);
+        }
+        if signature.algorithm != "ed25519" {
+            return Err(VerificationError::UnsupportedAlgorithm(
+                signature.algorithm.clone(),
+            ));
+        }
+        let verifying_key = VerifyingKey::from_bytes(public_key)
+            .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?;
+        let signature_bytes = BASE64
+            .decode(&signature.value)
+            .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?;
+        let signature = Signature::from_slice(&signature_bytes)
+            .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?;
+        verifying_key
+            .verify(
+                &self
+                    .signing_bytes()
+                    .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?,
+                &signature,
+            )
+            .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))
+    }
+
     pub fn envelope_digest(&self) -> Result<String, CanonicalError> {
         digest(&self.signing_bytes()?)
     }
@@ -102,9 +154,7 @@ impl TrustEnvelope {
         if signature.artifact_digest != self.artifact_digest {
             return Err(VerificationError::ArtifactDigestMismatch);
         }
-        Err(VerificationError::UnsupportedAlgorithm(
-            signature.algorithm.clone(),
-        ))
+        Err(VerificationError::PublicKeyRequired)
     }
 }
 
@@ -220,5 +270,51 @@ mod tests {
             value: "x".into(),
         });
         assert_eq!(e.verify(), Err(VerificationError::SubjectMismatch));
+    }
+
+    #[test]
+    fn signs_and_verifies_with_ed25519() {
+        let envelope = TrustEnvelope::unsigned(
+            "release-manifest",
+            "sha256-artifact",
+            serde_json::json!({"version":"0.0.6"}),
+        );
+        let secret_key = [7u8; 32];
+        let signed = envelope.sign("release-key-1", &secret_key).unwrap();
+        assert_eq!(signed.signature.as_ref().unwrap().algorithm, "ed25519");
+        let public_key = SigningKey::from_bytes(&secret_key)
+            .verifying_key()
+            .to_bytes();
+        assert!(signed.verify_with_public_key(&public_key).is_ok());
+    }
+
+    #[test]
+    fn rejects_tampered_claims_and_wrong_key() {
+        let envelope = TrustEnvelope::unsigned("release", "sha256-a", Value::Null);
+        let secret_key = [9u8; 32];
+        let signed = envelope.sign("key-1", &secret_key).unwrap();
+        let mut tampered = signed.clone();
+        tampered.claims = serde_json::json!({"version":"0.0.7"});
+        let public_key = SigningKey::from_bytes(&secret_key)
+            .verifying_key()
+            .to_bytes();
+        let wrong_public_key = SigningKey::from_bytes(&[8u8; 32])
+            .verifying_key()
+            .to_bytes();
+        assert!(tampered.verify_with_public_key(&public_key).is_err());
+        assert!(signed.verify_with_public_key(&wrong_public_key).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_signature_encoding() {
+        let mut envelope = TrustEnvelope::unsigned("release", "sha256-a", Value::Null);
+        envelope.signature = Some(DetachedSignature {
+            algorithm: "ed25519".into(),
+            key_id: "key-1".into(),
+            subject: envelope.subject.clone(),
+            artifact_digest: envelope.artifact_digest.clone(),
+            value: "not-base64".into(),
+        });
+        assert!(envelope.verify_with_public_key(&[0u8; 32]).is_err());
     }
 }
