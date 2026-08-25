@@ -1,0 +1,127 @@
+name: Website installer sync
+
+on:
+  pull_request:
+    paths:
+      - scripts/install.sh
+      - scripts/install.ps1
+      - .github/workflows/website-installer-sync.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/install.sh
+      - scripts/install.ps1
+      - .github/workflows/website-installer-sync.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-installer-sync-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate installers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Tapid
+        uses: actions/checkout@v4
+
+      - name: Shell syntax
+        run: bash -n scripts/install.sh
+
+      - name: Shell help
+        run: bash scripts/install.sh --help
+
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.PSParser]::Tokenize(
+            (Get-Content -Raw scripts/install.ps1),
+            [ref]$errors
+          )
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+            exit 1
+          }
+
+  sync-website:
+    name: Sync installer files to tapid-web
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      TAPID_WEB_SYNC_TOKEN: ${{ secrets.TAPID_WEB_SYNC_TOKEN }}
+    steps:
+      - name: Skip without website sync token
+        if: env.TAPID_WEB_SYNC_TOKEN == ''
+        run: |
+          echo "TAPID_WEB_SYNC_TOKEN is not configured; installer validation passed, skipping website sync."
+
+      - name: Check out Tapid
+        if: env.TAPID_WEB_SYNC_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          path: tapid
+
+      - name: Check out tapid-web
+        if: env.TAPID_WEB_SYNC_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          repository: LimeTip/tapid-web
+          ref: main
+          token: ${{ env.TAPID_WEB_SYNC_TOKEN }}
+          path: tapid-web
+
+      - name: Sync installer files
+        if: env.TAPID_WEB_SYNC_TOKEN != ''
+        run: |
+          cp tapid/scripts/install.sh tapid-web/public/install.sh
+          cp tapid/scripts/install.ps1 tapid-web/public/install.ps1
+          chmod 0644 tapid-web/public/install.sh tapid-web/public/install.ps1
+
+      - name: Check for changes
+        if: env.TAPID_WEB_SYNC_TOKEN != ''
+        id: changes
+        working-directory: tapid-web
+        run: |
+          if git status --short --untracked-files=all -- public/install.sh public/install.ps1 | grep -q .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: steps.changes.outputs.changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tapid-web/package-lock.json
+
+      - name: Verify website with synced installers
+        if: steps.changes.outputs.changed == 'true'
+        working-directory: tapid-web
+        run: |
+          bash -n public/install.sh
+          npm ci
+          npm run lint
+          npm run build
+          test -f out/install.sh
+          test -f out/install.ps1
+          cmp public/install.sh out/install.sh
+          cmp public/install.ps1 out/install.ps1
+
+      - name: Commit and push website sync
+        if: steps.changes.outputs.changed == 'true'
+        working-directory: tapid-web
+        run: |
+          git config user.name "tapid-installer-sync[bot]"
+          git config user.email "tapid-installer-sync[bot]@users.noreply.github.com"
+          git add public/install.sh public/install.ps1
+          git commit -m "chore: sync installers from tapid ${GITHUB_SHA::12}"
+          git pull --rebase origin main
+          git push origin HEAD:main
