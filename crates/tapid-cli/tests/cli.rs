@@ -189,6 +189,69 @@ fn install_rejects_malformed_lockfile_before_creating_output() {
 }
 
 #[test]
+fn install_rejects_unverified_artifacts_with_offline_or_frozen() {
+    for mode in ["offline", "frozen"] {
+        let dir = temp_dir(&format!("unverified-{mode}"));
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"demo","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let output = run(
+            &dir,
+            &[
+                "install",
+                "--allow-unverified-registry-artifacts",
+                &format!("--{mode}"),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("cannot be used with --offline or --frozen")
+        );
+        cleanup(dir);
+    }
+}
+
+#[test]
+fn install_allows_missing_integrity_only_with_explicit_warning() {
+    let dir = temp_dir("unverified-online");
+    let fixture = dir.join("registry.json");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"foo":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"foo","version":"1.0.0","artifact":"base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA"}]}"#,
+    )
+    .unwrap();
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--allow-unverified-registry-artifacts",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("not authenticated against a registry-declared digest")
+    );
+    assert!(dir.join("node_modules").is_dir());
+    cleanup(dir);
+}
+
+#[test]
 fn install_requires_lockfile_in_offline_and_frozen_modes() {
     for mode in ["offline", "frozen"] {
         let dir = temp_dir(mode);

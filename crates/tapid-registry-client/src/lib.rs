@@ -595,9 +595,9 @@ fn parse_npm(
         let integrity = match dist.get("integrity") {
             None if allow_missing_integrity => None,
             None => {
-                return Err(RegistryClientError::Metadata(
-                    MetadataError::UnsupportedIntegrity(key.clone()),
-                ));
+                return Err(RegistryClientError::Metadata(MetadataError::MissingField(
+                    "dist.integrity".into(),
+                )));
             }
             Some(value) => {
                 let value = value.as_str().ok_or_else(|| {
@@ -797,9 +797,8 @@ mod tests {
         let result = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), r).fetch("foo");
         assert!(matches!(
             result,
-            Err(RegistryClientError::Metadata(
-                MetadataError::UnsupportedIntegrity(_)
-            ))
+            Err(RegistryClientError::Metadata(MetadataError::MissingField(field)))
+                if field == "dist.integrity"
         ));
     }
 
