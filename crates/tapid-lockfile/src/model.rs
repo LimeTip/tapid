@@ -72,14 +72,16 @@ impl std::str::FromStr for LockfilePackageKey {
             registry: p[0].parse().map_err(LockfileError::Domain)?,
             name: name.parse().map_err(LockfileError::Domain)?,
             version: version.parse().map_err(LockfileError::Domain)?,
-            peer_context: (peer_context != "-")
-                .then_some(peer_context)
-                .unwrap_or_default()
-                .to_owned(),
-            platform_context: (platform_context != "-")
-                .then_some(platform_context)
-                .unwrap_or_default()
-                .to_owned(),
+            peer_context: if peer_context == "-" {
+                String::new()
+            } else {
+                peer_context.to_owned()
+            },
+            platform_context: if platform_context == "-" {
+                String::new()
+            } else {
+                platform_context.to_owned()
+            },
         };
         if key.peer_context.contains(' ') || key.platform_context.contains(' ') {
             return Err(LockfileError::InvalidPackageKey(value.into()));
