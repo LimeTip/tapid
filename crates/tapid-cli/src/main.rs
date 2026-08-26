@@ -571,7 +571,7 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
             ));
         }
         if meta.is_dir() {
-            copy_tree(&src, &dst)?;
+            copy_tree_contents(&src, &dst)?;
         } else if meta.is_file() {
             fs::copy(&src, &dst).map_err(|e| e.to_string())?;
         } else {
@@ -781,5 +781,26 @@ fn verify_lock(path: &Path) -> ExitCode {
             eprintln!("error: cannot verify {}: {error}", path.display());
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_tree;
+    use std::fs;
+
+    #[test]
+    fn preserves_nested_package_directories() {
+        let root = std::env::temp_dir().join(format!("tapid-copy-tree-{}", super::unique_nonce()));
+        let source = root.join("source/package/docs/package");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("example.json"), "{}").unwrap();
+
+        copy_tree(&root.join("source"), &target).unwrap();
+
+        assert!(target.join("docs/package/example.json").is_file());
+        assert!(!target.join("docs/example.json").exists());
+        let _ = fs::remove_dir_all(root);
     }
 }
