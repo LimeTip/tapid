@@ -804,6 +804,16 @@ mod tests {
     }
 
     #[test]
+    fn npm_missing_integrity_can_be_explicitly_allowed() {
+        let r: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz"}}}}"#;
+        let result = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), r)
+            .fetch_with_options("foo", true)
+            .unwrap();
+        assert!(result[0].integrity.is_none());
+    }
+
+    #[test]
     fn jsr_without_sha512_integrity_fails_closed() {
         let r: RegistryOrigin = "https://jsr.io".parse().unwrap();
         let e = JsrRegistry::new(
