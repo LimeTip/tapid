@@ -1,4 +1,4 @@
-use super::{LockedPackage, Lockfile, VERSION};
+use super::{LockedPackage, Lockfile, LockfilePackageKey, VERSION};
 use std::str::FromStr;
 use tapid_core::{ArtifactDigest, PackageName, PackageVersion};
 
@@ -156,11 +156,69 @@ fn same_name_and_version_from_two_registries_are_distinct() {
 #[test]
 fn package_key_display_round_trips_without_loss() {
     for encoded in [
-        "https://registry.example.test|@scope/pkg@1.0.0|peer=react@18.2.0|platform=linux-x86_64-gnu",
-        "https://registry.example.test|peer-pkg@1.0.0|peer=-|platform=-",
+        concat!(
+            "https://registry.example.test",
+            "|@scope/pkg@1.0.0|peer=react-dom@18.2.0|platform=linux-x86_64-gnu"
+        ),
+        concat!(
+            "https://registry.example.test",
+            "|peer-pkg@1.0.0|peer=-|platform=-"
+        ),
     ] {
         let parsed = encoded.parse::<crate::LockfilePackageKey>().unwrap();
         assert_eq!(parsed.to_string(), encoded);
+    }
+}
+
+#[test]
+fn package_key_typed_round_trip_preserves_canonical_identity() {
+    let peer = tapid_core::PeerContext::default()
+        .with("react-dom".parse().unwrap(), "18.2.0".parse().unwrap());
+    let platform =
+        tapid_core::PlatformContext::new(Some("linux"), Some("x86_64"), Some("gnu")).unwrap();
+    let populated = LockfilePackageKey::new(
+        "https://registry.example.test".parse().unwrap(),
+        "@scope/pkg".parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+        &peer,
+        &platform,
+    );
+    let empty = LockfilePackageKey::new(
+        "https://registry.example.test".parse().unwrap(),
+        "peer-pkg".parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+        &tapid_core::PeerContext::default(),
+        &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+    );
+
+    for key in [populated, empty] {
+        let parsed = key.to_string().parse::<LockfilePackageKey>().unwrap();
+        assert_eq!(parsed, key);
+    }
+}
+
+#[test]
+fn rejects_ambiguous_or_noncanonical_contexts() {
+    for encoded in [
+        concat!("https://registry.example", "|pkg@1.0.0|peer=|platform=-"),
+        concat!("https://registry.example", "|pkg@1.0.0|peer=-|platform="),
+        concat!(
+            "https://registry.example",
+            "|pkg@1.0.0|peer=react@18.2.0,react@19.0.0|platform=-"
+        ),
+        concat!(
+            "https://registry.example",
+            "|pkg@1.0.0|peer=-|platform=linux-x86_64-gnu-extra"
+        ),
+        concat!(
+            "https://registry.example",
+            "|pkg@1.0.0|peer=-|platform=linux|custom"
+        ),
+    ] {
+        assert!(
+            encoded.parse::<crate::LockfilePackageKey>().is_err(),
+            "accepted ambiguous key: {encoded}"
+        );
     }
 }
 

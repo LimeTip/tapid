@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tapid_core::{
     ArtifactDigest, PackageIntegrity, PackageName, PackageVersion, PeerContext, PlatformContext,
     RegistryOrigin,
@@ -68,6 +68,8 @@ impl std::str::FromStr for LockfilePackageKey {
             .ok_or_else(|| LockfileError::InvalidPackageKey(value.into()))?;
         let peer_context = &p[2][5..];
         let platform_context = &p[3][9..];
+        validate_peer_context(peer_context, value)?;
+        validate_platform_context(platform_context, value)?;
         let key = Self {
             registry: p[0].parse().map_err(LockfileError::Domain)?,
             name: name.parse().map_err(LockfileError::Domain)?,
@@ -86,8 +88,57 @@ impl std::str::FromStr for LockfilePackageKey {
         if key.peer_context.contains(' ') || key.platform_context.contains(' ') {
             return Err(LockfileError::InvalidPackageKey(value.into()));
         }
+        if key.to_string() != value {
+            return Err(LockfileError::InvalidPackageKey(value.into()));
+        }
         Ok(key)
     }
+}
+
+fn validate_peer_context(value: &str, original: &str) -> Result<(), LockfileError> {
+    if value.is_empty() || value == "-" {
+        return if value == "-" {
+            Ok(())
+        } else {
+            Err(LockfileError::InvalidPackageKey(original.into()))
+        };
+    }
+    let mut names = BTreeSet::new();
+    let mut previous_name = None;
+    for entry in value.split(',') {
+        let (name, version) = entry
+            .rsplit_once('@')
+            .ok_or_else(|| LockfileError::InvalidPackageKey(original.into()))?;
+        if name.is_empty() || version.is_empty() {
+            return Err(LockfileError::InvalidPackageKey(original.into()));
+        }
+        name.parse::<PackageName>().map_err(LockfileError::Domain)?;
+        version
+            .parse::<PackageVersion>()
+            .map_err(LockfileError::Domain)?;
+        if previous_name.is_some_and(|previous| name <= previous) {
+            return Err(LockfileError::InvalidPackageKey(original.into()));
+        }
+        previous_name = Some(name);
+        if !names.insert(name) {
+            return Err(LockfileError::InvalidPackageKey(original.into()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_platform_context(value: &str, original: &str) -> Result<(), LockfileError> {
+    if value == "-" {
+        return Ok(());
+    }
+    if value.is_empty() {
+        return Err(LockfileError::InvalidPackageKey(original.into()));
+    }
+    let parts: Vec<_> = value.split('-').collect();
+    if parts.is_empty() || parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err(LockfileError::InvalidPackageKey(original.into()));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -137,7 +137,7 @@ impl FromStr for RegistryOrigin {
         let trimmed = value.trim_end_matches('/');
         let valid = trimmed.starts_with("https://")
             && trimmed.len() > "https://".len()
-            && !trimmed.contains(['@', '?', '#'])
+            && !trimmed.contains(['@', '?', '#', '|'])
             && trimmed[8..]
                 .split('/')
                 .next()
@@ -254,7 +254,12 @@ impl PlatformContext {
         if [&context.os, &context.cpu, &context.libc]
             .into_iter()
             .flatten()
-            .any(|v| v.is_empty() || v.chars().any(char::is_whitespace))
+            .any(|v| {
+                v.is_empty()
+                    || v.chars().any(char::is_whitespace)
+                    || v == "-"
+                    || v.contains(['-', '|'])
+            })
         {
             return Err(DomainError::InvalidPlatformContext);
         }
@@ -362,6 +367,11 @@ mod tests {
                 .parse::<RegistryOrigin>()
                 .is_err()
         );
+        assert!(
+            "https://registry.example.test/path|ambiguous"
+                .parse::<RegistryOrigin>()
+                .is_err()
+        );
     }
 
     #[test]
@@ -390,5 +400,8 @@ mod tests {
         assert_eq!(peer.to_string(), "react@18.2.0");
         let platform = PlatformContext::new(Some("linux"), Some("x86_64"), Some("gnu")).unwrap();
         assert_eq!(platform.to_string(), "linux-x86_64-gnu");
+        assert!(PlatformContext::new(Some("linux-x"), None, None).is_err());
+        assert!(PlatformContext::new(Some("-"), None, None).is_err());
+        assert!(PlatformContext::new(Some("linux|custom"), None, None).is_err());
     }
 }
