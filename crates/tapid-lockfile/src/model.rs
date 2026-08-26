@@ -60,18 +60,26 @@ impl std::str::FromStr for LockfilePackageKey {
     type Err = LockfileError;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let p: Vec<_> = value.split('|').collect();
-        if p.len() != 5 || !p[3].starts_with("peer=") || !p[4].starts_with("platform=") {
+        if p.len() != 4 || !p[2].starts_with("peer=") || !p[3].starts_with("platform=") {
             return Err(LockfileError::InvalidPackageKey(value.into()));
         }
         let (name, version) = p[1]
             .rsplit_once('@')
             .ok_or_else(|| LockfileError::InvalidPackageKey(value.into()))?;
+        let peer_context = &p[2][5..];
+        let platform_context = &p[3][9..];
         let key = Self {
             registry: p[0].parse().map_err(LockfileError::Domain)?,
             name: name.parse().map_err(LockfileError::Domain)?,
             version: version.parse().map_err(LockfileError::Domain)?,
-            peer_context: p[3][5..].replace('-', ""),
-            platform_context: p[4][9..].to_owned(),
+            peer_context: (peer_context != "-")
+                .then_some(peer_context)
+                .unwrap_or_default()
+                .to_owned(),
+            platform_context: (platform_context != "-")
+                .then_some(platform_context)
+                .unwrap_or_default()
+                .to_owned(),
         };
         if key.peer_context.contains(' ') || key.platform_context.contains(' ') {
             return Err(LockfileError::InvalidPackageKey(value.into()));

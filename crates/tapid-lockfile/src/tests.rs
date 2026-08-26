@@ -154,6 +154,17 @@ fn same_name_and_version_from_two_registries_are_distinct() {
 }
 
 #[test]
+fn package_key_display_round_trips_without_loss() {
+    for encoded in [
+        "https://registry.example.test|@scope/pkg@1.0.0|peer=react@18.2.0|platform=linux-x86_64-gnu",
+        "https://registry.example.test|peer-pkg@1.0.0|peer=-|platform=-",
+    ] {
+        let parsed = encoded.parse::<crate::LockfilePackageKey>().unwrap();
+        assert_eq!(parsed.to_string(), encoded);
+    }
+}
+
+#[test]
 fn peer_and_platform_contexts_change_key_deterministically() {
     let peer = tapid_core::PeerContext::default()
         .with("react".parse().unwrap(), "18.2.0".parse().unwrap());
