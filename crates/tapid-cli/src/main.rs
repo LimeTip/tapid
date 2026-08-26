@@ -57,6 +57,9 @@ enum Command {
         offline: bool,
         #[arg(long)]
         frozen: bool,
+        /// Permit npm metadata without registry-declared integrity. Not allowed with --offline or --frozen.
+        #[arg(long)]
+        allow_unverified_registry_artifacts: bool,
         #[arg(long, default_value = ".")]
         project_dir: PathBuf,
         /// Store root containing verified `trees/<sha256-...>` directories.
@@ -100,6 +103,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Install {
             offline,
             frozen,
+            allow_unverified_registry_artifacts,
             project_dir,
             store_dir,
             registry_fixture,
@@ -109,6 +113,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             offline,
             frozen,
             registry_fixture.as_deref(),
+            allow_unverified_registry_artifacts,
         ),
     }
 }
@@ -159,7 +164,19 @@ fn install(
     offline: bool,
     frozen: bool,
     registry_fixture: Option<&Path>,
+    allow_unverified_registry_artifacts: bool,
 ) -> ExitCode {
+    if allow_unverified_registry_artifacts && (offline || frozen) {
+        eprintln!(
+            "error: --allow-unverified-registry-artifacts cannot be used with --offline or --frozen"
+        );
+        return ExitCode::from(1);
+    }
+    if allow_unverified_registry_artifacts {
+        eprintln!(
+            "warning: npm artifacts without registry integrity are not authenticated against a registry-declared digest"
+        );
+    }
     let project_dir = match fs::canonicalize(project_dir) {
         Ok(path) if path.is_dir() => path,
         Ok(path) => {
@@ -191,14 +208,19 @@ fn install(
                 .map(PathBuf::from)
                 .unwrap_or_else(|| project_dir.join(".tapid-store")),
         );
-        let (lock, input, trees) =
-            match online::resolve_and_fetch(&project_dir, &manifest, &store, registry_fixture) {
-                Ok(value) => value,
-                Err(error) => {
-                    eprintln!("error: {error}");
-                    return ExitCode::from(1);
-                }
-            };
+        let (lock, input, trees) = match online::resolve_and_fetch(
+            &project_dir,
+            &manifest,
+            &store,
+            registry_fixture,
+            allow_unverified_registry_artifacts,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
         let lock_json = match lock.to_json() {
             Ok(value) => value,
             Err(error) => {

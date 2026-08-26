@@ -390,6 +390,13 @@ impl<T: HttpTransport> NpmRegistry<T> {
         Self { transport, origin }
     }
     pub fn fetch(&self, package: &str) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
+        self.fetch_with_options(package, false)
+    }
+    pub fn fetch_with_options(
+        &self,
+        package: &str,
+        allow_missing_integrity: bool,
+    ) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
         let name: PackageName = package.parse().map_err(|_| {
             RegistryClientError::Metadata(MetadataError::InvalidPackageName(package.into()))
         })?;
@@ -398,7 +405,12 @@ impl<T: HttpTransport> NpmRegistry<T> {
             .transport
             .get(&url)
             .map_err(RegistryClientError::Transport)?;
-        parse_npm(&self.origin, &name, json_response(&response)?)
+        parse_npm(
+            &self.origin,
+            &name,
+            json_response(&response)?,
+            allow_missing_integrity,
+        )
     }
     pub fn download_artifact(
         &self,
@@ -537,6 +549,7 @@ fn parse_npm(
     origin: &RegistryOrigin,
     name: &PackageName,
     body: &[u8],
+    allow_missing_integrity: bool,
 ) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
     let root = json_object(body).map_err(RegistryClientError::Metadata)?;
     if let Some(n) = root.get("name").and_then(|v| v.as_str())
@@ -579,20 +592,22 @@ fn parse_npm(
             RegistryClientError::Metadata(MetadataError::MissingField("dist".into()))
         })?;
         let artifact_url = required_str(dist, "tarball").map_err(RegistryClientError::Metadata)?;
-        let integrity = dist
-            .get("integrity")
-            .map(|x| {
-                x.as_str().ok_or_else(|| {
+        let integrity = match dist.get("integrity") {
+            None if allow_missing_integrity => None,
+            None => {
+                return Err(RegistryClientError::Metadata(MetadataError::MissingField(
+                    "dist.integrity".into(),
+                )));
+            }
+            Some(value) => {
+                let value = value.as_str().ok_or_else(|| {
                     RegistryClientError::Metadata(MetadataError::InvalidIntegrity(key.clone()))
-                })
-            })
-            .transpose()?
-            .map(|x| {
-                x.parse().map_err(|_| {
-                    RegistryClientError::Metadata(MetadataError::InvalidIntegrity(x.into()))
-                })
-            })
-            .transpose()?;
+                })?;
+                Some(value.parse().map_err(|_| {
+                    RegistryClientError::Metadata(MetadataError::InvalidIntegrity(value.into()))
+                })?)
+            }
+        };
         let artifact_url = Url::parse(artifact_url)
             .map_err(|_| {
                 RegistryClientError::Metadata(MetadataError::InvalidArtifact(artifact_url.into()))
@@ -775,6 +790,28 @@ mod tests {
             Some(&"^2.0.0".to_owned())
         );
     }
+    #[test]
+    fn npm_missing_integrity_fails_closed() {
+        let r: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz"}}}}"#;
+        let result = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), r).fetch("foo");
+        assert!(matches!(
+            result,
+            Err(RegistryClientError::Metadata(MetadataError::MissingField(field)))
+                if field == "dist.integrity"
+        ));
+    }
+
+    #[test]
+    fn npm_missing_integrity_can_be_explicitly_allowed() {
+        let r: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz"}}}}"#;
+        let result = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), r)
+            .fetch_with_options("foo", true)
+            .unwrap();
+        assert!(result[0].integrity.is_none());
+    }
+
     #[test]
     fn jsr_without_sha512_integrity_fails_closed() {
         let r: RegistryOrigin = "https://jsr.io".parse().unwrap();
