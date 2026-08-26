@@ -579,20 +579,21 @@ fn parse_npm(
             RegistryClientError::Metadata(MetadataError::MissingField("dist".into()))
         })?;
         let artifact_url = required_str(dist, "tarball").map_err(RegistryClientError::Metadata)?;
-        let integrity = dist
+        let integrity: PackageIntegrity = dist
             .get("integrity")
-            .map(|x| {
+            .ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::UnsupportedIntegrity(key.clone()))
+            })
+            .and_then(|x| {
                 x.as_str().ok_or_else(|| {
                     RegistryClientError::Metadata(MetadataError::InvalidIntegrity(key.clone()))
                 })
             })
-            .transpose()?
-            .map(|x| {
+            .and_then(|x| {
                 x.parse().map_err(|_| {
                     RegistryClientError::Metadata(MetadataError::InvalidIntegrity(x.into()))
                 })
-            })
-            .transpose()?;
+            })?;
         let artifact_url = Url::parse(artifact_url)
             .map_err(|_| {
                 RegistryClientError::Metadata(MetadataError::InvalidArtifact(artifact_url.into()))
@@ -601,7 +602,7 @@ fn parse_npm(
         out.push(RegistryArtifact {
             identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
             artifact_url,
-            integrity,
+            integrity: Some(integrity),
             dependencies: parse_dependencies(v.get("dependencies"))?,
             registry_kind: RegistryKind::Npm,
         });
@@ -775,6 +776,19 @@ mod tests {
             Some(&"^2.0.0".to_owned())
         );
     }
+    #[test]
+    fn npm_missing_integrity_fails_closed() {
+        let r: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz"}}}}"#;
+        let result = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), r).fetch("foo");
+        assert!(matches!(
+            result,
+            Err(RegistryClientError::Metadata(
+                MetadataError::UnsupportedIntegrity(_)
+            ))
+        ));
+    }
+
     #[test]
     fn jsr_without_sha512_integrity_fails_closed() {
         let r: RegistryOrigin = "https://jsr.io".parse().unwrap();
