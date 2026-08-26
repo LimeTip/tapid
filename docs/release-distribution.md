@@ -1,6 +1,6 @@
 # Signed client release distribution
 
-Status: design contract for the next release-distribution implementation slice.
+Status: signature primitives and schema-shaped manifest signing/verification are implemented in `tapid-signatures::release`. Installer enforcement, trusted-key distribution, and end-to-end release installation remain future work.
 
 ## Scope
 
