@@ -30,10 +30,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Shell syntax
-        run: bash -n scripts/install.sh
+        run: sh -n scripts/install.sh
 
       - name: Shell help
-        run: bash scripts/install.sh --help
+        run: sh scripts/install.sh --help
 
       - name: PowerShell syntax
         shell: pwsh
@@ -53,38 +53,44 @@ jobs:
     needs: validate
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    env:
-      TAPID_WEB_SYNC_TOKEN: ${{ secrets.TAPID_WEB_SYNC_TOKEN }}
     steps:
-      - name: Skip without website sync token
-        if: env.TAPID_WEB_SYNC_TOKEN == ''
+      - name: Check for website sync token
+        id: sync-auth
+        env:
+          SYNC_TOKEN: ${{ secrets.TAPID_WEB_SYNC_TOKEN }}
         run: |
-          echo "TAPID_WEB_SYNC_TOKEN is not configured; installer validation passed, skipping website sync."
+          if [ -n "$SYNC_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "TAPID_WEB_SYNC_TOKEN is not configured; installer validation passed, skipping website sync."
+          fi
 
       - name: Check out Tapid
-        if: env.TAPID_WEB_SYNC_TOKEN != ''
+        if: steps.sync-auth.outputs.available == 'true'
         uses: actions/checkout@v4
         with:
           path: tapid
+          persist-credentials: false
 
       - name: Check out tapid-web
-        if: env.TAPID_WEB_SYNC_TOKEN != ''
+        if: steps.sync-auth.outputs.available == 'true'
         uses: actions/checkout@v4
         with:
           repository: LimeTip/tapid-web
           ref: main
-          token: ${{ env.TAPID_WEB_SYNC_TOKEN }}
+          persist-credentials: false
           path: tapid-web
 
       - name: Sync installer files
-        if: env.TAPID_WEB_SYNC_TOKEN != ''
+        if: steps.sync-auth.outputs.available == 'true'
         run: |
           cp tapid/scripts/install.sh tapid-web/public/install.sh
           cp tapid/scripts/install.ps1 tapid-web/public/install.ps1
           chmod 0644 tapid-web/public/install.sh tapid-web/public/install.ps1
 
       - name: Check for changes
-        if: env.TAPID_WEB_SYNC_TOKEN != ''
+        if: steps.sync-auth.outputs.available == 'true'
         id: changes
         working-directory: tapid-web
         run: |
@@ -106,7 +112,7 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         working-directory: tapid-web
         run: |
-          bash -n public/install.sh
+          sh -n public/install.sh
           npm ci
           npm run lint
           npm run build
@@ -118,10 +124,13 @@ jobs:
       - name: Commit and push website sync
         if: steps.changes.outputs.changed == 'true'
         working-directory: tapid-web
+        env:
+          TAPID_WEB_SYNC_TOKEN: ${{ secrets.TAPID_WEB_SYNC_TOKEN }}
         run: |
           git config user.name "tapid-installer-sync[bot]"
           git config user.email "tapid-installer-sync[bot]@users.noreply.github.com"
           git add public/install.sh public/install.ps1
           git commit -m "chore: sync installers from tapid ${GITHUB_SHA::12}"
-          git pull --rebase origin main
-          git push origin HEAD:main
+          git fetch origin main
+          git rebase origin/main
+          git -c "http.extraheader=AUTHORIZATION: bearer $TAPID_WEB_SYNC_TOKEN" push origin HEAD:main
