@@ -159,6 +159,12 @@ pub fn resolve_and_fetch(
                         .map_err(|_| format!("invalid fixture integrity {v}"))
                 })
                 .transpose()?;
+            if registry.to_string() == NPM && integrity.is_none() && !allow_missing_integrity {
+                return Err(format!(
+                    "fixture npm metadata for {}@{} is missing dist.integrity; pass --allow-unverified-registry-artifacts for an explicit compatibility exception",
+                    name, version
+                ));
+            }
             records.insert(
                 (p.registry.clone(), p.name.clone(), p.version.clone()),
                 PackageRecord {

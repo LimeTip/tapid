@@ -229,6 +229,14 @@ fn install_allows_missing_integrity_only_with_explicit_warning() {
     )
     .unwrap();
 
+    let rejected = run(
+        &dir,
+        &["install", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("missing dist.integrity"));
+    assert!(!dir.join("node_modules").exists());
+
     let output = run(
         &dir,
         &[
