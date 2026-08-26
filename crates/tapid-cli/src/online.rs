@@ -96,13 +96,15 @@ fn fixture(path: &Path) -> Result<Fixture, String> {
 fn remote_records(
     registry: &RegistryOrigin,
     name: &PackageName,
+    allow_missing_integrity: bool,
 ) -> Result<Vec<PackageRecord>, String> {
     let transport =
         HttpsTransport::standard().map_err(|e| format!("cannot create registry transport: {e}"))?;
     let artifacts: Vec<RegistryArtifact> = if registry.to_string() == JSR {
         JsrRegistry::new(transport, registry.clone()).fetch(&name.to_string())
     } else if registry.to_string() == NPM {
-        NpmRegistry::new(transport, registry.clone()).fetch(&name.to_string())
+        NpmRegistry::new(transport, registry.clone())
+            .fetch_with_options(&name.to_string(), allow_missing_integrity)
     } else {
         return Err(format!("unsupported registry origin: {registry}"));
     }
@@ -130,6 +132,7 @@ pub fn resolve_and_fetch(
     manifest: &PackageManifest,
     store: &Store,
     fixture_path: Option<&Path>,
+    allow_missing_integrity: bool,
 ) -> Result<(Lockfile, LayoutInput, BTreeMap<String, PathBuf>), String> {
     let fixture = fixture_path.map(fixture).transpose()?;
     fs::create_dir_all(store.root()).map_err(|e| format!("cannot create store: {e}"))?;
@@ -156,6 +159,12 @@ pub fn resolve_and_fetch(
                         .map_err(|_| format!("invalid fixture integrity {v}"))
                 })
                 .transpose()?;
+            if registry.to_string() == NPM && integrity.is_none() && !allow_missing_integrity {
+                return Err(format!(
+                    "fixture npm metadata for {}@{} is missing dist.integrity; pass --allow-unverified-registry-artifacts for an explicit compatibility exception",
+                    name, version
+                ));
+            }
             records.insert(
                 (p.registry.clone(), p.name.clone(), p.version.clone()),
                 PackageRecord {
@@ -200,7 +209,7 @@ pub fn resolve_and_fetch(
                 .map(|p| records[&(p.registry.clone(), p.name.clone(), p.version.clone())].clone())
                 .collect()
         } else {
-            remote_records(&dep.registry, &dep.name)?
+            remote_records(&dep.registry, &dep.name, allow_missing_integrity)?
         };
         if packages.is_empty() {
             return Err(format!(
@@ -265,7 +274,7 @@ pub fn resolve_and_fetch(
         let record = if let Some(p) = records.get(&key3) {
             p.clone()
         } else {
-            let fetched = remote_records(&id.registry, &id.name)?;
+            let fetched = remote_records(&id.registry, &id.name, allow_missing_integrity)?;
             let p = fetched
                 .into_iter()
                 .find(|p| p.version == id.version)
