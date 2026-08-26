@@ -429,6 +429,9 @@ fn parse_platform(value: &str) -> Result<PlatformContext, String> {
         return PlatformContext::new(None, None, None).map_err(|e| e.to_string());
     }
     let parts: Vec<_> = value.split('-').collect();
+    if parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err(format!("invalid platform context: {value}"));
+    }
     PlatformContext::new(
         parts.first().copied(),
         parts.get(1).copied(),
