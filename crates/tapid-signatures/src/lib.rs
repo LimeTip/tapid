@@ -94,6 +94,7 @@ pub enum VerificationError {
     KeyIdMismatch,
     InvalidKeyId(String),
     ManifestDigestMismatch,
+    InvalidSignature,
     PublicKeyRequired,
     InvalidEnvelope(String),
 }
@@ -116,6 +117,7 @@ impl fmt::Display for VerificationError {
             Self::ManifestDigestMismatch => {
                 write!(f, "release manifest digest does not match signature")
             }
+            Self::InvalidSignature => write!(f, "signature verification failed"),
             Self::PublicKeyRequired => {
                 write!(f, "a trusted public key is required for verification")
             }
@@ -238,7 +240,7 @@ impl TrustEnvelope {
                     .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?,
                 &crypto_signature,
             )
-            .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))
+            .map_err(|_| VerificationError::InvalidSignature)
     }
 
     pub fn envelope_digest(&self) -> Result<String, CanonicalError> {

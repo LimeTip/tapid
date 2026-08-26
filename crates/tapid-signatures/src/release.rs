@@ -16,6 +16,25 @@ pub fn signing_bytes(manifest: &Value) -> Result<Vec<u8>, CanonicalError> {
     crate::canonical_json(&Value::Object(unsigned)).map(|s| s.into_bytes())
 }
 
+/// Returns the canonical bytes signed for a release manifest.
+fn signature_payload(
+    manifest: &Value,
+    algorithm: &str,
+    key_id: &str,
+    signed_digest: &str,
+) -> Result<Vec<u8>, CanonicalError> {
+    let mut unsigned = manifest
+        .as_object()
+        .cloned()
+        .ok_or_else(|| CanonicalError("release manifest must be a JSON object".into()))?;
+    unsigned.remove("signature");
+    let mut context = Map::new();
+    context.insert("algorithm".into(), Value::String(algorithm.into()));
+    context.insert("key_id".into(), Value::String(key_id.into()));
+    context.insert("signed_digest".into(), Value::String(signed_digest.into()));
+    unsigned.insert("signature_context".into(), Value::Object(context));
+    crate::canonical_json(&Value::Object(unsigned)).map(|s| s.into_bytes())
+}
 /// Signs a schema-shaped release manifest using the v1 signature fields.
 pub fn sign(
     mut manifest: Value,
@@ -24,7 +43,9 @@ pub fn sign(
 ) -> Result<Value, CanonicalError> {
     let key_id = key_id.into();
     validate_key_id(&key_id).map_err(|e| CanonicalError(e.to_string()))?;
-    let bytes = signing_bytes(&manifest)?;
+    let unsigned_bytes = signing_bytes(&manifest)?;
+    let signed_digest = digest(&unsigned_bytes)?;
+    let bytes = signature_payload(&manifest, SIGNATURE_ALGORITHM, &key_id, &signed_digest)?;
     let signature = SigningKey::from_bytes(secret_key).sign(&bytes);
     let mut detached = Map::new();
     detached.insert(
@@ -32,7 +53,7 @@ pub fn sign(
         Value::String(SIGNATURE_ALGORITHM.into()),
     );
     detached.insert("key_id".into(), Value::String(key_id));
-    detached.insert("signed_digest".into(), Value::String(digest(&bytes)?));
+    detached.insert("signed_digest".into(), Value::String(signed_digest));
     detached.insert(
         "value".into(),
         Value::String(BASE64.encode(signature.to_bytes())),
@@ -87,13 +108,15 @@ pub fn verify(manifest: &Value, keyring: &KeyRing) -> Result<(), VerificationErr
             key.algorithm.clone(),
         ));
     }
-    let bytes =
+    let unsigned_bytes =
         signing_bytes(manifest).map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?;
-    if digest(&bytes).map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?
+    if digest(&unsigned_bytes).map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?
         != signed_digest
     {
         return Err(VerificationError::ManifestDigestMismatch);
     }
+    let bytes = signature_payload(manifest, &algorithm, &key_id, &signed_digest)
+        .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?;
     let signature_bytes = BASE64
         .decode(value)
         .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?;
@@ -107,7 +130,7 @@ pub fn verify(manifest: &Value, keyring: &KeyRing) -> Result<(), VerificationErr
     VerifyingKey::from_bytes(&key.public_key)
         .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))?
         .verify(&bytes, &signature)
-        .map_err(|e| VerificationError::InvalidEnvelope(e.to_string()))
+        .map_err(|_| VerificationError::InvalidSignature)
 }
 
 fn string_field(object: &Map<String, Value>, field: &str) -> Result<String, VerificationError> {
@@ -185,6 +208,25 @@ mod tests {
         assert_eq!(
             verify(&relabeled, &keyring(&secret)),
             Err(VerificationError::UnknownKeyId("release-key-2".into()))
+        );
+    }
+
+    #[test]
+    fn rejects_trusted_alias_relabeling() {
+        let secret = [7u8; 32];
+        let mut signed = sign(manifest(), "release-key-1", &secret).unwrap();
+        let public_key = SigningKey::from_bytes(&secret).verifying_key().to_bytes();
+        let mut ring = keyring(&secret);
+        ring.insert(TrustedKey {
+            key_id: "release-key-2".into(),
+            algorithm: SIGNATURE_ALGORITHM.into(),
+            public_key,
+        })
+        .unwrap();
+        signed["signature"]["key_id"] = json!("release-key-2");
+        assert_eq!(
+            verify(&signed, &ring),
+            Err(VerificationError::InvalidSignature)
         );
     }
 
