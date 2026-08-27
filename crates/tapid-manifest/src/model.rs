@@ -82,7 +82,12 @@ impl PackageManifest {
 
     /// Add or update a regular dependency while preserving deterministic output.
     pub fn with_dependency(mut self, name: &str, requirement: &str) -> Result<Self, ManifestError> {
-        name.parse::<PackageName>()
+        let validation_name = name
+            .strip_prefix("npm:")
+            .or_else(|| name.strip_prefix("jsr:"))
+            .unwrap_or(name);
+        validation_name
+            .parse::<PackageName>()
             .map_err(ManifestError::InvalidPackageName)?;
         self.dependencies
             .insert(name.to_owned(), requirement.trim().to_owned());

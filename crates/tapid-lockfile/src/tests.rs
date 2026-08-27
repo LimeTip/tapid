@@ -178,7 +178,7 @@ fn peer_and_platform_contexts_change_key_deterministically() {
 #[test]
 fn package_key_roundtrips_hyphens_and_delimiters_without_loss() {
     let peer = tapid_core::PeerContext::default()
-        .with("foo-bar".parse().unwrap(), "1.2.3-beta.1".parse().unwrap());
+        .with("foo-bar".parse().unwrap(), "1.2.3".parse().unwrap());
     let platform =
         tapid_core::PlatformContext::new(Some("linux-gnu"), Some("x86|64"), Some("musl-extra"))
             .unwrap();

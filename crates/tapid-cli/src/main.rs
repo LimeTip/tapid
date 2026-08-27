@@ -120,6 +120,38 @@ fn parse_package_spec(spec: &str) -> (&str, &str) {
     }
 }
 
+struct ManifestTransaction {
+    path: PathBuf,
+    original: Vec<u8>,
+    committed: bool,
+}
+
+impl ManifestTransaction {
+    fn begin(path: &Path) -> Result<Self, String> {
+        Ok(Self {
+            path: path.to_owned(),
+            original: fs::read(path).map_err(|error| error.to_string())?,
+            committed: false,
+        })
+    }
+
+    fn write(&self, contents: &str) -> Result<(), String> {
+        fs::write(&self.path, contents).map_err(|error| error.to_string())
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ManifestTransaction {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::write(&self.path, &self.original);
+        }
+    }
+}
+
 fn install(
     project_dir: &Path,
     package: Option<&str>,
@@ -168,6 +200,8 @@ fn install(
             return ExitCode::from(1);
         }
     };
+    let manifest_path = project_dir.join("package.json");
+    let mut manifest_transaction = None;
     let manifest = if let Some(spec) = package {
         let (name, requirement) = parse_package_spec(spec);
         let updated = match manifest.with_dependency(name, requirement) {
@@ -177,10 +211,18 @@ fn install(
                 return ExitCode::from(1);
             }
         };
-        if let Err(error) = fs::write(project_dir.join("package.json"), updated.to_json()) {
+        let transaction = match ManifestTransaction::begin(&manifest_path) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: cannot prepare package.json update: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(error) = transaction.write(&updated.to_json()) {
             eprintln!("error: cannot update package.json: {error}");
             return ExitCode::from(1);
         }
+        manifest_transaction = Some(transaction);
         updated
     } else {
         manifest
@@ -228,6 +270,9 @@ fn install(
             return result;
         }
         let _ = discard_lockfile_backup(lock_backup.as_deref());
+        if let Some(transaction) = manifest_transaction.take() {
+            transaction.commit();
+        }
         return result;
     }
     if !lock_path.is_file() {
