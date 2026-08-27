@@ -944,22 +944,41 @@ fn materialize_with_lock(
     let root = match ManagedRoot::new(project_dir) {
         Ok(value) => value,
         Err(error) => {
+            if replayed {
+                cleanup_replay_snapshots(&trees);
+            }
             eprintln!("error: {error}");
             return ExitCode::from(1);
         }
     };
     let platform = current_platform();
-    let plan = match plan_layout(root, input, platform) {
+    let plan = match plan_layout(root, input.clone(), platform) {
         Ok(value) => value,
         Err(error) => {
+            if replayed {
+                cleanup_replay_snapshots(&trees);
+            }
             eprintln!("error: {error}");
             return ExitCode::from(1);
         }
     };
-    let stage = project_dir.join(format!(".tapid-install-stage-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&stage);
-    let result = materialize_stage(&stage, &plan, &trees)
+    let stage = project_dir.join(format!(
+        ".tapid-install-stage-{}-{}",
+        std::process::id(),
+        unique_nonce()
+    ));
+    if let Err(error) = fs::create_dir(&stage) {
+        if replayed {
+            cleanup_replay_snapshots(&trees);
+        }
+        eprintln!("error: cannot create install staging directory: {error}");
+        return ExitCode::from(1);
+    }
+    let result = materialize_stage(&stage, &plan, &input, &trees)
         .and_then(|_| activate_node_modules(project_dir, &stage));
+    if replayed {
+        cleanup_replay_snapshots(&trees);
+    }
     if let Err(error) = result {
         let _ = fs::remove_dir_all(&stage);
         eprintln!("error: {error}");
@@ -973,6 +992,27 @@ fn materialize_with_lock(
     ExitCode::SUCCESS
 }
 
+fn cleanup_replay_snapshots(trees: &BTreeMap<String, PathBuf>) {
+    for tree in trees.values() {
+        let _ = fs::remove_dir_all(tree);
+    }
+}
+
+struct ReplaySnapshotGuard {
+    paths: Vec<PathBuf>,
+    keep: bool,
+}
+
+impl Drop for ReplaySnapshotGuard {
+    fn drop(&mut self) {
+        if !self.keep {
+            for path in &self.paths {
+                let _ = fs::remove_dir_all(path);
+            }
+        }
+    }
+}
+
 fn replay_input(
     lock: &Lockfile,
     manifest: &PackageManifest,
@@ -981,6 +1021,10 @@ fn replay_input(
     let mut instances = Vec::new();
     let mut keys = BTreeMap::new();
     let mut trees = BTreeMap::new();
+    let mut snapshots = ReplaySnapshotGuard {
+        paths: Vec::new(),
+        keep: false,
+    };
     let typed_packages = lock.packages_typed().map_err(|e| e.to_string())?;
     for (key, package) in &typed_packages {
         let encoded = key.to_string();
@@ -989,8 +1033,9 @@ fn replay_input(
             .parse()
             .map_err(|e: tapid_core::DomainError| e.to_string())?;
         let tree = store
-            .verified_tree_path(&digest)
+            .verified_tree_snapshot(&digest)
             .map_err(|e| format!("package {encoded} tree unavailable: {e}"))?;
+        snapshots.paths.push(tree.clone());
         let peer = context::parse_peer(&key.peer_context)?;
         let platform = context::parse_platform(&key.platform_context)?;
         let id = PackageInstanceId::new(key.registry.clone(), key.name.clone(), key.version);
@@ -1027,6 +1072,7 @@ fn replay_input(
             });
         }
     }
+    snapshots.keep = true;
     Ok((
         LayoutInput {
             instances,
@@ -1079,6 +1125,7 @@ fn current_platform() -> Platform {
 fn materialize_stage(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
+    input: &LayoutInput,
     trees: &BTreeMap<String, PathBuf>,
 ) -> Result<(), String> {
     fs::create_dir_all(stage.join("node_modules")).map_err(|e| e.to_string())?;
@@ -1088,6 +1135,18 @@ fn materialize_stage(
             .values()
             .find(|path| **path == entry.source)
             .ok_or_else(|| "tree replay mapping lost".to_owned())?;
+        let expected = input
+            .instances
+            .iter()
+            .find(|instance| instance.tree.root == *tree)
+            .map(|instance| instance.tree.digest.as_str())
+            .ok_or_else(|| "tree replay digest mapping lost".to_owned())?;
+        let actual = tapid_archive::canonical_tree_digest(tree).map_err(|e| e.to_string())?;
+        if actual != expected {
+            return Err(format!(
+                "tree changed during replay: expected {expected}, got {actual}"
+            ));
+        }
         let target = stage.join(
             entry
                 .target
@@ -1095,6 +1154,12 @@ fn materialize_stage(
                 .map_err(|_| "invalid stage target")?,
         );
         copy_tree(tree, &target)?;
+        let after = tapid_archive::canonical_tree_digest(tree).map_err(|e| e.to_string())?;
+        if after != expected {
+            return Err(format!(
+                "tree changed while replaying: expected {expected}, got {after}"
+            ));
+        }
         by_source.insert(entry.target.clone(), target);
     }
     for step in &plan.activation.steps {
@@ -1196,6 +1261,10 @@ fn relative_path(from: &Path, to: &Path) -> PathBuf {
 }
 
 fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
+    let source_meta = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
+    if !source_meta.is_dir() {
+        return Err("store tree root is not a directory".into());
+    }
     let package = source.join("package");
     let root = match fs::symlink_metadata(&package) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -1213,7 +1282,10 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
 }
 
 fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
-    fs::create_dir_all(target).map_err(|e| e.to_string())?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir(target).map_err(|e| e.to_string())?;
     for item in fs::read_dir(source).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
         let src = item.path();
@@ -1227,8 +1299,16 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
         }
         if meta.is_dir() {
             copy_tree_contents(&src, &dst)?;
+            fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else if meta.is_file() {
-            fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+            let mut input = fs::File::open(&src).map_err(|e| e.to_string())?;
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&dst)
+                .map_err(|e| e.to_string())?;
+            io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+            fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else {
             return Err(format!("unsupported store tree entry: {}", src.display()));
         }
@@ -1264,8 +1344,11 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
             "refusing to replace node_modules with an invalid .tapid-managed marker".into(),
         );
     }
-    let backup = project.join(format!(".tapid-node-modules-old-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&backup);
+    let backup = project.join(format!(
+        ".tapid-node-modules-old-{}-{}",
+        std::process::id(),
+        unique_nonce()
+    ));
     if destination.exists() {
         fs::rename(&destination, &backup)
             .map_err(|_| "cannot stage existing node_modules for replacement".to_owned())?;
@@ -1282,15 +1365,45 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
         }
         return Err(format!("cannot activate node_modules: {error}"));
     }
-    if let Err(error) = fs::write(&marker, MANAGED_MARKER) {
+    let marker_temp = project.join(format!(
+        ".tapid-managed-{}-{}.tmp",
+        std::process::id(),
+        unique_nonce()
+    ));
+    let marker_backup = project.join(format!(
+        ".tapid-managed-old-{}-{}",
+        std::process::id(),
+        unique_nonce()
+    ));
+    let marker_backed_up = cfg!(windows) && marker_exists;
+    if marker_backed_up && let Err(error) = fs::rename(&marker, &marker_backup) {
+        let _ = fs::rename(&backup, &destination);
+        return Err(format!("cannot stage .tapid-managed marker: {error}"));
+    }
+    let marker_result = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker_temp)
+        .and_then(|mut file| {
+            io::Write::write_all(&mut file, MANAGED_MARKER)?;
+            file.sync_all()?;
+            fs::rename(&marker_temp, &marker)
+        });
+    if let Err(error) = marker_result {
+        let _ = fs::remove_file(&marker_temp);
         let _ = fs::remove_dir_all(&destination);
         if backup.exists() {
             let _ = fs::rename(&backup, &destination);
         }
-        if !marker_exists {
+        if marker_backed_up {
+            let _ = fs::rename(&marker_backup, &marker);
+        } else if !marker_exists {
             let _ = fs::remove_file(&marker);
         }
         return Err(format!("cannot write .tapid-managed: {error}"));
+    }
+    if marker_backed_up {
+        let _ = fs::remove_file(&marker_backup);
     }
     let _ = fs::remove_dir_all(&backup);
     let _ = fs::remove_dir_all(stage);
@@ -1462,5 +1575,64 @@ mod replay_tests {
 
         assert!(replay_root_matches(&roots, &jsr));
         assert!(!replay_root_matches(&roots, &npm));
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    #[test]
+    fn copy_tree_handles_nested_directories_and_preserves_executable_mode() {
+        use super::copy_tree;
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-copy-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested").join("data"), b"nested").unwrap();
+        let bin = source.join("bin");
+        fs::write(&bin, b"#!/bin/sh\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(source.join("nested"), fs::Permissions::from_mode(0o750)).unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        copy_tree(&source, &target).unwrap();
+        assert_eq!(
+            fs::read(target.join("nested").join("data")).unwrap(),
+            b"nested"
+        );
+        assert!(target.join("bin").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(target.join("nested"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o750
+            );
+            assert_eq!(
+                fs::metadata(target.join("bin"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
+        let _ = fs::remove_dir_all(root);
     }
 }
