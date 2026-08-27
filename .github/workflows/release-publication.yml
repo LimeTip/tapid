@@ -79,6 +79,11 @@ jobs:
           BINARY: ${{ matrix.binary }}
         run: |
           set -euo pipefail
+          actual_version="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "tapid"))')"
+          test "$actual_version" = "$VERSION" || {
+            echo "release version $VERSION does not match Cargo package version $actual_version" >&2
+            exit 1
+          }
           cargo build --release --locked --bin tapid
           staging="$(mktemp -d)"
           trap 'rm -rf "$staging"' EXIT
