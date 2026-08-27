@@ -115,6 +115,19 @@ fn replay_validation_requires_current_root_manifest_digest() {
 }
 
 #[test]
+fn replay_accepts_equivalent_uppercase_root_manifest_digest() {
+    let lowercase = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let uppercase = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let mut document: serde_json::Value =
+        serde_json::from_str(&Lockfile::new(lowercase).unwrap().to_json().unwrap()).unwrap();
+    document["rootManifestDigest"] = serde_json::Value::String(uppercase.to_owned());
+    let lock = Lockfile::from_json(&serde_json::to_string(&document).unwrap()).unwrap();
+    assert_eq!(lock.root_manifest_digest(), lowercase);
+    assert!(lock.validate_replay(lowercase).is_ok());
+    assert!(lock.validate_replay(uppercase).is_ok());
+}
+
+#[test]
 fn rejects_invalid_artifact_urls_at_construction_time() {
     let mut package = package_fixture();
     assert!(package.set_artifact_url("file:///tmp/package.tgz").is_err());
@@ -218,6 +231,18 @@ fn rejects_ambiguous_or_noncanonical_contexts() {
         assert!(
             encoded.parse::<crate::LockfilePackageKey>().is_err(),
             "accepted ambiguous key: {encoded}"
+        );
+    }
+    for platform in [
+        "linux",
+        "linux-x86",
+        "linux x86_64-gnu",
+        "linux-x86_64-gnu\n",
+    ] {
+        let encoded = format!("https://registry.example|pkg@1.0.0|peer=-|platform={platform}");
+        assert!(
+            encoded.parse::<crate::LockfilePackageKey>().is_err(),
+            "accepted non-canonical platform key: {encoded:?}"
         );
     }
 }

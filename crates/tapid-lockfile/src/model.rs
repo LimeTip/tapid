@@ -135,7 +135,14 @@ fn validate_platform_context(value: &str, original: &str) -> Result<(), Lockfile
         return Err(LockfileError::InvalidPackageKey(original.into()));
     }
     let parts: Vec<_> = value.split('-').collect();
-    if parts.is_empty() || parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
+    if parts.len() != 3
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || part
+                    .chars()
+                    .any(|character| character.is_whitespace() || character.is_control())
+        })
+    {
         return Err(LockfileError::InvalidPackageKey(original.into()));
     }
     Ok(())
@@ -153,12 +160,13 @@ pub struct Lockfile {
 
 impl Lockfile {
     pub fn new(root_manifest_digest: &str) -> Result<Self, LockfileError> {
-        root_manifest_digest
+        let root_manifest_digest = root_manifest_digest
             .parse::<ArtifactDigest>()
-            .map_err(LockfileError::Domain)?;
+            .map_err(LockfileError::Domain)?
+            .to_string();
         Ok(Self {
             lockfile_version: LOCKFILE_VERSION,
-            root_manifest_digest: root_manifest_digest.to_owned(),
+            root_manifest_digest,
             resolver_version: "0".to_owned(),
             linker_version: "0".to_owned(),
             packages: BTreeMap::new(),
@@ -214,9 +222,16 @@ impl Lockfile {
 
     /// Checks that this lockfile belongs to the current root manifest.
     pub fn validate_replay(&self, current_root_manifest_digest: &str) -> Result<(), LockfileError> {
-        if self.root_manifest_digest != current_root_manifest_digest {
+        let expected = self
+            .root_manifest_digest
+            .parse::<ArtifactDigest>()
+            .map_err(LockfileError::Domain)?;
+        let actual = current_root_manifest_digest
+            .parse::<ArtifactDigest>()
+            .map_err(LockfileError::Domain)?;
+        if expected != actual {
             return Err(LockfileError::RootManifestDigestMismatch {
-                expected: self.root_manifest_digest.clone(),
+                expected: expected.to_string(),
                 actual: current_root_manifest_digest.to_owned(),
             });
         }
@@ -234,10 +249,15 @@ impl Lockfile {
         if lockfile.lockfile_version != LOCKFILE_VERSION {
             return Err(LockfileError::UnsupportedVersion(lockfile.lockfile_version));
         }
-        lockfile
+        let root_manifest_digest = lockfile
             .root_manifest_digest
             .parse::<ArtifactDigest>()
-            .map_err(LockfileError::Domain)?;
+            .map_err(LockfileError::Domain)?
+            .to_string();
+        let lockfile = Self {
+            root_manifest_digest,
+            ..lockfile
+        };
         for (key, package) in &lockfile.packages {
             key.parse::<LockfilePackageKey>()?;
             if key != &package.key() {
