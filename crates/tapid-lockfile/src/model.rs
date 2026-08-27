@@ -68,6 +68,9 @@ impl std::str::FromStr for LockfilePackageKey {
             .ok_or_else(|| LockfileError::InvalidPackageKey(value.into()))?;
         let peer_context = &p[2][5..];
         let platform_context = &p[3][9..];
+        if peer_context.is_empty() || platform_context.is_empty() {
+            return Err(LockfileError::InvalidPackageKey(value.into()));
+        }
         validate_peer_context(peer_context, value)?;
         validate_platform_context(platform_context, value)?;
         let key = Self {
@@ -97,11 +100,7 @@ impl std::str::FromStr for LockfilePackageKey {
 
 fn validate_peer_context(value: &str, original: &str) -> Result<(), LockfileError> {
     if value.is_empty() || value == "-" {
-        return if value == "-" {
-            Ok(())
-        } else {
-            Err(LockfileError::InvalidPackageKey(original.into()))
-        };
+        return Ok(());
     }
     let mut names = BTreeSet::new();
     let mut previous_name = None;
@@ -132,15 +131,15 @@ fn validate_platform_context(value: &str, original: &str) -> Result<(), Lockfile
         return Ok(());
     }
     if value.is_empty() {
-        return Err(LockfileError::InvalidPackageKey(original.into()));
+        return Ok(());
     }
     let parts: Vec<_> = value.split('-').collect();
     if parts.len() != 3
+        || parts.iter().all(|part| part.is_empty())
         || parts.iter().any(|part| {
-            part.is_empty()
-                || part
-                    .chars()
-                    .any(|character| character.is_whitespace() || character.is_control())
+            part.chars().any(|character| {
+                character.is_whitespace() || character.is_control() || character == '|'
+            })
         })
     {
         return Err(LockfileError::InvalidPackageKey(original.into()));
@@ -176,6 +175,7 @@ impl Lockfile {
     pub fn insert_package(&mut self, package: LockedPackage) -> Result<(), LockfileError> {
         package.validate()?;
         let key = package.key();
+        key.parse::<LockfilePackageKey>()?;
         if self.packages.contains_key(&key) {
             return Err(LockfileError::DuplicatePackage(key));
         }
@@ -260,10 +260,10 @@ impl Lockfile {
         };
         for (key, package) in &lockfile.packages {
             key.parse::<LockfilePackageKey>()?;
+            package.validate()?;
             if key != &package.key() {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));
             }
-            package.validate()?;
             for (name, dependency) in &package.dependencies {
                 let target = dependency.parse::<LockfilePackageKey>()?;
                 if dependency == key {
@@ -415,6 +415,11 @@ impl LockedPackage {
         self.tree_digest
             .parse::<ArtifactDigest>()
             .map_err(LockfileError::Domain)?;
+        if self.peer_context == "-" || self.platform_context == "-" {
+            return Err(LockfileError::InvalidPackageKey(self.name.clone()));
+        }
+        validate_peer_context(&self.peer_context, &self.name)?;
+        validate_platform_context(&self.platform_context, &self.name)?;
         validation::validate_url(&self.registry)?;
         if let Some(url) = &self.artifact_url {
             validation::validate_url(url)?;

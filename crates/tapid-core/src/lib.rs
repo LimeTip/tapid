@@ -251,20 +251,13 @@ impl PlatformContext {
             cpu: cpu.map(str::to_owned),
             libc: libc.map(str::to_owned),
         };
-        let present = [
-            context.os.is_some(),
-            context.cpu.is_some(),
-            context.libc.is_some(),
-        ];
-        if present.iter().any(|value| *value) && present.iter().any(|value| !value) {
-            return Err(DomainError::InvalidPlatformContext);
-        }
         if [&context.os, &context.cpu, &context.libc]
             .into_iter()
             .flatten()
             .any(|v| {
                 v.is_empty()
                     || v.chars().any(char::is_whitespace)
+                    || v.chars().any(char::is_control)
                     || v == "-"
                     || v.contains(['-', '|'])
             })
@@ -277,14 +270,17 @@ impl PlatformContext {
 
 impl fmt::Display for PlatformContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.os.is_none() && self.cpu.is_none() && self.libc.is_none() {
+            return Ok(());
+        }
         let values = [&self.os, &self.cpu, &self.libc];
-        let mut first = true;
-        for value in values.into_iter().flatten() {
-            if !first {
+        for (index, value) in values.into_iter().enumerate() {
+            if index > 0 {
                 f.write_str("-")?;
             }
-            first = false;
-            f.write_str(value)?;
+            if let Some(value) = value {
+                f.write_str(value)?;
+            }
         }
         Ok(())
     }
@@ -411,7 +407,19 @@ mod tests {
         assert!(PlatformContext::new(Some("linux-x"), None, None).is_err());
         assert!(PlatformContext::new(Some("-"), None, None).is_err());
         assert!(PlatformContext::new(Some("linux|custom"), None, None).is_err());
-        assert!(PlatformContext::new(None, Some("x86_64"), None).is_err());
-        assert!(PlatformContext::new(Some("linux"), None, Some("gnu")).is_err());
+        assert!(PlatformContext::new(Some("linux\u{0000}"), None, None).is_err());
+        assert!(PlatformContext::new(Some("linux\u{0007}"), None, None).is_err());
+        assert_eq!(
+            PlatformContext::new(None, Some("x86_64"), None)
+                .unwrap()
+                .to_string(),
+            "-x86_64-"
+        );
+        assert_eq!(
+            PlatformContext::new(Some("linux"), None, Some("gnu"))
+                .unwrap()
+                .to_string(),
+            "linux--gnu"
+        );
     }
 }

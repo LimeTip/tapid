@@ -203,8 +203,15 @@ fn package_key_typed_round_trip_preserves_canonical_identity() {
         &tapid_core::PeerContext::default(),
         &tapid_core::PlatformContext::new(None, None, None).unwrap(),
     );
+    let os_only = LockfilePackageKey::new(
+        "https://registry.example.test".parse().unwrap(),
+        "os-pkg".parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+        &tapid_core::PeerContext::default(),
+        &tapid_core::PlatformContext::new(Some("linux"), None, None).unwrap(),
+    );
 
-    for key in [populated, empty] {
+    for key in [populated, empty, os_only] {
         let parsed = key.to_string().parse::<LockfilePackageKey>().unwrap();
         assert_eq!(parsed, key);
     }
@@ -245,6 +252,13 @@ fn rejects_ambiguous_or_noncanonical_contexts() {
             "accepted non-canonical platform key: {encoded:?}"
         );
     }
+    for platform in ["linux--", "-x86_64-", "linux--gnu"] {
+        let encoded = format!("https://registry.example|pkg@1.0.0|peer=-|platform={platform}");
+        assert!(
+            encoded.parse::<crate::LockfilePackageKey>().is_ok(),
+            "rejected lossless partial platform key: {encoded:?}"
+        );
+    }
 }
 
 #[test]
@@ -259,9 +273,9 @@ fn rejects_malformed_top_level_package_keys_during_json_validation() {
         ),
         (
             "platformContext",
-            "linux-x86_64-gnu-extra",
+            "linux-x86_64-gnu|attacker",
             "|platform=-",
-            "|platform=linux-x86_64-gnu-extra",
+            "|platform=linux-x86_64-gnu|attacker",
         ),
     ] {
         let mut lockfile = Lockfile::new(digest).unwrap();
@@ -279,6 +293,34 @@ fn rejects_malformed_top_level_package_keys_during_json_validation() {
         let malformed_key = key.replace(marker, replacement);
         packages.insert(malformed_key, package);
         assert!(Lockfile::from_json(&serde_json::to_string(&document).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn rejects_malformed_package_identity_without_panicking() {
+    for (field, value) in [
+        ("registry", "not-https"),
+        ("name", "../escape"),
+        ("version", "not-semver"),
+    ] {
+        let mut lockfile = Lockfile::new(
+            "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        lockfile.insert_package(package_fixture()).unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_str(&lockfile.to_json().unwrap()).unwrap();
+        let package = document["packages"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        package[field] = serde_json::Value::String(value.to_owned());
+        let input = serde_json::to_string(&document).unwrap();
+        let result = std::panic::catch_unwind(|| Lockfile::from_json(&input));
+        assert!(result.is_ok(), "malformed {field} caused a panic");
+        assert!(result.unwrap().is_err(), "malformed {field} was accepted");
     }
 }
 

@@ -311,6 +311,12 @@ fn install_replays_valid_lockfile_without_running_scripts() {
     fs::write(dir.join("package.json"), raw_manifest).unwrap();
     let lock = lock_for_manifest(raw_manifest);
     fs::write(dir.join("tapid.lock"), lock.to_json().unwrap()).unwrap();
+    let verified = run(&dir, &["lock", "verify"]);
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
     let output = run(&dir, &["install", "--offline", "--frozen"]);
     assert!(
         output.status.success(),
