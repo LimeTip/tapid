@@ -30,13 +30,11 @@ Options:
 
 Environment:
   TAPID_REPO, TAPID_INSTALL_DIR
-  TAPID_RELEASE_BASE_URL, TAPID_RELEASE_DISCOVERY_URL, TAPID_RELEASE_MANIFEST_URL
+  TAPID_RELEASE_BASE_URL, TAPID_RELEASE_DISCOVERY_URL
 
-Stable releases are described by a provider-neutral, signed manifest. The
-manifest contains schema_version, version, target, artifact_url,
-artifact_size, and artifact_sha256. Its detached Ed25519 signature is fetched
-from manifest.json.sig (the detached manifest.sig). A checksum file alone is
-never trusted.
+Release assets are expected to use this contract:
+  tapid-0.1.0-TARGET.tar.gz
+  tapid-0.1.0-checksums.txt
 Release tags use the v0.1.0 form; --version accepts either v0.1.0 or 0.1.0.
 USAGE
 }
@@ -183,29 +181,28 @@ fi
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
-command -v openssl >/dev/null 2>&1 || fail "fail closed: an OpenSSL Ed25519 verifier is required"
-command -v python3 >/dev/null 2>&1 || fail "fail closed: python3 is required to validate the signed manifest"
 
-manifest_url="${TAPID_RELEASE_MANIFEST_URL:-}"
-manifest_url_fallback=""
-if [ -z "$manifest_url" ] && [ "$VERSION" = latest ]; then
-  manifest_url="$RELEASE_DISCOVERY_URL/download/tapid-manifest.json"
-  manifest_url_fallback="$RELEASE_BASE_URL/latest/tapid-manifest.json"
-fi
+case "$VERSION" in
+  latest)
+    resolved_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$RELEASE_DISCOVERY_URL" 2>/dev/null)" || \
+      fail "could not contact the stable release discovery endpoint"
+    case "$resolved_url" in
+      */releases/tag/*) VERSION="${resolved_url##*/tag/}" ;;
+      *) fail "stable release discovery endpoint did not resolve a release tag; use --source-ref REF for development installation" ;;
+    esac
+    ;;
+esac
 
-if [ "$VERSION" != latest ]; then
-  case "$VERSION" in
-    *[![:print:]]*) fail "version must be a stable release such as v0.1.0" ;;
-  esac
-  printf '%s' "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$' || \
-    fail "version must be a stable release such as v0.1.0"
+case "$VERSION" in
+  ''|*[!0-9.v]*) fail "version must be a stable release such as v0.1.0" ;;
+esac
+if ! printf '%s' "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+  fail "version must be a stable release such as v0.1.0"
 fi
-if [ "$VERSION" != latest ]; then
-  case "$VERSION" in
-    v*) ;;
-    *) VERSION="v$VERSION" ;;
-  esac
-fi
+case "$VERSION" in
+  v*) ;;
+  *) VERSION="v$VERSION" ;;
+esac
 
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64|Darwin:aarch64) target="aarch64-apple-darwin" ;;
@@ -216,66 +213,36 @@ case "$(uname -s):$(uname -m)" in
 esac
 
 version_without_v="${VERSION#v}"
-if [ -z "$manifest_url" ]; then
-  manifest_url="$RELEASE_BASE_URL/$VERSION/tapid-manifest.json"
-  manifest_url_fallback="$RELEASE_BASE_URL/$VERSION/manifest.json"
-fi
+archive="tapid-${version_without_v}-${target}.tar.gz"
+checksums="tapid-${version_without_v}-checksums.txt"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/tapid-install.XXXXXX")"
 cleanup() { rm -rf "$tmp_dir"; [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"; }
 trap cleanup 0 1 2 15
 
-download_manifest() {
-  curl -fsSL "$1" -o "$tmp_dir/manifest.json" 2>/dev/null && \
-    curl -fsSL "$1.sig" -o "$tmp_dir/manifest.json.sig" 2>/dev/null
-}
-if ! download_manifest "$manifest_url"; then
-  [ -n "$manifest_url_fallback" ] || fail "could not fetch the stable signed manifest"
-  manifest_url="$manifest_url_fallback"
-  download_manifest "$manifest_url" || fail "could not fetch the stable signed manifest"
-fi
-
-# CONFIGURATION: this is the release-signing public key, never a private key.
-public_key_file="$tmp_dir/release-signing-key.pem"
-if [ -n "${TAPID_RELEASE_PUBLIC_KEY_FILE:-}" ]; then
-  [ -f "$TAPID_RELEASE_PUBLIC_KEY_FILE" ] || fail "release public key file does not exist"
-  cp "$TAPID_RELEASE_PUBLIC_KEY_FILE" "$public_key_file"
+base="$RELEASE_BASE_URL/$VERSION"
+curl -fsSL "$base/$archive" -o "$tmp_dir/$archive" 2>/dev/null || \
+  fail "stable release $VERSION has no $target binary asset in $REPO; use --source-ref REF for development installation"
+curl -fsSL "$base/$checksums" -o "$tmp_dir/$checksums" 2>/dev/null || \
+  fail "stable release $VERSION has no checksum manifest in $REPO"
+expected="$(awk -v name="$archive" '$2 == name || $2 == "*" name {print $1; exit}' "$tmp_dir/$checksums")"
+[ -n "$expected" ] || fail "checksum entry for $archive is missing"
+if command -v shasum >/dev/null 2>&1; then
+  actual="$(shasum -a 256 "$tmp_dir/$archive" | awk '{print $1}')"
+elif command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$tmp_dir/$archive" | awk '{print $1}')"
 else
-  printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'MCowBQYDK2VwAyEAKH2wLpL1ZawchfeUH3TH4xxWHHwdHel/GtPSTCNy8SY=' '-----END PUBLIC KEY-----' > "$public_key_file"
+  fail "shasum or sha256sum is required"
 fi
-openssl pkeyutl -verify -pubin -inkey "$public_key_file" -rawin \
-  -in "$tmp_dir/manifest.json" -sigfile "$tmp_dir/manifest.json.sig" >/dev/null 2>&1 || \
-  fail "Ed25519 manifest signature verification failed"
-
-manifest_values="$(python3 - "$tmp_dir/manifest.json" "$target" "$VERSION" <<'PY'
-import json, sys
-m=json.load(open(sys.argv[1], encoding='utf-8'))
-if m.get('schema_version') != 1 or m.get('target') != sys.argv[2] or (sys.argv[3] != 'latest' and m.get('version') != sys.argv[3]): raise SystemExit(1)
-u=m.get('artifact_url'); n=m.get('artifact_size'); h=m.get('artifact_sha256')
-if not isinstance(u,str) or not u.startswith(('https://','file://')) or not isinstance(n,int) or n < 0 or not isinstance(h,str) or len(h)!=64 or any(c not in '0123456789abcdefABCDEF' for c in h): raise SystemExit(1)
-if not isinstance(m.get('version'), str) or not __import__('re').fullmatch(r'v?[0-9]+\.[0-9]+\.[0-9]+', m['version']): raise SystemExit(1)
-print(m['version']); print(u); print(n); print(h.lower())
-PY
-)" || fail "signed manifest has invalid target, version, or artifact metadata"
-VERSION="$(printf '%s\n' "$manifest_values" | sed -n '1p')"
-case "$VERSION" in v*) ;; *) VERSION="v$VERSION" ;; esac
-artifact_url="$(printf '%s\n' "$manifest_values" | sed -n '2p')"
-artifact_size="$(printf '%s\n' "$manifest_values" | sed -n '3p')"
-expected="$(printf '%s\n' "$manifest_values" | sed -n '4p')"
-archive="$tmp_dir/artifact.tar.gz"
-curl -fsSL "$artifact_url" -o "$archive" 2>/dev/null || fail "could not fetch the signed release artifact"
-actual_size="$(wc -c < "$archive" | tr -d '[:space:]')"
-[ "$actual_size" = "$artifact_size" ] || fail "signed artifact size verification failed"
-if command -v shasum >/dev/null 2>&1; then actual="$(shasum -a 256 "$archive" | awk '{print $1}')"; else command -v sha256sum >/dev/null 2>&1 || fail "SHA-256 verifier is required"; actual="$(sha256sum "$archive" | awk '{print $1}')"; fi
-[ "$actual" = "$expected" ] || fail "signed artifact SHA-256 verification failed"
+[ "$actual" = "$expected" ] || fail "checksum verification failed for $archive"
 
 mkdir -p "$tmp_dir/extracted"
-members="$(tar -tzf "$archive")" || fail "cannot inspect release archive"
+members="$(tar -tzf "$tmp_dir/$archive")" || fail "cannot inspect release archive"
 printf '%s\n' "$members" | awk 'NF { count++; if ($0 != "tapid") invalid=1 } END { exit !(count == 1 && !invalid) }' || \
   fail "release archive must contain exactly one member named tapid"
-entry_info="$(tar -tvzf "$archive")" || fail "cannot inspect release archive entry type"
+entry_info="$(tar -tvzf "$tmp_dir/$archive")" || fail "cannot inspect release archive entry type"
 printf '%s\n' "$entry_info" | awk 'NF { count++; if (substr($0, 1, 1) != "-" || $NF != "tapid") invalid=1 } END { exit !(count == 1 && !invalid) }' || \
   fail "release archive tapid member must be a regular file"
-tar -xzf "$archive" -C "$tmp_dir/extracted" tapid || fail "cannot extract tapid from release archive"
+tar -xzf "$tmp_dir/$archive" -C "$tmp_dir/extracted" tapid || fail "cannot extract tapid from release archive"
 [ -f "$tmp_dir/extracted/tapid" ] || fail "release archive does not contain tapid"
 [ ! -L "$tmp_dir/extracted/tapid" ] || fail "release archive tapid member must not be a symlink"
   STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
