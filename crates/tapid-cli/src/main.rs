@@ -457,10 +457,10 @@ fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String> {
             let _ = fs::remove_file(&temp);
             return Err(error.to_string());
         }
-        return fs::rename(&temp, path).map_err(|e| {
+        fs::rename(&temp, path).map_err(|e| {
             let _ = fs::remove_file(&temp);
             e.to_string()
-        });
+        })
     }
     #[cfg(windows)]
     {
