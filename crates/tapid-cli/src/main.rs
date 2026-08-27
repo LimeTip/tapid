@@ -733,12 +733,33 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
             "refusing to replace unmarked node_modules; create .tapid-managed to opt in".into(),
         );
     }
-    if marker_exists
-        && fs::read(&marker).map_err(|_| "cannot read .tapid-managed".to_owned())? != MANAGED_MARKER
-    {
-        return Err(
-            "refusing to replace node_modules with an invalid .tapid-managed marker".into(),
-        );
+    let marker_backup = project.join(format!(
+        ".tapid-managed-old-{}-{}",
+        std::process::id(),
+        unique_nonce()
+    ));
+    // Move the existing marker by name before reading it to close the check/read race.
+    if marker_exists {
+        fs::rename(&marker, &marker_backup)
+            .map_err(|e| format!("cannot stage .tapid-managed marker: {e}"))?;
+        let contents = match fs::read(&marker_backup) {
+            Ok(contents) => contents,
+            Err(error) => {
+                let _ = fs::rename(&marker_backup, &marker);
+                return Err(format!("cannot read .tapid-managed: {error}"));
+            }
+        };
+        let still_regular = fs::symlink_metadata(&marker_backup)
+            .map(|metadata| metadata.file_type().is_file())
+            .unwrap_or(false);
+        if !still_regular || contents != MANAGED_MARKER {
+            let _ = fs::rename(&marker_backup, &marker);
+            return Err(if still_regular {
+                "refusing to replace node_modules with an invalid .tapid-managed marker".into()
+            } else {
+                "refusing to use a non-regular .tapid-managed marker".into()
+            });
+        }
     }
     let backup = project.join(format!(
         ".tapid-node-modules-old-{}-{}",
@@ -746,18 +767,30 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
         unique_nonce()
     ));
     if destination.exists() {
-        fs::rename(&destination, &backup)
-            .map_err(|_| "cannot stage existing node_modules for replacement".to_owned())?;
+        if let Err(error) = fs::rename(&destination, &backup) {
+            if marker_exists {
+                let _ = fs::rename(&marker_backup, &marker);
+            }
+            return Err(format!(
+                "cannot stage existing node_modules for replacement: {error}"
+            ));
+        }
     }
     if std::env::var_os("TAPID_TEST_FAIL_ACTIVATION").is_some() {
         if backup.exists() {
             let _ = fs::rename(&backup, &destination);
+        }
+        if marker_exists {
+            let _ = fs::rename(&marker_backup, &marker);
         }
         return Err("install activation failed (injected)".into());
     }
     if let Err(error) = fs::rename(&staged, &destination) {
         if backup.exists() {
             let _ = fs::rename(&backup, &destination);
+        }
+        if marker_exists {
+            let _ = fs::rename(&marker_backup, &marker);
         }
         return Err(format!("cannot activate node_modules: {error}"));
     }
@@ -766,16 +799,6 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
         std::process::id(),
         unique_nonce()
     ));
-    let marker_backup = project.join(format!(
-        ".tapid-managed-old-{}-{}",
-        std::process::id(),
-        unique_nonce()
-    ));
-    let marker_backed_up = cfg!(windows) && marker_exists;
-    if marker_backed_up && let Err(error) = fs::rename(&marker, &marker_backup) {
-        let _ = fs::rename(&backup, &destination);
-        return Err(format!("cannot stage .tapid-managed marker: {error}"));
-    }
     let marker_result = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -791,14 +814,14 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
         if backup.exists() {
             let _ = fs::rename(&backup, &destination);
         }
-        if marker_backed_up {
+        if marker_exists {
             let _ = fs::rename(&marker_backup, &marker);
-        } else if !marker_exists {
+        } else {
             let _ = fs::remove_file(&marker);
         }
         return Err(format!("cannot write .tapid-managed: {error}"));
     }
-    if marker_backed_up {
+    if marker_exists {
         let _ = fs::remove_file(&marker_backup);
     }
     let _ = fs::remove_dir_all(&backup);
@@ -1036,5 +1059,45 @@ mod copy_tests {
             );
         }
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod activation_tests {
+    use super::activate_node_modules;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_project(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "tapid-{name}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn symlinked_marker_is_rejected_without_touching_target() {
+        let project = temp_project("marker-symlink");
+        let stage = project.join("stage");
+        let target = project.join("attacker-target");
+        fs::create_dir_all(stage.join("node_modules")).unwrap();
+        fs::write(&target, b"must remain unchanged").unwrap();
+        symlink(&target, project.join(".tapid-managed")).unwrap();
+
+        let error = activate_node_modules(&project, &stage).unwrap_err();
+
+        assert!(error.contains("non-regular"));
+        assert_eq!(fs::read(&target).unwrap(), b"must remain unchanged");
+        assert!(
+            fs::symlink_metadata(project.join(".tapid-managed"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let _ = fs::remove_dir_all(project);
     }
 }
