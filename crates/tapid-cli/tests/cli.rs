@@ -524,5 +524,29 @@ fn injected_activation_failure_restores_marked_node_modules() {
         fs::read_to_string(dir.join("node_modules").join("KEEP")).unwrap(),
         "user data"
     );
+    assert_eq!(
+        fs::read(dir.join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1
+"
+    );
+    assert!(!fs::read_dir(&dir).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".tapid-managed-old-")
+    }));
+    assert_eq!(
+        fs::read(dir.join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1
+"
+    );
+    assert!(!fs::read_dir(&dir).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".tapid-managed-old-")
+    }));
     cleanup(dir);
 }
