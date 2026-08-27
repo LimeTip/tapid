@@ -123,31 +123,36 @@ fn upgrade(
     destination_arg: Option<&Path>,
     dry_run: bool,
 ) -> ExitCode {
-    let keyring_path = keyring_arg
+    let keyring = match keyring_arg
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TAPID_RELEASE_KEYRING").map(PathBuf::from));
-    let Some(keyring_path) = keyring_path else {
-        eprintln!(
-            "error: trusted release keyring is required (use --keyring or TAPID_RELEASE_KEYRING)"
-        );
-        return ExitCode::from(1);
-    };
-    let keyring_bytes = match fs::read(&keyring_path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!(
-                "error: cannot read trusted release keyring '{}': {error}",
-                keyring_path.display()
-            );
-            return ExitCode::from(1);
+        .or_else(|| std::env::var_os("TAPID_RELEASE_KEYRING").map(PathBuf::from))
+    {
+        Some(keyring_path) => {
+            let keyring_bytes = match fs::read(&keyring_path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    eprintln!(
+                        "error: cannot read trusted release keyring '{}': {error}",
+                        keyring_path.display()
+                    );
+                    return ExitCode::from(1);
+                }
+            };
+            match KeyRing::from_embedded_json(&keyring_bytes) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("error: invalid trusted release keyring: {error}");
+                    return ExitCode::from(1);
+                }
+            }
         }
-    };
-    let keyring = match KeyRing::from_embedded_json(&keyring_bytes) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("error: invalid trusted release keyring: {error}");
-            return ExitCode::from(1);
-        }
+        None => match KeyRing::production() {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: embedded production release keyring is invalid: {error}");
+                return ExitCode::from(1);
+            }
+        },
     };
     let endpoints = stable_discovery_endpoints(
         endpoint_args,

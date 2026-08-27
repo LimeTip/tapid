@@ -45,31 +45,42 @@ fn cleanup(path: PathBuf) {
     let _ = fs::remove_dir_all(path);
 }
 #[test]
-fn upgrade_fails_closed_without_explicit_trust_root() {
+fn upgrade_uses_embedded_trust_root_without_manual_keyring() {
     let dir = temp_dir("upgrade-no-keyring");
+    let destination = dir.join("tapid");
+    fs::write(&destination, b"old").unwrap();
+    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
     let output = run(
         &dir,
         &[
             "upgrade",
             "--endpoint",
             "https://example.invalid/stable.json",
+            "--destination",
+            destination.to_str().unwrap(),
         ],
     );
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("stable discovery unavailable"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required"));
     cleanup(dir);
 }
 
 #[test]
-fn upgrade_uses_built_in_stable_endpoints_but_checks_keyring_first() {
+fn upgrade_uses_built_in_stable_endpoints_and_embedded_keyring() {
     let dir = temp_dir("upgrade-default-endpoints");
     let output = run_without_release_config(&dir, &["upgrade"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required"),
+        String::from_utf8_lossy(&output.stderr).contains("unmarked non-Tapid-managed destination"),
         "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("no stable discovery endpoints"));
     cleanup(dir);
 }
