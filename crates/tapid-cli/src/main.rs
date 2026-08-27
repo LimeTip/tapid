@@ -409,14 +409,12 @@ mod upgrade_tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn tar_artifact_rejects_symlink_members() {
         let root = temp("symlink");
         fs::write(root.join("payload"), b"payload").unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink("payload", root.join("tapid")).unwrap();
-        #[cfg(not(unix))]
-        return;
         let bytes = tar_gz(&root, &["tapid", "payload"]);
         assert!(materialize_artifact("tapid.tar.gz", &bytes).is_err());
         fs::remove_dir_all(root).unwrap();

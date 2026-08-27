@@ -37,6 +37,7 @@ fn release_state_rejects_replay_and_downgrade() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn malformed_state_and_symlink_are_rejected() {
     let dir = tempfile_dir(); let path = dir.join("state.json");
