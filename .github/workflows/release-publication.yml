@@ -41,33 +41,51 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+      - name: Bind tag to immutable commit
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           name: release-artifacts
           path: release-artifacts
-      - name: Generate signed manifest
+      - name: Generate and cryptographically verify signed manifest
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_ED25519_PRIVATE_KEY }}
           RELEASE_SIGNING_KEY_ID: ${{ vars.TAPID_RELEASE_SIGNING_KEY_ID }}
+          RELEASE_SIGNING_PUBLIC_KEY: ${{ vars.TAPID_RELEASE_ED25519_PUBLIC_KEY }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+          RELEASE_CREATED_AT: ${{ inputs.created_at }}
+          RELEASE_EXPIRES_AT: ${{ inputs.expires_at }}
+          RELEASE_BASE_URL: ${{ inputs.base_url }}
         run: |
           set -euo pipefail
           test -n "${RELEASE_SIGNING_KEY:-}" || { echo 'Signing secret is missing' >&2; exit 1; }
           test -n "${RELEASE_SIGNING_KEY_ID:-}" || { echo 'Signing key id is missing' >&2; exit 1; }
-          mapfile -t files < <(find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print | sort)
-          test "${#files[@]}" -gt 0 || { echo 'No required release artifacts found' >&2; exit 1; }
-          args=()
-          for file in "${files[@]}"; do
-            name=$(basename "$file")
-            target=${name#tapid-${{ inputs.version }}-}
-            target=${target%.tar.gz}; target=${target%.zip}
-            args+=(--artifact "${target}=${file}")
-          done
+          test -n "${RELEASE_SIGNING_PUBLIC_KEY:-}" || { echo 'Signing public key is missing' >&2; exit 1; }
+          # This is the authoritative filename -> target mapping. ZIP files are
+          # passed through untouched; never extract an untrusted Windows ZIP here.
+          python3 .github/release/validate_artifacts.py --version "$RELEASE_VERSION" \
+            --root release-artifacts --output artifact-args
+          mapfile -t artifact_args < artifact-args
           python3 .github/release/generate_manifest.py \
-            --version '${{ inputs.version }}' --tag '${{ inputs.tag }}' --commit '${{ inputs.commit }}' \
-            --created-at '${{ inputs.created_at }}' --expires-at '${{ inputs.expires_at }}' \
-            --base-url '${{ inputs.base_url }}' --output release-manifest.json "${args[@]}"
+            --version "$RELEASE_VERSION" --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
+            --created-at "$RELEASE_CREATED_AT" --expires-at "$RELEASE_EXPIRES_AT" \
+            --base-url "$RELEASE_BASE_URL" --output release-manifest.json "${artifact_args[@]}"
           test -s release-manifest.json
+          python3 .github/release/verify_manifest.py --manifest release-manifest.json \
+            --public-key "$RELEASE_SIGNING_PUBLIC_KEY"
       - name: Upload signed manifest for approved advancement
         uses: actions/upload-artifact@v4
         with:
@@ -83,22 +101,28 @@ jobs:
       name: stable-release
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+      - name: Download signed manifest
+        uses: actions/download-artifact@v4
         with:
           name: signed-release-manifest
           path: publication
-      - name: Verify signed manifest is present
+      - name: Verify immutable source and signed manifest
+        env:
+          RELEASE_SIGNING_PUBLIC_KEY: ${{ vars.TAPID_RELEASE_ED25519_PUBLIC_KEY }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+          test -n "${RELEASE_SIGNING_PUBLIC_KEY:-}" || { echo 'Signing public key is missing' >&2; exit 1; }
           test -s publication/release-manifest.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          m = json.loads(Path('publication/release-manifest.json').read_text())
-          assert m.get('signature', {}).get('algorithm') == 'ed25519', 'manifest is not signed'
-          assert m['signature'].get('value'), 'manifest signature is empty'
-          assert m['artifacts'], 'manifest has no artifacts'
-          PY
+          python3 .github/release/verify_manifest.py --manifest publication/release-manifest.json \
+            --public-key "$RELEASE_SIGNING_PUBLIC_KEY"
       - name: Build ordered provider-neutral stable metadata
         env:
           ENDPOINTS: ${{ inputs.manifest_endpoints }}

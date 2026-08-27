@@ -10,6 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 MANIFEST = ROOT / "generate_manifest.py"
 STABLE = ROOT / "stable_channel.py"
+VERIFY = ROOT / "verify_manifest.py"
+VALIDATE = ROOT / "validate_artifacts.py"
+WORKFLOW = ROOT.parent / "workflows" / "release-publication.yml"
 
 
 class ReleasePublicationTests(unittest.TestCase):
@@ -63,6 +66,62 @@ class ReleasePublicationTests(unittest.TestCase):
             result = self.run_manifest(env, str(artifact))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("RELEASE_SIGNING_KEY", result.stderr)
+
+    def test_verifier_accepts_manifest_with_matching_public_key_and_rejects_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "tapid-0.0.7-x86_64-unknown-linux-gnu.tar.gz"
+            artifact.write_bytes(b"release bytes\\n")
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            private = Ed25519PrivateKey.generate()
+            private_pem = private.private_bytes(serialization.Encoding.PEM,
+                                                serialization.PrivateFormat.PKCS8,
+                                                serialization.NoEncryption()).decode()
+            public_pem = private.public_key().public_bytes(serialization.Encoding.PEM,
+                                                           serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+            env = os.environ.copy()
+            env["RELEASE_SIGNING_KEY"] = private_pem
+            env["RELEASE_SIGNING_KEY_ID"] = "test-key"
+            result = self.run_manifest(env, str(artifact))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = Path(directory, "manifest.json")
+            verify = subprocess.run(["python3", str(VERIFY), "--manifest", str(manifest),
+                                     "--public-key", public_pem], text=True, capture_output=True)
+            self.assertEqual(verify.returncode, 0, verify.stderr)
+            data = json.loads(manifest.read_text())
+            data["commit"] = "fedcba9876543210fedcba9876543210fedcba98"
+            manifest.write_text(json.dumps(data))
+            verify = subprocess.run(["python3", str(VERIFY), "--manifest", str(manifest),
+                                     "--public-key", public_pem], text=True, capture_output=True)
+            self.assertNotEqual(verify.returncode, 0)
+
+    def test_workflow_checks_immutable_commit_tag_target_mapping_and_protected_verification(self):
+        workflow = WORKFLOW.read_text()
+        self.assertIn("ref: ${{ inputs.commit }}", workflow)
+        self.assertIn("git rev-parse", workflow)
+        self.assertIn("target mapping", workflow)
+        self.assertIn("verify_manifest.py", workflow)
+        self.assertIn("environment:", workflow)
+        self.assertNotIn("source fallback", workflow.lower())
+
+    def test_artifact_validation_rejects_unknown_names_and_emits_target_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "artifacts"
+            root.mkdir()
+            valid = root / "tapid-0.0.7-aarch64-pc-windows-msvc.zip"
+            valid.write_bytes(b"zip bytes")
+            args = Path(directory) / "args"
+            result = subprocess.run(["python3", str(VALIDATE), "--version", "0.0.7",
+                                     "--root", str(root), "--output", str(args)],
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(args.read_text().splitlines(), [
+                "--artifact", f"aarch64-pc-windows-msvc={valid}"])
+            (root / "not-a-release.txt").write_text("reject")
+            result = subprocess.run(["python3", str(VALIDATE), "--version", "0.0.7",
+                                     "--root", str(root), "--output", str(args)],
+                                    text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
 
     def test_stable_channel_preserves_endpoint_order_and_requires_https(self):
         with tempfile.TemporaryDirectory() as directory:
