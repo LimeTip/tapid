@@ -27,16 +27,17 @@ class WindowsInstallerScriptTests(unittest.TestCase):
         self.assertNotIn('$SourceRef = "main"', install_text)
         self.assertIn("stable release discovery endpoint", install_text)
 
-    def test_windows_stable_install_requires_external_signed_manifest_verifier(self):
+    def test_windows_stable_install_embeds_production_verifier_without_external_configuration(self):
         install_text = INSTALL.read_text()
-        self.assertIn("TAPID_RELEASE_VERIFIER", install_text)
-        self.assertIn("TAPID_RELEASE_TRUSTED_KEYS", install_text)
-        self.assertIn("signature", install_text)
+        self.assertNotIn("TAPID_RELEASE_VERIFIER", install_text)
+        self.assertNotIn("TAPID_RELEASE_TRUSTED_KEYS", install_text)
+        self.assertIn("eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc=", install_text)
+        self.assertIn("signature_context", install_text)
         self.assertNotIn("checksums.txt", install_text)
 
     def test_windows_signed_manifest_is_verified_before_artifact_download(self):
         install_text = INSTALL.read_text()
-        verify = install_text.index("TAPID_RELEASE_VERIFIER")
+        verify = install_text.index("signature_context")
         artifact = install_text.index('Invoke-WebRequest -UseBasicParsing $artifactUrl')
         self.assertLess(verify, artifact)
         for field in ("target", "version", "size", "sha256"):
