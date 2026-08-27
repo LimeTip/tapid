@@ -25,7 +25,11 @@ function Configure-UserPath([string]$Directory) {
         [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
     }
     if (($env:Path -split ';' | ForEach-Object { $_.TrimEnd('\\') }) -notcontains $normalized) {
-        $env:Path = "$normalized;$env:Path"
+        if ([string]::IsNullOrEmpty($env:Path)) {
+            $env:Path = $normalized
+        } else {
+            $env:Path = "$normalized;$env:Path"
+        }
     }
     $script:PathUpdated = $true
 }
