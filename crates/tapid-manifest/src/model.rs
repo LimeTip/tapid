@@ -123,6 +123,17 @@ impl PackageManifest {
             peer_dependencies: (!self.peer_dependencies.is_empty())
                 .then_some(&self.peer_dependencies),
             scripts: (!self.scripts.is_empty()).then_some(&self.scripts),
+            bin: self.bin.as_ref().map(|bin| {
+                bin.targets
+                    .iter()
+                    .map(|target| {
+                        (
+                            target.command.clone(),
+                            target.target.to_string_lossy().into_owned(),
+                        )
+                    })
+                    .collect()
+            }),
         };
         format!(
             "{}\n",
@@ -153,4 +164,6 @@ struct ManifestDocument<'a> {
     peer_dependencies: Option<&'a BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scripts: Option<&'a BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bin: Option<BTreeMap<String, String>>,
 }

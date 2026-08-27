@@ -27,13 +27,18 @@ See [installation details](#installation-details) for release selection, alterna
 
 ## Quick start
 
-The shortest path from an empty directory to a running development script is:
+The shortest path from an empty directory to installing a package is:
 
 ```bash
 mkdir my-app
 cd my-app
 tapid init
 tapid i is-char
+```
+
+To run a development script, add a `dev` entry to `package.json`, then run:
+
+```bash
 tapid run dev
 ```
 

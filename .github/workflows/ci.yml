@@ -39,6 +39,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Run tests
         run: cargo test --workspace --all-features --locked
+      - name: Run nested integration workspace
+        run: cargo test --manifest-path tests/integration/Cargo.toml --locked
       - name: Validate Windows developer installer
         if: runner.os == 'Windows'
         shell: pwsh
