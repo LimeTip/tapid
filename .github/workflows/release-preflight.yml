@@ -1,0 +1,46 @@
+name: Release preflight
+
+on:
+  pull_request:
+    paths:
+      - ".github/release/**"
+      - ".github/workflows/release-preflight.yml"
+      - "schemas/tapid-release-manifest-v1.json"
+      - "docs/release-distribution.md"
+  workflow_dispatch:
+
+# This workflow validates release metadata only. It never publishes artifacts.
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Validate release manifest and artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run manifest, artifact, and signature preflight
+        run: python3 .github/release/preflight.py
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Verify release-signature crate tests
+        run: cargo test -p tapid-signatures --locked release::tests
+
+  stable-approval:
+    name: Protected stable advancement approval
+    if: github.event_name == 'workflow_dispatch'
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment:
+      name: stable-release
+    steps:
+      - name: Record approved handoff without publishing
+        run: |
+          echo "Protected environment approval recorded for ${GITHUB_SHA}."
+          echo "No stable channel advancement or artifact publication is performed by this workflow."

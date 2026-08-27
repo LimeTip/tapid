@@ -14,12 +14,32 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const ENVELOPE_VERSION: &str = "tapid-trust-envelope-v1";
 pub const DIGEST_ALGORITHM: &str = "sha256";
 pub const SIGNATURE_ALGORITHM: &str = "ed25519";
+pub const KEY_RING_VERSION: &str = "tapid-release-keyring-v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrustedKey {
     pub key_id: String,
     pub algorithm: String,
     pub public_key: [u8; 32],
+}
+
+/// Versioned, JSON-serializable trusted key material for embedding in clients.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddedKeyRing {
+    pub version: String,
+    pub keys: Vec<EmbeddedTrustedKey>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddedTrustedKey {
+    pub key_id: String,
+    pub algorithm: String,
+    /// Standard padded Base64 encoding of the 32-byte Ed25519 public key.
+    pub public_key: String,
+    /// SHA-256 digest of the decoded public key, encoded as `sha256-` + hex.
+    pub fingerprint: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -32,10 +52,55 @@ impl KeyRing {
         Self::default()
     }
 
+    /// Parses and validates versioned trusted key material intended for
+    /// embedding in a client. Any unknown key ID remains untrusted.
+    pub fn from_embedded_json(bytes: &[u8]) -> Result<Self, VerificationError> {
+        let material: EmbeddedKeyRing = serde_json::from_slice(bytes)
+            .map_err(|e| VerificationError::InvalidKeyMaterial(e.to_string()))?;
+        if material.version != KEY_RING_VERSION {
+            return Err(VerificationError::UnsupportedKeyRingVersion(
+                material.version,
+            ));
+        }
+        let mut ring = Self::new();
+        for embedded in material.keys {
+            validate_key_id(&embedded.key_id)?;
+            if embedded.algorithm != SIGNATURE_ALGORITHM {
+                return Err(VerificationError::UnsupportedAlgorithm(embedded.algorithm));
+            }
+            let public_key = BASE64.decode(&embedded.public_key).map_err(|e| {
+                VerificationError::InvalidKeyMaterial(format!("invalid public key: {e}"))
+            })?;
+            if public_key.len() != 32 || BASE64.encode(&public_key) != embedded.public_key {
+                return Err(VerificationError::InvalidKeyMaterial(
+                    "public key must be canonical padded Base64 for 32 bytes".into(),
+                ));
+            }
+            let public_key: [u8; 32] = public_key.try_into().expect("length checked");
+            if digest(&public_key)
+                .map_err(|e| VerificationError::InvalidKeyMaterial(e.to_string()))?
+                != embedded.fingerprint
+            {
+                return Err(VerificationError::KeyFingerprintMismatch);
+            }
+            VerifyingKey::from_bytes(&public_key)
+                .map_err(|e| VerificationError::InvalidKeyMaterial(e.to_string()))?;
+            ring.insert(TrustedKey {
+                key_id: embedded.key_id,
+                algorithm: embedded.algorithm,
+                public_key,
+            })?;
+        }
+        Ok(ring)
+    }
+
     pub fn insert(&mut self, key: TrustedKey) -> Result<(), VerificationError> {
         validate_key_id(&key.key_id)?;
         if key.algorithm != SIGNATURE_ALGORITHM {
             return Err(VerificationError::UnsupportedAlgorithm(key.algorithm));
+        }
+        if self.keys.contains_key(&key.key_id) {
+            return Err(VerificationError::DuplicateKeyId(key.key_id));
         }
         self.keys.insert(key.key_id.clone(), key);
         Ok(())
@@ -93,6 +158,10 @@ pub enum VerificationError {
     UnknownKeyId(String),
     KeyIdMismatch,
     InvalidKeyId(String),
+    DuplicateKeyId(String),
+    UnsupportedKeyRingVersion(String),
+    KeyFingerprintMismatch,
+    InvalidKeyMaterial(String),
     ManifestDigestMismatch,
     InvalidSignature,
     PublicKeyRequired,
@@ -114,6 +183,12 @@ impl fmt::Display for VerificationError {
             Self::UnknownKeyId(k) => write!(f, "unknown trusted key ID: {k}"),
             Self::KeyIdMismatch => write!(f, "signature key ID does not match trusted key"),
             Self::InvalidKeyId(k) => write!(f, "invalid key ID: {k}"),
+            Self::DuplicateKeyId(k) => write!(f, "duplicate trusted key ID: {k}"),
+            Self::UnsupportedKeyRingVersion(v) => write!(f, "unsupported key ring version: {v}"),
+            Self::KeyFingerprintMismatch => {
+                write!(f, "trusted key fingerprint does not match public key")
+            }
+            Self::InvalidKeyMaterial(e) => write!(f, "invalid embedded key material: {e}"),
             Self::ManifestDigestMismatch => {
                 write!(f, "release manifest digest does not match signature")
             }
@@ -427,5 +502,82 @@ mod tests {
             canonical_json(&value).unwrap(),
             r#"{"nested":{"a":2,"z":1},"é":0.000001,"😀":0}"#
         );
+    }
+
+    #[test]
+    fn loads_versioned_embedded_key_material_and_rejects_unknown_keys() {
+        let secret = [7u8; 32];
+        let public_key = BASE64.encode(SigningKey::from_bytes(&secret).verifying_key().to_bytes());
+        let fingerprint =
+            digest(&SigningKey::from_bytes(&secret).verifying_key().to_bytes()).unwrap();
+        let material = serde_json::json!({
+            "version": "tapid-release-keyring-v1",
+            "keys": [{
+                "key_id": "release-key-1",
+                "algorithm": "ed25519",
+                "public_key": public_key,
+                "fingerprint": fingerprint
+            }]
+        });
+        let ring = KeyRing::from_embedded_json(&serde_json::to_vec(&material).unwrap()).unwrap();
+        let signed = TrustEnvelope::unsigned("release", "sha256-a", Value::Null)
+            .sign("release-key-1", &secret)
+            .unwrap();
+        assert!(signed.verify_with_keyring(&ring).is_ok());
+
+        let unknown = TrustEnvelope::unsigned("release", "sha256-a", Value::Null)
+            .sign("release-key-2", &secret)
+            .unwrap();
+        assert_eq!(
+            unknown.verify_with_keyring(&ring),
+            Err(VerificationError::UnknownKeyId("release-key-2".into()))
+        );
+    }
+
+    #[test]
+    fn rejects_key_material_with_wrong_version_fingerprint_or_unknown_field() {
+        let secret = [7u8; 32];
+        let public_key = BASE64.encode(SigningKey::from_bytes(&secret).verifying_key().to_bytes());
+        let base = serde_json::json!({
+            "version": "tapid-release-keyring-v1",
+            "keys": [{"key_id":"key-1","algorithm":"ed25519","public_key":public_key,"fingerprint":"sha256-00"}]
+        });
+        assert!(matches!(
+            KeyRing::from_embedded_json(&serde_json::to_vec(&base).unwrap()),
+            Err(VerificationError::KeyFingerprintMismatch)
+        ));
+        let mut wrong_version = base.clone();
+        wrong_version["version"] = serde_json::json!("tapid-release-keyring-v2");
+        assert!(matches!(
+            KeyRing::from_embedded_json(&serde_json::to_vec(&wrong_version).unwrap()),
+            Err(VerificationError::UnsupportedKeyRingVersion(_))
+        ));
+        let unknown_field =
+            serde_json::json!({"version":"tapid-release-keyring-v1","keys":[],"future":true});
+        assert!(matches!(
+            KeyRing::from_embedded_json(&serde_json::to_vec(&unknown_field).unwrap()),
+            Err(VerificationError::InvalidKeyMaterial(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_embedded_key_ids() {
+        let first = SigningKey::from_bytes(&[1u8; 32])
+            .verifying_key()
+            .to_bytes();
+        let second = SigningKey::from_bytes(&[2u8; 32])
+            .verifying_key()
+            .to_bytes();
+        let material = serde_json::json!({
+            "version": "tapid-release-keyring-v1",
+            "keys": [
+                {"key_id":"key-1","algorithm":"ed25519","public_key":BASE64.encode(first),"fingerprint":digest(&first).unwrap()},
+                {"key_id":"key-1","algorithm":"ed25519","public_key":BASE64.encode(second),"fingerprint":digest(&second).unwrap()}
+            ]
+        });
+        assert!(matches!(
+            KeyRing::from_embedded_json(&serde_json::to_vec(&material).unwrap()),
+            Err(VerificationError::DuplicateKeyId(ref key)) if key == "key-1"
+        ));
     }
 }
