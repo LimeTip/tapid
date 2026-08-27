@@ -440,11 +440,15 @@ fn safe_atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
             fs::remove_file(&backup).map_err(|e| Error::State(e.to_string()))?;
             moved_existing = false;
         }
-        OpenOptions::new()
-            .read(true)
-            .open(parent)
-            .and_then(|d| d.sync_all())
-            .map_err(|e| Error::State(e.to_string()))
+        #[cfg(unix)]
+        {
+            OpenOptions::new()
+                .read(true)
+                .open(parent)
+                .and_then(|d| d.sync_all())
+                .map_err(|e| Error::State(e.to_string()))?;
+        }
+        Ok(())
     })();
     if result.is_err() {
         if created {
