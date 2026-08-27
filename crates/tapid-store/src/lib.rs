@@ -152,6 +152,42 @@ impl Store {
         Ok(path)
     }
 
+    /// Creates a private replay snapshot after validating the source tree.
+    ///
+    /// Replay must not validate one mutable tree and then materialize a later
+    /// view of that tree. Copying into a private staging directory and hashing
+    /// the completed copy makes the bytes consumed by replay immutable with
+    /// respect to subsequent changes to the store. If a source changes while
+    /// it is being copied, the completed snapshot digest fails closed.
+    pub fn verified_tree_snapshot(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
+        let source = self.verified_tree_path(digest)?;
+        let staging_dir = self.root.join(".staging");
+        fs::create_dir_all(&staging_dir)?;
+        let snapshot = staging_dir.join(format!(
+            "replay-tree-{}-{}",
+            std::process::id(),
+            unique_nonce()
+        ));
+        // Never reuse a path that could have been planted by another process.
+        fs::create_dir(&snapshot)?;
+        let result = (|| {
+            copy_tree_contents(&source, &snapshot)?;
+            let actual = tapid_archive::canonical_tree_digest(&snapshot)?;
+            if actual != digest.as_str() {
+                return Err(IngestError::TreeDigestMismatch {
+                    expected: digest.clone(),
+                    actual,
+                });
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_dir_all(&snapshot);
+            return Err(error);
+        }
+        Ok(snapshot)
+    }
+
     /// Activates a tree only after recomputing its canonical digest. This is
     /// intentionally a copy operation: callers cannot mark arbitrary bytes as
     /// verified merely by supplying a digest.
@@ -281,6 +317,10 @@ impl Store {
 
 fn copy_tree(source: &Path, target: &Path) -> io::Result<()> {
     fs::create_dir_all(target)?;
+    copy_tree_contents(source, target)
+}
+
+fn copy_tree_contents(source: &Path, target: &Path) -> io::Result<()> {
     for item in fs::read_dir(source)? {
         let item = item?;
         let src = item.path();
@@ -293,9 +333,13 @@ fn copy_tree(source: &Path, target: &Path) -> io::Result<()> {
             ));
         }
         if meta.is_dir() {
-            copy_tree(&src, &dst)?;
+            fs::create_dir(&dst)?;
+            copy_tree_contents(&src, &dst)?;
         } else if meta.is_file() {
-            fs::copy(&src, &dst)?;
+            let mut input = OpenOptions::new().read(true).open(&src)?;
+            let mut output = OpenOptions::new().write(true).create_new(true).open(&dst)?;
+            io::copy(&mut input, &mut output)?;
+            output.sync_all()?;
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -467,6 +511,32 @@ mod tests {
             Err(IngestError::TreeDigestMismatch { .. })
         ));
         let _ = fs::remove_dir_all(root);
+
+    fn replay_snapshot_is_verified_and_detached_from_store_mutations() {
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"{\"name\":\"fixture\"}").unwrap();
+        let tree_digest = tapid_archive::canonical_tree_digest(&source).unwrap();
+        let digest = ArtifactDigest::from_str(&tree_digest).unwrap();
+        let destination = root.join("trees").join(digest.as_str());
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::rename(&source, &destination).unwrap();
+        fs::write(destination.join(".tapid-tree"), digest.as_str()).unwrap();
+        let store = Store::new(&root);
+
+        let snapshot = store.verified_tree_snapshot(&digest).unwrap();
+        fs::write(destination.join("package.json"), b"tampered").unwrap();
+        assert_eq!(
+            fs::read(snapshot.join("package.json")).unwrap(),
+            b"{\"name\":\"fixture\"}"
+        );
+        assert_eq!(
+            tapid_archive::canonical_tree_digest(&snapshot).unwrap(),
+            digest.as_str()
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
