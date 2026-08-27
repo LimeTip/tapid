@@ -18,8 +18,8 @@ Tapid treats manifests, registry metadata, package archives, filesystem trees, l
 
 ## Non-goals and residual risks
 
-- The CLI and installer do not yet enforce release-manifest verification end to end. A signature primitive alone is not evidence of trusted release installation.
-- Trusted key distribution, key rotation, revocation, validity intervals, rollback floors, and recovery after key compromise remain to be implemented at the release-client boundary.
+- The CLI release-client path enforces signed-manifest verification, but first-install bootstrap enforcement and production trusted-key provisioning are not complete. A signature primitive or checksum-only installer is not evidence of trusted release installation.
+- Trusted key rotation, revocation, validity intervals, and production release recovery remain release gates even though local rollback-safe state and embedded-keyring parsing are implemented.
 - Root scripts can execute arbitrary project code through `/bin/sh` on Unix or `cmd.exe` on Windows. Tapid provides no OS sandbox, capability enforcement, malware scanner, executable scanner, or process containment.
 - Archive validation does not decompress or inspect behavior. A validated archive is not necessarily safe software.
 - No provenance verification or transparency-log verification is implemented for release artifacts.

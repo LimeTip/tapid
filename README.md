@@ -126,7 +126,7 @@ Windows uninstall:
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
 ```
 
-The installers use the canonical `LimeTip/tapid` repository by default. Alternate repositories are explicit through `--repo` or `TAPID_REPO`. The uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Release installation currently verifies HTTPS-delivered SHA-256 checksums; independently signed release metadata, platform binaries, and self-upgrade support are planned follow-ups. Source installation is the supported developer path until those distribution artifacts exist.
+The installers use the canonical `LimeTip/tapid` repository by default. Alternate repositories are explicit through `--repo` or `TAPID_REPO`. The uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Source installation is the supported developer path until a real signed release manifest, trusted bootstrap key, and cross-platform release artifacts are published. The repository now contains the verified release-client and `tapid upgrade` foundation, but stable binary installation is not advertised as production-ready until the same signed-manifest verification path is used for first installation.
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
 
