@@ -15,12 +15,12 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tapid-lockfile = { version = "0.0.4", path = "../tapid-lockfile" }
-tapid-manifest = { version = "0.0.3", path = "../tapid-manifest" }
+tapid-manifest = { version = "0.0.4", path = "../tapid-manifest" }
 tapid-core = { version = "0.0.2", path = "../tapid-core" }
 tapid-linker = { version = "0.0.2", path = "../tapid-linker" }
 tapid-store = { version = "0.0.2", path = "../tapid-store" }
 tapid-archive = { version = "0.0.2", path = "../tapid-archive" }
-tapid-registry-client = { version = "0.0.2", path = "../tapid-registry-client" }
+tapid-registry-client = { version = "0.0.3", path = "../tapid-registry-client" }
 tapid-resolver = { version = "0.0.2", path = "../tapid-resolver" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
