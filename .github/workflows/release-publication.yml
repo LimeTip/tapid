@@ -36,8 +36,42 @@ permissions:
   contents: write
 
 jobs:
+  prepare-source:
+    name: Validate immutable release source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate commit and tag ancestry
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40,64}$ ]]
+          [[ "$RELEASE_TAG" =~ ^v0\.[0-9]+\.[0-9]+$ ]]
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          git cat-file -e "$RELEASE_COMMIT^{commit}"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+      - name: Export validated source archive
+        env:
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: git archive --format=tar --output=validated-source.tar "$RELEASE_COMMIT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-release-source
+          path: validated-source.tar
+          if-no-files-found: error
+
   build-artifacts:
     name: Build ${{ matrix.target }} release artifact
+    needs: prepare-source
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -58,21 +92,21 @@ jobs:
             target: x86_64-pc-windows-msvc
             binary: tapid.exe
     steps:
-      - uses: actions/checkout@v4
+      - name: Download validated release source
+        uses: actions/download-artifact@v4
         with:
-          ref: ${{ inputs.commit }}
-          fetch-depth: 0
-      - name: Bind tag to immutable commit
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_COMMIT: ${{ inputs.commit }}
+          name: validated-release-source
+      - name: Extract validated release source
+        shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
-          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+          mkdir source
+          tar -xf validated-source.tar -C source
+          cd source
+          test -f Cargo.toml
       - name: Build and package artifact
         shell: bash
+        working-directory: source
         env:
           VERSION: ${{ inputs.version }}
           TARGET: ${{ matrix.target }}
@@ -94,7 +128,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: release-artifacts-${{ matrix.target }}
-          path: release-artifacts/*.tar.gz
+          path: source/release-artifacts/*.tar.gz
           if-no-files-found: error
 
   sign-manifest:
@@ -108,17 +142,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit }}
-          fetch-depth: 0
-      - name: Bind tag to immutable commit
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_COMMIT: ${{ inputs.commit }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
-          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -170,17 +196,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit }}
-          fetch-depth: 0
-      - name: Bind tag to immutable commit before publication
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_COMMIT: ${{ inputs.commit }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
-          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
       - name: Download signed manifest
         uses: actions/download-artifact@v4
         with:
