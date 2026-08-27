@@ -21,6 +21,8 @@ use tapid_linker::{
 };
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
+use tapid_release_client::Fetcher;
+use tapid_signatures::KeyRing;
 use tapid_store::Store;
 
 #[derive(Debug, Parser)]
@@ -55,6 +57,17 @@ fn dispatch(cli: Cli) -> ExitCode {
             project_dir,
             arguments,
         }) => run_script(&project_dir, &script, arguments),
+        Some(Command::Upgrade {
+            endpoints,
+            keyring,
+            destination,
+            dry_run,
+        }) => upgrade(
+            &endpoints,
+            keyring.as_deref(),
+            destination.as_deref(),
+            dry_run,
+        ),
         Some(Command::Install {
             package,
             offline,
@@ -72,6 +85,302 @@ fn dispatch(cli: Cli) -> ExitCode {
             registry_fixture.as_deref(),
             allow_unverified_registry_artifacts,
         ),
+    }
+}
+
+fn upgrade(
+    endpoint_args: &[String],
+    keyring_arg: Option<&Path>,
+    destination_arg: Option<&Path>,
+    dry_run: bool,
+) -> ExitCode {
+    let keyring_path = keyring_arg
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TAPID_RELEASE_KEYRING").map(PathBuf::from));
+    let Some(keyring_path) = keyring_path else {
+        eprintln!(
+            "error: trusted release keyring is required (use --keyring or TAPID_RELEASE_KEYRING)"
+        );
+        return ExitCode::from(1);
+    };
+    let keyring_bytes = match fs::read(&keyring_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!(
+                "error: cannot read trusted release keyring '{}': {error}",
+                keyring_path.display()
+            );
+            return ExitCode::from(1);
+        }
+    };
+    let keyring = match KeyRing::from_embedded_json(&keyring_bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("error: invalid trusted release keyring: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let endpoints: Vec<String> = if endpoint_args.is_empty() {
+        std::env::var("TAPID_STABLE_ENDPOINTS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        endpoint_args.to_vec()
+    };
+    if endpoints.is_empty() {
+        eprintln!(
+            "error: no stable discovery endpoints configured (use --endpoint; provider migration remains operator-supplied)"
+        );
+        return ExitCode::from(1);
+    }
+    let destination = match destination_arg {
+        Some(path) => path.to_owned(),
+        None => match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("error: cannot determine current executable: {error}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    if let Err(error) = validate_upgrade_destination(&destination) {
+        eprintln!("error: {error}");
+        return ExitCode::from(1);
+    }
+    let target = release_target();
+    let mut fetcher = CurlFetcher;
+    let (manifest, bytes) = match fetch_verified_release(&mut fetcher, &endpoints, &keyring, target)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let artifact_name = manifest
+        .artifact()
+        .map(|a| a.name.clone())
+        .unwrap_or_default();
+    let executable = match materialize_artifact(&artifact_name, &bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    if dry_run {
+        println!(
+            "Verified stable Tapid {} for {target}; dry-run did not replace {}",
+            manifest.version,
+            destination.display()
+        );
+        return ExitCode::SUCCESS;
+    }
+    match replace_executable(&destination, &executable) {
+        Ok(()) => {
+            println!("Upgraded Tapid to {}", manifest.version);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: cannot activate verified artifact: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn fetch_verified_release<F: Fetcher>(
+    fetcher: &mut F,
+    endpoints: &[String],
+    keyring: &KeyRing,
+    target: &str,
+) -> Result<(tapid_release_client::ReleaseManifest, Vec<u8>), String> {
+    let endpoint_refs: Vec<&str> = endpoints.iter().map(String::as_str).collect();
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|e| format!("cannot determine current time: {e}"))?;
+    let manifest = tapid_release_client::discover(
+        fetcher,
+        &endpoint_refs,
+        keyring,
+        target,
+        &now,
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60)),
+    )
+    .map_err(|e| format!("stable release discovery failed: {e}"))?;
+    let artifact = manifest
+        .artifact()
+        .ok_or_else(|| format!("verified release has no artifact for target {target}"))?;
+    let bytes = fetcher
+        .fetch(&artifact.url)
+        .map_err(|e| format!("cannot download verified artifact: {e}"))?;
+    manifest
+        .verify_artifact(&bytes)
+        .map_err(|e| format!("artifact verification failed: {e}"))?;
+    Ok((manifest, bytes))
+}
+
+fn materialize_artifact(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let temp = std::env::temp_dir().join(format!("tapid-artifact-{}", std::process::id()));
+    fs::create_dir_all(&temp).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let mut command = if name.ends_with(".tar.gz") {
+            let mut c = std::process::Command::new("tar");
+            c.args(["-xzf", "-", "-C"]).arg(&temp);
+            c
+        } else if name.ends_with(".zip") {
+            let archive = temp.join("artifact.zip");
+            fs::write(&archive, bytes).map_err(|e| e.to_string())?;
+            let mut c = std::process::Command::new("unzip");
+            c.args(["-q", "-o"]).arg(&archive).args(["-d"]).arg(&temp);
+            c
+        } else {
+            return Err("verified artifact has an unsupported archive format".into());
+        };
+        if name.ends_with(".tar.gz") {
+            use std::io::Write;
+            let mut child = command
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(bytes)
+                .map_err(|e| e.to_string())?;
+            let output = child.wait_with_output().map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+            }
+        } else if !command.status().map_err(|e| e.to_string())?.success() {
+            return Err("cannot extract verified artifact".into());
+        }
+        let candidate = fs::read_dir(&temp)
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .find_map(|entry| {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .is_some_and(|n| n == "tapid" || n == "tapid.exe")
+                    && fs::symlink_metadata(&path).ok()?.file_type().is_file()
+                {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| "verified artifact does not contain a tapid executable".to_owned())?;
+        fs::read(candidate).map_err(|e| e.to_string())
+    })();
+    let _ = fs::remove_dir_all(&temp);
+    result
+}
+
+fn validate_upgrade_destination(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| {
+        format!(
+            "cannot inspect upgrade destination '{}': {e}",
+            path.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err("upgrade destination must be a regular file".into());
+    }
+    let marker = path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".tapid-managed");
+    let marker_metadata = match fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return Err(format!(
+                "refusing to replace unmarked non-Tapid-managed destination '{}'; expected {}",
+                path.display(),
+                marker.display()
+            ));
+        }
+    };
+    if !marker_metadata.file_type().is_file() {
+        return Err("Tapid ownership marker must be a regular file".into());
+    }
+    if fs::read(&marker).map_or(true, |bytes| bytes != b"tapid-managed-v1\n") {
+        return Err(format!(
+            "refusing to replace unmarked non-Tapid-managed destination '{}'; expected {}",
+            path.display(),
+            marker.display()
+        ));
+    }
+    Ok(())
+}
+
+fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let temp = path.with_file_name(format!(".tapid-upgrade-{}", std::process::id()));
+    fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode();
+        fs::set_permissions(&temp, fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&temp, path).map_err(|e| {
+        let _ = fs::remove_file(&temp);
+        e.to_string()
+    })
+}
+
+struct CurlFetcher;
+impl tapid_release_client::Fetcher for CurlFetcher {
+    fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> {
+        if !url.starts_with("https://") {
+            return Err("URL must use HTTPS".into());
+        }
+        let output = std::process::Command::new("curl")
+            .args([
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--proto",
+                "=https",
+                "--tlsv1.2",
+                url,
+            ])
+            .output()
+            .map_err(|e| format!("HTTPS transport unavailable: {e}"))?;
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        }
+    }
+}
+
+fn release_target() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "aarch64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "unsupported-target"
     }
 }
 

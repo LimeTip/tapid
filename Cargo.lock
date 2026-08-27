@@ -1273,8 +1273,11 @@ dependencies = [
  "tapid-lockfile",
  "tapid-manifest",
  "tapid-registry-client",
+ "tapid-release-client",
  "tapid-resolver",
+ "tapid-signatures",
  "tapid-store",
+ "time",
 ]
 
 [[package]]

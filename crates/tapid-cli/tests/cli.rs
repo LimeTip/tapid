@@ -35,6 +35,52 @@ fn run_with_env(cwd: &PathBuf, args: &[&str], key: &str, value: &str) -> std::pr
 fn cleanup(path: PathBuf) {
     let _ = fs::remove_dir_all(path);
 }
+#[test]
+fn upgrade_fails_closed_without_explicit_trust_root() {
+    let dir = temp_dir("upgrade-no-keyring");
+    let output = run(
+        &dir,
+        &[
+            "upgrade",
+            "--endpoint",
+            "https://example.invalid/stable.json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required")
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn upgrade_rejects_unmanaged_destination_before_network() {
+    let dir = temp_dir("upgrade-unmanaged");
+    let destination = dir.join("tapid");
+    fs::write(&destination, b"old").unwrap();
+    let keyring = dir.join("keys.json");
+    fs::write(
+        &keyring,
+        br#"{"version":"tapid-release-keyring-v1","keys":[]}"#,
+    )
+    .unwrap();
+    let output = run(
+        &dir,
+        &[
+            "upgrade",
+            "--endpoint",
+            "https://example.invalid/stable.json",
+            "--keyring",
+            keyring.to_str().unwrap(),
+            "--destination",
+            destination.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Tapid-managed"));
+    assert_eq!(fs::read(&destination).unwrap(), b"old");
+    cleanup(dir);
+}
 fn lock_for_manifest(raw: &str) -> Lockfile {
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());
