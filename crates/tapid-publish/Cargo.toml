@@ -2,7 +2,7 @@
 name = "tapid-publish"
 readme = "README.md"
 description = "Deterministic package packing and staged publication foundations for Tapid"
-version.workspace = true
+version = "0.0.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,4 +11,4 @@ authors.workspace = true
 
 [dependencies]
 sha2 = "0.10"
-tapid-core = { version = "0.0.2", path = "../tapid-core" }
+tapid-core = { version = "0.0.3", path = "../tapid-core" }

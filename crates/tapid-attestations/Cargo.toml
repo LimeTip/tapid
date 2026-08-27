@@ -2,7 +2,7 @@
 name = "tapid-attestations"
 readme = "README.md"
 description = "Artifact-bound attestation foundations for Tapid"
-version.workspace = true
+version = "0.0.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,7 +13,7 @@ authors.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
-tapid-signatures = { version = "0.0.1", path = "../tapid-signatures" }
+tapid-signatures = { version = "0.0.2", path = "../tapid-signatures" }
 
 [lib]
 path = "src/lib.rs"
