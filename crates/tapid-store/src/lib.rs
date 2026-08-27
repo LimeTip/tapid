@@ -335,11 +335,13 @@ fn copy_tree_contents(source: &Path, target: &Path) -> io::Result<()> {
         if meta.is_dir() {
             fs::create_dir(&dst)?;
             copy_tree_contents(&src, &dst)?;
+            fs::set_permissions(&dst, meta.permissions())?;
         } else if meta.is_file() {
             let mut input = OpenOptions::new().read(true).open(&src)?;
             let mut output = OpenOptions::new().write(true).create_new(true).open(&dst)?;
             io::copy(&mut input, &mut output)?;
             output.sync_all()?;
+            fs::set_permissions(&dst, meta.permissions())?;
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -527,7 +529,10 @@ mod tests {
         let store = Store::new(&root);
 
         let snapshot = store.verified_tree_snapshot(&digest).unwrap();
-        fs::write(destination.join("package.json"), b"tampered").unwrap();
+        fs::remove_dir_all(&destination).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(destination.join("package.json"), b"replacement").unwrap();
+        fs::write(destination.join(".tapid-tree"), digest.as_str()).unwrap();
         assert_eq!(
             fs::read(snapshot.join("package.json")).unwrap(),
             b"{\"name\":\"fixture\"}"
@@ -537,6 +542,44 @@ mod tests {
             digest.as_str()
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_copy_handles_nested_directories_and_preserves_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::set_permissions(source.join("nested"), fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(source.join("nested").join("data"), b"nested").unwrap();
+        let bin = source.join("bin");
+        fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        copy_tree(&source, &target).unwrap();
+        assert_eq!(
+            fs::read(target.join("nested").join("data")).unwrap(),
+            b"nested"
+        );
+        assert_eq!(
+            fs::metadata(target.join("nested"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
+        assert_eq!(
+            fs::metadata(target.join("bin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

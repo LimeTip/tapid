@@ -535,6 +535,12 @@ fn materialize_stage(
                 .map_err(|_| "invalid stage target")?,
         );
         copy_tree(tree, &target)?;
+        let after = tapid_archive::canonical_tree_digest(tree).map_err(|e| e.to_string())?;
+        if after != expected {
+            return Err(format!(
+                "tree changed while replaying: expected {expected}, got {after}"
+            ));
+        }
         by_source.insert(entry.target.clone(), target);
     }
     for step in &plan.activation.steps {
@@ -673,8 +679,8 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
             ));
         }
         if meta.is_dir() {
-            fs::create_dir(&dst).map_err(|e| e.to_string())?;
             copy_tree_contents(&src, &dst)?;
+            fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else if meta.is_file() {
             let mut input = fs::File::open(&src).map_err(|e| e.to_string())?;
             let mut output = fs::OpenOptions::new()
@@ -683,6 +689,7 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
                 .open(&dst)
                 .map_err(|e| e.to_string())?;
             io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+            fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else {
             return Err(format!("unsupported store tree entry: {}", src.display()));
         }
@@ -922,5 +929,55 @@ mod replay_tests {
 
         assert!(replay_root_matches(&roots, &jsr));
         assert!(!replay_root_matches(&roots, &npm));
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::copy_tree;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_handles_nested_directories_and_preserves_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "tapid-copy-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::set_permissions(source.join("nested"), fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(source.join("nested").join("data"), b"nested").unwrap();
+        let bin = source.join("bin");
+        fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        copy_tree(&source, &target).unwrap();
+        assert_eq!(
+            fs::read(target.join("nested").join("data")).unwrap(),
+            b"nested"
+        );
+        assert_eq!(
+            fs::metadata(target.join("nested"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
+        assert_eq!(
+            fs::metadata(target.join("bin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }
