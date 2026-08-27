@@ -498,6 +498,15 @@ fn materialize_stage(
     Ok(())
 }
 
+fn package_root_for_shims(package_dir: &Path) -> PathBuf {
+    let nested = package_dir.join("package");
+    if !package_dir.join("package.json").is_file() && nested.join("package.json").is_file() {
+        nested
+    } else {
+        package_dir.to_path_buf()
+    }
+}
+
 fn materialize_package_shims(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
@@ -510,11 +519,7 @@ fn materialize_package_shims(
                 .strip_prefix(plan.managed_root.path.join("node_modules"))
                 .map_err(|_| "invalid package activation target")?,
         );
-        let package_root = if package_dir.join("package").is_dir() {
-            package_dir.join("package")
-        } else {
-            package_dir.clone()
-        };
+        let package_root = package_root_for_shims(&package_dir);
         let package_json = fs::read_to_string(package_root.join("package.json"))
             .map_err(|e| format!("cannot read installed package manifest: {e}"))?;
         packages.push(tapid_linker::ShimPackage {
@@ -811,22 +816,76 @@ fn verify_lock(path: &Path) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::copy_tree;
-    use std::fs;
+    use super::{copy_tree, package_root_for_shims};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            loop {
+                let candidate = std::env::temp_dir().join(format!(
+                    "tapid-copy-tree-{}-{}-{}",
+                    std::process::id(),
+                    super::unique_nonce(),
+                    COUNTER.fetch_add(1, Ordering::Relaxed)
+                ));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => return Self(candidate),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("cannot create test directory: {error}"),
+                }
+            }
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn preserves_nested_package_directories() {
-        let root = std::env::temp_dir().join(format!("tapid-copy-tree-{}", super::unique_nonce()));
-        let source = root.join("source/package/docs/package");
-        let target = root.join("target");
+        let root = TempDir::new();
+        let source = root.path().join("source/package/docs/package");
+        let target = root.path().join("target");
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("example.json"), "{}").unwrap();
 
-        copy_tree(&root.join("source"), &target).unwrap();
+        copy_tree(&root.path().join("source"), &target).unwrap();
 
         assert!(target.join("docs/package/example.json").is_file());
         assert!(!target.join("docs/example.json").exists());
-        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn keeps_legitimate_root_package_directory_outside_archive_wrapper() {
+        let root = TempDir::new();
+        let package_dir = root.path().join("package");
+        fs::create_dir(&package_dir).unwrap();
+        fs::write(root.path().join("package.json"), "{}").unwrap();
+
+        assert_eq!(package_root_for_shims(root.path()), root.path());
+    }
+
+    #[test]
+    fn unwraps_archive_package_directory_for_shims() {
+        let root = TempDir::new();
+        let package_dir = root.path().join("package");
+        fs::create_dir(&package_dir).unwrap();
+        fs::write(package_dir.join("package.json"), "{}").unwrap();
+
+        assert_eq!(package_root_for_shims(root.path()), package_dir);
     }
 }
 
