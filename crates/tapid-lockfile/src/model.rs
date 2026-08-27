@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tapid_core::{
     ArtifactDigest, PackageIntegrity, PackageName, PackageVersion, PeerContext, PlatformContext,
     RegistryOrigin,
@@ -60,24 +60,91 @@ impl std::str::FromStr for LockfilePackageKey {
     type Err = LockfileError;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let p: Vec<_> = value.split('|').collect();
-        if p.len() != 5 || !p[3].starts_with("peer=") || !p[4].starts_with("platform=") {
+        if p.len() != 4 || !p[2].starts_with("peer=") || !p[3].starts_with("platform=") {
             return Err(LockfileError::InvalidPackageKey(value.into()));
         }
         let (name, version) = p[1]
             .rsplit_once('@')
             .ok_or_else(|| LockfileError::InvalidPackageKey(value.into()))?;
+        let peer_context = &p[2][5..];
+        let platform_context = &p[3][9..];
+        if peer_context.is_empty() || platform_context.is_empty() {
+            return Err(LockfileError::InvalidPackageKey(value.into()));
+        }
+        validate_peer_context(peer_context, value)?;
+        validate_platform_context(platform_context, value)?;
         let key = Self {
             registry: p[0].parse().map_err(LockfileError::Domain)?,
             name: name.parse().map_err(LockfileError::Domain)?,
             version: version.parse().map_err(LockfileError::Domain)?,
-            peer_context: p[3][5..].replace('-', ""),
-            platform_context: p[4][9..].to_owned(),
+            peer_context: if peer_context == "-" {
+                String::new()
+            } else {
+                peer_context.to_owned()
+            },
+            platform_context: if platform_context == "-" {
+                String::new()
+            } else {
+                platform_context.to_owned()
+            },
         };
         if key.peer_context.contains(' ') || key.platform_context.contains(' ') {
             return Err(LockfileError::InvalidPackageKey(value.into()));
         }
+        if key.to_string() != value {
+            return Err(LockfileError::InvalidPackageKey(value.into()));
+        }
         Ok(key)
     }
+}
+
+fn validate_peer_context(value: &str, original: &str) -> Result<(), LockfileError> {
+    if value.is_empty() || value == "-" {
+        return Ok(());
+    }
+    let mut names = BTreeSet::new();
+    let mut previous_name = None;
+    for entry in value.split(',') {
+        let (name, version) = entry
+            .rsplit_once('@')
+            .ok_or_else(|| LockfileError::InvalidPackageKey(original.into()))?;
+        if name.is_empty() || version.is_empty() {
+            return Err(LockfileError::InvalidPackageKey(original.into()));
+        }
+        name.parse::<PackageName>().map_err(LockfileError::Domain)?;
+        version
+            .parse::<PackageVersion>()
+            .map_err(LockfileError::Domain)?;
+        if previous_name.is_some_and(|previous| name <= previous) {
+            return Err(LockfileError::InvalidPackageKey(original.into()));
+        }
+        previous_name = Some(name);
+        if !names.insert(name) {
+            return Err(LockfileError::InvalidPackageKey(original.into()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_platform_context(value: &str, original: &str) -> Result<(), LockfileError> {
+    if value == "-" {
+        return Ok(());
+    }
+    if value.is_empty() {
+        return Ok(());
+    }
+    let parts: Vec<_> = value.split('-').collect();
+    if parts.len() != 3
+        || parts.iter().all(|part| part.is_empty())
+        || parts.iter().any(|part| {
+            part.chars().any(|character| {
+                character.is_whitespace() || character.is_control() || character == '|'
+            })
+        })
+    {
+        return Err(LockfileError::InvalidPackageKey(original.into()));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -92,12 +159,13 @@ pub struct Lockfile {
 
 impl Lockfile {
     pub fn new(root_manifest_digest: &str) -> Result<Self, LockfileError> {
-        root_manifest_digest
+        let root_manifest_digest = root_manifest_digest
             .parse::<ArtifactDigest>()
-            .map_err(LockfileError::Domain)?;
+            .map_err(LockfileError::Domain)?
+            .to_string();
         Ok(Self {
             lockfile_version: LOCKFILE_VERSION,
-            root_manifest_digest: root_manifest_digest.to_owned(),
+            root_manifest_digest,
             resolver_version: "0".to_owned(),
             linker_version: "0".to_owned(),
             packages: BTreeMap::new(),
@@ -107,6 +175,7 @@ impl Lockfile {
     pub fn insert_package(&mut self, package: LockedPackage) -> Result<(), LockfileError> {
         package.validate()?;
         let key = package.key();
+        key.parse::<LockfilePackageKey>()?;
         if self.packages.contains_key(&key) {
             return Err(LockfileError::DuplicatePackage(key));
         }
@@ -153,9 +222,16 @@ impl Lockfile {
 
     /// Checks that this lockfile belongs to the current root manifest.
     pub fn validate_replay(&self, current_root_manifest_digest: &str) -> Result<(), LockfileError> {
-        if self.root_manifest_digest != current_root_manifest_digest {
+        let expected = self
+            .root_manifest_digest
+            .parse::<ArtifactDigest>()
+            .map_err(LockfileError::Domain)?;
+        let actual = current_root_manifest_digest
+            .parse::<ArtifactDigest>()
+            .map_err(LockfileError::Domain)?;
+        if expected != actual {
             return Err(LockfileError::RootManifestDigestMismatch {
-                expected: self.root_manifest_digest.clone(),
+                expected: expected.to_string(),
                 actual: current_root_manifest_digest.to_owned(),
             });
         }
@@ -173,15 +249,21 @@ impl Lockfile {
         if lockfile.lockfile_version != LOCKFILE_VERSION {
             return Err(LockfileError::UnsupportedVersion(lockfile.lockfile_version));
         }
-        lockfile
+        let root_manifest_digest = lockfile
             .root_manifest_digest
             .parse::<ArtifactDigest>()
-            .map_err(LockfileError::Domain)?;
+            .map_err(LockfileError::Domain)?
+            .to_string();
+        let lockfile = Self {
+            root_manifest_digest,
+            ..lockfile
+        };
         for (key, package) in &lockfile.packages {
+            key.parse::<LockfilePackageKey>()?;
+            package.validate()?;
             if key != &package.key() {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));
             }
-            package.validate()?;
             for (name, dependency) in &package.dependencies {
                 let target = dependency.parse::<LockfilePackageKey>()?;
                 if dependency == key {
@@ -333,6 +415,11 @@ impl LockedPackage {
         self.tree_digest
             .parse::<ArtifactDigest>()
             .map_err(LockfileError::Domain)?;
+        if self.peer_context == "-" || self.platform_context == "-" {
+            return Err(LockfileError::InvalidPackageKey(self.name.clone()));
+        }
+        validate_peer_context(&self.peer_context, &self.name)?;
+        validate_platform_context(&self.platform_context, &self.name)?;
         validation::validate_url(&self.registry)?;
         if let Some(url) = &self.artifact_url {
             validation::validate_url(url)?;

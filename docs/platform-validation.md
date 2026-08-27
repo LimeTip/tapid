@@ -20,7 +20,7 @@ The fixture checks that:
 - the root script runs in the project directory;
 - arguments after `--` are forwarded;
 - the child exit code is propagated;
-- package executable behavior can be extended through the fixture's declared `bin` contract.
+- package executable behavior is not exercised by the current consumer fixture; linker unit tests cover shim planning and materialization separately.
 
 Linux uses Bash and Unix shell behavior. Windows uses PowerShell to invoke the binary and `cmd.exe` for the child script backend, with `.cmd` and PowerShell shim formats selected by the linker.
 

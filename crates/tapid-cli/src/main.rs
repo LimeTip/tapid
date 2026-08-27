@@ -451,10 +451,13 @@ fn parse_platform(value: &str) -> Result<PlatformContext, String> {
         return PlatformContext::new(None, None, None).map_err(|e| e.to_string());
     }
     let parts: Vec<_> = value.split('-').collect();
+    if parts.len() != 3 {
+        return Err(format!("invalid platform context: {value}"));
+    }
     PlatformContext::new(
-        parts.first().copied(),
-        parts.get(1).copied(),
-        parts.get(2).copied(),
+        (!parts[0].is_empty()).then_some(parts[0]),
+        (!parts[1].is_empty()).then_some(parts[1]),
+        (!parts[2].is_empty()).then_some(parts[2]),
     )
     .map_err(|e| e.to_string())
 }
@@ -824,5 +827,23 @@ mod tests {
         assert!(target.join("docs/package/example.json").is_file());
         assert!(!target.join("docs/example.json").exists());
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::parse_platform;
+
+    #[test]
+    fn parses_full_and_partial_fixed_slot_platform_contexts() {
+        for value in ["linux-x86_64-gnu", "linux--", "-x86_64-", "--gnu"] {
+            assert_eq!(parse_platform(value).unwrap().to_string(), value);
+        }
+        for value in ["linux", "linux-x86_64"] {
+            assert!(
+                parse_platform(value).is_err(),
+                "accepted legacy value {value}"
+            );
+        }
     }
 }
