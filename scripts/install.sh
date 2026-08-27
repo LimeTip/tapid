@@ -13,7 +13,7 @@ usage() {
   cat <<'USAGE'
 Usage: install.sh [options]
 
-Install the latest stable Tapid release by default.
+Build Tapid from the main source branch by default.
 
 Options:
   --version VERSION     Install a specific stable release tag, e.g. v0.1.0
@@ -76,6 +76,11 @@ printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || \
 
 if [ "$VERSION_SET" -eq 1 ] && [ "$SOURCE_REF_SET" -eq 1 ]; then
   fail "use either --version or --source-ref, not both"
+fi
+
+if [ "$VERSION_SET" -eq 0 ] && [ "$SOURCE_REF_SET" -eq 0 ]; then
+  SOURCE_REF="main"
+  SOURCE_REF_SET=1
 fi
 
 case "$INSTALL_DIR" in
