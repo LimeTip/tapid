@@ -473,15 +473,66 @@ fn current_platform() -> Platform {
     }
 }
 
+fn percent_decode(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err(format!("invalid percent encoding: {value}"));
+            }
+            let high = (bytes[index + 1] as char)
+                .to_digit(16)
+                .ok_or_else(|| format!("invalid percent encoding: {value}"))?;
+            let low = (bytes[index + 2] as char)
+                .to_digit(16)
+                .ok_or_else(|| format!("invalid percent encoding: {value}"))?;
+            decoded.push((high * 16 + low) as u8);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| format!("invalid UTF-8 context: {value}"))
+}
+
 fn parse_peer(value: &str) -> Result<PeerContext, String> {
     if value.is_empty() || value == "-" {
         return Ok(PeerContext::default());
     }
     let mut result = PeerContext::default();
     for item in value.split(',') {
-        let (name, version) = item
-            .rsplit_once('@')
-            .ok_or_else(|| format!("invalid peer context: {value}"))?;
+        let (name, version) = if item.starts_with("name=") {
+            let fields: std::collections::BTreeMap<_, _> = item
+                .split(';')
+                .map(|field| {
+                    field
+                        .split_once('=')
+                        .ok_or_else(|| format!("invalid peer context: {value}"))
+                })
+                .collect::<Result<_, _>>()?;
+            (
+                percent_decode(
+                    fields
+                        .get("name")
+                        .copied()
+                        .ok_or_else(|| format!("invalid peer context: {value}"))?,
+                )?,
+                percent_decode(
+                    fields
+                        .get("version")
+                        .copied()
+                        .ok_or_else(|| format!("invalid peer context: {value}"))?,
+                )?,
+            )
+        } else {
+            let (name, version) = item
+                .rsplit_once('@')
+                .ok_or_else(|| format!("invalid peer context: {value}"))?;
+            (name.to_owned(), version.to_owned())
+        };
         result = result.with(
             name.parse::<tapid_core::PackageName>()
                 .map_err(|e| e.to_string())?,
@@ -492,9 +543,37 @@ fn parse_peer(value: &str) -> Result<PeerContext, String> {
     }
     Ok(result)
 }
+
 fn parse_platform(value: &str) -> Result<PlatformContext, String> {
     if value.is_empty() || value == "-" {
         return PlatformContext::new(None, None, None).map_err(|e| e.to_string());
+    }
+    if value.starts_with("os=") {
+        let fields: std::collections::BTreeMap<_, _> = value
+            .split(';')
+            .map(|field| {
+                field
+                    .split_once('=')
+                    .ok_or_else(|| format!("invalid platform context: {value}"))
+            })
+            .collect::<Result<_, _>>()?;
+        let decode_optional = |key: &str| -> Result<Option<String>, String> {
+            let raw = fields
+                .get(key)
+                .copied()
+                .ok_or_else(|| format!("invalid platform context: {value}"))?;
+            if raw.is_empty() {
+                Ok(None)
+            } else {
+                percent_decode(raw).map(Some)
+            }
+        };
+        return PlatformContext::new(
+            decode_optional("os")?.as_deref(),
+            decode_optional("cpu")?.as_deref(),
+            decode_optional("libc")?.as_deref(),
+        )
+        .map_err(|e| e.to_string());
     }
     let parts: Vec<_> = value.split('-').collect();
     PlatformContext::new(
@@ -855,6 +934,29 @@ fn verify_lock(path: &Path) -> ExitCode {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+
+    #[test]
+    fn canonical_contexts_replay_into_typed_values() {
+        let peer = parse_peer("name=%40scope%2Fpkg;version=1.2.3").unwrap();
+        assert_eq!(peer.entries().len(), 1);
+        assert_eq!(
+            peer.entries().keys().next().unwrap().to_string(),
+            "@scope/pkg"
+        );
+
+        let platform = parse_platform("os=linux;cpu=x86%2D64;libc=gnu").unwrap();
+        assert_eq!(platform.os.as_deref(), Some("linux"));
+        assert_eq!(platform.cpu.as_deref(), Some("x86-64"));
+        assert_eq!(platform.libc.as_deref(), Some("gnu"));
+    }
+
+    #[test]
+    fn canonical_empty_platform_replays_as_empty_context() {
+        let platform = parse_platform("os=;cpu=;libc=").unwrap();
+        assert_eq!(platform.os, None);
+        assert_eq!(platform.cpu, None);
+        assert_eq!(platform.libc, None);
+    }
 
     #[test]
     fn explicit_registry_root_matches_only_its_registry_identity() {
