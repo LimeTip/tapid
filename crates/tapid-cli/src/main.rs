@@ -498,6 +498,15 @@ fn materialize_stage(
     Ok(())
 }
 
+fn package_root_for_shims(package_dir: &Path) -> PathBuf {
+    let nested = package_dir.join("package");
+    if !package_dir.join("package.json").is_file() && nested.join("package.json").is_file() {
+        nested
+    } else {
+        package_dir.to_path_buf()
+    }
+}
+
 fn materialize_package_shims(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
@@ -510,11 +519,7 @@ fn materialize_package_shims(
                 .strip_prefix(plan.managed_root.path.join("node_modules"))
                 .map_err(|_| "invalid package activation target")?,
         );
-        let package_root = if package_dir.join("package").is_dir() {
-            package_dir.join("package")
-        } else {
-            package_dir.clone()
-        };
+        let package_root = package_root_for_shims(&package_dir);
         let package_json = fs::read_to_string(package_root.join("package.json"))
             .map_err(|e| format!("cannot read installed package manifest: {e}"))?;
         packages.push(tapid_linker::ShimPackage {
@@ -578,7 +583,18 @@ fn relative_path(from: &Path, to: &Path) -> PathBuf {
 
 fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     let package = source.join("package");
-    let root = if package.is_dir() { &package } else { source };
+    let root = match fs::symlink_metadata(&package) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "symlink in store tree is not replayable: {}",
+                package.display()
+            ));
+        }
+        Ok(meta) if meta.is_dir() => &package,
+        Ok(_) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => source,
+        Err(error) => return Err(error.to_string()),
+    };
     copy_tree_contents(root, target)
 }
 
@@ -596,7 +612,7 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
             ));
         }
         if meta.is_dir() {
-            copy_tree(&src, &dst)?;
+            copy_tree_contents(&src, &dst)?;
         } else if meta.is_file() {
             fs::copy(&src, &dst).map_err(|e| e.to_string())?;
         } else {
@@ -806,6 +822,95 @@ fn verify_lock(path: &Path) -> ExitCode {
             eprintln!("error: cannot verify {}: {error}", path.display());
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{copy_tree, package_root_for_shims};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            loop {
+                let candidate = std::env::temp_dir().join(format!(
+                    "tapid-copy-tree-{}-{}-{}",
+                    std::process::id(),
+                    super::unique_nonce(),
+                    COUNTER.fetch_add(1, Ordering::Relaxed)
+                ));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => return Self(candidate),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("cannot create test directory: {error}"),
+                }
+            }
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn preserves_nested_package_directories() {
+        let root = TempDir::new();
+        let source = root.path().join("source/package/docs/package");
+        let target = root.path().join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("example.json"), "{}").unwrap();
+
+        copy_tree(&root.path().join("source"), &target).unwrap();
+
+        assert!(target.join("docs/package/example.json").is_file());
+        assert!(!target.join("docs/example.json").exists());
+    }
+
+    #[test]
+    fn keeps_legitimate_root_package_directory_outside_archive_wrapper() {
+        let root = TempDir::new();
+        let package_dir = root.path().join("package");
+        fs::create_dir(&package_dir).unwrap();
+        fs::write(root.path().join("package.json"), "{}").unwrap();
+
+        assert_eq!(package_root_for_shims(root.path()), root.path());
+    }
+
+    #[test]
+    fn unwraps_archive_package_directory_for_shims() {
+        let root = TempDir::new();
+        let package_dir = root.path().join("package");
+        fs::create_dir(&package_dir).unwrap();
+        fs::write(package_dir.join("package.json"), "{}").unwrap();
+
+        assert_eq!(package_root_for_shims(root.path()), package_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_top_level_package_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new();
+        let external = TempDir::new();
+        fs::write(external.path().join("package.json"), "{}").unwrap();
+        symlink(external.path(), root.path().join("package")).unwrap();
+
+        let error = copy_tree(root.path(), &root.path().join("target")).unwrap_err();
+        assert!(error.contains("symlink in store tree is not replayable"));
     }
 }
 
