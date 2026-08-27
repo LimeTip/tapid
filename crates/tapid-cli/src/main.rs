@@ -340,7 +340,9 @@ fn materialize_with_lock(
     let root = match ManagedRoot::new(project_dir) {
         Ok(value) => value,
         Err(error) => {
-            cleanup_replay_snapshots(&trees);
+            if replayed {
+                cleanup_replay_snapshots(&trees);
+            }
             eprintln!("error: {error}");
             return ExitCode::from(1);
         }
@@ -349,7 +351,9 @@ fn materialize_with_lock(
     let plan = match plan_layout(root, input.clone(), platform) {
         Ok(value) => value,
         Err(error) => {
-            cleanup_replay_snapshots(&trees);
+            if replayed {
+                cleanup_replay_snapshots(&trees);
+            }
             eprintln!("error: {error}");
             return ExitCode::from(1);
         }
@@ -360,13 +364,17 @@ fn materialize_with_lock(
         unique_nonce()
     ));
     if let Err(error) = fs::create_dir(&stage) {
-        cleanup_replay_snapshots(&trees);
+        if replayed {
+            cleanup_replay_snapshots(&trees);
+        }
         eprintln!("error: cannot create install staging directory: {error}");
         return ExitCode::from(1);
     }
     let result = materialize_stage(&stage, &plan, &input, &trees)
         .and_then(|_| activate_node_modules(project_dir, &stage));
-    cleanup_replay_snapshots(&trees);
+    if replayed {
+        cleanup_replay_snapshots(&trees);
+    }
     if let Err(error) = result {
         let _ = fs::remove_dir_all(&stage);
         eprintln!("error: {error}");
@@ -974,14 +982,12 @@ mod replay_tests {
 
 #[cfg(test)]
 mod copy_tests {
-    use super::copy_tree;
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[cfg(unix)]
     #[test]
     fn copy_tree_handles_nested_directories_and_preserves_executable_mode() {
-        use std::os::unix::fs::PermissionsExt;
+        use super::copy_tree;
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         let root = std::env::temp_dir().join(format!(
             "tapid-copy-test-{}",
             SystemTime::now()
@@ -992,32 +998,43 @@ mod copy_tests {
         let source = root.join("source");
         let target = root.join("target");
         fs::create_dir_all(source.join("nested")).unwrap();
-        fs::set_permissions(source.join("nested"), fs::Permissions::from_mode(0o750)).unwrap();
         fs::write(source.join("nested").join("data"), b"nested").unwrap();
         let bin = source.join("bin");
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(source.join("nested"), fs::Permissions::from_mode(0o750)).unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
         copy_tree(&source, &target).unwrap();
         assert_eq!(
             fs::read(target.join("nested").join("data")).unwrap(),
             b"nested"
         );
-        assert_eq!(
-            fs::metadata(target.join("nested"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o750
-        );
-        assert_eq!(
-            fs::metadata(target.join("bin"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o755
-        );
+        assert!(target.join("bin").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(target.join("nested"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o750
+            );
+            assert_eq!(
+                fs::metadata(target.join("bin"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 }

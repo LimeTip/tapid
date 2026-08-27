@@ -92,9 +92,7 @@ impl Store {
             self.verified_tree_path(expected_tree)?;
             return Ok(IngestResult::AlreadyPresent(destination));
         }
-        let staging_dir = self.root.join(".staging");
-        fs::create_dir_all(&staging_dir)?;
-        let staging = staging_dir.join(format!("tree-{}-{}", std::process::id(), unique_nonce()));
+        let staging = private_staging_path(&self.root, "tree")?;
         tapid_archive::extract_to(bytes, format, &staging, limits)?;
         let actual_tree = tapid_archive::canonical_tree_digest(&staging)?;
         if actual_tree != expected_tree.as_str() {
@@ -161,15 +159,7 @@ impl Store {
     /// it is being copied, the completed snapshot digest fails closed.
     pub fn verified_tree_snapshot(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
         let source = self.verified_tree_path(digest)?;
-        let staging_dir = self.root.join(".staging");
-        fs::create_dir_all(&staging_dir)?;
-        let snapshot = staging_dir.join(format!(
-            "replay-tree-{}-{}",
-            std::process::id(),
-            unique_nonce()
-        ));
-        // Never reuse a path that could have been planted by another process.
-        fs::create_dir(&snapshot)?;
+        let snapshot = create_private_staging_dir(&self.root, "replay-tree")?;
         let result = (|| {
             copy_tree_contents(&source, &snapshot)?;
             let actual = tapid_archive::canonical_tree_digest(&snapshot)?;
@@ -215,11 +205,9 @@ impl Store {
             self.verified_tree_path(digest)?;
             return Ok(destination);
         }
-        let staging_dir = self.root.join(".staging");
-        fs::create_dir_all(&staging_dir)?;
-        let staging = staging_dir.join(format!("tree-{}-{}", std::process::id(), unique_nonce()));
+        let staging = create_private_staging_dir(&self.root, "tree")?;
         let result = (|| {
-            copy_tree(source, &staging)?;
+            copy_tree_contents(source, &staging)?;
             let staged_digest = tapid_archive::canonical_tree_digest(&staging)?;
             if staged_digest != digest.as_str() {
                 return Err(IngestError::TreeDigestMismatch {
@@ -324,11 +312,6 @@ impl Store {
     }
 }
 
-fn copy_tree(source: &Path, target: &Path) -> io::Result<()> {
-    fs::create_dir_all(target)?;
-    copy_tree_contents(source, target)
-}
-
 fn copy_tree_contents(source: &Path, target: &Path) -> io::Result<()> {
     for item in fs::read_dir(source)? {
         let item = item?;
@@ -401,6 +384,74 @@ fn unique_nonce() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     (timestamp << 32) | u128::from(COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+fn private_staging_path(root: &Path, prefix: &str) -> io::Result<PathBuf> {
+    if !root.exists() {
+        fs::create_dir_all(root)?;
+    }
+    let root_metadata = fs::symlink_metadata(root)?;
+    if !root_metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "store root is not a directory",
+        ));
+    }
+    let staging_dir = root.join(".staging");
+    match fs::symlink_metadata(&staging_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store staging path is not a directory",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match fs::create_dir(&staging_dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let metadata = fs::symlink_metadata(&staging_dir)?;
+                    if !metadata.file_type().is_dir() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "store staging path is not a directory",
+                        ));
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    for _ in 0..1024 {
+        let path = staging_dir.join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            unique_nonce()
+        ));
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate private store staging path",
+    ))
+}
+
+fn create_private_staging_dir(root: &Path, prefix: &str) -> io::Result<PathBuf> {
+    for _ in 0..1024 {
+        let path = private_staging_path(root, prefix)?;
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate private store staging directory",
+    ))
 }
 
 #[cfg(test)]
@@ -569,7 +620,8 @@ mod tests {
         let bin = source.join("bin");
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-        copy_tree(&source, &target).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        copy_tree_contents(&source, &target).unwrap();
         assert_eq!(
             fs::read(target.join("nested").join("data")).unwrap(),
             b"nested"
