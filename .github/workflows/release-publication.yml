@@ -1,0 +1,118 @@
+name: Protected release publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Immutable 0.x.y release version"
+        required: true
+        type: string
+      tag:
+        description: "Immutable release tag (v0.x.y)"
+        required: true
+        type: string
+      commit:
+        description: "Full immutable commit SHA"
+        required: true
+        type: string
+      created_at:
+        description: "RFC3339 creation timestamp"
+        required: true
+        type: string
+      expires_at:
+        description: "RFC3339 expiry timestamp"
+        required: true
+        type: string
+      base_url:
+        description: "HTTPS artifact base URL"
+        required: true
+        type: string
+      manifest_endpoints:
+        description: "Ordered HTTPS manifest URLs, one per line"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  sign-manifest:
+    name: Generate and sign release manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: release-artifacts
+      - name: Generate signed manifest
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_ED25519_PRIVATE_KEY }}
+          RELEASE_SIGNING_KEY_ID: ${{ vars.TAPID_RELEASE_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          test -n "${RELEASE_SIGNING_KEY:-}" || { echo 'Signing secret is missing' >&2; exit 1; }
+          test -n "${RELEASE_SIGNING_KEY_ID:-}" || { echo 'Signing key id is missing' >&2; exit 1; }
+          mapfile -t files < <(find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print | sort)
+          test "${#files[@]}" -gt 0 || { echo 'No required release artifacts found' >&2; exit 1; }
+          args=()
+          for file in "${files[@]}"; do
+            name=$(basename "$file")
+            target=${name#tapid-${{ inputs.version }}-}
+            target=${target%.tar.gz}; target=${target%.zip}
+            args+=(--artifact "${target}=${file}")
+          done
+          python3 .github/release/generate_manifest.py \
+            --version '${{ inputs.version }}' --tag '${{ inputs.tag }}' --commit '${{ inputs.commit }}' \
+            --created-at '${{ inputs.created_at }}' --expires-at '${{ inputs.expires_at }}' \
+            --base-url '${{ inputs.base_url }}' --output release-manifest.json "${args[@]}"
+          test -s release-manifest.json
+      - name: Upload signed manifest for approved advancement
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-release-manifest
+          path: release-manifest.json
+          if-no-files-found: error
+
+  advance-stable:
+    name: Advance stable channel (approval required)
+    needs: sign-manifest
+    runs-on: ubuntu-latest
+    environment:
+      name: stable-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-release-manifest
+          path: publication
+      - name: Verify signed manifest is present
+        run: |
+          set -euo pipefail
+          test -s publication/release-manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          m = json.loads(Path('publication/release-manifest.json').read_text())
+          assert m.get('signature', {}).get('algorithm') == 'ed25519', 'manifest is not signed'
+          assert m['signature'].get('value'), 'manifest signature is empty'
+          assert m['artifacts'], 'manifest has no artifacts'
+          PY
+      - name: Build ordered provider-neutral stable metadata
+        env:
+          ENDPOINTS: ${{ inputs.manifest_endpoints }}
+        run: |
+          set -euo pipefail
+          mapfile -t endpoints < <(printf '%s\n' "$ENDPOINTS" | sed '/^[[:space:]]*$/d')
+          test "${#endpoints[@]}" -gt 0 || { echo 'No stable manifest endpoints supplied' >&2; exit 1; }
+          args=()
+          for endpoint in "${endpoints[@]}"; do args+=(--endpoint "$endpoint"); done
+          python3 .github/release/stable_channel.py --output publication/stable.json "${args[@]}"
+          test -s publication/stable.json
+      - name: Publish signed manifest and stable channel metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload '${{ inputs.tag }}' publication/release-manifest.json publication/stable.json --clobber
