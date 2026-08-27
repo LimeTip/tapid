@@ -26,3 +26,48 @@ fn verifies_artifact_hash_and_size() { let mut v = manifest(); v["artifacts"][0]
 fn falls_back_in_order_and_returns_verified_release() { let mut v = manifest(); v["artifacts"][0]["sha256"] = json!(digest(b"hello")); let body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); let mut f = Fake { responses: [("https://one.test/manifest".into(), Err("outage".into())), ("https://two.test/manifest".into(), Ok(body))].into_iter().collect(), calls: vec![] }; let r = discover(&mut f, &["https://one.test/manifest", "https://two.test/manifest"], &keyring(), TARGET, NOW, None).unwrap(); assert_eq!(r.artifact().unwrap().url, "https://example.test/tapid.tar.gz"); assert_eq!(f.calls, vec!["https://one.test/manifest", "https://two.test/manifest"]); }
 #[test]
 fn last_known_good_round_trips_and_replaces_atomically() { let state = LastKnownGood { version: "0.0.6".into(), artifact_sha256: "a".repeat(64) }; let dir = std::env::temp_dir().join(format!("tapid-release-{}", std::process::id())); let _ = std::fs::create_dir_all(&dir); let path = dir.join("state.json"); write_last_known_good(&path, &state).unwrap(); assert_eq!(read_last_known_good(&path).unwrap(), state); let _ = std::fs::remove_dir_all(dir); }
+
+#[test]
+fn release_state_rejects_replay_and_downgrade() {
+    let dir = tempfile_dir(); let path = dir.join("state.json");
+    let state = ReleaseState::new("0.0.6", 6, "a".repeat(64)).unwrap();
+    write_release_state(&path, &state).unwrap();
+    assert!(matches!(accept_release(&state, "0.0.6", 6, "b".repeat(64)), Err(Error::ReleaseReplay { .. })));
+    assert!(matches!(accept_release(&state, "0.0.5", 7, "b".repeat(64)), Err(Error::ReleaseDowngrade { .. })));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn malformed_state_and_symlink_are_rejected() {
+    let dir = tempfile_dir(); let path = dir.join("state.json");
+    std::fs::write(&path, b"{\"schema\":\"tapid-release-state-v2\"}").unwrap();
+    assert!(matches!(read_release_state(&path), Err(Error::State(_))));
+    let target = dir.join("target"); std::fs::write(&target, b"old").unwrap();
+    let link = dir.join("link"); std::os::unix::fs::symlink(&target, &link).unwrap();
+    let state = ReleaseState::new("0.0.6", 6, "a".repeat(64)).unwrap();
+    assert!(matches!(write_release_state(&link, &state), Err(Error::State(_))));
+    assert_eq!(std::fs::read(&target).unwrap(), b"old"); let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn interrupted_replacement_preserves_previous_state() {
+    let dir = tempfile_dir();
+    let path = dir.join("state.json");
+    let old = ReleaseState::new("0.0.6", 6, "a".repeat(64)).unwrap();
+    write_release_state(&path, &old).unwrap();
+    let temp = dir.join(format!(".state.json.tmp-{}", std::process::id()));
+    std::fs::write(&temp, b"interrupted").unwrap();
+    let newer = ReleaseState::new("0.0.7", 7, "b".repeat(64)).unwrap();
+    assert!(write_release_state(&path, &newer).is_err());
+    assert_eq!(read_release_state(&path).unwrap(), old);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn all_endpoints_fail_with_deterministic_error() {
+    let mut f = Fake { responses: BTreeMap::new(), calls: vec![] };
+    let err = discover(&mut f, &["https://one.test/manifest", "https://two.test/manifest"], &keyring(), TARGET, NOW, None).unwrap_err();
+    assert!(matches!(err, Error::AllEndpointsFailed { attempts: 2 }));
+}
+
+fn tempfile_dir() -> std::path::PathBuf { let d = std::env::temp_dir().join(format!("tapid-release-test-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())); std::fs::create_dir_all(&d).unwrap(); d }

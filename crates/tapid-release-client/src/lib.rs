@@ -4,7 +4,13 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fmt, fs, path::Path, time::Duration};
+use std::{
+    fmt, fs,
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tapid_signatures::{KeyRing, VerificationError, release};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -15,9 +21,23 @@ pub enum Error {
     StaleMetadata,
     TargetNotFound(String),
     ArtifactDigestMismatch,
-    ArtifactSizeMismatch { expected: u64, actual: u64 },
+    ArtifactSizeMismatch {
+        expected: u64,
+        actual: u64,
+    },
     Fetch(String),
     State(String),
+    ReleaseReplay {
+        current_sequence: u64,
+        received_sequence: u64,
+    },
+    ReleaseDowngrade {
+        floor: String,
+        received: String,
+    },
+    AllEndpointsFailed {
+        attempts: usize,
+    },
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -206,25 +226,23 @@ pub fn discover<F: Fetcher>(
     now: &str,
     max_age: Option<Duration>,
 ) -> Result<ReleaseManifest, Error> {
-    let mut last = None;
     for endpoint in endpoints {
         if !https(endpoint) {
-            last = Some(Error::InvalidManifest(
-                "discovery endpoint must use HTTPS".into(),
-            ));
             continue;
         }
-        match fetcher.fetch(endpoint) {
-            Ok(body) => {
-                match ReleaseManifest::parse_and_verify(&body, keyring, target, now, max_age) {
-                    Ok(m) => return Ok(m),
-                    Err(e) => last = Some(e),
-                }
-            }
-            Err(e) => last = Some(Error::Fetch(e)),
+        let body = match fetcher.fetch(endpoint) {
+            Ok(body) => body,
+            Err(_) => continue,
+        };
+        if let Ok(manifest) =
+            ReleaseManifest::parse_and_verify(&body, keyring, target, now, max_age)
+        {
+            return Ok(manifest);
         }
     }
-    Err(last.unwrap_or_else(|| Error::Fetch("no discovery endpoints".into())))
+    Err(Error::AllEndpointsFailed {
+        attempts: endpoints.len(),
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -234,17 +252,178 @@ pub struct LastKnownGood {
     pub artifact_sha256: String,
 }
 pub fn write_last_known_good(path: &Path, state: &LastKnownGood) -> Result<(), Error> {
-    let bytes = serde_json::to_vec(state).map_err(|e| Error::State(e.to_string()))?;
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&tmp, bytes).map_err(|e| Error::State(e.to_string()))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        Error::State(e.to_string())
-    })
+    validate_lkg(state)?;
+    safe_atomic_write(
+        path,
+        &serde_json::to_vec(state).map_err(|e| Error::State(e.to_string()))?,
+    )
 }
 pub fn read_last_known_good(path: &Path) -> Result<LastKnownGood, Error> {
     let bytes = fs::read(path).map_err(|e| Error::State(e.to_string()))?;
-    serde_json::from_slice(&bytes).map_err(|e| Error::State(e.to_string()))
+    let state: LastKnownGood =
+        serde_json::from_slice(&bytes).map_err(|e| Error::State(e.to_string()))?;
+    validate_lkg(&state)?;
+    Ok(state)
+}
+
+/// Durable client policy state. This is deliberately separate from v1 manifests:
+/// v1 remains byte-for-byte and parser compatible, while state has an explicit v2 schema.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseState {
+    pub schema: String,
+    pub release_floor: String,
+    pub release_sequence: u64,
+    pub last_known_good: LastKnownGood,
+}
+
+impl ReleaseState {
+    pub fn new(version: &str, sequence: u64, artifact_sha256: String) -> Result<Self, Error> {
+        let state = Self {
+            schema: "tapid-release-state-v2".into(),
+            release_floor: version.into(),
+            release_sequence: sequence,
+            last_known_good: LastKnownGood {
+                version: version.into(),
+                artifact_sha256,
+            },
+        };
+        validate_state(&state)?;
+        Ok(state)
+    }
+}
+
+pub fn accept_release(
+    state: &ReleaseState,
+    version: &str,
+    sequence: u64,
+    artifact_sha256: String,
+) -> Result<ReleaseState, Error> {
+    validate_state(state)?;
+    if sequence <= state.release_sequence {
+        return Err(Error::ReleaseReplay {
+            current_sequence: state.release_sequence,
+            received_sequence: sequence,
+        });
+    }
+    if compare_version(version, &state.release_floor)? == std::cmp::Ordering::Less {
+        return Err(Error::ReleaseDowngrade {
+            floor: state.release_floor.clone(),
+            received: version.into(),
+        });
+    }
+    let floor = if compare_version(version, &state.release_floor)? != std::cmp::Ordering::Less {
+        version
+    } else {
+        &state.release_floor
+    };
+    ReleaseState::new(floor, sequence, artifact_sha256)
+}
+
+pub fn write_release_state(path: &Path, state: &ReleaseState) -> Result<(), Error> {
+    validate_state(state)?;
+    safe_atomic_write(
+        path,
+        &serde_json::to_vec(state).map_err(|e| Error::State(e.to_string()))?,
+    )
+}
+
+pub fn read_release_state(path: &Path) -> Result<ReleaseState, Error> {
+    let bytes = fs::read(path).map_err(|e| Error::State(e.to_string()))?;
+    let state: ReleaseState =
+        serde_json::from_slice(&bytes).map_err(|e| Error::State(e.to_string()))?;
+    validate_state(&state)?;
+    Ok(state)
+}
+
+fn validate_state(state: &ReleaseState) -> Result<(), Error> {
+    if state.schema != "tapid-release-state-v2" || !version(&state.release_floor) {
+        return Err(Error::State(
+            "unsupported or malformed release state".into(),
+        ));
+    }
+    validate_lkg(&state.last_known_good)?;
+    if compare_version(&state.last_known_good.version, &state.release_floor)?
+        == std::cmp::Ordering::Less
+    {
+        return Err(Error::State(
+            "last-known-good is below release floor".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_lkg(state: &LastKnownGood) -> Result<(), Error> {
+    if !version(&state.version) || !hex64(&state.artifact_sha256) {
+        return Err(Error::State("malformed last-known-good state".into()));
+    }
+    Ok(())
+}
+
+fn compare_version(left: &str, right: &str) -> Result<std::cmp::Ordering, Error> {
+    let parse = |s: &str| -> Result<[u64; 3], Error> {
+        let p: Vec<_> = s.split('.').collect();
+        if p.len() != 3 || p[0] != "0" {
+            return Err(Error::State("invalid release version".into()));
+        }
+        Ok([
+            0,
+            p[1].parse()
+                .map_err(|_| Error::State("invalid release version".into()))?,
+            p[2].parse()
+                .map_err(|_| Error::State("invalid release version".into()))?,
+        ])
+    };
+    Ok(parse(left)?.cmp(&parse(right)?))
+}
+
+fn safe_atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::State("state path has no parent".into()))?;
+    let parent_meta = fs::symlink_metadata(parent).map_err(|e| Error::State(e.to_string()))?;
+    if !parent_meta.file_type().is_dir() || parent_meta.file_type().is_symlink() {
+        return Err(Error::State("state parent must be a real directory".into()));
+    }
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(Error::State("state path must not be a symlink".into()));
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::State("state path has no filename".into()))?
+        .to_string_lossy();
+    let tmp: PathBuf = parent.join(format!(".{name}.tmp-{}", std::process::id()));
+    let mut created = false;
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| Error::State(e.to_string()))?;
+        created = true;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|e| Error::State(e.to_string()))?;
+        }
+        file.write_all(bytes)
+            .map_err(|e| Error::State(e.to_string()))?;
+        file.sync_all().map_err(|e| Error::State(e.to_string()))?;
+        if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(Error::State("state path became a symlink".into()));
+        }
+        fs::rename(&tmp, path).map_err(|e| Error::State(e.to_string()))?;
+        OpenOptions::new()
+            .read(true)
+            .open(parent)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| Error::State(e.to_string()))
+    })();
+    if result.is_err() && created {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
