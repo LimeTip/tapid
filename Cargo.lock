@@ -1363,6 +1363,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tapid-release-client"
+version = "0.0.1"
+dependencies = [
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tapid-signatures",
+ "time",
+]
+
+[[package]]
 name = "tapid-resolver"
 version = "0.0.2"
 dependencies = [
