@@ -1364,15 +1364,15 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
         std::process::id(),
         unique_nonce()
     ));
-    if destination.exists() {
-        if let Err(error) = fs::rename(&destination, &backup) {
-            if marker_exists {
-                let _ = fs::rename(&marker_backup, &marker);
-            }
-            return Err(format!(
-                "cannot stage existing node_modules for replacement: {error}"
-            ));
+    if destination.exists()
+        && let Err(error) = fs::rename(&destination, &backup)
+    {
+        if marker_exists {
+            let _ = fs::rename(&marker_backup, &marker);
         }
+        return Err(format!(
+            "cannot stage existing node_modules for replacement: {error}"
+        ));
     }
     if std::env::var_os("TAPID_TEST_FAIL_ACTIVATION").is_some() {
         if backup.exists() {
