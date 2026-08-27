@@ -49,7 +49,7 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $destination = Join-Path $InstallDir "tapid.exe"
 Test-RegularDestination $destination
 
-if ($PSBoundParameters.ContainsKey("SourceRef")) {
+if (-not [string]::IsNullOrEmpty($SourceRef)) {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Fail "git is required for -SourceRef"
     }

@@ -42,7 +42,8 @@ configure_path() {
   esac
   # Only modify a shell startup file for the default user-local path.
   if [ "$INSTALL_DIR" != "$HOME/.local/bin" ]; then return; fi
-  shell_name="${SHELL##*/}"
+  shell_name="${SHELL-}"
+  shell_name="${shell_name##*/}"
   case "$shell_name" in
     zsh) PATH_RC="$HOME/.zprofile" ;;
     bash)
