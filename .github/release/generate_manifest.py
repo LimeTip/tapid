@@ -18,7 +18,22 @@ TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def canonical(value):
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    """Serialize the release schema using the RFC 8785 JCS subset it permits."""
+    if isinstance(value, dict):
+        ordered = sorted(value.items(), key=lambda item: item[0].encode("utf-16-be"))
+        return ("{" + ",".join(
+            json.dumps(key, ensure_ascii=False, separators=(",", ":")) + ":" + canonical(item).decode("utf-8")
+            for key, item in ordered
+        ) + "}").encode("utf-8")
+    if isinstance(value, list):
+        return ("[" + ",".join(canonical(item).decode("utf-8") for item in value) + "]").encode("utf-8")
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if isinstance(value, bool) or value is None:
+        return json.dumps(value, separators=(",", ":")).encode("ascii")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return str(value).encode("ascii")
+    raise ValueError("release manifest contains a number outside the supported JCS subset")
 
 
 def sign(payload, pem):

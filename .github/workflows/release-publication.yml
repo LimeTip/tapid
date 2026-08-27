@@ -36,9 +36,70 @@ permissions:
   contents: write
 
 jobs:
+  build-artifacts:
+    name: Build ${{ matrix.target }} release artifact
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: tapid
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            binary: tapid
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: tapid
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: tapid.exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+      - name: Bind tag to immutable commit
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+      - name: Build and package artifact
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --bin tapid
+          staging="$(mktemp -d)"
+          trap 'rm -rf "$staging"' EXIT
+          install -m 0755 "target/release/$BINARY" "$staging/$BINARY"
+          mkdir -p release-artifacts
+          tar -czf "release-artifacts/tapid-${VERSION}-${TARGET}.tar.gz" -C "$staging" "$BINARY"
+          test -s "release-artifacts/tapid-${VERSION}-${TARGET}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ matrix.target }}
+          path: release-artifacts/*.tar.gz
+          if-no-files-found: error
+
   sign-manifest:
     name: Generate and sign release manifest
+    needs: build-artifacts
     runs-on: ubuntu-latest
+    environment:
+      name: stable-release
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,8 +117,9 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: release-artifacts
+          pattern: release-artifacts-*
           path: release-artifacts
+          merge-multiple: true
       - name: Generate signed manifest
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_ED25519_PRIVATE_KEY }}

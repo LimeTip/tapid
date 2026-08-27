@@ -51,6 +51,17 @@ class ReleasePublicationTests(unittest.TestCase):
             self.assertEqual(len(base64.b64decode(manifest["signature"]["value"])), 64)
             self.assertTrue(manifest["signature"]["signed_digest"].startswith("sha256-"))
 
+    def test_manifest_canonicalization_uses_rfc8785_utf16_key_order(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("generate_manifest", MANIFEST)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(
+            module.canonical({"😀": 1, "\ue000": 2}),
+            '{"😀":1,"\ue000":2}'.encode(),
+        )
+
     def test_manifest_fails_closed_without_key_or_required_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / "tapid-0.0.7-x86_64-unknown-linux-gnu.tar.gz"

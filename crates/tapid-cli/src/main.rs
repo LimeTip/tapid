@@ -14,16 +14,16 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
 };
-use tapid_archive::{extract_to, ArchiveFormat, ArchiveLimits};
+use tapid_archive::{ArchiveFormat, ArchiveLimits, extract_to};
 use tapid_core::{ArtifactDigest, PackageInstanceId};
 use tapid_linker::{
-    plan_layout, DependencyEdge, InstanceKey, LayoutInput, ManagedRoot, PackageInstance, Platform,
-    VerifiedTreeReference,
+    DependencyEdge, InstanceKey, LayoutInput, ManagedRoot, PackageInstance, Platform,
+    VerifiedTreeReference, plan_layout,
 };
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 use tapid_release_client::{
-    accept_release, read_release_state, write_release_state, Fetcher, ReleaseState,
+    Fetcher, ReleaseState, accept_release, read_release_state, write_release_state,
 };
 use tapid_signatures::KeyRing;
 use tapid_store::Store;
@@ -341,7 +341,7 @@ fn fetch_verified_release<F: Fetcher>(
 
 #[cfg(test)]
 mod upgrade_tests {
-    use super::{materialize_artifact, stable_discovery_endpoints, DEFAULT_STABLE_ENDPOINTS};
+    use super::{DEFAULT_STABLE_ENDPOINTS, materialize_artifact, stable_discovery_endpoints};
     use std::{
         fs,
         process::Command,
@@ -427,24 +427,28 @@ mod upgrade_tests {
         let root = temp("duplicate");
         let plain = root.join("artifact.tar");
         fs::write(root.join("tapid"), b"new").unwrap();
-        assert!(Command::new("tar")
-            .args(["-cf"])
-            .arg(&plain)
-            .args(["-C"])
-            .arg(&root)
-            .arg("tapid")
-            .status()
-            .unwrap()
-            .success());
-        assert!(Command::new("tar")
-            .args(["-rf"])
-            .arg(&plain)
-            .args(["-C"])
-            .arg(&root)
-            .arg("tapid")
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("tar")
+                .args(["-cf"])
+                .arg(&plain)
+                .args(["-C"])
+                .arg(&root)
+                .arg("tapid")
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("tar")
+                .args(["-rf"])
+                .arg(&plain)
+                .args(["-C"])
+                .arg(&root)
+                .arg("tapid")
+                .status()
+                .unwrap()
+                .success()
+        );
         let output = Command::new("gzip")
             .args(["-c"])
             .arg(&plain)

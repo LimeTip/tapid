@@ -66,7 +66,9 @@ fn upgrade_uses_embedded_trust_root_without_manual_keyring() {
         "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required"));
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required")
+    );
     cleanup(dir);
 }
 
@@ -80,7 +82,9 @@ fn upgrade_uses_built_in_stable_endpoints_and_embedded_keyring() {
         "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required"));
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required")
+    );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("no stable discovery endpoints"));
     cleanup(dir);
 }
@@ -123,15 +127,17 @@ fn upgrade_recovers_last_verified_artifact_when_discovery_is_unavailable() {
     fs::create_dir(&artifact_root).unwrap();
     fs::write(artifact_root.join("tapid"), b"recovered").unwrap();
     let archive = dir.join("artifact.tar.gz");
-    assert!(Command::new("tar")
-        .args(["--format=ustar", "-czf"])
-        .arg(&archive)
-        .args(["-C"])
-        .arg(&artifact_root)
-        .arg("tapid")
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("tar")
+            .args(["--format=ustar", "-czf"])
+            .arg(&archive)
+            .args(["-C"])
+            .arg(&artifact_root)
+            .arg("tapid")
+            .status()
+            .unwrap()
+            .success()
+    );
     let bytes = fs::read(&archive).unwrap();
     let digest = format!("{:x}", Sha256::digest(&bytes));
     fs::write(
@@ -192,9 +198,11 @@ fn init_creates_manifest_and_reports_stdout() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Created "));
-    assert!(fs::read_to_string(dir.join("package.json"))
-        .unwrap()
-        .contains("\"private\": true"));
+    assert!(
+        fs::read_to_string(dir.join("package.json"))
+            .unwrap()
+            .contains("\"private\": true")
+    );
     cleanup(dir);
 }
 #[test]
@@ -347,8 +355,10 @@ fn install_rejects_unverified_artifacts_with_offline_or_frozen() {
             ],
         );
         assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stderr)
-            .contains("cannot be used with --offline or --frozen"));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("cannot be used with --offline or --frozen")
+        );
         cleanup(dir);
     }
 }
@@ -390,8 +400,10 @@ fn install_allows_missing_integrity_only_with_explicit_warning() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("not authenticated against a registry-declared digest"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("not authenticated against a registry-declared digest")
+    );
     assert!(dir.join("node_modules").is_dir());
     cleanup(dir);
 }
