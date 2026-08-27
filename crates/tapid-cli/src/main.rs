@@ -583,7 +583,18 @@ fn relative_path(from: &Path, to: &Path) -> PathBuf {
 
 fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     let package = source.join("package");
-    let root = if package.is_dir() { &package } else { source };
+    let root = match fs::symlink_metadata(&package) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "symlink in store tree is not replayable: {}",
+                package.display()
+            ));
+        }
+        Ok(meta) if meta.is_dir() => &package,
+        Ok(_) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => source,
+        Err(error) => return Err(error.to_string()),
+    };
     copy_tree_contents(root, target)
 }
 
@@ -886,6 +897,20 @@ mod tests {
         fs::write(package_dir.join("package.json"), "{}").unwrap();
 
         assert_eq!(package_root_for_shims(root.path()), package_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_top_level_package_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new();
+        let external = TempDir::new();
+        fs::write(external.path().join("package.json"), "{}").unwrap();
+        symlink(external.path(), root.path().join("package")).unwrap();
+
+        let error = copy_tree(root.path(), &root.path().join("target")).unwrap_err();
+        assert!(error.contains("symlink in store tree is not replayable"));
     }
 }
 
