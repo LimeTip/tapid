@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
 };
+use tapid_archive::{ArchiveFormat, ArchiveLimits, extract_to};
 use tapid_core::{ArtifactDigest, PackageInstanceId};
 use tapid_linker::{
     DependencyEdge, InstanceKey, LayoutInput, ManagedRoot, PackageInstance, Platform,
@@ -226,61 +227,176 @@ fn fetch_verified_release<F: Fetcher>(
     Ok((manifest, bytes))
 }
 
-fn materialize_artifact(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let temp = std::env::temp_dir().join(format!("tapid-artifact-{}", std::process::id()));
-    fs::create_dir_all(&temp).map_err(|e| e.to_string())?;
-    let result = (|| {
-        let mut command = if name.ends_with(".tar.gz") {
-            let mut c = std::process::Command::new("tar");
-            c.args(["-xzf", "-", "-C"]).arg(&temp);
-            c
-        } else if name.ends_with(".zip") {
-            let archive = temp.join("artifact.zip");
-            fs::write(&archive, bytes).map_err(|e| e.to_string())?;
-            let mut c = std::process::Command::new("unzip");
-            c.args(["-q", "-o"]).arg(&archive).args(["-d"]).arg(&temp);
-            c
-        } else {
-            return Err("verified artifact has an unsupported archive format".into());
-        };
-        if name.ends_with(".tar.gz") {
-            use std::io::Write;
-            let mut child = command
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| e.to_string())?;
-            child
-                .stdin
-                .take()
+#[cfg(test)]
+mod upgrade_tests {
+    use super::materialize_artifact;
+    use std::{
+        fs,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp(label: &str) -> std::path::PathBuf {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("tapid-upgrade-{label}-{n}"));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn tar_gz(root: &std::path::Path, entries: &[&str]) -> Vec<u8> {
+        let archive = root.join("artifact.tar.gz");
+        let status = Command::new("tar")
+            .args(["-czf"])
+            .arg(&archive)
+            .args(["-C"])
+            .arg(root)
+            .args(entries)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::read(archive).unwrap()
+    }
+
+    #[test]
+    fn tar_artifact_rejects_extra_members_before_selecting_tapid() {
+        let root = temp("extra");
+        fs::write(root.join("tapid"), b"new").unwrap();
+        fs::write(root.join("extra"), b"unexpected").unwrap();
+        let bytes = tar_gz(&root, &["tapid", "extra"]);
+        let result = materialize_artifact("tapid.tar.gz", &bytes);
+        assert!(result.is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tar_artifact_rejects_symlink_members() {
+        let root = temp("symlink");
+        fs::write(root.join("payload"), b"payload").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("payload", root.join("tapid")).unwrap();
+        #[cfg(not(unix))]
+        return;
+        let bytes = tar_gz(&root, &["tapid", "payload"]);
+        assert!(materialize_artifact("tapid.tar.gz", &bytes).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tar_artifact_rejects_duplicate_members() {
+        let root = temp("duplicate");
+        let plain = root.join("artifact.tar");
+        fs::write(root.join("tapid"), b"new").unwrap();
+        assert!(
+            Command::new("tar")
+                .args(["-cf"])
+                .arg(&plain)
+                .args(["-C"])
+                .arg(&root)
+                .arg("tapid")
+                .status()
                 .unwrap()
-                .write_all(bytes)
-                .map_err(|e| e.to_string())?;
-            let output = child.wait_with_output().map_err(|e| e.to_string())?;
-            if !output.status.success() {
-                return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-            }
-        } else if !command.status().map_err(|e| e.to_string())?.success() {
-            return Err("cannot extract verified artifact".into());
+                .success()
+        );
+        assert!(
+            Command::new("tar")
+                .args(["-rf"])
+                .arg(&plain)
+                .args(["-C"])
+                .arg(&root)
+                .arg("tapid")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let output = Command::new("gzip")
+            .args(["-c"])
+            .arg(&plain)
+            .output()
+            .unwrap();
+        let result = materialize_artifact("tapid.tar.gz", &output.stdout);
+        assert!(result.is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tar_artifact_rejects_traversal_members() {
+        let root = temp("traversal");
+        let outside = root.parent().unwrap().join(format!(
+            "tapid-outside-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&outside, b"outside").unwrap();
+        let archive = root.join("artifact.tar.gz");
+        let output = Command::new("python3")
+            .args([
+                "-c",
+                "import tarfile,sys; t=tarfile.open(sys.argv[1],'w:gz'); i=tarfile.TarInfo('../tapid'); i.size=3; t.addfile(i, __import__('io').BytesIO(b'new')); t.close()",
+                archive.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(materialize_artifact("tapid.tar.gz", &fs::read(&archive).unwrap()).is_err());
+        let _ = fs::remove_file(outside);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn zip_artifact_is_rejected_without_unsafe_extraction() {
+        assert!(materialize_artifact("tapid.zip", b"not a zip").is_err());
+    }
+}
+
+fn unique_nonce() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
+fn materialize_artifact(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if name.ends_with(".zip") {
+        return Err(
+            "verified Windows zip artifacts are unsupported: refusing unsafe extraction".into(),
+        );
+    }
+    if !name.ends_with(".tar.gz") {
+        return Err("verified artifact has an unsupported archive format".into());
+    }
+    let temp = std::env::temp_dir().join(format!(
+        "tapid-artifact-{}-{}",
+        std::process::id(),
+        unique_nonce()
+    ));
+    let result = (|| {
+        extract_to(bytes, ArchiveFormat::TarGz, &temp, ArchiveLimits::default())
+            .map_err(|e| format!("cannot safely extract verified artifact: {e}"))?;
+        let mut entries = fs::read_dir(&temp).map_err(|e| e.to_string())?;
+        let first = entries.next().transpose().map_err(|e| e.to_string())?;
+        let Some(first) = first else {
+            return Err("verified artifact does not contain a tapid executable".into());
+        };
+        if entries.next().is_some() {
+            return Err("verified artifact must contain exactly one member named tapid".into());
         }
-        let candidate = fs::read_dir(&temp)
-            .map_err(|e| e.to_string())?
-            .filter_map(Result::ok)
-            .find_map(|entry| {
-                let path = entry.path();
-                if path
-                    .file_name()
-                    .is_some_and(|n| n == "tapid" || n == "tapid.exe")
-                    && fs::symlink_metadata(&path).ok()?.file_type().is_file()
-                {
-                    Some(path)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| "verified artifact does not contain a tapid executable".to_owned())?;
-        fs::read(candidate).map_err(|e| e.to_string())
+        let path = first.path();
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or_default();
+        if name != "tapid" && name != "tapid.exe" {
+            return Err("verified artifact must contain exactly one member named tapid".into());
+        }
+        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if !metadata.file_type().is_file() {
+            return Err("verified artifact tapid member must be a regular file".into());
+        }
+        fs::read(path).map_err(|e| e.to_string())
     })();
     let _ = fs::remove_dir_all(&temp);
     result
@@ -324,7 +440,11 @@ fn validate_upgrade_destination(path: &Path) -> Result<(), String> {
 }
 
 fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let temp = path.with_file_name(format!(".tapid-upgrade-{}", std::process::id()));
+    let temp = path.with_file_name(format!(
+        ".tapid-upgrade-{}-{}",
+        std::process::id(),
+        unique_nonce()
+    ));
     fs::write(&temp, bytes).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
@@ -333,12 +453,49 @@ fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .permissions()
             .mode();
-        fs::set_permissions(&temp, fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
+        if let Err(error) = fs::set_permissions(&temp, fs::Permissions::from_mode(mode)) {
+            let _ = fs::remove_file(&temp);
+            return Err(error.to_string());
+        }
+        return fs::rename(&temp, path).map_err(|e| {
+            let _ = fs::remove_file(&temp);
+            e.to_string()
+        });
     }
-    fs::rename(&temp, path).map_err(|e| {
+    #[cfg(windows)]
+    {
+        let backup = path.with_file_name(format!(
+            ".tapid-old-{}-{}",
+            std::process::id(),
+            unique_nonce()
+        ));
+        fs::rename(path, &backup).map_err(|e| {
+            let _ = fs::remove_file(&temp);
+            e.to_string()
+        })?;
+        match fs::rename(&temp, path) {
+            Ok(()) => {
+                let _ = fs::remove_file(&backup);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::remove_file(path);
+                let restore = fs::rename(&backup, path);
+                if let Err(restore_error) = restore {
+                    return Err(format!(
+                        "{error}; could not restore old executable: {restore_error}"
+                    ));
+                }
+                let _ = fs::remove_file(&temp);
+                Err(error.to_string())
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
         let _ = fs::remove_file(&temp);
-        e.to_string()
-    })
+        Err("executable replacement is unsupported on this operating system".into())
+    }
 }
 
 struct CurlFetcher;
@@ -1059,12 +1216,6 @@ fn discard_lockfile_backup(backup: Option<&Path>) -> Result<(), String> {
         fs::remove_file(backup).map_err(|e| e.to_string())?;
     }
     Ok(())
-}
-
-fn unique_nonce() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos())
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {

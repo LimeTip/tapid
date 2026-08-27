@@ -10,6 +10,7 @@ VERSION_SET=0
 SOURCE_REF=""
 SOURCE_REF_SET=0
 STAGED_BINARY=""
+STAGED_MARKER=""
 PATH_UPDATED=0
 PATH_RC=""
 PATH_COMMAND=""
@@ -153,7 +154,7 @@ if [ "$SOURCE_REF_SET" -eq 1 ]; then
   command -v cargo >/dev/null 2>&1 || fail "cargo is required for --source-ref"
   command -v git >/dev/null 2>&1 || fail "git is required for --source-ref"
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/tapid-install.XXXXXX")"
-  cleanup() { rm -rf "$tmp_dir"; [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"; }
+  cleanup() { rm -rf "$tmp_dir"; [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"; [ -z "$STAGED_MARKER" ] || rm -f "$STAGED_MARKER"; }
   trap cleanup 0 1 2 15
   git clone --filter=blob:none --no-checkout "https://github.com/$REPO.git" "$tmp_dir/tapid"
   if ! git -C "$tmp_dir/tapid" checkout --detach "$SOURCE_REF"; then
@@ -165,9 +166,13 @@ if [ "$SOURCE_REF_SET" -eq 1 ]; then
   cargo install --path "$tmp_dir/tapid/crates/tapid-cli" --locked --root "$tmp_dir/root"
   mkdir -p "$INSTALL_DIR"
   STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
+  STAGED_MARKER="$(mktemp "$INSTALL_DIR/.tapid-marker.tmp.XXXXXX")"
   install -m 0755 "$tmp_dir/root/bin/tapid" "$STAGED_BINARY"
+  printf 'tapid-managed-v1\n' > "$STAGED_MARKER"
   mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"
   STAGED_BINARY=""
+  mv -f "$STAGED_MARKER" "$INSTALL_DIR/.tapid-managed"
+  STAGED_MARKER=""
   configure_path
   printf 'Installed Tapid from %s into %s/tapid\n' "$SOURCE_REF" "$INSTALL_DIR"
   print_path_guidance
@@ -240,10 +245,14 @@ printf '%s\n' "$entry_info" | awk 'NF { count++; if (substr($0, 1, 1) != "-" || 
 tar -xzf "$tmp_dir/$archive" -C "$tmp_dir/extracted" tapid || fail "cannot extract tapid from release archive"
 [ -f "$tmp_dir/extracted/tapid" ] || fail "release archive does not contain tapid"
 [ ! -L "$tmp_dir/extracted/tapid" ] || fail "release archive tapid member must not be a symlink"
-STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
-install -m 0755 "$tmp_dir/extracted/tapid" "$STAGED_BINARY"
-mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"
-STAGED_BINARY=""
+  STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
+  STAGED_MARKER="$(mktemp "$INSTALL_DIR/.tapid-marker.tmp.XXXXXX")"
+  install -m 0755 "$tmp_dir/extracted/tapid" "$STAGED_BINARY"
+  printf 'tapid-managed-v1\n' > "$STAGED_MARKER"
+  mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"
+  STAGED_BINARY=""
+  mv -f "$STAGED_MARKER" "$INSTALL_DIR/.tapid-managed"
+  STAGED_MARKER=""
 configure_path
 printf 'Installed Tapid %s into %s/tapid\n' "$VERSION" "$INSTALL_DIR"
 print_path_guidance

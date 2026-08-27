@@ -91,6 +91,7 @@ if (-not [string]::IsNullOrEmpty($SourceRef)) {
     $checkout = Join-Path $tempRoot "tapid"
     $cargoRoot = Join-Path $tempRoot "root"
     $staged = Join-Path $InstallDir (".tapid.tmp." + [guid]::NewGuid().ToString("N") + ".exe")
+    $stagedMarker = Join-Path $InstallDir (".tapid-marker.tmp." + [guid]::NewGuid().ToString("N"))
     try {
         New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
         & git clone --filter=blob:none --no-checkout "https://github.com/$Repo.git" $checkout
@@ -105,7 +106,9 @@ if (-not [string]::IsNullOrEmpty($SourceRef)) {
         & cargo install --path (Join-Path $checkout "crates\tapid-cli") --locked --root $cargoRoot
         if ($LASTEXITCODE -ne 0) { Fail "cargo build failed" }
         Copy-Item -LiteralPath (Join-Path $cargoRoot "bin\tapid.exe") -Destination $staged -Force
+        [IO.File]::WriteAllBytes($stagedMarker, [Text.Encoding]::ASCII.GetBytes("tapid-managed-v1`n"))
         Move-Item -LiteralPath $staged -Destination $destination -Force
+        Move-Item -LiteralPath $stagedMarker -Destination (Join-Path $InstallDir ".tapid-managed") -Force
         Configure-UserPath $InstallDir
         Write-Output "Installed Tapid from $SourceRef into $destination"
         Print-PathGuidance
@@ -114,6 +117,7 @@ if (-not [string]::IsNullOrEmpty($SourceRef)) {
     finally {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stagedMarker -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -157,6 +161,7 @@ $archivePath = Join-Path $tempRoot $archive
 $checksumsPath = Join-Path $tempRoot $checksums
 $extractRoot = Join-Path $tempRoot "extracted"
 $staged = Join-Path $InstallDir (".tapid.tmp." + [guid]::NewGuid().ToString("N") + ".exe")
+$stagedMarker = Join-Path $InstallDir (".tapid-marker.tmp." + [guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
     Invoke-WebRequest -UseBasicParsing "$base/$archive" -OutFile $archivePath
@@ -176,7 +181,9 @@ try {
     $extracted = Join-Path $extractRoot "tapid.exe"
     Test-RegularDestination $extracted
     Copy-Item -LiteralPath $extracted -Destination $staged -Force
+    [IO.File]::WriteAllBytes($stagedMarker, [Text.Encoding]::ASCII.GetBytes("tapid-managed-v1`n"))
     Move-Item -LiteralPath $staged -Destination $destination -Force
+    Move-Item -LiteralPath $stagedMarker -Destination (Join-Path $InstallDir ".tapid-managed") -Force
     Configure-UserPath $InstallDir
     Write-Output "Installed Tapid $Version into $destination"
     Print-PathGuidance
@@ -184,4 +191,5 @@ try {
 finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stagedMarker -Force -ErrorAction SilentlyContinue
 }

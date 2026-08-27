@@ -81,6 +81,17 @@ fn upgrade_rejects_unmanaged_destination_before_network() {
     assert_eq!(fs::read(&destination).unwrap(), b"old");
     cleanup(dir);
 }
+#[test]
+fn official_installers_write_the_upgrade_ownership_marker() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sh = fs::read_to_string(root.join("scripts/install.sh")).unwrap();
+    let ps = fs::read_to_string(root.join("scripts/install.ps1")).unwrap();
+    for script in [sh, ps] {
+        assert!(script.contains(".tapid-managed"));
+        assert!(script.contains("tapid-managed-v1"));
+    }
+}
+
 fn lock_for_manifest(raw: &str) -> Lockfile {
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());
