@@ -16,4 +16,6 @@ This matrix describes the current implemented contract. Supported means covered 
 | Store and lockfile | SHA-256 content-addressed staging, exact tree replay, canonical lockfile v3, and atomic managed activation | No remote cache, garbage collection, lease protocol, or full npm lockfile graph |
 | Platforms | macOS behavior is locally exercisable; Linux and Windows consumer checks are configured in GitHub Actions | Configured CI is not execution evidence until a workflow run completes; macOS is not Linux or Windows evidence |
 
+Platform contexts preserve independent OS, CPU, and libc fields. Empty contexts are encoded as `platform=-`; non-empty partial contexts use fixed slots, for example `linux--` for OS-only and `-x86_64-` for CPU-only. Legacy flattened one- and two-component values are rejected because their field positions are ambiguous.
+
 Local fixtures are runtime-derived and do not imply live registry or cross-platform validation. The CI workflow is the authoritative place for configured Linux and Windows consumer checks.

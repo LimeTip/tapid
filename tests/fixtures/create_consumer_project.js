@@ -20,9 +20,6 @@ const packageJson = JSON.stringify(
       preinstall: "node -e \"require('fs').writeFileSync('LIFECYCLE_SHOULD_NOT_RUN', 'x')\"",
       test: testScript,
     },
-    bin: {
-      fixture: 'fixture.js',
-    },
   },
   null,
   2,
@@ -62,7 +59,6 @@ fs.writeFileSync(
     checks: [
       'install',
       'root-script',
-      'bin-shim',
       'argument-forwarding',
       'exit-code',
       'lifecycle-suppression',

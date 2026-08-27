@@ -23,6 +23,7 @@ cargo test -p tapid-test-support
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
+cargo test --manifest-path tests/integration/Cargo.toml --locked
 cargo metadata --no-deps --format-version 1 --locked
 cargo package --workspace --locked
 ```
