@@ -385,15 +385,27 @@ fn safe_atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     if !parent_meta.file_type().is_dir() || parent_meta.file_type().is_symlink() {
         return Err(Error::State("state parent must be a real directory".into()));
     }
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(Error::State("state path must not be a symlink".into()));
-    }
+    let existing = match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(Error::State("state path must not be a symlink".into()));
+            }
+            if !metadata.file_type().is_file() {
+                return Err(Error::State("state path must be a regular file".into()));
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(Error::State(error.to_string())),
+    };
     let name = path
         .file_name()
         .ok_or_else(|| Error::State("state path has no filename".into()))?
         .to_string_lossy();
     let tmp: PathBuf = parent.join(format!(".{name}.tmp-{}", std::process::id()));
+    let backup: PathBuf = parent.join(format!(".{name}.bak-{}", std::process::id()));
     let mut created = false;
+    let mut moved_existing = false;
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
@@ -413,15 +425,35 @@ fn safe_atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
         if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err(Error::State("state path became a symlink".into()));
         }
-        fs::rename(&tmp, path).map_err(|e| Error::State(e.to_string()))?;
+        if existing {
+            fs::rename(path, &backup).map_err(|e| Error::State(e.to_string()))?;
+            moved_existing = true;
+        }
+        if let Err(error) = fs::rename(&tmp, path) {
+            if moved_existing {
+                let _ = fs::rename(&backup, path);
+                moved_existing = false;
+            }
+            return Err(Error::State(error.to_string()));
+        }
+        if moved_existing {
+            fs::remove_file(&backup).map_err(|e| Error::State(e.to_string()))?;
+            moved_existing = false;
+        }
         OpenOptions::new()
             .read(true)
             .open(parent)
             .and_then(|d| d.sync_all())
             .map_err(|e| Error::State(e.to_string()))
     })();
-    if result.is_err() && created {
-        let _ = fs::remove_file(&tmp);
+    if result.is_err() {
+        if created {
+            let _ = fs::remove_file(&tmp);
+        }
+        if moved_existing {
+            let _ = fs::remove_file(path);
+            let _ = fs::rename(&backup, path);
+        }
     }
     result
 }
