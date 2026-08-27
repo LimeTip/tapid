@@ -1,8 +1,12 @@
+mod commands;
+mod context;
 mod online;
+mod package_spec;
 #[allow(dead_code)]
 mod run;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use commands::{Command, LockCommand, ManifestCommand};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -10,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
 };
-use tapid_core::{ArtifactDigest, PackageInstanceId, PeerContext, PlatformContext};
+use tapid_core::{ArtifactDigest, PackageInstanceId};
 use tapid_linker::{
     DependencyEdge, InstanceKey, LayoutInput, ManagedRoot, PackageInstance, Platform,
     VerifiedTreeReference, plan_layout,
@@ -28,55 +32,6 @@ use tapid_store::Store;
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-}
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Create a private package.json manifest.
-    Init { path: Option<PathBuf> },
-    Manifest {
-        #[command(subcommand)]
-        command: ManifestCommand,
-    },
-    Lock {
-        #[command(subcommand)]
-        command: LockCommand,
-    },
-    /// Replay the project's validated lockfile without network access.
-    Run {
-        /// Root package script name.
-        script: String,
-        /// Project directory containing package.json.
-        #[arg(long, default_value = ".")]
-        project_dir: PathBuf,
-        /// Arguments forwarded after `--` to the script.
-        #[arg(last = true)]
-        arguments: Vec<String>,
-    },
-    Install {
-        #[arg(long)]
-        offline: bool,
-        #[arg(long)]
-        frozen: bool,
-        /// Permit npm metadata without registry-declared integrity. Not allowed with --offline or --frozen.
-        #[arg(long)]
-        allow_unverified_registry_artifacts: bool,
-        #[arg(long, default_value = ".")]
-        project_dir: PathBuf,
-        /// Store root containing verified `trees/<sha256-...>` directories.
-        #[arg(long)]
-        store_dir: Option<PathBuf>,
-        /// Local JSON registry fixture used by tests and air-gapped development.
-        #[arg(long)]
-        registry_fixture: Option<PathBuf>,
-    },
-}
-#[derive(Debug, Subcommand)]
-enum ManifestCommand {
-    Validate { path: Option<PathBuf> },
-}
-#[derive(Debug, Subcommand)]
-enum LockCommand {
-    Verify,
 }
 
 fn main() -> ExitCode {
@@ -101,6 +56,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             arguments,
         }) => run_script(&project_dir, &script, arguments),
         Some(Command::Install {
+            package,
             offline,
             frozen,
             allow_unverified_registry_artifacts,
@@ -109,6 +65,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             registry_fixture,
         }) => install(
             &project_dir,
+            package.as_deref(),
             store_dir.as_deref(),
             offline,
             frozen,
@@ -158,14 +115,55 @@ fn run_script(project_dir: &Path, script_name: &str, arguments: Vec<String>) -> 
     }
 }
 
+struct ManifestTransaction {
+    path: PathBuf,
+    original: Vec<u8>,
+    committed: bool,
+}
+
+impl ManifestTransaction {
+    fn begin(path: &Path) -> Result<Self, String> {
+        let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+        if !metadata.file_type().is_file() {
+            return Err("package.json must be a regular file".to_owned());
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            original: fs::read(path).map_err(|error| error.to_string())?,
+            committed: false,
+        })
+    }
+
+    fn write(&self, contents: &str) -> Result<(), String> {
+        fs::write(&self.path, contents).map_err(|error| error.to_string())
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ManifestTransaction {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::write(&self.path, &self.original);
+        }
+    }
+}
+
 fn install(
     project_dir: &Path,
+    package: Option<&str>,
     store_root: Option<&Path>,
     offline: bool,
     frozen: bool,
     registry_fixture: Option<&Path>,
     allow_unverified_registry_artifacts: bool,
 ) -> ExitCode {
+    if package.is_some() && (offline || frozen) {
+        eprintln!("error: a package argument cannot be used with --offline or --frozen");
+        return ExitCode::from(1);
+    }
     if allow_unverified_registry_artifacts && (offline || frozen) {
         eprintln!(
             "error: --allow-unverified-registry-artifacts cannot be used with --offline or --frozen"
@@ -200,6 +198,33 @@ fn install(
             eprintln!("error: {error}");
             return ExitCode::from(1);
         }
+    };
+    let manifest_path = project_dir.join("package.json");
+    let mut manifest_transaction = None;
+    let manifest = if let Some(spec) = package {
+        let (name, requirement) = package_spec::parse(spec);
+        let updated = match manifest.with_dependency(name, requirement) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: cannot add dependency '{spec}': {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let transaction = match ManifestTransaction::begin(&manifest_path) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: cannot prepare package.json update: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(error) = transaction.write(&updated.to_json()) {
+            eprintln!("error: cannot update package.json: {error}");
+            return ExitCode::from(1);
+        }
+        manifest_transaction = Some(transaction);
+        updated
+    } else {
+        manifest
     };
     let lock_path = project_dir.join("tapid.lock");
     if !offline && !frozen {
@@ -244,6 +269,9 @@ fn install(
             return result;
         }
         let _ = discard_lockfile_backup(lock_backup.as_deref());
+        if let Some(transaction) = manifest_transaction.take() {
+            transaction.commit();
+        }
         return result;
     }
     if !lock_path.is_file() {
@@ -359,8 +387,8 @@ fn replay_input(
         let tree = store
             .verified_tree_path(&digest)
             .map_err(|e| format!("package {encoded} tree unavailable: {e}"))?;
-        let peer = parse_peer(&key.peer_context)?;
-        let platform = parse_platform(&key.platform_context)?;
+        let peer = context::parse_peer(&key.peer_context)?;
+        let platform = context::parse_platform(&key.platform_context)?;
         let id = PackageInstanceId::new(key.registry.clone(), key.name.clone(), key.version);
         let instance = PackageInstance {
             id,
@@ -374,19 +402,11 @@ fn replay_input(
         instances.push(instance);
     }
     let mut roots = Vec::new();
-    let mut root_names = BTreeMap::new();
-    for map in [
-        manifest.dependencies(),
-        manifest.dev_dependencies(),
-        manifest.optional_dependencies(),
-    ] {
-        for name in map.keys() {
-            root_names.insert(name.clone(), ());
-        }
-    }
+    let root_identities = replay_root_identities(manifest)?;
+    let has_root_dependencies = !root_identities.is_empty();
     for (key, _) in &typed_packages {
         let encoded = key.to_string();
-        if root_names.is_empty() || root_names.contains_key(&key.name.to_string()) {
+        if !has_root_dependencies || replay_root_matches(&root_identities, key) {
             roots.push(keys[&encoded].clone());
         }
     }
@@ -413,6 +433,31 @@ fn replay_input(
     ))
 }
 
+fn replay_root_identities(
+    manifest: &PackageManifest,
+) -> Result<std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>, String>
+{
+    let mut identities = std::collections::BTreeSet::new();
+    for map in [
+        manifest.dependencies(),
+        manifest.dev_dependencies(),
+        manifest.optional_dependencies(),
+    ] {
+        for name in map.keys() {
+            let (registry, package) = online::dep_parts(name)?;
+            identities.insert((registry, package));
+        }
+    }
+    Ok(identities)
+}
+
+fn replay_root_matches(
+    roots: &std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>,
+    key: &tapid_lockfile::LockfilePackageKey,
+) -> bool {
+    roots.contains(&(key.registry.clone(), key.name.clone()))
+}
+
 fn current_platform() -> Platform {
     if cfg!(target_family = "windows") {
         Platform::Windows
@@ -425,41 +470,6 @@ fn current_platform() -> Platform {
     } else {
         Platform::Other
     }
-}
-
-fn parse_peer(value: &str) -> Result<PeerContext, String> {
-    if value.is_empty() || value == "-" {
-        return Ok(PeerContext::default());
-    }
-    let mut result = PeerContext::default();
-    for item in value.split(',') {
-        let (name, version) = item
-            .rsplit_once('@')
-            .ok_or_else(|| format!("invalid peer context: {value}"))?;
-        result = result.with(
-            name.parse::<tapid_core::PackageName>()
-                .map_err(|e| e.to_string())?,
-            version
-                .parse::<tapid_core::PackageVersion>()
-                .map_err(|e| e.to_string())?,
-        );
-    }
-    Ok(result)
-}
-fn parse_platform(value: &str) -> Result<PlatformContext, String> {
-    if value.is_empty() || value == "-" {
-        return PlatformContext::new(None, None, None).map_err(|e| e.to_string());
-    }
-    let parts: Vec<_> = value.split('-').collect();
-    if parts.len() != 3 {
-        return Err(format!("invalid platform context: {value}"));
-    }
-    PlatformContext::new(
-        (!parts[0].is_empty()).then_some(parts[0]),
-        (!parts[1].is_empty()).then_some(parts[1]),
-        (!parts[2].is_empty()).then_some(parts[2]),
-    )
-    .map_err(|e| e.to_string())
 }
 
 fn materialize_stage(
@@ -630,7 +640,14 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
     }
     let destination = project.join("node_modules");
     let marker = project.join(".tapid-managed");
-    let marker_exists = marker.exists();
+    let marker_exists = match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.file_type().is_file() => true,
+        Ok(_) => {
+            return Err("refusing to use a non-regular .tapid-managed marker".to_owned());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("cannot inspect .tapid-managed: {error}")),
+    };
     if destination.exists() && !marker_exists {
         return Err(
             "refusing to replace unmarked node_modules; create .tapid-managed to opt in".into(),
@@ -826,108 +843,26 @@ fn verify_lock(path: &Path) -> ExitCode {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{copy_tree, package_root_for_shims};
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            loop {
-                let candidate = std::env::temp_dir().join(format!(
-                    "tapid-copy-tree-{}-{}-{}",
-                    std::process::id(),
-                    super::unique_nonce(),
-                    COUNTER.fetch_add(1, Ordering::Relaxed)
-                ));
-                match fs::create_dir(&candidate) {
-                    Ok(()) => return Self(candidate),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => panic!("cannot create test directory: {error}"),
-                }
-            }
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+mod replay_tests {
+    use super::*;
 
     #[test]
-    fn preserves_nested_package_directories() {
-        let root = TempDir::new();
-        let source = root.path().join("source/package/docs/package");
-        let target = root.path().join("target");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("example.json"), "{}").unwrap();
+    fn explicit_registry_root_matches_only_its_registry_identity() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"jsr:@std/path":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let roots = replay_root_identities(&manifest).unwrap();
+        let jsr: tapid_lockfile::LockfilePackageKey =
+            "https://jsr.io|@std/path@1.0.0|peer=-|platform=-"
+                .parse()
+                .unwrap();
+        let npm: tapid_lockfile::LockfilePackageKey =
+            "https://registry.npmjs.org|@std/path@1.0.0|peer=-|platform=-"
+                .parse()
+                .unwrap();
 
-        copy_tree(&root.path().join("source"), &target).unwrap();
-
-        assert!(target.join("docs/package/example.json").is_file());
-        assert!(!target.join("docs/example.json").exists());
-    }
-
-    #[test]
-    fn keeps_legitimate_root_package_directory_outside_archive_wrapper() {
-        let root = TempDir::new();
-        let package_dir = root.path().join("package");
-        fs::create_dir(&package_dir).unwrap();
-        fs::write(root.path().join("package.json"), "{}").unwrap();
-
-        assert_eq!(package_root_for_shims(root.path()), root.path());
-    }
-
-    #[test]
-    fn unwraps_archive_package_directory_for_shims() {
-        let root = TempDir::new();
-        let package_dir = root.path().join("package");
-        fs::create_dir(&package_dir).unwrap();
-        fs::write(package_dir.join("package.json"), "{}").unwrap();
-
-        assert_eq!(package_root_for_shims(root.path()), package_dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_top_level_package_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let root = TempDir::new();
-        let external = TempDir::new();
-        fs::write(external.path().join("package.json"), "{}").unwrap();
-        symlink(external.path(), root.path().join("package")).unwrap();
-
-        let error = copy_tree(root.path(), &root.path().join("target")).unwrap_err();
-        assert!(error.contains("symlink in store tree is not replayable"));
-    }
-}
-
-#[cfg(test)]
-mod platform_tests {
-    use super::parse_platform;
-
-    #[test]
-    fn parses_full_and_partial_fixed_slot_platform_contexts() {
-        for value in ["linux-x86_64-gnu", "linux--", "-x86_64-", "--gnu"] {
-            assert_eq!(parse_platform(value).unwrap().to_string(), value);
-        }
-        for value in ["linux", "linux-x86_64"] {
-            assert!(
-                parse_platform(value).is_err(),
-                "accepted legacy value {value}"
-            );
-        }
+        assert!(replay_root_matches(&roots, &jsr));
+        assert!(!replay_root_matches(&roots, &npm));
     }
 }

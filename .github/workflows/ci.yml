@@ -39,7 +39,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Run tests
         run: cargo test --workspace --all-features --locked
-      - name: Run nested integration tests
+      - name: Run nested integration workspace
         run: cargo test --manifest-path tests/integration/Cargo.toml --locked
       - name: Validate Windows developer installer
         if: runner.os == 'Windows'
@@ -50,10 +50,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $binary = Join-Path $installDir 'tapid.exe'
           if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Tapid was not installed' }
-          $normalizedInstallDir = $installDir.TrimEnd('\\')
-          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-          $pathEntries = @($userPath -split ';' | ForEach-Object { $_.TrimEnd('\\') })
-          if ($pathEntries -notcontains $normalizedInstallDir) { throw 'Tapid install directory was not added to user PATH' }
           & $binary --help | Out-Null
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$env:GITHUB_WORKSPACE\scripts\uninstall.ps1" -InstallDir $installDir

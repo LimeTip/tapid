@@ -2,7 +2,7 @@
 name = "tapid-manifest"
 readme = "README.md"
 description = "Manifest parsing and package metadata models for Tapid"
-version = "0.0.3"
+version = "0.0.5"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

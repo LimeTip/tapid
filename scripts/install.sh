@@ -44,7 +44,8 @@ configure_path() {
   # Only modify shell configuration for the default user-local path.
   if [ "$INSTALL_DIR" != "$HOME/.local/bin" ]; then return; fi
 
-  shell_name="${SHELL##*/}"
+  shell_name="${SHELL-}"
+  shell_name="${shell_name##*/}"
   case "$shell_name" in
     zsh) PATH_RC="$HOME/.zprofile"; PATH_COMMAND=". \"$PATH_RC\""; path_line='export PATH="$HOME/.local/bin:$PATH"' ;;
     bash)
