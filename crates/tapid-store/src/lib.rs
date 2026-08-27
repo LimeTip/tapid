@@ -218,20 +218,29 @@ impl Store {
         let staging_dir = self.root.join(".staging");
         fs::create_dir_all(&staging_dir)?;
         let staging = staging_dir.join(format!("tree-{}-{}", std::process::id(), unique_nonce()));
-        copy_tree(source, &staging)?;
-        fs::write(staging.join(".tapid-tree"), digest.as_str())?;
-        fs::create_dir_all(destination.parent().expect("tree destination has parent"))?;
-        match fs::rename(&staging, &destination) {
-            Ok(()) => Ok(destination),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_dir_all(&staging);
-                self.verified_tree_path(digest)
+        let result = (|| {
+            copy_tree(source, &staging)?;
+            let staged_digest = tapid_archive::canonical_tree_digest(&staging)?;
+            if staged_digest != digest.as_str() {
+                return Err(IngestError::TreeDigestMismatch {
+                    expected: digest.clone(),
+                    actual: staged_digest,
+                });
             }
-            Err(error) => {
-                let _ = fs::remove_dir_all(&staging);
-                Err(error.into())
+            fs::write(staging.join(".tapid-tree"), digest.as_str())?;
+            fs::create_dir_all(destination.parent().expect("tree destination has parent"))?;
+            match fs::rename(&staging, &destination) {
+                Ok(()) => Ok(destination.clone()),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    self.verified_tree_path(digest)
+                }
+                Err(error) => Err(error.into()),
             }
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
         }
+        result
     }
 
     /// Stream bytes into a private staging file, verify SHA-256, then atomically
@@ -513,7 +522,9 @@ mod tests {
             Err(IngestError::TreeDigestMismatch { .. })
         ));
         let _ = fs::remove_dir_all(root);
+    }
 
+    #[test]
     fn replay_snapshot_is_verified_and_detached_from_store_mutations() {
         let root = root();
         let _ = fs::remove_dir_all(&root);
