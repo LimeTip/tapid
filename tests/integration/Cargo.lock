@@ -1153,11 +1153,11 @@ dependencies = [
 
 [[package]]
 name = "tapid-core"
-version = "0.0.2"
+version = "0.0.3"
 
 [[package]]
 name = "tapid-linker"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "tapid-core",
  "tapid-manifest",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-lockfile"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-publish"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "sha2",
  "tapid-core",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-resolver"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "tapid-core",
  "tapid-registry-client",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-runner"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "sha2",
  "tapid-policy",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-signatures"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-store"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "hex",
  "sha2",
