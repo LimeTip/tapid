@@ -2,6 +2,7 @@
 set -eu
 
 REPO="${TAPID_REPO:-LimeTip/tapid}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 RELEASE_BASE_URL="${TAPID_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
 RELEASE_DISCOVERY_URL="${TAPID_RELEASE_DISCOVERY_URL:-https://github.com/$REPO/releases/latest}"
 INSTALL_DIR="${TAPID_INSTALL_DIR:-$HOME/.local/bin}"
@@ -31,10 +32,11 @@ Options:
 Environment:
   TAPID_REPO, TAPID_INSTALL_DIR
   TAPID_RELEASE_BASE_URL, TAPID_RELEASE_DISCOVERY_URL
+  TAPID_RELEASE_VERIFIER, TAPID_RELEASE_TRUSTED_KEYS
 
 Release assets are expected to use this contract:
   tapid-0.1.0-TARGET.tar.gz
-  tapid-0.1.0-checksums.txt
+  manifest.json (signed tapid-release-manifest-v1)
 Release tags use the v0.1.0 form; --version accepts either v0.1.0 or 0.1.0.
 USAGE
 }
@@ -182,6 +184,7 @@ fi
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
 
+
 case "$VERSION" in
   latest)
     resolved_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$RELEASE_DISCOVERY_URL" 2>/dev/null)" || \
@@ -213,19 +216,27 @@ case "$(uname -s):$(uname -m)" in
 esac
 
 version_without_v="${VERSION#v}"
-archive="tapid-${version_without_v}-${target}.tar.gz"
-checksums="tapid-${version_without_v}-checksums.txt"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/tapid-install.XXXXXX")"
 cleanup() { rm -rf "$tmp_dir"; [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"; }
 trap cleanup 0 1 2 15
 
 base="$RELEASE_BASE_URL/$VERSION"
-curl -fsSL "$base/$archive" -o "$tmp_dir/$archive" 2>/dev/null || \
-  fail "stable release $VERSION has no $target binary asset in $REPO; use --source-ref REF for development installation"
-curl -fsSL "$base/$checksums" -o "$tmp_dir/$checksums" 2>/dev/null || \
-  fail "stable release $VERSION has no checksum manifest in $REPO"
-expected="$(awk -v name="$archive" '$2 == name || $2 == "*" name {print $1; exit}' "$tmp_dir/$checksums")"
-[ -n "$expected" ] || fail "checksum entry for $archive is missing"
+manifest="$tmp_dir/manifest.json"
+case "$RELEASE_BASE_URL" in https://*) ;; *) fail "stable release base URL must use HTTPS" ;; esac
+command -v python3 >/dev/null 2>&1 || fail "python3 is required for signed manifest validation"
+[ -n "${TAPID_RELEASE_VERIFIER:-}" ] || fail "stable installation requires TAPID_RELEASE_VERIFIER; use --source-ref REF for development installation"
+[ -x "$TAPID_RELEASE_VERIFIER" ] || fail "TAPID_RELEASE_VERIFIER must be an executable path"
+[ -n "${TAPID_RELEASE_TRUSTED_KEYS:-}" ] || fail "stable installation requires TAPID_RELEASE_TRUSTED_KEYS; use --source-ref REF for development installation"
+[ -f "$TAPID_RELEASE_TRUSTED_KEYS" ] || fail "TAPID_RELEASE_TRUSTED_KEYS must name a trusted key file"
+curl -fsSL "$base/manifest.json" -o "$manifest" 2>/dev/null || fail "stable release $VERSION has no signed release manifest"
+"$TAPID_RELEASE_VERIFIER" "$manifest" "$TAPID_RELEASE_TRUSTED_KEYS" "$target" "$VERSION" || fail "signed release manifest verification failed"
+# The verifier validates the Ed25519 signature; the helper validates signature,
+# target, version, size, and sha256 fields before artifact selection.
+artifact_info="$(python3 "$SCRIPT_DIR/release_manifest.py" "$manifest" "$target" "$VERSION")" || exit 1
+IFS='\t' read -r archive artifact_url expected expected_size <<EOF
+$artifact_info
+EOF
+curl -fsSL "$artifact_url" -o "$tmp_dir/$archive" 2>/dev/null || fail "could not download verified artifact $archive"
 if command -v shasum >/dev/null 2>&1; then
   actual="$(shasum -a 256 "$tmp_dir/$archive" | awk '{print $1}')"
 elif command -v sha256sum >/dev/null 2>&1; then
@@ -234,6 +245,7 @@ else
   fail "shasum or sha256sum is required"
 fi
 [ "$actual" = "$expected" ] || fail "checksum verification failed for $archive"
+[ "$(wc -c < "$tmp_dir/$archive" | tr -d ' ')" = "$expected_size" ] || fail "artifact size verification failed for $archive"
 
 mkdir -p "$tmp_dir/extracted"
 members="$(tar -tzf "$tmp_dir/$archive")" || fail "cannot inspect release archive"

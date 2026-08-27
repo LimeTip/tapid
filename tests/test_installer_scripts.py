@@ -109,6 +109,21 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn('TAPID_RELEASE_DISCOVERY_URL', install_text)
         self.assertIn('TAPID_RELEASE_BASE_URL', install_text.split('Environment:', 1)[1])
 
+    def test_stable_install_requires_external_signed_manifest_verifier(self):
+        install_text = INSTALL.read_text()
+        self.assertIn("TAPID_RELEASE_VERIFIER", install_text)
+        self.assertIn("TAPID_RELEASE_TRUSTED_KEYS", install_text)
+        self.assertIn("signature", install_text)
+        self.assertNotIn("checksums.txt", install_text)
+
+    def test_signed_manifest_is_verified_before_artifact_download(self):
+        install_text = INSTALL.read_text()
+        verify = install_text.index("TAPID_RELEASE_VERIFIER")
+        artifact = install_text.index('curl -fsSL "$artifact_url"')
+        self.assertLess(verify, artifact)
+        for field in ("target", "version", "size", "sha256"):
+            self.assertIn(field, install_text[verify:artifact])
+
     def test_uninstall_removes_only_tapid_binary(self):
         with tempfile.TemporaryDirectory() as tmp:
             install_dir = Path(tmp) / "bin"

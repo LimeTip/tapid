@@ -9,6 +9,8 @@ param(
 $ErrorActionPreference = "Stop"
 $ReleaseBaseUrl = if ($env:TAPID_RELEASE_BASE_URL) { $env:TAPID_RELEASE_BASE_URL.TrimEnd('/') } else { "https://github.com/$Repo/releases/download" }
 $ReleaseDiscoveryUrl = if ($env:TAPID_RELEASE_DISCOVERY_URL) { $env:TAPID_RELEASE_DISCOVERY_URL } else { "https://github.com/$Repo/releases/latest" }
+$ReleaseVerifier = $env:TAPID_RELEASE_VERIFIER
+$TrustedKeys = $env:TAPID_RELEASE_TRUSTED_KEYS
 
 function Fail([string]$Message) {
     throw "tapid installer: $Message"
@@ -151,27 +153,43 @@ $target = switch ($architecture) {
 if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
     Fail "tar.exe is required for Windows release installation"
 }
+if ([string]::IsNullOrEmpty($ReleaseVerifier) -or -not (Test-Path -LiteralPath $ReleaseVerifier -PathType Leaf)) {
+    Fail "stable installation requires TAPID_RELEASE_VERIFIER; use -SourceRef REF for development installation"
+}
+if ([string]::IsNullOrEmpty($TrustedKeys) -or -not (Test-Path -LiteralPath $TrustedKeys -PathType Leaf)) {
+    Fail "stable installation requires TAPID_RELEASE_TRUSTED_KEYS; use -SourceRef REF for development installation"
+}
 
 $versionWithoutV = $Version.Substring(1)
-$archive = "tapid-$versionWithoutV-$target.tar.gz"
-$checksums = "tapid-$versionWithoutV-checksums.txt"
 $base = "$ReleaseBaseUrl/$Version"
+if ($ReleaseBaseUrl -notmatch '^https://') { Fail "stable release base URL must use HTTPS" }
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("tapid-install-" + [guid]::NewGuid().ToString("N"))
-$archivePath = Join-Path $tempRoot $archive
-$checksumsPath = Join-Path $tempRoot $checksums
+$manifestPath = Join-Path $tempRoot "manifest.json"
 $extractRoot = Join-Path $tempRoot "extracted"
 $staged = Join-Path $InstallDir (".tapid.tmp." + [guid]::NewGuid().ToString("N") + ".exe")
 $stagedMarker = Join-Path $InstallDir (".tapid-marker.tmp." + [guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
-    Invoke-WebRequest -UseBasicParsing "$base/$archive" -OutFile $archivePath
-    Invoke-WebRequest -UseBasicParsing "$base/$checksums" -OutFile $checksumsPath
-    $archivePattern = [regex]::Escape($archive)
-    $checksumLine = Get-Content -LiteralPath $checksumsPath | Where-Object { $_ -match ("^\s*([0-9a-fA-F]{64})\s+\*?" + $archivePattern + "\s*$") } | Select-Object -First 1
-    if (-not $checksumLine) { Fail "checksum entry for $archive is missing" }
-    $expected = ([regex]::Match($checksumLine, "[0-9a-fA-F]{64}")).Value.ToLowerInvariant()
+    Invoke-WebRequest -UseBasicParsing "$base/manifest.json" -OutFile $manifestPath
+    & $ReleaseVerifier $manifestPath $TrustedKeys $target $Version
+    if ($LASTEXITCODE -ne 0) { Fail "signed release manifest verification failed" }
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    if ($manifest.signature.algorithm -ne "ed25519") { Fail "signed release manifest has no Ed25519 signature" }
+    if ($manifest.version -ne $versionWithoutV -or $manifest.tag -ne $Version) { Fail "signed release manifest version does not match requested version" }
+    $artifact = @($manifest.artifacts | Where-Object { $_.target -eq $target })
+    if ($artifact.Count -ne 1) { Fail "signed release manifest must contain exactly one artifact for $target" }
+    $artifact = $artifact[0]
+    $archive = "tapid-$versionWithoutV-$target.tar.gz"
+    if ($artifact.name -ne $archive -or $artifact.url -notmatch '^https://') { Fail "signed release manifest artifact identity or URL is invalid" }
+    if ($artifact.sha256 -notmatch '^[0-9a-f]{64}$' -or [int64]$artifact.size -lt 1) { Fail "signed release manifest artifact hash or size is invalid" }
+    $artifactUrl = $artifact.url
+    $expected = $artifact.sha256
+    $expectedSize = [int64]$artifact.size
+    $archivePath = Join-Path $tempRoot $archive
+    Invoke-WebRequest -UseBasicParsing $artifactUrl -OutFile $archivePath
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
     if ($actual -ne $expected) { Fail "checksum verification failed for $archive" }
+    if ((Get-Item -LiteralPath $archivePath).Length -ne $expectedSize) { Fail "artifact size verification failed for $archive" }
     $members = & tar.exe -tzf $archivePath
     if ($LASTEXITCODE -ne 0 -or @($members).Count -ne 1 -or $members[0] -ne "tapid.exe") {
         Fail "release archive must contain exactly one member named tapid.exe"
