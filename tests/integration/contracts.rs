@@ -169,7 +169,7 @@ fn contracts_flow_from_runtime_fixture_to_deterministic_plan() {
             .reasons()
             .contains(&ReasonCode::DeclaredNetworkCapability)
     );
-    assert!(runner.approval_required);
+    assert!(runner.approval_required());
     assert_eq!(
         runner.validate_approval(&request, None),
         Err(ValidationError::MissingApproval)
