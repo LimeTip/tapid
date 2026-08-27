@@ -215,13 +215,14 @@ esac
 
 version_without_v="${VERSION#v}"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/tapid-install.XXXXXX")"
-cleanup() { rm -rf "$tmp_dir"; [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"; }
+cleanup() { rm -rf "$tmp_dir"; [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"; [ -z "$STAGED_MARKER" ] || rm -f "$STAGED_MARKER"; }
 trap cleanup 0 1 2 15
 
 base="$RELEASE_BASE_URL/$VERSION"
 manifest="$tmp_dir/manifest.json"
 case "$RELEASE_BASE_URL" in https://*) ;; *) fail "stable release base URL must use HTTPS" ;; esac
 command -v python3 >/dev/null 2>&1 || fail "unsupported Ed25519 verifier: python3 is required"
+curl -fsSL "$base/manifest.json" -o "$manifest" 2>/dev/null || fail "could not download signed release manifest"
 # This verifier is embedded so curl-piped execution has no adjacent-file dependency.
 artifact_info="$(python3 - "$manifest" "$target" "$VERSION" <<'TAPID_BOOTSTRAP_VERIFIER'
 #!/usr/bin/env python3

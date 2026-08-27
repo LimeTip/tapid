@@ -29,7 +29,7 @@ pub(crate) enum Command {
         /// Stable discovery endpoint(s), tried in the given order.
         #[arg(long = "endpoint", value_name = "HTTPS_URL")]
         endpoints: Vec<String>,
-        /// Trusted release keyring JSON. Required; no embedded trust root is used.
+        /// Optional trusted release keyring JSON. Uses the embedded production trust root by default.
         #[arg(long)]
         keyring: Option<PathBuf>,
         /// Destination executable (defaults to the current executable).

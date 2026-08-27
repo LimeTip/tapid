@@ -23,7 +23,8 @@ use tapid_linker::{
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 use tapid_release_client::{
-    Fetcher, ReleaseState, accept_release, read_release_state, write_release_state,
+    Error as ReleaseError, Fetcher, ReleaseState, accept_release, read_release_state,
+    write_release_state,
 };
 use tapid_signatures::KeyRing;
 use tapid_store::Store;
@@ -213,7 +214,7 @@ fn upgrade(
                     .unwrap_or_default();
                 (value.0.version, name, value.1)
             }
-            Err(error) if error.contains("AllEndpointsFailed") => {
+            Err(ReleaseError::AllEndpointsFailed { .. }) => {
                 match recover_last_known_good(&destination, target) {
                     Ok(value) => (value.0, value.1, value.2),
                     Err(recovery) => {
@@ -313,11 +314,11 @@ fn fetch_verified_release<F: Fetcher>(
     endpoints: &[String],
     keyring: &KeyRing,
     target: &str,
-) -> Result<(tapid_release_client::ReleaseManifest, Vec<u8>), String> {
+) -> Result<(tapid_release_client::ReleaseManifest, Vec<u8>), ReleaseError> {
     let endpoint_refs: Vec<&str> = endpoints.iter().map(String::as_str).collect();
     let now = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
-        .map_err(|e| format!("cannot determine current time: {e}"))?;
+        .map_err(|e| ReleaseError::State(format!("cannot determine current time: {e}")))?;
     let manifest = tapid_release_client::discover(
         fetcher,
         &endpoint_refs,
@@ -325,17 +326,12 @@ fn fetch_verified_release<F: Fetcher>(
         target,
         &now,
         Some(std::time::Duration::from_secs(7 * 24 * 60 * 60)),
-    )
-    .map_err(|e| format!("stable release discovery failed: {e}"))?;
+    )?;
     let artifact = manifest
         .artifact()
-        .ok_or_else(|| format!("verified release has no artifact for target {target}"))?;
-    let bytes = fetcher
-        .fetch(&artifact.url)
-        .map_err(|e| format!("cannot download verified artifact: {e}"))?;
-    manifest
-        .verify_artifact(&bytes)
-        .map_err(|e| format!("artifact verification failed: {e}"))?;
+        .ok_or_else(|| ReleaseError::TargetNotFound(target.into()))?;
+    let bytes = fetcher.fetch(&artifact.url).map_err(ReleaseError::Fetch)?;
+    manifest.verify_artifact(&bytes)?;
     Ok((manifest, bytes))
 }
 
