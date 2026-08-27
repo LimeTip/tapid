@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-manifest"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-registry-client"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "reqwest",
  "serde",
