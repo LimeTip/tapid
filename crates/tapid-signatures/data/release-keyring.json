@@ -1,0 +1,9 @@
+{
+  "version": "tapid-release-keyring-v1",
+  "keys": [{
+    "key_id": "release-key-2026-01",
+    "algorithm": "ed25519",
+    "public_key": "eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc=",
+    "fingerprint": "sha256-238d16177b1c9ae21b53476d1a9097b5011414a26e6625986ecf1799dacf47f4"
+  }]
+}

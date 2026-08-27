@@ -52,6 +52,11 @@ impl KeyRing {
         Self::default()
     }
 
+    /// Loads the release trust root shipped with Tapid.
+    pub fn production() -> Result<Self, VerificationError> {
+        Self::from_embedded_json(include_bytes!("../data/release-keyring.json"))
+    }
+
     /// Parses and validates versioned trusted key material intended for
     /// embedding in a client. Any unknown key ID remains untrusted.
     pub fn from_embedded_json(bytes: &[u8]) -> Result<Self, VerificationError> {
@@ -92,6 +97,18 @@ impl KeyRing {
             })?;
         }
         Ok(ring)
+    }
+
+    pub fn contains_key(&self, key_id: &str) -> bool {
+        self.keys.contains_key(key_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
     }
 
     pub fn insert(&mut self, key: TrustedKey) -> Result<(), VerificationError> {
