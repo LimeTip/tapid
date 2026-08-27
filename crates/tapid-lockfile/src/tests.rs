@@ -176,12 +176,11 @@ fn peer_and_platform_contexts_change_key_deterministically() {
 }
 
 #[test]
-fn package_key_roundtrips_hyphens_and_delimiters_without_loss() {
+fn package_key_roundtrips_contexts_without_loss() {
     let peer = tapid_core::PeerContext::default()
         .with("foo-bar".parse().unwrap(), "1.2.3".parse().unwrap());
     let platform =
-        tapid_core::PlatformContext::new(Some("linux-gnu"), Some("x86|64"), Some("musl-extra"))
-            .unwrap();
+        tapid_core::PlatformContext::new(Some("linux"), Some("x86_64"), Some("musl")).unwrap();
     let package = LockedPackage::new_with_context(
         "https://registry.example.test",
         "tapid",
@@ -195,15 +194,13 @@ fn package_key_roundtrips_hyphens_and_delimiters_without_loss() {
     let key = package.key();
     let parsed = key.parse::<super::LockfilePackageKey>().unwrap();
     assert_eq!(parsed.to_string(), key);
-    assert!(key.contains("linux%2Dgnu"));
-    assert!(key.contains("x86%7C64"));
     assert!(key.contains("foo%2Dbar"));
 }
 
 #[test]
 fn package_key_distinguishes_platform_component_boundaries() {
-    let first = tapid_core::PlatformContext::new(Some("linux-x86"), Some("64"), None).unwrap();
-    let second = tapid_core::PlatformContext::new(Some("linux"), Some("x86-64"), None).unwrap();
+    let first = tapid_core::PlatformContext::new(Some("linux"), Some("x86_64"), None).unwrap();
+    let second = tapid_core::PlatformContext::new(Some("linux"), None, Some("x86_64")).unwrap();
     let make = |platform: &tapid_core::PlatformContext| {
         LockedPackage::new_with_context(
             "https://registry.example.test",

@@ -112,6 +112,8 @@ Invoke-WebRequest https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/i
 Remove-Item $installer
 ```
 
+Both installers add their user-local install directory to PATH without requiring administrator privileges. Unix shells are detected from `$SHELL`; zsh, bash, fish, and a POSIX profile fallback are supported. The default Unix directory, `~/.local/bin`, is configured automatically. For a custom `--install-dir`, the installer prints the directory that must be added manually. PowerShell updates the user-level Windows PATH. Open a new terminal, or follow the command printed by the installer, before using `tapid` in an existing terminal.
+
 Remove only the Tapid CLI binary on Unix:
 
 ```bash

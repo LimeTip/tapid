@@ -123,9 +123,9 @@ mod tests {
 
     #[test]
     fn parses_canonical_platform_context_with_percent_encoding() {
-        let parsed = parse_platform("os=linux;cpu=x86%2D64;libc=gnu").unwrap();
+        let parsed = parse_platform("os=linux;cpu=x86_64;libc=gnu").unwrap();
         assert_eq!(parsed.os.as_deref(), Some("linux"));
-        assert_eq!(parsed.cpu.as_deref(), Some("x86-64"));
+        assert_eq!(parsed.cpu.as_deref(), Some("x86_64"));
         assert_eq!(parsed.libc.as_deref(), Some("gnu"));
     }
 

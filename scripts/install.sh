@@ -10,12 +10,13 @@ SOURCE_REF_SET=0
 STAGED_BINARY=""
 PATH_UPDATED=0
 PATH_RC=""
+PATH_COMMAND=""
 
 usage() {
   cat <<'USAGE'
 Usage: install.sh [options]
 
-Build Tapid from the main source branch by default.
+Install the latest stable Tapid release by default.
 
 Options:
   --version VERSION     Install a specific stable release tag, e.g. v0.1.0
@@ -40,31 +41,47 @@ configure_path() {
   case ":${PATH:-}:" in
     *:"$INSTALL_DIR":*) return ;;
   esac
-  # Only modify a shell startup file for the default user-local path.
+  # Only modify shell configuration for the default user-local path.
   if [ "$INSTALL_DIR" != "$HOME/.local/bin" ]; then return; fi
+
   shell_name="${SHELL-}"
   shell_name="${shell_name##*/}"
   case "$shell_name" in
-    zsh) PATH_RC="$HOME/.zprofile" ;;
+    zsh) PATH_RC="$HOME/.zprofile"; PATH_COMMAND=". \"$PATH_RC\""; path_line='export PATH="$HOME/.local/bin:$PATH"' ;;
     bash)
       if [ -f "$HOME/.bash_profile" ]; then PATH_RC="$HOME/.bash_profile"; else PATH_RC="$HOME/.bashrc"; fi
+      PATH_COMMAND=". \"$PATH_RC\""
+      path_line='export PATH="$HOME/.local/bin:$PATH"'
       ;;
-    *) PATH_RC="$HOME/.profile" ;;
+    fish)
+      PATH_RC="$HOME/.config/fish/config.fish"
+      PATH_COMMAND="source \"$PATH_RC\""
+      path_line='set -gx PATH $HOME/.local/bin $PATH'
+      mkdir -p "$(dirname "$PATH_RC")"
+      ;;
+    *)
+      PATH_RC="$HOME/.profile"
+      PATH_COMMAND=". \"$PATH_RC\""
+      path_line='export PATH="$HOME/.local/bin:$PATH"'
+      ;;
   esac
-  path_line='export PATH="$HOME/.local/bin:$PATH"'
+
   if [ ! -f "$PATH_RC" ] || ! grep -Fqx "$path_line" "$PATH_RC"; then
     printf '\n# Tapid\n%s\n' "$path_line" >> "$PATH_RC"
   fi
-  PATH="$INSTALL_DIR:$PATH"
+  if [ -n "${PATH:-}" ]; then
+    PATH="$INSTALL_DIR:$PATH"
+  else
+    PATH="$INSTALL_DIR"
+  fi
   export PATH
   PATH_UPDATED=1
 }
 
 print_path_guidance() {
   if [ "$PATH_UPDATED" -eq 1 ]; then
-    printf 'Tapid is ready in this shell.\n'
-    printf 'For future shells, PATH was configured in %s.\n' "$PATH_RC"
-    printf 'To enable it now in the parent shell, run: . "%s"\n' "$PATH_RC"
+    printf 'Tapid was installed and PATH was configured in %s.\n' "$PATH_RC"
+    printf 'To enable it in the current shell, run: %s\n' "$PATH_COMMAND"
   elif [ "$INSTALL_DIR" != "$HOME/.local/bin" ]; then
     printf 'Add this directory to PATH before running Tapid: %s\n' "$INSTALL_DIR"
   fi
@@ -112,11 +129,6 @@ printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || \
 
 if [ "$VERSION_SET" -eq 1 ] && [ "$SOURCE_REF_SET" -eq 1 ]; then
   fail "use either --version or --source-ref, not both"
-fi
-
-if [ "$VERSION_SET" -eq 0 ] && [ "$SOURCE_REF_SET" -eq 0 ]; then
-  SOURCE_REF="main"
-  SOURCE_REF_SET=1
 fi
 
 case "$INSTALL_DIR" in

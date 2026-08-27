@@ -508,6 +508,15 @@ fn materialize_stage(
     Ok(())
 }
 
+fn package_root_for_shims(package_dir: &Path) -> PathBuf {
+    let nested = package_dir.join("package");
+    if !package_dir.join("package.json").is_file() && nested.join("package.json").is_file() {
+        nested
+    } else {
+        package_dir.to_path_buf()
+    }
+}
+
 fn materialize_package_shims(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
@@ -520,11 +529,7 @@ fn materialize_package_shims(
                 .strip_prefix(plan.managed_root.path.join("node_modules"))
                 .map_err(|_| "invalid package activation target")?,
         );
-        let package_root = if package_dir.join("package").is_dir() {
-            package_dir.join("package")
-        } else {
-            package_dir.clone()
-        };
+        let package_root = package_root_for_shims(&package_dir);
         let package_json = fs::read_to_string(package_root.join("package.json"))
             .map_err(|e| format!("cannot read installed package manifest: {e}"))?;
         packages.push(tapid_linker::ShimPackage {
@@ -588,7 +593,18 @@ fn relative_path(from: &Path, to: &Path) -> PathBuf {
 
 fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     let package = source.join("package");
-    let root = if package.is_dir() { &package } else { source };
+    let root = match fs::symlink_metadata(&package) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "symlink in store tree is not replayable: {}",
+                package.display()
+            ));
+        }
+        Ok(meta) if meta.is_dir() => &package,
+        Ok(_) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => source,
+        Err(error) => return Err(error.to_string()),
+    };
     copy_tree_contents(root, target)
 }
 
@@ -606,7 +622,7 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
             ));
         }
         if meta.is_dir() {
-            copy_tree(&src, &dst)?;
+            copy_tree_contents(&src, &dst)?;
         } else if meta.is_file() {
             fs::copy(&src, &dst).map_err(|e| e.to_string())?;
         } else {
