@@ -16,7 +16,7 @@ path = "consumer_install.rs"
 
 [dependencies]
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11.0"
 tapid-archive = { path = "../../crates/tapid-archive" }
 tapid-core = { path = "../../crates/tapid-core" }
 tapid-linker = { path = "../../crates/tapid-linker" }
