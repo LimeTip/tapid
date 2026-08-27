@@ -2,7 +2,7 @@
 name = "tapid-store"
 readme = "README.md"
 description = "Local content-addressed package store foundations for Tapid"
-version = "0.0.2"
+version = "0.0.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,6 +10,6 @@ rust-version.workspace = true
 
 [dependencies]
 tapid-archive = { version = "0.0.2", path = "../tapid-archive" }
-tapid-core = { version = "0.0.2", path = "../tapid-core" }
+tapid-core = { version = "0.0.3", path = "../tapid-core" }
 sha2 = "0.10"
 hex = "0.4"
