@@ -126,7 +126,7 @@ Windows uninstall:
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
 ```
 
-The installers use the canonical `LimeTip/tapid` repository by default. Alternate repositories are explicit through `--repo` or `TAPID_REPO`. The uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Source installation is the supported developer path until a real signed release manifest, trusted bootstrap key, and cross-platform release artifacts are published. The repository now contains the verified release-client and `tapid upgrade` foundation, but stable binary installation is not advertised as production-ready until the same signed-manifest verification path is used for first installation.
+The installers use the canonical `LimeTip/tapid` repository by default. Alternate repositories are explicit through `--repo` or `TAPID_REPO`. The uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Source installation remains the explicit development path. Stable installation and `tapid upgrade` now use signed release manifests, the embedded production public key, artifact hash and size verification, safe archive validation, endpoint fallback, and managed atomic replacement. Public stable release advertising still waits for protected CI configuration and clean macOS, Linux, and Windows release exercises.
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
 
@@ -149,7 +149,7 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - `add`, `remove`, `update`, `prune`, workspaces, full npm lockfile compatibility, and private-registry authentication are not implemented.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - Linux and Windows consumer checks are configured in GitHub Actions. A local macOS run is not evidence for those platforms, and the repository does not claim CI execution until a workflow run is available.
-- Tapid does not provide malware scanning, cryptographic signing, provenance verification, an OS sandbox, or process capability enforcement.
+- Tapid does not yet provide package-level malware scanning, package provenance verification, an OS sandbox, or process capability enforcement. Stable client release manifests are separately authenticated with Ed25519.
 
 ## Development
 

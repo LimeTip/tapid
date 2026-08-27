@@ -259,6 +259,15 @@ if __name__ == "__main__":
     if len(sys.argv) != 4: fail("verifier requires MANIFEST TARGET VERSION")
     verify(sys.argv[1], sys.argv[2], sys.argv[3])
 '@
+$versionWithoutV = $Version.Substring(1)
+$base = "$ReleaseBaseUrl/$Version"
+if ($ReleaseBaseUrl -notmatch '^https://') { Fail "stable release base URL must use HTTPS" }
+$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("tapid-install-" + [guid]::NewGuid().ToString("N"))
+$manifestPath = Join-Path $tempRoot "manifest.json"
+$extractRoot = Join-Path $tempRoot "extracted"
+$archivePath = Join-Path $tempRoot ("tapid-$versionWithoutV-$target.tar.gz")
+$staged = Join-Path $InstallDir (".tapid.tmp." + [guid]::NewGuid().ToString("N") + ".exe")
+$stagedMarker = Join-Path $InstallDir (".tapid-marker.tmp." + [guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
     Invoke-WebRequest -UseBasicParsing "$base/manifest.json" -OutFile $manifestPath

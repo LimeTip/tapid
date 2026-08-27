@@ -1,6 +1,6 @@
 # Signed client release distribution
 
-Status: signature primitives, versioned trusted keyring parsing, verified release discovery, recovery state, and the `tapid upgrade` foundation are implemented. Production key provisioning and a fully self-contained signed bootstrap for first installation remain release gates.
+Status: signed manifest verification, versioned trusted keyring parsing, embedded production public key, verified release discovery, recovery state, self-contained first-install verification, and the `tapid upgrade` foundation are implemented. A real protected release publication and clean cross-platform release exercise remain production gates.
 
 ## Scope
 
@@ -55,4 +55,4 @@ The release workflow must additionally produce checksums, SBOMs, and signed prov
 
 ## Explicit non-goals
 
-The current implementation enables an explicitly configured and verified `tapid upgrade` path for development and integration testing. It does not yet constitute a public production release channel: the production public key must be provisioned, the release CI must publish real signed manifests, and first-install bootstrap verification must use the identical protocol on macOS, Linux, and Windows before advertising stable installation.
+The current implementation provides a signed stable release path for first installation and `tapid upgrade`, including embedded production public-key trust, endpoint fallback, rollback-safe local state, verified artifact downloads, and safe archive handling. It does not yet constitute a publicly advertised production channel until protected release CI is configured, real artifacts are published, endpoint copies are deployed, and clean macOS, Linux, and Windows installation and upgrade runs have passed.

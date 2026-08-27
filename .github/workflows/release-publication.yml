@@ -41,6 +41,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+      - name: Bind tag to immutable commit
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -59,6 +71,10 @@ jobs:
           args=()
           for file in "${files[@]}"; do
             name=$(basename "$file")
+            case "$name" in
+              tapid-${{ inputs.version }}-[A-Za-z0-9._-]*.tar.gz|tapid-${{ inputs.version }}-[A-Za-z0-9._-]*.zip) ;;
+              *) echo "invalid release artifact filename: $name" >&2; exit 1 ;;
+            esac
             target=${name#tapid-${{ inputs.version }}-}
             target=${target%.tar.gz}; target=${target%.zip}
             args+=(--artifact "${target}=${file}")
@@ -86,7 +102,20 @@ jobs:
       name: stable-release
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+      - name: Bind tag to immutable commit before publication
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+      - name: Download signed manifest
+        uses: actions/download-artifact@v4
         with:
           name: signed-release-manifest
           path: publication
