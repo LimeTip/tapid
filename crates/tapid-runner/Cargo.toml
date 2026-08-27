@@ -11,7 +11,7 @@ authors.workspace = true
 
 [dependencies]
 sha2 = "0.10"
-tapid-policy = { version = "0.0.1", path = "../tapid-policy" }
+tapid-policy = { version = "0.0.2", path = "../tapid-policy" }
 
 [lib]
 path = "src/lib.rs"
