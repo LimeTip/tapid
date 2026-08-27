@@ -2,6 +2,8 @@
 set -eu
 
 REPO="${TAPID_REPO:-LimeTip/tapid}"
+RELEASE_BASE_URL="${TAPID_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
+RELEASE_DISCOVERY_URL="${TAPID_RELEASE_DISCOVERY_URL:-https://github.com/$REPO/releases/latest}"
 INSTALL_DIR="${TAPID_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="latest"
 VERSION_SET=0
@@ -22,11 +24,12 @@ Options:
   --version VERSION     Install a specific stable release tag, e.g. v0.1.0
   --source-ref REF      Build from a source branch, tag, or commit (development)
   --install-dir DIR     Install the binary into DIR (default: ~/.local/bin)
-  --repo OWNER/REPO     GitHub repository (default: LimeTip/tapid)
+  --repo OWNER/REPO     Default GitHub repository (default: LimeTip/tapid)
   -h, --help            Show this help
 
 Environment:
   TAPID_REPO, TAPID_INSTALL_DIR
+  TAPID_RELEASE_BASE_URL, TAPID_RELEASE_DISCOVERY_URL
 
 Release assets are expected to use this contract:
   tapid-0.1.0-TARGET.tar.gz
@@ -176,12 +179,11 @@ command -v tar >/dev/null 2>&1 || fail "tar is required"
 
 case "$VERSION" in
   latest)
-    release_url="https://github.com/$REPO/releases/latest"
-    resolved_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$release_url" 2>/dev/null)" || \
-      fail "could not contact GitHub to resolve the latest Tapid release"
+    resolved_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$RELEASE_DISCOVERY_URL" 2>/dev/null)" || \
+      fail "could not contact the stable release discovery endpoint"
     case "$resolved_url" in
       */releases/tag/*) VERSION="${resolved_url##*/tag/}" ;;
-      *) fail "no stable Tapid release is published yet; use --source-ref REF for development installation" ;;
+      *) fail "stable release discovery endpoint did not resolve a release tag; use --source-ref REF for development installation" ;;
     esac
     ;;
 esac
@@ -212,7 +214,7 @@ tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/tapid-install.XXXXXX")"
 cleanup() { rm -rf "$tmp_dir"; [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"; }
 trap cleanup 0 1 2 15
 
-base="https://github.com/$REPO/releases/download/$VERSION"
+base="$RELEASE_BASE_URL/$VERSION"
 curl -fsSL "$base/$archive" -o "$tmp_dir/$archive" 2>/dev/null || \
   fail "stable release $VERSION has no $target binary asset in $REPO; use --source-ref REF for development installation"
 curl -fsSL "$base/$checksums" -o "$tmp_dir/$checksums" 2>/dev/null || \

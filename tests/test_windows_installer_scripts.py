@@ -20,6 +20,13 @@ class WindowsInstallerScriptTests(unittest.TestCase):
         for expected in ("tapid.exe", "ReparsePoint", "Remove-Item"):
             self.assertIn(expected, uninstall_text)
 
+    def test_windows_stable_and_source_paths_are_explicitly_separate(self):
+        install_text = INSTALL.read_text()
+        self.assertIn("TAPID_RELEASE_BASE_URL", install_text)
+        self.assertIn("TAPID_RELEASE_DISCOVERY_URL", install_text)
+        self.assertNotIn('$SourceRef = "main"', install_text)
+        self.assertIn("stable release discovery endpoint", install_text)
+
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell Core is not installed")
     def test_windows_scripts_parse_with_powershell(self):
         for script in (INSTALL, UNINSTALL):

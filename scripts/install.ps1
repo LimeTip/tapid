@@ -7,6 +7,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ReleaseBaseUrl = if ($env:TAPID_RELEASE_BASE_URL) { $env:TAPID_RELEASE_BASE_URL.TrimEnd('/') } else { "https://github.com/$Repo/releases/download" }
+$ReleaseDiscoveryUrl = if ($env:TAPID_RELEASE_DISCOVERY_URL) { $env:TAPID_RELEASE_DISCOVERY_URL } else { "https://github.com/$Repo/releases/latest" }
 
 function Fail([string]$Message) {
     throw "tapid installer: $Message"
@@ -70,10 +72,6 @@ if ($PSBoundParameters.ContainsKey("Version") -and $PSBoundParameters.ContainsKe
 if ($PSBoundParameters.ContainsKey("SourceRef") -and [string]::IsNullOrWhiteSpace($SourceRef)) {
     Fail "-SourceRef requires a non-empty value"
 }
-if (-not $PSBoundParameters.ContainsKey("Version") -and -not $PSBoundParameters.ContainsKey("SourceRef")) {
-    $SourceRef = "main"
-}
-
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $destination = Join-Path $InstallDir "tapid.exe"
 Test-RegularDestination $destination
@@ -120,7 +118,17 @@ if (-not [string]::IsNullOrEmpty($SourceRef)) {
 }
 
 if ($Version -eq "latest") {
-    Fail "stable Windows release assets are not published yet; use -SourceRef REF for development installation"
+    try {
+        $discovery = Invoke-WebRequest -Method Head -UseBasicParsing -MaximumRedirection 10 $ReleaseDiscoveryUrl
+        $resolvedPath = $discovery.BaseResponse.ResponseUri.AbsolutePath
+        if ($resolvedPath -notmatch '/releases/tag/(v?[0-9]+\.[0-9]+\.[0-9]+)$') {
+            Fail "stable release discovery endpoint did not resolve a release tag; use -SourceRef REF for development installation"
+        }
+        $Version = $Matches[1]
+    }
+    catch {
+        Fail "could not contact the stable release discovery endpoint"
+    }
 }
 if ($Version -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+$') {
     Fail "version must be a stable release such as v0.1.0"
@@ -143,7 +151,7 @@ if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
 $versionWithoutV = $Version.Substring(1)
 $archive = "tapid-$versionWithoutV-$target.tar.gz"
 $checksums = "tapid-$versionWithoutV-checksums.txt"
-$base = "https://github.com/$Repo/releases/download/$Version"
+$base = "$ReleaseBaseUrl/$Version"
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("tapid-install-" + [guid]::NewGuid().ToString("N"))
 $archivePath = Join-Path $tempRoot $archive
 $checksumsPath = Join-Path $tempRoot $checksums

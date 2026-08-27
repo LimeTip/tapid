@@ -103,6 +103,12 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("non-empty value", result.stderr)
 
+    def test_stable_discovery_endpoint_is_provider_configurable(self):
+        install_text = INSTALL.read_text()
+        self.assertIn('TAPID_RELEASE_BASE_URL', install_text)
+        self.assertIn('TAPID_RELEASE_DISCOVERY_URL', install_text)
+        self.assertIn('TAPID_RELEASE_BASE_URL', install_text.split('Environment:', 1)[1])
+
     def test_uninstall_removes_only_tapid_binary(self):
         with tempfile.TemporaryDirectory() as tmp:
             install_dir = Path(tmp) / "bin"
