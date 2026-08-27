@@ -204,6 +204,12 @@ jobs:
         with:
           name: signed-release-manifest
           path: publication
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-artifacts-*
+          path: release-artifacts
+          merge-multiple: true
       - name: Verify signed manifest against production protocol
         run: |
           set -euo pipefail
@@ -222,9 +228,18 @@ jobs:
           for endpoint in "${endpoints[@]}"; do args+=(--endpoint "$endpoint"); done
           python3 .github/release/stable_channel.py --output publication/stable.json "${args[@]}"
           test -s publication/stable.json
-      - name: Publish signed manifest and stable channel metadata
+      - name: Publish signed release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          gh release upload '${{ inputs.tag }}' publication/release-manifest.json publication/stable.json --clobber
+          mapfile -t artifacts < <(find release-artifacts -maxdepth 1 -type f -name '*.tar.gz' -print | sort)
+          test "${#artifacts[@]}" -eq 4 || { echo "expected four release artifacts, found ${#artifacts[@]}" >&2; exit 1; }
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "Tapid $RELEASE_TAG" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" \
+            "${artifacts[@]}" \
+            publication/release-manifest.json publication/stable.json --clobber
