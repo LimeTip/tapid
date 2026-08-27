@@ -161,11 +161,11 @@ fn contracts_flow_from_runtime_fixture_to_deterministic_plan() {
         os: "linux".into(),
     };
     let runner = runner_plan(&request, evidence.clone());
-    assert_eq!(runner.policy.evidence(), evidence.as_slice());
-    assert_eq!(runner.policy.decision(), Decision::Warn);
+    assert_eq!(runner.policy().evidence(), evidence.as_slice());
+    assert_eq!(runner.policy().decision(), Decision::Warn);
     assert!(
         runner
-            .policy
+            .policy()
             .reasons()
             .contains(&ReasonCode::DeclaredNetworkCapability)
     );
