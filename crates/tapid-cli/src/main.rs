@@ -14,15 +14,17 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
 };
-use tapid_archive::{ArchiveFormat, ArchiveLimits, extract_to};
+use tapid_archive::{extract_to, ArchiveFormat, ArchiveLimits};
 use tapid_core::{ArtifactDigest, PackageInstanceId};
 use tapid_linker::{
-    DependencyEdge, InstanceKey, LayoutInput, ManagedRoot, PackageInstance, Platform,
-    VerifiedTreeReference, plan_layout,
+    plan_layout, DependencyEdge, InstanceKey, LayoutInput, ManagedRoot, PackageInstance, Platform,
+    VerifiedTreeReference,
 };
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
-use tapid_release_client::Fetcher;
+use tapid_release_client::{
+    accept_release, read_release_state, write_release_state, Fetcher, ReleaseState,
+};
 use tapid_signatures::KeyRing;
 use tapid_store::Store;
 
@@ -167,18 +169,61 @@ fn upgrade(
     }
     let target = release_target();
     let mut fetcher = CurlFetcher;
-    let (manifest, bytes) = match fetch_verified_release(&mut fetcher, &endpoints, &keyring, target)
-    {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::from(1);
-        }
-    };
-    let artifact_name = manifest
-        .artifact()
-        .map(|a| a.name.clone())
-        .unwrap_or_default();
+    let (manifest_version, artifact_name, bytes) =
+        match fetch_verified_release(&mut fetcher, &endpoints, &keyring, target) {
+            Ok(value) => {
+                let digest = format!("{:x}", Sha256::digest(&value.1));
+                let state_path = release_state_path(&destination);
+                let state = match read_release_state(&state_path) {
+                    Ok(previous) => accept_release(
+                        &previous,
+                        &value.0.version,
+                        previous.release_sequence.saturating_add(1),
+                        digest.clone(),
+                    ),
+                    Err(_) if !state_path.exists() => {
+                        ReleaseState::new(&value.0.version, 1, digest.clone())
+                    }
+                    Err(error) => Err(error),
+                };
+                let state = match state {
+                    Ok(state) => state,
+                    Err(error) => {
+                        eprintln!("error: cannot accept verified release state: {error}");
+                        return ExitCode::from(1);
+                    }
+                };
+                if let Err(error) =
+                    write_cached_artifact(&destination, &digest, &value.1).and_then(|_| {
+                        write_release_state(&state_path, &state).map_err(|e| e.to_string())
+                    })
+                {
+                    eprintln!("error: cannot persist verified release state: {error}");
+                    return ExitCode::from(1);
+                }
+                let name = value
+                    .0
+                    .artifact()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default();
+                (value.0.version, name, value.1)
+            }
+            Err(error) if error.contains("AllEndpointsFailed") => {
+                match recover_last_known_good(&destination, target) {
+                    Ok(value) => (value.0, value.1, value.2),
+                    Err(recovery) => {
+                        eprintln!(
+                            "error: stable discovery unavailable and recovery failed: {recovery}"
+                        );
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
     let executable = match materialize_artifact(&artifact_name, &bytes) {
         Ok(value) => value,
         Err(error) => {
@@ -189,14 +234,14 @@ fn upgrade(
     if dry_run {
         println!(
             "Verified stable Tapid {} for {target}; dry-run did not replace {}",
-            manifest.version,
+            manifest_version,
             destination.display()
         );
         return ExitCode::SUCCESS;
     }
     match replace_executable(&destination, &executable) {
         Ok(()) => {
-            println!("Upgraded Tapid to {}", manifest.version);
+            println!("Upgraded Tapid to {}", manifest_version);
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -204,6 +249,58 @@ fn upgrade(
             ExitCode::from(1)
         }
     }
+}
+
+fn release_state_path(destination: &Path) -> PathBuf {
+    destination
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".tapid-release-state.json")
+}
+
+fn cached_artifact_path(destination: &Path, digest: &str) -> PathBuf {
+    destination
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(format!(".tapid-release-artifact-{digest}"))
+}
+
+fn write_cached_artifact(destination: &Path, digest: &str, bytes: &[u8]) -> Result<(), String> {
+    let path = cached_artifact_path(destination, digest);
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err("cached artifact must be a regular file".into());
+        }
+        return Ok(());
+    }
+    let temp = path.with_file_name(format!(".tapid-release-artifact-tmp-{}", unique_nonce()));
+    fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+    fs::rename(&temp, &path).map_err(|e| {
+        let _ = fs::remove_file(&temp);
+        e.to_string()
+    })
+}
+
+fn recover_last_known_good(
+    destination: &Path,
+    target: &str,
+) -> Result<(String, String, Vec<u8>), String> {
+    let state = read_release_state(&release_state_path(destination))
+        .map_err(|e| format!("invalid or missing last-known-good state: {e}"))?;
+    let path = cached_artifact_path(destination, &state.last_known_good.artifact_sha256);
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|e| format!("cannot inspect cached verified artifact: {e}"))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err("cached artifact must be a regular file".into());
+    }
+    let bytes =
+        fs::read(&path).map_err(|e| format!("cannot read cached verified artifact: {e}"))?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    if digest != state.last_known_good.artifact_sha256 {
+        return Err("cached artifact digest does not match last-known-good state".into());
+    }
+    let name = format!("tapid-{}-{target}.tar.gz", state.last_known_good.version);
+    Ok((state.last_known_good.version, name, bytes))
 }
 
 fn fetch_verified_release<F: Fetcher>(
@@ -239,7 +336,7 @@ fn fetch_verified_release<F: Fetcher>(
 
 #[cfg(test)]
 mod upgrade_tests {
-    use super::{DEFAULT_STABLE_ENDPOINTS, materialize_artifact, stable_discovery_endpoints};
+    use super::{materialize_artifact, stable_discovery_endpoints, DEFAULT_STABLE_ENDPOINTS};
     use std::{
         fs,
         process::Command,
@@ -325,28 +422,24 @@ mod upgrade_tests {
         let root = temp("duplicate");
         let plain = root.join("artifact.tar");
         fs::write(root.join("tapid"), b"new").unwrap();
-        assert!(
-            Command::new("tar")
-                .args(["-cf"])
-                .arg(&plain)
-                .args(["-C"])
-                .arg(&root)
-                .arg("tapid")
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            Command::new("tar")
-                .args(["-rf"])
-                .arg(&plain)
-                .args(["-C"])
-                .arg(&root)
-                .arg("tapid")
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(Command::new("tar")
+            .args(["-cf"])
+            .arg(&plain)
+            .args(["-C"])
+            .arg(&root)
+            .arg("tapid")
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("tar")
+            .args(["-rf"])
+            .arg(&plain)
+            .args(["-C"])
+            .arg(&root)
+            .arg("tapid")
+            .status()
+            .unwrap()
+            .success());
         let output = Command::new("gzip")
             .args(["-c"])
             .arg(&plain)
