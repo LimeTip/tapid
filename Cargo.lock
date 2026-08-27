@@ -1273,8 +1273,11 @@ dependencies = [
  "tapid-lockfile",
  "tapid-manifest",
  "tapid-registry-client",
+ "tapid-release-client",
  "tapid-resolver",
+ "tapid-signatures",
  "tapid-store",
+ "time",
 ]
 
 [[package]]
@@ -1360,6 +1363,18 @@ dependencies = [
  "serde_json",
  "tapid-core",
  "url",
+]
+
+[[package]]
+name = "tapid-release-client"
+version = "0.0.1"
+dependencies = [
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tapid-signatures",
+ "time",
 ]
 
 [[package]]

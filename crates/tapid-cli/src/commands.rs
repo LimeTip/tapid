@@ -24,6 +24,21 @@ pub(crate) enum Command {
         #[arg(last = true)]
         arguments: Vec<String>,
     },
+    /// Upgrade Tapid from a verified stable release.
+    Upgrade {
+        /// Stable discovery endpoint(s), tried in the given order.
+        #[arg(long = "endpoint", value_name = "HTTPS_URL")]
+        endpoints: Vec<String>,
+        /// Optional trusted release keyring JSON. Uses the embedded production trust root by default.
+        #[arg(long)]
+        keyring: Option<PathBuf>,
+        /// Destination executable (defaults to the current executable).
+        #[arg(long)]
+        destination: Option<PathBuf>,
+        /// Inspect and verify without replacing the executable.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Install dependencies, optionally adding one package first.
     #[command(alias = "i")]
     Install {

@@ -1,6 +1,6 @@
 # Signed client release distribution
 
-Status: signature primitives and schema-shaped manifest signing/verification are implemented in `tapid-signatures::release`. Installer enforcement, trusted-key distribution, and end-to-end release installation remain future work.
+Status: signed manifest verification, versioned trusted keyring parsing, embedded production public key, verified release discovery, recovery state, self-contained first-install verification, and the `tapid upgrade` foundation are implemented. A real protected release publication and clean cross-platform release exercise remain production gates.
 
 ## Scope
 
@@ -55,4 +55,4 @@ The release workflow must additionally produce checksums, SBOMs, and signed prov
 
 ## Explicit non-goals
 
-This design does not enable `tapid upgrade`, automatic update checks, or production release installation by itself. Those behaviors remain disabled until the verification implementation and end-to-end release evidence exist.
+The current implementation provides a signed stable release path for first installation and `tapid upgrade`, including embedded production public-key trust, endpoint fallback, rollback-safe local state, verified artifact downloads, and safe archive handling. It does not yet constitute a publicly advertised production channel until protected release CI is configured, real artifacts are published, endpoint copies are deployed, and clean macOS, Linux, and Windows installation and upgrade runs have passed.

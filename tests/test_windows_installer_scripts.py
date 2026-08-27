@@ -20,6 +20,29 @@ class WindowsInstallerScriptTests(unittest.TestCase):
         for expected in ("tapid.exe", "ReparsePoint", "Remove-Item"):
             self.assertIn(expected, uninstall_text)
 
+    def test_windows_stable_and_source_paths_are_explicitly_separate(self):
+        install_text = INSTALL.read_text()
+        self.assertIn("TAPID_RELEASE_BASE_URL", install_text)
+        self.assertIn("TAPID_RELEASE_DISCOVERY_URL", install_text)
+        self.assertNotIn('$SourceRef = "main"', install_text)
+        self.assertIn("stable release discovery endpoint", install_text)
+
+    def test_windows_stable_install_embeds_production_verifier_without_external_configuration(self):
+        install_text = INSTALL.read_text()
+        self.assertNotIn("TAPID_RELEASE_VERIFIER", install_text)
+        self.assertNotIn("TAPID_RELEASE_TRUSTED_KEYS", install_text)
+        self.assertIn("eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc=", install_text)
+        self.assertIn("signature_context", install_text)
+        self.assertNotIn("checksums.txt", install_text)
+
+    def test_windows_signed_manifest_is_verified_before_artifact_download(self):
+        install_text = INSTALL.read_text()
+        verify = install_text.index("signature_context")
+        artifact = install_text.index('Invoke-WebRequest -UseBasicParsing $artifactUrl')
+        self.assertLess(verify, artifact)
+        for field in ("target", "version", "size", "sha256"):
+            self.assertIn(field, install_text[verify:artifact])
+
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell Core is not installed")
     def test_windows_scripts_parse_with_powershell(self):
         for script in (INSTALL, UNINSTALL):

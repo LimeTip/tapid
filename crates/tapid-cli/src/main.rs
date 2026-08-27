@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
 };
+use tapid_archive::{ArchiveFormat, ArchiveLimits, extract_to};
 use tapid_core::{ArtifactDigest, PackageInstanceId};
 use tapid_linker::{
     DependencyEdge, InstanceKey, LayoutInput, ManagedRoot, PackageInstance, Platform,
@@ -21,6 +22,11 @@ use tapid_linker::{
 };
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
+use tapid_release_client::{
+    Error as ReleaseError, Fetcher, ReleaseState, accept_release, read_release_state,
+    write_release_state,
+};
+use tapid_signatures::KeyRing;
 use tapid_store::Store;
 
 #[derive(Debug, Parser)]
@@ -55,6 +61,17 @@ fn dispatch(cli: Cli) -> ExitCode {
             project_dir,
             arguments,
         }) => run_script(&project_dir, &script, arguments),
+        Some(Command::Upgrade {
+            endpoints,
+            keyring,
+            destination,
+            dry_run,
+        }) => upgrade(
+            &endpoints,
+            keyring.as_deref(),
+            destination.as_deref(),
+            dry_run,
+        ),
         Some(Command::Install {
             package,
             offline,
@@ -72,6 +89,587 @@ fn dispatch(cli: Cli) -> ExitCode {
             registry_fixture.as_deref(),
             allow_unverified_registry_artifacts,
         ),
+    }
+}
+
+const DEFAULT_STABLE_ENDPOINTS: [&str; 2] = [
+    "https://tapid.dev/stable.json",
+    "https://github.com/LimeTip/tapid/releases/latest/download/stable.json",
+];
+
+fn stable_discovery_endpoints(endpoint_args: &[String], env_value: Option<&str>) -> Vec<String> {
+    if !endpoint_args.is_empty() {
+        return endpoint_args.to_vec();
+    }
+    if let Some(value) = env_value {
+        let endpoints: Vec<String> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !endpoints.is_empty() {
+            return endpoints;
+        }
+    }
+    DEFAULT_STABLE_ENDPOINTS
+        .iter()
+        .map(|endpoint| (*endpoint).to_owned())
+        .collect()
+}
+
+fn upgrade(
+    endpoint_args: &[String],
+    keyring_arg: Option<&Path>,
+    destination_arg: Option<&Path>,
+    dry_run: bool,
+) -> ExitCode {
+    let keyring = match keyring_arg
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TAPID_RELEASE_KEYRING").map(PathBuf::from))
+    {
+        Some(keyring_path) => {
+            let keyring_bytes = match fs::read(&keyring_path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    eprintln!(
+                        "error: cannot read trusted release keyring '{}': {error}",
+                        keyring_path.display()
+                    );
+                    return ExitCode::from(1);
+                }
+            };
+            match KeyRing::from_embedded_json(&keyring_bytes) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("error: invalid trusted release keyring: {error}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        None => match KeyRing::production() {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: embedded production release keyring is invalid: {error}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    let endpoints = stable_discovery_endpoints(
+        endpoint_args,
+        std::env::var("TAPID_STABLE_ENDPOINTS").ok().as_deref(),
+    );
+    let destination = match destination_arg {
+        Some(path) => path.to_owned(),
+        None => match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("error: cannot determine current executable: {error}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    if let Err(error) = validate_upgrade_destination(&destination) {
+        eprintln!("error: {error}");
+        return ExitCode::from(1);
+    }
+    let target = release_target();
+    let mut fetcher = CurlFetcher;
+    let (manifest_version, artifact_name, bytes) =
+        match fetch_verified_release(&mut fetcher, &endpoints, &keyring, target) {
+            Ok(value) => {
+                let digest = format!("{:x}", Sha256::digest(&value.1));
+                let state_path = release_state_path(&destination);
+                let state = match read_release_state(&state_path) {
+                    Ok(previous) => accept_release(
+                        &previous,
+                        &value.0.version,
+                        previous.release_sequence.saturating_add(1),
+                        digest.clone(),
+                    ),
+                    Err(_) if !state_path.exists() => {
+                        ReleaseState::new(&value.0.version, 1, digest.clone())
+                    }
+                    Err(error) => Err(error),
+                };
+                let state = match state {
+                    Ok(state) => state,
+                    Err(error) => {
+                        eprintln!("error: cannot accept verified release state: {error}");
+                        return ExitCode::from(1);
+                    }
+                };
+                if let Err(error) =
+                    write_cached_artifact(&destination, &digest, &value.1).and_then(|_| {
+                        write_release_state(&state_path, &state).map_err(|e| e.to_string())
+                    })
+                {
+                    eprintln!("error: cannot persist verified release state: {error}");
+                    return ExitCode::from(1);
+                }
+                let name = value
+                    .0
+                    .artifact()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default();
+                (value.0.version, name, value.1)
+            }
+            Err(ReleaseError::AllEndpointsFailed { .. }) => {
+                match recover_last_known_good(&destination, target) {
+                    Ok(value) => (value.0, value.1, value.2),
+                    Err(recovery) => {
+                        eprintln!(
+                            "error: stable discovery unavailable and recovery failed: {recovery}"
+                        );
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+    let executable = match materialize_artifact(&artifact_name, &bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    if dry_run {
+        println!(
+            "Verified stable Tapid {} for {target}; dry-run did not replace {}",
+            manifest_version,
+            destination.display()
+        );
+        return ExitCode::SUCCESS;
+    }
+    match replace_executable(&destination, &executable) {
+        Ok(()) => {
+            println!("Upgraded Tapid to {}", manifest_version);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: cannot activate verified artifact: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn release_state_path(destination: &Path) -> PathBuf {
+    destination
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".tapid-release-state.json")
+}
+
+fn cached_artifact_path(destination: &Path, digest: &str) -> PathBuf {
+    destination
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(format!(".tapid-release-artifact-{digest}"))
+}
+
+fn write_cached_artifact(destination: &Path, digest: &str, bytes: &[u8]) -> Result<(), String> {
+    let path = cached_artifact_path(destination, digest);
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err("cached artifact must be a regular file".into());
+        }
+        return Ok(());
+    }
+    let temp = path.with_file_name(format!(".tapid-release-artifact-tmp-{}", unique_nonce()));
+    fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+    fs::rename(&temp, &path).map_err(|e| {
+        let _ = fs::remove_file(&temp);
+        e.to_string()
+    })
+}
+
+fn recover_last_known_good(
+    destination: &Path,
+    target: &str,
+) -> Result<(String, String, Vec<u8>), String> {
+    let state = read_release_state(&release_state_path(destination))
+        .map_err(|e| format!("invalid or missing last-known-good state: {e}"))?;
+    let path = cached_artifact_path(destination, &state.last_known_good.artifact_sha256);
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|e| format!("cannot inspect cached verified artifact: {e}"))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err("cached artifact must be a regular file".into());
+    }
+    let bytes =
+        fs::read(&path).map_err(|e| format!("cannot read cached verified artifact: {e}"))?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    if digest != state.last_known_good.artifact_sha256 {
+        return Err("cached artifact digest does not match last-known-good state".into());
+    }
+    let name = format!("tapid-{}-{target}.tar.gz", state.last_known_good.version);
+    Ok((state.last_known_good.version, name, bytes))
+}
+
+fn fetch_verified_release<F: Fetcher>(
+    fetcher: &mut F,
+    endpoints: &[String],
+    keyring: &KeyRing,
+    target: &str,
+) -> Result<(tapid_release_client::ReleaseManifest, Vec<u8>), ReleaseError> {
+    let endpoint_refs: Vec<&str> = endpoints.iter().map(String::as_str).collect();
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|e| ReleaseError::State(format!("cannot determine current time: {e}")))?;
+    let manifest = tapid_release_client::discover(
+        fetcher,
+        &endpoint_refs,
+        keyring,
+        target,
+        &now,
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60)),
+    )?;
+    let artifact = manifest
+        .artifact()
+        .ok_or_else(|| ReleaseError::TargetNotFound(target.into()))?;
+    let bytes = fetcher.fetch(&artifact.url).map_err(ReleaseError::Fetch)?;
+    manifest.verify_artifact(&bytes)?;
+    Ok((manifest, bytes))
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::{DEFAULT_STABLE_ENDPOINTS, materialize_artifact, stable_discovery_endpoints};
+    use std::{
+        fs,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp(label: &str) -> std::path::PathBuf {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("tapid-upgrade-{label}-{n}"));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn default_stable_endpoints_are_ordered_with_tapid_dev_first() {
+        let endpoints = stable_discovery_endpoints(&[], None);
+        assert_eq!(endpoints, DEFAULT_STABLE_ENDPOINTS);
+    }
+
+    #[test]
+    fn stable_endpoint_overrides_preserve_cli_then_environment_precedence() {
+        let cli = vec!["https://cli.test/stable.json".to_owned()];
+        assert_eq!(
+            stable_discovery_endpoints(&cli, Some("https://env.test/stable.json")),
+            cli
+        );
+        assert_eq!(
+            stable_discovery_endpoints(&[], Some(" https://one.test/a, ,https://two.test/b ")),
+            vec![
+                "https://one.test/a".to_owned(),
+                "https://two.test/b".to_owned()
+            ]
+        );
+        assert_eq!(
+            stable_discovery_endpoints(&[], Some(" , ")),
+            DEFAULT_STABLE_ENDPOINTS
+        );
+    }
+
+    fn tar_gz(root: &std::path::Path, entries: &[&str]) -> Vec<u8> {
+        let archive = root.join("artifact.tar.gz");
+        let status = Command::new("tar")
+            .args(["-czf"])
+            .arg(&archive)
+            .args(["-C"])
+            .arg(root)
+            .args(entries)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::read(archive).unwrap()
+    }
+
+    #[test]
+    fn tar_artifact_rejects_extra_members_before_selecting_tapid() {
+        let root = temp("extra");
+        fs::write(root.join("tapid"), b"new").unwrap();
+        fs::write(root.join("extra"), b"unexpected").unwrap();
+        let bytes = tar_gz(&root, &["tapid", "extra"]);
+        let result = materialize_artifact("tapid.tar.gz", &bytes);
+        assert!(result.is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tar_artifact_rejects_symlink_members() {
+        let root = temp("symlink");
+        fs::write(root.join("payload"), b"payload").unwrap();
+        std::os::unix::fs::symlink("payload", root.join("tapid")).unwrap();
+        let bytes = tar_gz(&root, &["tapid", "payload"]);
+        assert!(materialize_artifact("tapid.tar.gz", &bytes).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tar_artifact_rejects_duplicate_members() {
+        let root = temp("duplicate");
+        let plain = root.join("artifact.tar");
+        fs::write(root.join("tapid"), b"new").unwrap();
+        assert!(
+            Command::new("tar")
+                .args(["-cf"])
+                .arg(&plain)
+                .args(["-C"])
+                .arg(&root)
+                .arg("tapid")
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("tar")
+                .args(["-rf"])
+                .arg(&plain)
+                .args(["-C"])
+                .arg(&root)
+                .arg("tapid")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let output = Command::new("gzip")
+            .args(["-c"])
+            .arg(&plain)
+            .output()
+            .unwrap();
+        let result = materialize_artifact("tapid.tar.gz", &output.stdout);
+        assert!(result.is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tar_artifact_rejects_traversal_members() {
+        let root = temp("traversal");
+        let outside = root.parent().unwrap().join(format!(
+            "tapid-outside-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&outside, b"outside").unwrap();
+        let archive = root.join("artifact.tar.gz");
+        let output = Command::new("python3")
+            .args([
+                "-c",
+                "import tarfile,sys; t=tarfile.open(sys.argv[1],'w:gz'); i=tarfile.TarInfo('../tapid'); i.size=3; t.addfile(i, __import__('io').BytesIO(b'new')); t.close()",
+                archive.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(materialize_artifact("tapid.tar.gz", &fs::read(&archive).unwrap()).is_err());
+        let _ = fs::remove_file(outside);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn zip_artifact_is_rejected_without_unsafe_extraction() {
+        assert!(materialize_artifact("tapid.zip", b"not a zip").is_err());
+    }
+}
+
+fn unique_nonce() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
+fn materialize_artifact(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if name.ends_with(".zip") {
+        return Err(
+            "verified Windows zip artifacts are unsupported: refusing unsafe extraction".into(),
+        );
+    }
+    if !name.ends_with(".tar.gz") {
+        return Err("verified artifact has an unsupported archive format".into());
+    }
+    let temp = std::env::temp_dir().join(format!(
+        "tapid-artifact-{}-{}",
+        std::process::id(),
+        unique_nonce()
+    ));
+    let result = (|| {
+        extract_to(bytes, ArchiveFormat::TarGz, &temp, ArchiveLimits::default())
+            .map_err(|e| format!("cannot safely extract verified artifact: {e}"))?;
+        let mut entries = fs::read_dir(&temp).map_err(|e| e.to_string())?;
+        let first = entries.next().transpose().map_err(|e| e.to_string())?;
+        let Some(first) = first else {
+            return Err("verified artifact does not contain a tapid executable".into());
+        };
+        if entries.next().is_some() {
+            return Err("verified artifact must contain exactly one member named tapid".into());
+        }
+        let path = first.path();
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or_default();
+        if name != "tapid" && name != "tapid.exe" {
+            return Err("verified artifact must contain exactly one member named tapid".into());
+        }
+        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if !metadata.file_type().is_file() {
+            return Err("verified artifact tapid member must be a regular file".into());
+        }
+        fs::read(path).map_err(|e| e.to_string())
+    })();
+    let _ = fs::remove_dir_all(&temp);
+    result
+}
+
+fn validate_upgrade_destination(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| {
+        format!(
+            "cannot inspect upgrade destination '{}': {e}",
+            path.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err("upgrade destination must be a regular file".into());
+    }
+    let marker = path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".tapid-managed");
+    let marker_metadata = match fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return Err(format!(
+                "refusing to replace unmarked non-Tapid-managed destination '{}'; expected {}",
+                path.display(),
+                marker.display()
+            ));
+        }
+    };
+    if !marker_metadata.file_type().is_file() {
+        return Err("Tapid ownership marker must be a regular file".into());
+    }
+    if fs::read(&marker).map_or(true, |bytes| bytes != b"tapid-managed-v1\n") {
+        return Err(format!(
+            "refusing to replace unmarked non-Tapid-managed destination '{}'; expected {}",
+            path.display(),
+            marker.display()
+        ));
+    }
+    Ok(())
+}
+
+fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let temp = path.with_file_name(format!(
+        ".tapid-upgrade-{}-{}",
+        std::process::id(),
+        unique_nonce()
+    ));
+    fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode();
+        if let Err(error) = fs::set_permissions(&temp, fs::Permissions::from_mode(mode)) {
+            let _ = fs::remove_file(&temp);
+            return Err(error.to_string());
+        }
+        fs::rename(&temp, path).map_err(|e| {
+            let _ = fs::remove_file(&temp);
+            e.to_string()
+        })
+    }
+    #[cfg(windows)]
+    {
+        let backup = path.with_file_name(format!(
+            ".tapid-old-{}-{}",
+            std::process::id(),
+            unique_nonce()
+        ));
+        fs::rename(path, &backup).map_err(|e| {
+            let _ = fs::remove_file(&temp);
+            e.to_string()
+        })?;
+        match fs::rename(&temp, path) {
+            Ok(()) => {
+                let _ = fs::remove_file(&backup);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::remove_file(path);
+                let restore = fs::rename(&backup, path);
+                if let Err(restore_error) = restore {
+                    return Err(format!(
+                        "{error}; could not restore old executable: {restore_error}"
+                    ));
+                }
+                let _ = fs::remove_file(&temp);
+                Err(error.to_string())
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = fs::remove_file(&temp);
+        Err("executable replacement is unsupported on this operating system".into())
+    }
+}
+
+struct CurlFetcher;
+impl tapid_release_client::Fetcher for CurlFetcher {
+    fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> {
+        if !url.starts_with("https://") {
+            return Err("URL must use HTTPS".into());
+        }
+        let output = std::process::Command::new("curl")
+            .args([
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--proto",
+                "=https",
+                "--tlsv1.2",
+                url,
+            ])
+            .output()
+            .map_err(|e| format!("HTTPS transport unavailable: {e}"))?;
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        }
+    }
+}
+
+fn release_target() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "aarch64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "unsupported-target"
     }
 }
 
@@ -863,12 +1461,6 @@ fn discard_lockfile_backup(backup: Option<&Path>) -> Result<(), String> {
         fs::remove_file(backup).map_err(|e| e.to_string())?;
     }
     Ok(())
-}
-
-fn unique_nonce() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos())
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {

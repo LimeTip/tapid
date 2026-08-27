@@ -18,6 +18,7 @@ members = [
     "crates/tapid-signatures",
     "crates/tapid-attestations",
     "crates/tapid-transparency",
+    "crates/tapid-release-client",
 ]
 
 [workspace.package]

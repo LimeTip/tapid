@@ -1,0 +1,245 @@
+name: Protected release publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Immutable 0.x.y release version"
+        required: true
+        type: string
+      tag:
+        description: "Immutable release tag (v0.x.y)"
+        required: true
+        type: string
+      commit:
+        description: "Full immutable commit SHA"
+        required: true
+        type: string
+      created_at:
+        description: "RFC3339 creation timestamp"
+        required: true
+        type: string
+      expires_at:
+        description: "RFC3339 expiry timestamp"
+        required: true
+        type: string
+      base_url:
+        description: "HTTPS artifact base URL"
+        required: true
+        type: string
+      manifest_endpoints:
+        description: "Ordered HTTPS manifest URLs, one per line"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-source:
+    name: Validate immutable release source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate commit and tag ancestry
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40,64}$ ]]
+          [[ "$RELEASE_TAG" =~ ^v0\.[0-9]+\.[0-9]+$ ]]
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          git cat-file -e "$RELEASE_COMMIT^{commit}"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+      - name: Export validated source archive
+        env:
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: git archive --format=tar --output=validated-source.tar "$RELEASE_COMMIT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-release-source
+          path: validated-source.tar
+          if-no-files-found: error
+
+  build-artifacts:
+    name: Build ${{ matrix.target }} release artifact
+    needs: prepare-source
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: tapid
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            binary: tapid
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: tapid
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: tapid.exe
+    steps:
+      - name: Download validated release source
+        uses: actions/download-artifact@v4
+        with:
+          name: validated-release-source
+      - name: Extract validated release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir source
+          tar -xf validated-source.tar -C source
+          cd source
+          test -f Cargo.toml
+      - name: Build and package artifact
+        shell: bash
+        working-directory: source
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          set -euo pipefail
+          actual_version="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "tapid"))')"
+          test "$actual_version" = "$VERSION" || {
+            echo "release version $VERSION does not match Cargo package version $actual_version" >&2
+            exit 1
+          }
+          cargo build --release --locked --bin tapid
+          staging="$(mktemp -d)"
+          trap 'rm -rf "$staging"' EXIT
+          install -m 0755 "target/release/$BINARY" "$staging/$BINARY"
+          mkdir -p release-artifacts
+          tar -czf "release-artifacts/tapid-${VERSION}-${TARGET}.tar.gz" -C "$staging" "$BINARY"
+          test -s "release-artifacts/tapid-${VERSION}-${TARGET}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ matrix.target }}
+          path: source/release-artifacts/*.tar.gz
+          if-no-files-found: error
+
+  sign-manifest:
+    name: Generate and sign release manifest
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    environment:
+      name: stable-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-artifacts-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Generate signed manifest
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_ED25519_PRIVATE_KEY }}
+          RELEASE_SIGNING_KEY_ID: ${{ vars.TAPID_RELEASE_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          test -n "${RELEASE_SIGNING_KEY:-}" || { echo 'Signing secret is missing' >&2; exit 1; }
+          test -n "${RELEASE_SIGNING_KEY_ID:-}" || { echo 'Signing key id is missing' >&2; exit 1; }
+          mapfile -t files < <(find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print | sort)
+          test "${#files[@]}" -gt 0 || { echo 'No required release artifacts found' >&2; exit 1; }
+          args=()
+          for file in "${files[@]}"; do
+            name=$(basename "$file")
+            case "$name" in
+              tapid-${{ inputs.version }}-[A-Za-z0-9._-]*.tar.gz|tapid-${{ inputs.version }}-[A-Za-z0-9._-]*.zip) ;;
+              *) echo "invalid release artifact filename: $name" >&2; exit 1 ;;
+            esac
+            target=${name#tapid-${{ inputs.version }}-}
+            target=${target%.tar.gz}; target=${target%.zip}
+            args+=(--artifact "${target}=${file}")
+          done
+          python3 .github/release/generate_manifest.py \
+            --version '${{ inputs.version }}' --tag '${{ inputs.tag }}' --commit '${{ inputs.commit }}' \
+            --created-at '${{ inputs.created_at }}' --expires-at '${{ inputs.expires_at }}' \
+            --base-url '${{ inputs.base_url }}' --output release-manifest.json "${args[@]}"
+          test -s release-manifest.json
+          cargo run --locked --quiet --manifest-path .github/release/verifier/Cargo.toml -- \
+            release-manifest.json crates/tapid-signatures/data/release-keyring.json \
+            '${{ inputs.version }}' '${{ inputs.tag }}' '${{ inputs.commit }}'
+      - name: Upload signed manifest for approved advancement
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-release-manifest
+          path: release-manifest.json
+          if-no-files-found: error
+
+  advance-stable:
+    name: Advance stable channel (approval required)
+    needs: sign-manifest
+    runs-on: ubuntu-latest
+    environment:
+      name: stable-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download signed manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-release-manifest
+          path: publication
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-artifacts-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Verify signed manifest against production protocol
+        run: |
+          set -euo pipefail
+          test -s publication/release-manifest.json
+          cargo run --locked --quiet --manifest-path .github/release/verifier/Cargo.toml -- \
+            publication/release-manifest.json crates/tapid-signatures/data/release-keyring.json \
+            '${{ inputs.version }}' '${{ inputs.tag }}' '${{ inputs.commit }}'
+      - name: Build ordered provider-neutral stable metadata
+        env:
+          ENDPOINTS: ${{ inputs.manifest_endpoints }}
+        run: |
+          set -euo pipefail
+          mapfile -t endpoints < <(printf '%s\n' "$ENDPOINTS" | sed '/^[[:space:]]*$/d')
+          test "${#endpoints[@]}" -gt 0 || { echo 'No stable manifest endpoints supplied' >&2; exit 1; }
+          args=()
+          for endpoint in "${endpoints[@]}"; do args+=(--endpoint "$endpoint"); done
+          python3 .github/release/stable_channel.py --output publication/stable.json "${args[@]}"
+          test -s publication/stable.json
+      - name: Publish signed release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mapfile -t artifacts < <(find release-artifacts -maxdepth 1 -type f -name '*.tar.gz' -print | sort)
+          test "${#artifacts[@]}" -eq 4 || { echo "expected four release artifacts, found ${#artifacts[@]}" >&2; exit 1; }
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "Tapid $RELEASE_TAG" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" \
+            "${artifacts[@]}" \
+            publication/release-manifest.json publication/stable.json --clobber
