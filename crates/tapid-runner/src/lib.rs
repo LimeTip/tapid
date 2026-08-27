@@ -63,13 +63,27 @@ pub enum ValidationError {
     ScriptHashMismatch,
     MissingApproval,
     UnsupportedOs,
+    PolicyDenied,
+    RequestMismatch,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerPlan {
-    pub policy: PolicyDecision,
-    pub approval_required: bool,
-    pub containment_available: bool,
+    policy: PolicyDecision,
+    approval_required: bool,
+    containment_available: bool,
+    request: RunnerRequest,
+}
+impl RunnerPlan {
+    pub fn policy(&self) -> &PolicyDecision {
+        &self.policy
+    }
+    pub fn approval_required(&self) -> bool {
+        self.approval_required
+    }
+    pub fn containment_available(&self) -> bool {
+        self.containment_available
+    }
 }
 impl RunnerPlan {
     pub fn validate_approval(
@@ -77,6 +91,18 @@ impl RunnerPlan {
         request: &RunnerRequest,
         approval: Option<&Approval>,
     ) -> Result<(), ValidationError> {
+        if request.artifact_digest != self.request.artifact_digest {
+            return Err(ValidationError::ArtifactDigestMismatch);
+        }
+        if request.script_hash() != self.request.script_hash() {
+            return Err(ValidationError::ScriptHashMismatch);
+        }
+        if request.unattended != self.request.unattended || request.os != self.request.os {
+            return Err(ValidationError::RequestMismatch);
+        }
+        if self.policy.decision() == Decision::Deny {
+            return Err(ValidationError::PolicyDenied);
+        }
         let Some(approval) = approval else {
             return if self.approval_required {
                 Err(ValidationError::MissingApproval)
@@ -108,6 +134,7 @@ pub fn plan(request: &RunnerRequest, evidence: Vec<Evidence>) -> RunnerPlan {
         policy,
         approval_required,
         containment_available: false,
+        request: request.clone(),
     }
 }
 
@@ -160,9 +187,41 @@ mod tests {
             &r,
             vec![Evidence::inferred(Capability::Network, "heuristic")],
         );
-        assert_eq!(p.policy.decision(), Decision::Deny);
-        assert!(p.approval_required);
+        assert_eq!(p.policy().decision(), Decision::Deny);
+        assert!(p.approval_required());
     }
+    #[test]
+    fn approval_cannot_override_policy_denial() {
+        let cases = [
+            (
+                RunnerRequest {
+                    unattended: true,
+                    ..request()
+                },
+                vec![Evidence::inferred(Capability::Network, "heuristic")],
+            ),
+            (
+                request(),
+                vec![Evidence::ambiguous(Capability::Network, "unclear")],
+            ),
+            (
+                RunnerRequest {
+                    os: "plan9".into(),
+                    ..request()
+                },
+                vec![],
+            ),
+        ];
+        for (r, evidence) in cases {
+            let p = plan(&r, evidence);
+            assert_eq!(p.policy().decision(), Decision::Deny);
+            assert_eq!(
+                p.validate_approval(&r, Some(&Approval::for_request(&r))),
+                Err(ValidationError::PolicyDenied)
+            );
+        }
+    }
+
     #[test]
     fn unsupported_os_is_explicit_and_not_containment() {
         let r = RunnerRequest {
@@ -170,8 +229,8 @@ mod tests {
             ..request()
         };
         let p = plan(&r, vec![]);
-        assert_eq!(p.policy.decision(), Decision::Deny);
-        assert!(p.policy.reasons().contains(&ReasonCode::UnsupportedOs));
-        assert!(!p.containment_available);
+        assert_eq!(p.policy().decision(), Decision::Deny);
+        assert!(p.policy().reasons().contains(&ReasonCode::UnsupportedOs));
+        assert!(!p.containment_available());
     }
 }
