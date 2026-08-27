@@ -89,6 +89,32 @@ fn dispatch(cli: Cli) -> ExitCode {
     }
 }
 
+const DEFAULT_STABLE_ENDPOINTS: [&str; 2] = [
+    "https://tapid.dev/stable.json",
+    "https://github.com/LimeTip/tapid/releases/latest/download/stable.json",
+];
+
+fn stable_discovery_endpoints(endpoint_args: &[String], env_value: Option<&str>) -> Vec<String> {
+    if !endpoint_args.is_empty() {
+        return endpoint_args.to_vec();
+    }
+    if let Some(value) = env_value {
+        let endpoints: Vec<String> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !endpoints.is_empty() {
+            return endpoints;
+        }
+    }
+    DEFAULT_STABLE_ENDPOINTS
+        .iter()
+        .map(|endpoint| (*endpoint).to_owned())
+        .collect()
+}
+
 fn upgrade(
     endpoint_args: &[String],
     keyring_arg: Option<&Path>,
@@ -121,26 +147,10 @@ fn upgrade(
             return ExitCode::from(1);
         }
     };
-    let endpoints: Vec<String> = if endpoint_args.is_empty() {
-        std::env::var("TAPID_STABLE_ENDPOINTS")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        endpoint_args.to_vec()
-    };
-    if endpoints.is_empty() {
-        eprintln!(
-            "error: no stable discovery endpoints configured (use --endpoint; provider migration remains operator-supplied)"
-        );
-        return ExitCode::from(1);
-    }
+    let endpoints = stable_discovery_endpoints(
+        endpoint_args,
+        std::env::var("TAPID_STABLE_ENDPOINTS").ok().as_deref(),
+    );
     let destination = match destination_arg {
         Some(path) => path.to_owned(),
         None => match std::env::current_exe() {
@@ -229,7 +239,7 @@ fn fetch_verified_release<F: Fetcher>(
 
 #[cfg(test)]
 mod upgrade_tests {
-    use super::materialize_artifact;
+    use super::{DEFAULT_STABLE_ENDPOINTS, materialize_artifact, stable_discovery_endpoints};
     use std::{
         fs,
         process::Command,
@@ -244,6 +254,32 @@ mod upgrade_tests {
         let p = std::env::temp_dir().join(format!("tapid-upgrade-{label}-{n}"));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn default_stable_endpoints_are_ordered_with_tapid_dev_first() {
+        let endpoints = stable_discovery_endpoints(&[], None);
+        assert_eq!(endpoints, DEFAULT_STABLE_ENDPOINTS);
+    }
+
+    #[test]
+    fn stable_endpoint_overrides_preserve_cli_then_environment_precedence() {
+        let cli = vec!["https://cli.test/stable.json".to_owned()];
+        assert_eq!(
+            stable_discovery_endpoints(&cli, Some("https://env.test/stable.json")),
+            cli
+        );
+        assert_eq!(
+            stable_discovery_endpoints(&[], Some(" https://one.test/a, ,https://two.test/b ")),
+            vec![
+                "https://one.test/a".to_owned(),
+                "https://two.test/b".to_owned()
+            ]
+        );
+        assert_eq!(
+            stable_discovery_endpoints(&[], Some(" , ")),
+            DEFAULT_STABLE_ENDPOINTS
+        );
     }
 
     fn tar_gz(root: &std::path::Path, entries: &[&str]) -> Vec<u8> {

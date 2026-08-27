@@ -32,6 +32,15 @@ fn run_with_env(cwd: &PathBuf, args: &[&str], key: &str, value: &str) -> std::pr
         .output()
         .unwrap()
 }
+fn run_without_release_config(cwd: &PathBuf, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(args)
+        .current_dir(cwd)
+        .env_remove("TAPID_RELEASE_KEYRING")
+        .env_remove("TAPID_STABLE_ENDPOINTS")
+        .output()
+        .unwrap()
+}
 fn cleanup(path: PathBuf) {
     let _ = fs::remove_dir_all(path);
 }
@@ -50,6 +59,20 @@ fn upgrade_fails_closed_without_explicit_trust_root() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required")
     );
+    cleanup(dir);
+}
+
+#[test]
+fn upgrade_uses_built_in_stable_endpoints_but_checks_keyring_first() {
+    let dir = temp_dir("upgrade-default-endpoints");
+    let output = run_without_release_config(&dir, &["upgrade"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("no stable discovery endpoints"));
     cleanup(dir);
 }
 
