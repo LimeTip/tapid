@@ -108,3 +108,32 @@ pub(crate) fn parse_platform(value: &str) -> Result<PlatformContext, String> {
     )
     .map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_canonical_peer_context_with_percent_encoding() {
+        let parsed = parse_peer("name=%40scope%2Fpkg;version=1.2.3").unwrap();
+        let (name, version) = parsed.entries().iter().next().unwrap();
+        assert_eq!(name.as_str(), "@scope/pkg");
+        assert_eq!(version.to_string(), "1.2.3");
+    }
+
+    #[test]
+    fn parses_canonical_platform_context_with_percent_encoding() {
+        let parsed = parse_platform("os=linux;cpu=x86%2D64;libc=gnu").unwrap();
+        assert_eq!(parsed.os.as_deref(), Some("linux"));
+        assert_eq!(parsed.cpu.as_deref(), Some("x86-64"));
+        assert_eq!(parsed.libc.as_deref(), Some("gnu"));
+    }
+
+    #[test]
+    fn parses_empty_canonical_platform_context() {
+        let parsed = parse_platform("os=;cpu=;libc=").unwrap();
+        assert_eq!(parsed.os, None);
+        assert_eq!(parsed.cpu, None);
+        assert_eq!(parsed.libc, None);
+    }
+}

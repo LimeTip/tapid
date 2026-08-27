@@ -5,6 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
+use sha2::{Digest, Sha256};
 use tapid_archive::{ArchiveFormat, ArchiveLimits, canonical_tree_digest, extract_to};
 use tapid_core::{ArtifactDigest, RegistryOrigin};
 use tapid_lockfile::{LockedPackage, Lockfile};
@@ -148,20 +149,8 @@ impl RegistryTransport for SnapshotTransport {
 }
 
 fn sha256_digest(bytes: &[u8]) -> ArtifactDigest {
-    let output = std::process::Command::new("shasum")
-        .args(["-a", "256"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            child.stdin.take().unwrap().write_all(bytes)?;
-            child.wait_with_output()
-        })
-        .unwrap();
-    let hex = String::from_utf8(output.stdout).unwrap();
-    format!("sha256-{}", hex.split_whitespace().next().unwrap())
-        .parse()
-        .unwrap()
+    let digest = Sha256::digest(bytes);
+    format!("sha256-{digest:x}").parse().unwrap()
 }
 
 fn tar_fixture() -> Vec<u8> {
