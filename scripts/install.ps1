@@ -41,6 +41,9 @@ if ($PSBoundParameters.ContainsKey("Version") -and $PSBoundParameters.ContainsKe
 if ($PSBoundParameters.ContainsKey("SourceRef") -and [string]::IsNullOrWhiteSpace($SourceRef)) {
     Fail "-SourceRef requires a non-empty value"
 }
+if (-not $PSBoundParameters.ContainsKey("Version") -and -not $PSBoundParameters.ContainsKey("SourceRef")) {
+    $SourceRef = "main"
+}
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $destination = Join-Path $InstallDir "tapid.exe"

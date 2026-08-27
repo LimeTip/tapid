@@ -8,12 +8,14 @@ VERSION_SET=0
 SOURCE_REF=""
 SOURCE_REF_SET=0
 STAGED_BINARY=""
+PATH_UPDATED=0
+PATH_RC=""
 
 usage() {
   cat <<'USAGE'
 Usage: install.sh [options]
 
-Install the latest stable Tapid release by default.
+Build Tapid from the main source branch by default.
 
 Options:
   --version VERSION     Install a specific stable release tag, e.g. v0.1.0
@@ -33,6 +35,39 @@ USAGE
 }
 
 fail() { printf 'tapid installer: %s\n' "$*" >&2; exit 1; }
+
+configure_path() {
+  case ":${PATH:-}:" in
+    *:"$INSTALL_DIR":*) return ;;
+  esac
+  # Only modify a shell startup file for the default user-local path.
+  if [ "$INSTALL_DIR" != "$HOME/.local/bin" ]; then return; fi
+  shell_name="${SHELL##*/}"
+  case "$shell_name" in
+    zsh) PATH_RC="$HOME/.zprofile" ;;
+    bash)
+      if [ -f "$HOME/.bash_profile" ]; then PATH_RC="$HOME/.bash_profile"; else PATH_RC="$HOME/.bashrc"; fi
+      ;;
+    *) PATH_RC="$HOME/.profile" ;;
+  esac
+  path_line='export PATH="$HOME/.local/bin:$PATH"'
+  if [ ! -f "$PATH_RC" ] || ! grep -Fqx "$path_line" "$PATH_RC"; then
+    printf '\n# Tapid\n%s\n' "$path_line" >> "$PATH_RC"
+  fi
+  PATH="$INSTALL_DIR:$PATH"
+  export PATH
+  PATH_UPDATED=1
+}
+
+print_path_guidance() {
+  if [ "$PATH_UPDATED" -eq 1 ]; then
+    printf 'Tapid is ready in this shell.\n'
+    printf 'For future shells, PATH was configured in %s.\n' "$PATH_RC"
+    printf 'To enable it now in the parent shell, run: . "%s"\n' "$PATH_RC"
+  elif [ "$INSTALL_DIR" != "$HOME/.local/bin" ]; then
+    printf 'Add this directory to PATH before running Tapid: %s\n' "$INSTALL_DIR"
+  fi
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -78,6 +113,11 @@ if [ "$VERSION_SET" -eq 1 ] && [ "$SOURCE_REF_SET" -eq 1 ]; then
   fail "use either --version or --source-ref, not both"
 fi
 
+if [ "$VERSION_SET" -eq 0 ] && [ "$SOURCE_REF_SET" -eq 0 ]; then
+  SOURCE_REF="main"
+  SOURCE_REF_SET=1
+fi
+
 case "$INSTALL_DIR" in
   /*) ;;
   *) fail "install directory must be an absolute path" ;;
@@ -112,7 +152,9 @@ if [ "$SOURCE_REF_SET" -eq 1 ]; then
   install -m 0755 "$tmp_dir/root/bin/tapid" "$STAGED_BINARY"
   mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"
   STAGED_BINARY=""
+  configure_path
   printf 'Installed Tapid from %s into %s/tapid\n' "$SOURCE_REF" "$INSTALL_DIR"
+  print_path_guidance
   exit 0
 fi
 
@@ -187,4 +229,6 @@ STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
 install -m 0755 "$tmp_dir/extracted/tapid" "$STAGED_BINARY"
 mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"
 STAGED_BINARY=""
+configure_path
 printf 'Installed Tapid %s into %s/tapid\n' "$VERSION" "$INSTALL_DIR"
+print_path_guidance

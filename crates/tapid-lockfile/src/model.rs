@@ -7,6 +7,58 @@ use tapid_core::{
 
 use crate::{LOCKFILE_VERSION, LockfileError, validation};
 
+fn encode(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'.' | b'@' => vec![byte],
+            _ => format!("%{byte:02X}").into_bytes(),
+        })
+        .map(char::from)
+        .collect()
+}
+
+fn canonical_peer_context(context: &PeerContext) -> String {
+    context
+        .entries()
+        .iter()
+        .map(|(name, version)| {
+            format!(
+                "name={};version={}",
+                encode(&name.to_string()),
+                encode(&version.to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn canonical_platform_context(context: &PlatformContext) -> String {
+    format!(
+        "os={};cpu={};libc={}",
+        context.os.as_deref().map(encode).unwrap_or_default(),
+        context.cpu.as_deref().map(encode).unwrap_or_default(),
+        context.libc.as_deref().map(encode).unwrap_or_default()
+    )
+}
+
+fn context_or_dash(context: &str) -> &str {
+    if context.is_empty() { "-" } else { context }
+}
+
+fn parse_context(field: &str, prefix: &str, original: &str) -> Result<String, LockfileError> {
+    let value = field
+        .strip_prefix(prefix)
+        .ok_or_else(|| LockfileError::InvalidPackageKey(original.into()))?;
+    if value.is_empty() || value == "-" {
+        return Ok(String::new());
+    }
+    if value.chars().any(char::is_whitespace) {
+        return Err(LockfileError::InvalidPackageKey(original.into()));
+    }
+    Ok(value.to_owned())
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LockfilePackageKey {
     pub registry: RegistryOrigin,
@@ -28,8 +80,8 @@ impl LockfilePackageKey {
             registry,
             name,
             version,
-            peer_context: peer_context.to_string(),
-            platform_context: platform_context.to_string(),
+            peer_context: canonical_peer_context(peer_context),
+            platform_context: canonical_platform_context(platform_context),
         }
     }
 }
@@ -42,16 +94,8 @@ impl std::fmt::Display for LockfilePackageKey {
             self.registry,
             self.name,
             self.version,
-            if self.peer_context.is_empty() {
-                "-"
-            } else {
-                &self.peer_context
-            },
-            if self.platform_context.is_empty() {
-                "-"
-            } else {
-                &self.platform_context
-            }
+            context_or_dash(&self.peer_context),
+            context_or_dash(&self.platform_context)
         )
     }
 }
@@ -60,7 +104,7 @@ impl std::str::FromStr for LockfilePackageKey {
     type Err = LockfileError;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let p: Vec<_> = value.split('|').collect();
-        if p.len() != 5 || !p[3].starts_with("peer=") || !p[4].starts_with("platform=") {
+        if p.len() != 4 || !p[2].starts_with("peer=") || !p[3].starts_with("platform=") {
             return Err(LockfileError::InvalidPackageKey(value.into()));
         }
         let (name, version) = p[1]
@@ -70,8 +114,8 @@ impl std::str::FromStr for LockfilePackageKey {
             registry: p[0].parse().map_err(LockfileError::Domain)?,
             name: name.parse().map_err(LockfileError::Domain)?,
             version: version.parse().map_err(LockfileError::Domain)?,
-            peer_context: p[3][5..].replace('-', ""),
-            platform_context: p[4][9..].to_owned(),
+            peer_context: parse_context(p[2], "peer=", value)?,
+            platform_context: parse_context(p[3], "platform=", value)?,
         };
         if key.peer_context.contains(' ') || key.platform_context.contains(' ') {
             return Err(LockfileError::InvalidPackageKey(value.into()));
@@ -276,8 +320,8 @@ impl LockedPackage {
                 .to_string(),
             tree_digest: unpacked_digest.to_owned(),
             artifact_url: None,
-            peer_context: peer_context.to_string(),
-            platform_context: platform_context.to_string(),
+            peer_context: canonical_peer_context(peer_context),
+            platform_context: canonical_platform_context(platform_context),
             dependencies: BTreeMap::new(),
         };
         package.validate()?;
@@ -293,16 +337,8 @@ impl LockedPackage {
             registry,
             name,
             version,
-            if self.peer_context.is_empty() {
-                "-"
-            } else {
-                &self.peer_context
-            },
-            if self.platform_context.is_empty() {
-                "-"
-            } else {
-                &self.platform_context
-            }
+            context_or_dash(&self.peer_context),
+            context_or_dash(&self.platform_context)
         )
     }
 

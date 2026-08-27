@@ -171,8 +171,52 @@ fn peer_and_platform_contexts_change_key_deterministically() {
     .unwrap();
     assert_eq!(
         package.key(),
-        "https://registry.example.test|tapid@1.0.0|peer=react@18.2.0|platform=linux-x86_64-gnu"
+        "https://registry.example.test|tapid@1.0.0|peer=name=react;version=18.2.0|platform=os=linux;cpu=x86_64;libc=gnu"
     );
+}
+
+#[test]
+fn package_key_roundtrips_hyphens_and_delimiters_without_loss() {
+    let peer = tapid_core::PeerContext::default()
+        .with("foo-bar".parse().unwrap(), "1.2.3-beta.1".parse().unwrap());
+    let platform =
+        tapid_core::PlatformContext::new(Some("linux-gnu"), Some("x86|64"), Some("musl-extra"))
+            .unwrap();
+    let package = LockedPackage::new_with_context(
+        "https://registry.example.test",
+        "tapid",
+        "1.0.0",
+        &format!("sha512-{}", "A".repeat(86)),
+        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        &peer,
+        &platform,
+    )
+    .unwrap();
+    let key = package.key();
+    let parsed = key.parse::<super::LockfilePackageKey>().unwrap();
+    assert_eq!(parsed.to_string(), key);
+    assert!(key.contains("linux%2Dgnu"));
+    assert!(key.contains("x86%7C64"));
+    assert!(key.contains("foo%2Dbar"));
+}
+
+#[test]
+fn package_key_distinguishes_platform_component_boundaries() {
+    let first = tapid_core::PlatformContext::new(Some("linux-x86"), Some("64"), None).unwrap();
+    let second = tapid_core::PlatformContext::new(Some("linux"), Some("x86-64"), None).unwrap();
+    let make = |platform: &tapid_core::PlatformContext| {
+        LockedPackage::new_with_context(
+            "https://registry.example.test",
+            "tapid",
+            "1.0.0",
+            &format!("sha512-{}", "A".repeat(86)),
+            "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &tapid_core::PeerContext::default(),
+            platform,
+        )
+        .unwrap()
+    };
+    assert_ne!(make(&first).key(), make(&second).key());
 }
 
 #[test]

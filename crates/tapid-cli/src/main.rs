@@ -1,8 +1,10 @@
+mod commands;
 mod online;
 #[allow(dead_code)]
 mod run;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use commands::{Command, LockCommand, ManifestCommand};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -29,55 +31,6 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 }
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Create a private package.json manifest.
-    Init { path: Option<PathBuf> },
-    Manifest {
-        #[command(subcommand)]
-        command: ManifestCommand,
-    },
-    Lock {
-        #[command(subcommand)]
-        command: LockCommand,
-    },
-    /// Replay the project's validated lockfile without network access.
-    Run {
-        /// Root package script name.
-        script: String,
-        /// Project directory containing package.json.
-        #[arg(long, default_value = ".")]
-        project_dir: PathBuf,
-        /// Arguments forwarded after `--` to the script.
-        #[arg(last = true)]
-        arguments: Vec<String>,
-    },
-    Install {
-        #[arg(long)]
-        offline: bool,
-        #[arg(long)]
-        frozen: bool,
-        /// Permit npm metadata without registry-declared integrity. Not allowed with --offline or --frozen.
-        #[arg(long)]
-        allow_unverified_registry_artifacts: bool,
-        #[arg(long, default_value = ".")]
-        project_dir: PathBuf,
-        /// Store root containing verified `trees/<sha256-...>` directories.
-        #[arg(long)]
-        store_dir: Option<PathBuf>,
-        /// Local JSON registry fixture used by tests and air-gapped development.
-        #[arg(long)]
-        registry_fixture: Option<PathBuf>,
-    },
-}
-#[derive(Debug, Subcommand)]
-enum ManifestCommand {
-    Validate { path: Option<PathBuf> },
-}
-#[derive(Debug, Subcommand)]
-enum LockCommand {
-    Verify,
-}
 
 fn main() -> ExitCode {
     dispatch(Cli::parse())
@@ -101,6 +54,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             arguments,
         }) => run_script(&project_dir, &script, arguments),
         Some(Command::Install {
+            package,
             offline,
             frozen,
             allow_unverified_registry_artifacts,
@@ -109,6 +63,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             registry_fixture,
         }) => install(
             &project_dir,
+            package.as_deref(),
             store_dir.as_deref(),
             offline,
             frozen,
@@ -158,8 +113,16 @@ fn run_script(project_dir: &Path, script_name: &str, arguments: Vec<String>) -> 
     }
 }
 
+fn parse_package_spec(spec: &str) -> (&str, &str) {
+    match spec.rsplit_once('@') {
+        Some((name, version)) if !name.is_empty() && !version.is_empty() => (name, version),
+        _ => (spec, "*"),
+    }
+}
+
 fn install(
     project_dir: &Path,
+    package: Option<&str>,
     store_root: Option<&Path>,
     offline: bool,
     frozen: bool,
@@ -200,6 +163,23 @@ fn install(
             eprintln!("error: {error}");
             return ExitCode::from(1);
         }
+    };
+    let manifest = if let Some(spec) = package {
+        let (name, requirement) = parse_package_spec(spec);
+        let updated = match manifest.with_dependency(name, requirement) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: cannot add dependency '{spec}': {error}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(error) = fs::write(project_dir.join("package.json"), updated.to_json()) {
+            eprintln!("error: cannot update package.json: {error}");
+            return ExitCode::from(1);
+        }
+        updated
+    } else {
+        manifest
     };
     let lock_path = project_dir.join("tapid.lock");
     if !offline && !frozen {
@@ -374,19 +354,11 @@ fn replay_input(
         instances.push(instance);
     }
     let mut roots = Vec::new();
-    let mut root_names = BTreeMap::new();
-    for map in [
-        manifest.dependencies(),
-        manifest.dev_dependencies(),
-        manifest.optional_dependencies(),
-    ] {
-        for name in map.keys() {
-            root_names.insert(name.clone(), ());
-        }
-    }
+    let root_identities = replay_root_identities(manifest)?;
+    let has_root_dependencies = !root_identities.is_empty();
     for (key, _) in &typed_packages {
         let encoded = key.to_string();
-        if root_names.is_empty() || root_names.contains_key(&key.name.to_string()) {
+        if !has_root_dependencies || replay_root_matches(&root_identities, key) {
             roots.push(keys[&encoded].clone());
         }
     }
@@ -411,6 +383,31 @@ fn replay_input(
         },
         trees,
     ))
+}
+
+fn replay_root_identities(
+    manifest: &PackageManifest,
+) -> Result<std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>, String>
+{
+    let mut identities = std::collections::BTreeSet::new();
+    for map in [
+        manifest.dependencies(),
+        manifest.dev_dependencies(),
+        manifest.optional_dependencies(),
+    ] {
+        for name in map.keys() {
+            let (registry, package) = online::dep_parts(name)?;
+            identities.insert((registry, package));
+        }
+    }
+    Ok(identities)
+}
+
+fn replay_root_matches(
+    roots: &std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>,
+    key: &tapid_lockfile::LockfilePackageKey,
+) -> bool {
+    roots.contains(&(key.registry.clone(), key.name.clone()))
 }
 
 fn current_platform() -> Platform {
@@ -803,5 +800,30 @@ fn verify_lock(path: &Path) -> ExitCode {
             eprintln!("error: cannot verify {}: {error}", path.display());
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_registry_root_matches_only_its_registry_identity() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"jsr:@std/path":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let roots = replay_root_identities(&manifest).unwrap();
+        let jsr: tapid_lockfile::LockfilePackageKey =
+            "https://jsr.io|@std/path@1.0.0|peer=-|platform=-"
+                .parse()
+                .unwrap();
+        let npm: tapid_lockfile::LockfilePackageKey =
+            "https://registry.npmjs.org|@std/path@1.0.0|peer=-|platform=-"
+                .parse()
+                .unwrap();
+
+        assert!(replay_root_matches(&roots, &jsr));
+        assert!(!replay_root_matches(&roots, &npm));
     }
 }

@@ -37,10 +37,12 @@ impl FromStr for Requirement {
         if raw.is_empty() {
             return Err(ResolveError::InvalidRequirement(s.into()));
         }
-        for token in raw.split_whitespace() {
-            let value = token.trim_start_matches(['^', '~', '=']);
-            if token.starts_with(['>', '<']) || value.parse::<PackageVersion>().is_err() {
-                return Err(ResolveError::UnsupportedRange(raw.into()));
+        if raw != "*" {
+            for token in raw.split_whitespace() {
+                let value = token.trim_start_matches(['^', '~', '=']);
+                if token.starts_with(['>', '<']) || value.parse::<PackageVersion>().is_err() {
+                    return Err(ResolveError::UnsupportedRange(raw.into()));
+                }
             }
         }
         Ok(Self { raw: raw.into() })
@@ -203,6 +205,9 @@ fn available(
     out
 }
 fn matches_requirement(version: PackageVersion, raw: &str) -> bool {
+    if raw.trim() == "*" {
+        return true;
+    }
     raw.split_whitespace().all(|token| {
         let (op, value) = if let Some(v) = token.strip_prefix('^') {
             ('^', v)

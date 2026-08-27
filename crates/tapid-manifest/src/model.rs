@@ -79,6 +79,15 @@ impl PackageManifest {
     pub fn dependencies(&self) -> &BTreeMap<String, String> {
         &self.dependencies
     }
+
+    /// Add or update a regular dependency while preserving deterministic output.
+    pub fn with_dependency(mut self, name: &str, requirement: &str) -> Result<Self, ManifestError> {
+        name.parse::<PackageName>()
+            .map_err(ManifestError::InvalidPackageName)?;
+        self.dependencies
+            .insert(name.to_owned(), requirement.trim().to_owned());
+        Ok(self)
+    }
     pub fn dev_dependencies(&self) -> &BTreeMap<String, String> {
         &self.dev_dependencies
     }
