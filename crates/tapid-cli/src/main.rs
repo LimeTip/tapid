@@ -129,6 +129,10 @@ fn install(
     registry_fixture: Option<&Path>,
     allow_unverified_registry_artifacts: bool,
 ) -> ExitCode {
+    if package.is_some() && (offline || frozen) {
+        eprintln!("error: a package argument cannot be used with --offline or --frozen");
+        return ExitCode::from(1);
+    }
     if allow_unverified_registry_artifacts && (offline || frozen) {
         eprintln!(
             "error: --allow-unverified-registry-artifacts cannot be used with --offline or --frozen"
