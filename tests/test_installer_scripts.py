@@ -109,6 +109,27 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn('TAPID_RELEASE_DISCOVERY_URL', install_text)
         self.assertIn('TAPID_RELEASE_BASE_URL', install_text.split('Environment:', 1)[1])
 
+    def test_posix_stable_install_requires_signed_provider_neutral_manifest(self):
+        text = INSTALL.read_text()
+        self.assertIn("TAPID_RELEASE_MANIFEST_URL", text)
+        self.assertIn("Ed25519", text)
+        self.assertIn("manifest.sig", text)
+        self.assertIn("openssl", text)
+        self.assertIn("artifact_url", text)
+        self.assertIn("artifact_size", text)
+        self.assertIn("artifact_sha256", text)
+        self.assertIn("fail closed", text)
+
+    def test_posix_stable_install_does_not_use_checksum_file(self):
+        text = INSTALL.read_text()
+        stable = text.split('if [ "$SOURCE_REF_SET" -eq 1 ]; then', 1)[1]
+        self.assertNotIn("checksums.txt", stable)
+
+    def test_manifest_endpoint_fallback_order_is_explicit(self):
+        text = INSTALL.read_text()
+        self.assertIn("manifest_url_fallback", text)
+        self.assertLess(text.index("manifest_url"), text.index("manifest_url_fallback"))
+
     def test_uninstall_removes_only_tapid_binary(self):
         with tempfile.TemporaryDirectory() as tmp:
             install_dir = Path(tmp) / "bin"

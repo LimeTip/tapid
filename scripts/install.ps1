@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ReleaseBaseUrl = if ($env:TAPID_RELEASE_BASE_URL) { $env:TAPID_RELEASE_BASE_URL.TrimEnd('/') } else { "https://github.com/$Repo/releases/download" }
 $ReleaseDiscoveryUrl = if ($env:TAPID_RELEASE_DISCOVERY_URL) { $env:TAPID_RELEASE_DISCOVERY_URL } else { "https://github.com/$Repo/releases/latest" }
+$ManifestUrlOverride = $env:TAPID_RELEASE_MANIFEST_URL
 
 function Fail([string]$Message) {
     throw "tapid installer: $Message"
@@ -122,24 +123,20 @@ if (-not [string]::IsNullOrEmpty($SourceRef)) {
 }
 
 if ($Version -eq "latest") {
-    try {
-        $discovery = Invoke-WebRequest -Method Head -UseBasicParsing -MaximumRedirection 10 $ReleaseDiscoveryUrl
-        $resolvedPath = $discovery.BaseResponse.ResponseUri.AbsolutePath
-        if ($resolvedPath -notmatch '/releases/tag/(v?[0-9]+\.[0-9]+\.[0-9]+)$') {
-            Fail "stable release discovery endpoint did not resolve a release tag; use -SourceRef REF for development installation"
-        }
-        $Version = $Matches[1]
+    $manifestUrl = if ($ManifestUrlOverride) { $ManifestUrlOverride } else { "$ReleaseDiscoveryUrl/download/tapid-manifest.json" }
+    $manifestFallback = if ($ManifestUrlOverride) { $null } else { "$ReleaseBaseUrl/latest/tapid-manifest.json" }
+} else {
+    if ($Version -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+$') {
+        Fail "version must be a stable release such as v0.1.0"
     }
-    catch {
-        Fail "could not contact the stable release discovery endpoint"
-    }
+    if (-not $Version.StartsWith("v")) { $Version = "v$Version" }
+    $manifestUrl = if ($ManifestUrlOverride) { $ManifestUrlOverride } else { "$ReleaseBaseUrl/$Version/tapid-manifest.json" }
+    $manifestFallback = if ($ManifestUrlOverride) { $null } else { "$ReleaseBaseUrl/$Version/manifest.json" }
 }
-if ($Version -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+$') {
+if ($Version -ne "latest" -and $Version -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+$') {
     Fail "version must be a stable release such as v0.1.0"
 }
-if (-not $Version.StartsWith("v")) {
-    $Version = "v$Version"
-}
+
 
 $architecture = $env:PROCESSOR_ARCHITECTURE
 $target = switch ($architecture) {
@@ -151,27 +148,45 @@ $target = switch ($architecture) {
 if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
     Fail "tar.exe is required for Windows release installation"
 }
+if (-not (Get-Command openssl.exe -ErrorAction SilentlyContinue)) {
+    Fail "fail closed: OpenSSL with Ed25519 support is required; Windows PowerShell has no guaranteed stock verifier"
+}
 
-$versionWithoutV = $Version.Substring(1)
-$archive = "tapid-$versionWithoutV-$target.tar.gz"
-$checksums = "tapid-$versionWithoutV-checksums.txt"
-$base = "$ReleaseBaseUrl/$Version"
+$versionWithoutV = if ($Version -eq "latest") { "latest" } else { $Version.Substring(1) }
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("tapid-install-" + [guid]::NewGuid().ToString("N"))
-$archivePath = Join-Path $tempRoot $archive
-$checksumsPath = Join-Path $tempRoot $checksums
+$archivePath = Join-Path $tempRoot "artifact.tar.gz"
+$manifestPath = Join-Path $tempRoot "manifest.json"
+$signaturePath = Join-Path $tempRoot "manifest.json.sig"
+$publicKeyPath = Join-Path $tempRoot "release-signing-key.pem"
 $extractRoot = Join-Path $tempRoot "extracted"
 $staged = Join-Path $InstallDir (".tapid.tmp." + [guid]::NewGuid().ToString("N") + ".exe")
 $stagedMarker = Join-Path $InstallDir (".tapid-marker.tmp." + [guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
-    Invoke-WebRequest -UseBasicParsing "$base/$archive" -OutFile $archivePath
-    Invoke-WebRequest -UseBasicParsing "$base/$checksums" -OutFile $checksumsPath
-    $archivePattern = [regex]::Escape($archive)
-    $checksumLine = Get-Content -LiteralPath $checksumsPath | Where-Object { $_ -match ("^\s*([0-9a-fA-F]{64})\s+\*?" + $archivePattern + "\s*$") } | Select-Object -First 1
-    if (-not $checksumLine) { Fail "checksum entry for $archive is missing" }
-    $expected = ([regex]::Match($checksumLine, "[0-9a-fA-F]{64}")).Value.ToLowerInvariant()
+    try { Invoke-WebRequest -UseBasicParsing $manifestUrl -OutFile $manifestPath; Invoke-WebRequest -UseBasicParsing "$manifestUrl.sig" -OutFile $signaturePath }
+    catch {
+        if (-not $manifestFallback) { Fail "could not contact the stable release discovery endpoint or fetch the signed manifest" }
+        $manifestUrl = $manifestFallback
+        try { Invoke-WebRequest -UseBasicParsing $manifestUrl -OutFile $manifestPath; Invoke-WebRequest -UseBasicParsing "$manifestUrl.sig" -OutFile $signaturePath }
+        catch { Fail "could not fetch the stable signed manifest" }
+    }
+    # CONFIGURATION: release-signing public key only; no private key is accepted.
+    if ($env:TAPID_RELEASE_PUBLIC_KEY_FILE) { Copy-Item -LiteralPath $env:TAPID_RELEASE_PUBLIC_KEY_FILE -Destination $publicKeyPath -Force }
+    else { [IO.File]::WriteAllText($publicKeyPath, "-----BEGIN PUBLIC KEY-----`nMCowBQYDK2VwAyEAKH2wLpL1ZawchfeUH3TH4xxWHHwdHel/GtPSTCNy8SY=`n-----END PUBLIC KEY-----`n") }
+    & openssl.exe pkeyutl -verify -pubin -inkey $publicKeyPath -rawin -in $manifestPath -sigfile $signaturePath 2>$null
+    if ($LASTEXITCODE -ne 0) { Fail "Ed25519 manifest signature verification failed" }
+    try { $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json } catch { Fail "signed manifest is not valid JSON" }
+    if ($manifest.schema_version -ne 1 -or $manifest.target -ne $target) { Fail "signed manifest has invalid target or schema" }
+    if ($manifest.version -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+$' -or ($Version -ne "latest" -and $manifest.version -ne $Version)) { Fail "signed manifest has invalid version" }
+    $Version = if ($manifest.version.StartsWith("v")) { $manifest.version } else { "v$($manifest.version)" }
+    $artifactUrl = [string]$manifest.artifact_url
+    $artifactSize = [long]$manifest.artifact_size
+    $expected = ([string]$manifest.artifact_sha256).ToLowerInvariant()
+    if ($artifactUrl -notmatch '^https://|^file://' -or $artifactSize -lt 0 -or $expected -notmatch '^[0-9a-f]{64}$') { Fail "signed manifest has invalid artifact metadata" }
+    Invoke-WebRequest -UseBasicParsing $artifactUrl -OutFile $archivePath
+    if ((Get-Item -LiteralPath $archivePath).Length -ne $artifactSize) { Fail "signed artifact size verification failed" }
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
-    if ($actual -ne $expected) { Fail "checksum verification failed for $archive" }
+    if ($actual -ne $expected) { Fail "signed artifact SHA-256 verification failed" }
     $members = & tar.exe -tzf $archivePath
     if ($LASTEXITCODE -ne 0 -or @($members).Count -ne 1 -or $members[0] -ne "tapid.exe") {
         Fail "release archive must contain exactly one member named tapid.exe"

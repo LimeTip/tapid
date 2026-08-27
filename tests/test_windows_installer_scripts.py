@@ -27,6 +27,12 @@ class WindowsInstallerScriptTests(unittest.TestCase):
         self.assertNotIn('$SourceRef = "main"', install_text)
         self.assertIn("stable release discovery endpoint", install_text)
 
+    def test_windows_stable_install_requires_signed_manifest_and_not_checksum_file(self):
+        text = INSTALL.read_text()
+        for expected in ("TAPID_RELEASE_MANIFEST_URL", "Ed25519", "artifact_url", "artifact_size", "artifact_sha256", "openssl.exe", "fail closed"):
+            self.assertIn(expected, text)
+        self.assertNotIn("checksums.txt", text)
+
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell Core is not installed")
     def test_windows_scripts_parse_with_powershell(self):
         for script in (INSTALL, UNINSTALL):
