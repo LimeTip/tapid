@@ -68,7 +68,7 @@ fn root_digest(project: &Path) -> Result<String, String> {
     let data = fs::read(project.join("package.json")).map_err(|e| e.to_string())?;
     Ok(digest(&data).to_string())
 }
-fn dep_parts(name: &str) -> Result<(RegistryOrigin, PackageName), String> {
+pub(crate) fn dep_parts(name: &str) -> Result<(RegistryOrigin, PackageName), String> {
     let (origin, raw) = if let Some(v) = name.strip_prefix("jsr:") {
         (JSR, v)
     } else if let Some(v) = name.strip_prefix("npm:") {

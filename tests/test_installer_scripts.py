@@ -48,7 +48,7 @@ class InstallerScriptTests(unittest.TestCase):
     def test_install_help_documents_latest_and_explicit_version(self):
         result = self.run_script(INSTALL, "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("latest stable", result.stdout)
+        self.assertIn("stable release", result.stdout)
         self.assertIn("--version VERSION", result.stdout)
         self.assertIn("--source-ref REF", result.stdout)
 

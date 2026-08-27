@@ -136,11 +136,18 @@ impl Store {
         let marker = path.join(".tapid-tree");
         let marker_meta = fs::symlink_metadata(&marker)?;
         if !marker_meta.file_type().is_file()
-            || fs::read_to_string(marker)?.trim() != digest.as_str()
+            || fs::read_to_string(&marker)?.trim() != digest.as_str()
         {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidData, "store tree is not verified").into(),
             );
+        }
+        let actual = tapid_archive::canonical_tree_digest(&path)?;
+        if actual != digest.as_str() {
+            return Err(IngestError::TreeDigestMismatch {
+                expected: digest.clone(),
+                actual,
+            });
         }
         Ok(path)
     }
@@ -430,6 +437,35 @@ mod tests {
             Err(IngestError::TreeDigestMismatch { .. })
         ));
         assert!(!store.artifact_path(&expected).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verified_tree_rejects_mutation_after_activation() {
+        let root = root();
+        let source = root.join("source");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"original").unwrap();
+        let expected = tapid_archive::canonical_tree_digest(&source)
+            .unwrap()
+            .parse::<ArtifactDigest>()
+            .unwrap();
+        let store = Store::new(&root);
+        store.activate_verified_tree(&expected, &source).unwrap();
+        fs::write(
+            store
+                .root()
+                .join("trees")
+                .join(expected.as_str())
+                .join("package.json"),
+            b"tampered",
+        )
+        .unwrap();
+        assert!(matches!(
+            store.verified_tree_path(&expected),
+            Err(IngestError::TreeDigestMismatch { .. })
+        ));
         let _ = fs::remove_dir_all(root);
     }
 

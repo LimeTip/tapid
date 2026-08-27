@@ -8,12 +8,11 @@ Tapid is a JavaScript and TypeScript package manager written in Rust. It provide
 
 Source installation is the supported developer path today.
 
-**macOS and Linux**
-
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \
-  | sh -s -- --source-ref main
+curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh | bash
 ```
+
+The default command builds Tapid from the `main` source branch locally. This is the development installation path until signed platform release assets are published.
 
 **Windows PowerShell**
 
@@ -25,6 +24,27 @@ Remove-Item $installer
 ```
 
 See [installation details](#installation-details) for release selection, alternate repositories, and uninstall instructions.
+
+## Quick start
+
+The shortest path from an empty directory to installing a package is:
+
+```bash
+mkdir my-app
+cd my-app
+tapid init
+tapid i is-char
+```
+
+To run a development script, add a `dev` entry to `package.json`, then run:
+
+```bash
+tapid run dev
+```
+
+`tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`.
+
+`tapid run dev` runs the root `dev` script from `package.json`. It is a compatibility-oriented process runner, not a sandbox.
 
 ## Current consumer workflow
 

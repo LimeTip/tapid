@@ -27,6 +27,20 @@ mod tests {
     }
 
     #[test]
+    fn preserves_bin_when_serializing_after_dependency_update() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"tool","version":"1.0.0","bin":{"tool":"./cli.js"}}"#,
+        )
+        .unwrap()
+        .with_dependency("is-char", "*")
+        .unwrap();
+        let json = manifest.to_json();
+        assert!(json.contains("\"bin\""));
+        assert!(json.contains("\"tool\": \"cli.js\""));
+        assert!(json.contains("\"is-char\": \"*\""));
+    }
+
+    #[test]
     fn rejects_malformed_and_invalid_documents() {
         assert!(PackageManifest::parse("not json").is_err());
         assert!(PackageManifest::parse(r#"{"version":"1.0.0"}"#).is_err());

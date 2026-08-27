@@ -31,7 +31,7 @@ const manifestDigest = crypto
   .digest('hex');
 const lockfile = JSON.stringify(
   {
-    lockfileVersion: 3,
+    lockfileVersion: 4,
     rootManifestDigest: `sha256-${manifestDigest}`,
     resolverVersion: '0',
     linkerVersion: '0',

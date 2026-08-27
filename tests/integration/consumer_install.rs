@@ -150,8 +150,7 @@ impl RegistryTransport for SnapshotTransport {
 
 fn sha256_digest(bytes: &[u8]) -> ArtifactDigest {
     let digest = Sha256::digest(bytes);
-    let hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-    format!("sha256-{hex}").parse().unwrap()
+    format!("sha256-{digest:x}").parse().unwrap()
 }
 
 fn tar_fixture() -> Vec<u8> {

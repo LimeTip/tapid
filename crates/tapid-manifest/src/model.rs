@@ -79,6 +79,20 @@ impl PackageManifest {
     pub fn dependencies(&self) -> &BTreeMap<String, String> {
         &self.dependencies
     }
+
+    /// Add or update a regular dependency while preserving deterministic output.
+    pub fn with_dependency(mut self, name: &str, requirement: &str) -> Result<Self, ManifestError> {
+        let validation_name = name
+            .strip_prefix("npm:")
+            .or_else(|| name.strip_prefix("jsr:"))
+            .unwrap_or(name);
+        validation_name
+            .parse::<PackageName>()
+            .map_err(ManifestError::InvalidPackageName)?;
+        self.dependencies
+            .insert(name.to_owned(), requirement.trim().to_owned());
+        Ok(self)
+    }
     pub fn dev_dependencies(&self) -> &BTreeMap<String, String> {
         &self.dev_dependencies
     }
@@ -109,6 +123,17 @@ impl PackageManifest {
             peer_dependencies: (!self.peer_dependencies.is_empty())
                 .then_some(&self.peer_dependencies),
             scripts: (!self.scripts.is_empty()).then_some(&self.scripts),
+            bin: self.bin.as_ref().map(|bin| {
+                bin.targets
+                    .iter()
+                    .map(|target| {
+                        (
+                            target.command.clone(),
+                            target.target.to_string_lossy().into_owned(),
+                        )
+                    })
+                    .collect()
+            }),
         };
         format!(
             "{}\n",
@@ -139,4 +164,6 @@ struct ManifestDocument<'a> {
     peer_dependencies: Option<&'a BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scripts: Option<&'a BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bin: Option<BTreeMap<String, String>>,
 }
