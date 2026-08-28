@@ -43,6 +43,21 @@ struct Cli {
 fn main() -> ExitCode {
     dispatch(Cli::parse())
 }
+
+/// Convert a child status to the process status used by the CLI.
+///
+/// `ExitCode` only accepts an 8-bit value, while Windows process exit codes
+/// are 32-bit.  Exiting through the OS on Windows preserves the full child
+/// status; Unix kernels intentionally expose only the low 8 bits to a parent.
+#[cfg(windows)]
+fn child_exit_code(code: i32) -> ExitCode {
+    std::process::exit(code);
+}
+
+#[cfg(not(windows))]
+fn child_exit_code(code: i32) -> ExitCode {
+    ExitCode::from(code as u8)
+}
 fn dispatch(cli: Cli) -> ExitCode {
     match cli.command {
         None => {
@@ -705,7 +720,7 @@ fn run_script(project_dir: &Path, script_name: &str, arguments: Vec<String>) -> 
     match run::execute(run::RunRequest::new(project_dir, Some(script)).with_arguments(arguments)) {
         Ok(result) => result
             .exit_code()
-            .map_or(ExitCode::from(1), |code| ExitCode::from(code as u8)),
+            .map_or(ExitCode::from(1), child_exit_code),
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::from(1)
