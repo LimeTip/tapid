@@ -309,6 +309,13 @@ mod tests {
         assert!(!result.success());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_child_exit_code_is_not_truncated() {
+        let request = RunRequest::new(project(), Some("exit /b 256".into()));
+        assert_eq!(execute(request).unwrap().exit_code(), Some(256));
+    }
+
     #[test]
     fn shell_backend_selection_builds_platform_specific_invocations() {
         let unix = ShellBackend::UnixSh.invocation("echo hi", &["a".into(), "b".into()]);

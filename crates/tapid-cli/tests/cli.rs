@@ -279,6 +279,20 @@ fn run_executes_root_script_and_forwards_arguments() {
     cleanup(dir);
 }
 
+#[cfg(windows)]
+#[test]
+fn run_preserves_windows_child_exit_code() {
+    let dir = temp_dir("run-exit-code");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit /b 256"}}"#,
+    )
+    .unwrap();
+    let output = run(&dir, &["run", "dev"]);
+    assert_eq!(output.status.code(), Some(256));
+    cleanup(dir);
+}
+
 #[test]
 fn run_resolves_installed_bin_and_rejects_missing_script_stably() {
     let dir = temp_dir("run-bin");
