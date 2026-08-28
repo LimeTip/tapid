@@ -1189,6 +1189,14 @@ fn package_root_for_shims(package_dir: &Path) -> PathBuf {
     }
 }
 
+fn powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "\'\'")
+}
+
+fn cmd_batch_path(value: &str) -> String {
+    value.replace('%', "%%")
+}
+
 fn materialize_package_shims(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
@@ -1234,11 +1242,20 @@ fn materialize_package_shims(
                 let ps1 = entry.target.with_extension("ps1");
                 fs::write(
                     cmd,
-                    format!("@echo off\r\n\"{}\" %*\r\n", entry.source.display()),
+                    format!(
+                        "@echo off\r\n@setlocal DisableDelayedExpansion\r\n\"{}\" %*\r\n",
+                        cmd_batch_path(&entry.source.display().to_string())
+                    ),
                 )
                 .map_err(|e| e.to_string())?;
-                fs::write(ps1, format!("& '{}' $args\r\n", entry.source.display()))
-                    .map_err(|e| e.to_string())?;
+                fs::write(
+                    ps1,
+                    format!(
+                        "& '{}' $args\r\n",
+                        powershell_single_quoted(&entry.source.display().to_string())
+                    ),
+                )
+                .map_err(|e| e.to_string())?;
             }
         }
     }
@@ -1823,5 +1840,31 @@ mod activation_tests {
                 .is_symlink()
         );
         let _ = fs::remove_dir_all(project);
+#[cfg(test)]
+mod tests {
+    use super::{cmd_batch_path, powershell_single_quoted};
+
+    #[test]
+    fn powershell_single_quoted_escapes_apostrophes() {
+        assert_eq!(
+            powershell_single_quoted(r"C:\\Users\O'Brien\project\tapid.exe"),
+            r"C:\\Users\O''Brien\project\tapid.exe"
+        );
+    }
+
+    #[test]
+    fn powershell_single_quoted_preserves_other_path_characters() {
+        assert_eq!(
+            powershell_single_quoted(r"C:\\Program Files\tapid.exe"),
+            r"C:\\Program Files\tapid.exe"
+        );
+    }
+
+    #[test]
+    fn cmd_batch_path_escapes_percent_and_preserves_other_characters() {
+        assert_eq!(
+            cmd_batch_path(r"C:\\100%\O'Brien\tapid.exe"),
+            r"C:\\100%%\O'Brien\tapid.exe"
+        );
     }
 }
