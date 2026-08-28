@@ -1871,13 +1871,18 @@ mod tests {
         let parent = std::path::Path::new("/project/node_modules/.bin");
         let source = std::path::Path::new("/project/node_modules/tool/cli.js");
 
+        let relative = format!(
+            "..{}tool{}cli.js",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        );
         assert_eq!(
             cmd_shim_contents(parent, source),
-            "@echo off\r\n@setlocal DisableDelayedExpansion\r\n\"%~dp0../tool/cli.js\" %*\r\n"
+            format!("@echo off\r\n@setlocal DisableDelayedExpansion\r\n\"%~dp0{relative}\" %*\r\n")
         );
         assert_eq!(
             powershell_shim_contents(parent, source),
-            "& (Join-Path $PSScriptRoot '../tool/cli.js') $args\r\n"
+            format!("& (Join-Path $PSScriptRoot '{relative}') $args\r\n")
         );
     }
 
