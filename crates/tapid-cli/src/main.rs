@@ -1320,7 +1320,7 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
 }
 const MANAGED_MARKER: &[u8] = b"tapid-managed-v1\n";
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
     let activation_lock = ActivationLock::acquire(project)?;
     activate_node_modules_with_lock(project, stage, &activation_lock)
