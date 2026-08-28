@@ -1189,6 +1189,28 @@ fn package_root_for_shims(package_dir: &Path) -> PathBuf {
     }
 }
 
+fn powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "\'\'")
+}
+
+fn cmd_batch_path(value: &str) -> String {
+    value.replace('%', "%%")
+}
+
+fn cmd_shim_contents(parent: &Path, source: &Path) -> String {
+    format!(
+        "@echo off\r\n@setlocal DisableDelayedExpansion\r\n\"%~dp0{}\" %*\r\n",
+        cmd_batch_path(&relative_path(parent, source).display().to_string())
+    )
+}
+
+fn powershell_shim_contents(parent: &Path, source: &Path) -> String {
+    format!(
+        "& (Join-Path $PSScriptRoot '{}') $args\r\n",
+        powershell_single_quoted(&relative_path(parent, source).display().to_string())
+    )
+}
+
 fn materialize_package_shims(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
@@ -1232,19 +1254,15 @@ fn materialize_package_shims(
             tapid_linker::ShimStrategy::WindowsCmdAndPowerShell => {
                 let cmd = entry.target.with_extension("cmd");
                 let ps1 = entry.target.with_extension("ps1");
-                fs::write(
-                    cmd,
-                    format!("@echo off\r\n\"{}\" %*\r\n", entry.source.display()),
-                )
-                .map_err(|e| e.to_string())?;
-                fs::write(ps1, format!("& '{}' $args\r\n", entry.source.display()))
+                fs::write(cmd, cmd_shim_contents(parent, &entry.source))
+                    .map_err(|e| e.to_string())?;
+                fs::write(ps1, powershell_shim_contents(parent, &entry.source))
                     .map_err(|e| e.to_string())?;
             }
         }
     }
     Ok(())
 }
-#[cfg(unix)]
 fn relative_path(from: &Path, to: &Path) -> PathBuf {
     let from_components: Vec<_> = from.components().collect();
     let to_components: Vec<_> = to.components().collect();
@@ -1823,5 +1841,56 @@ mod activation_tests {
                 .is_symlink()
         );
         let _ = fs::remove_dir_all(project);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        cmd_batch_path, cmd_shim_contents, powershell_shim_contents, powershell_single_quoted,
+    };
+
+    #[test]
+    fn powershell_single_quoted_escapes_apostrophes() {
+        assert_eq!(
+            powershell_single_quoted(r"C:\\Users\O'Brien\project\tapid.exe"),
+            r"C:\\Users\O''Brien\project\tapid.exe"
+        );
+    }
+
+    #[test]
+    fn powershell_single_quoted_preserves_other_path_characters() {
+        assert_eq!(
+            powershell_single_quoted(r"C:\\Program Files\tapid.exe"),
+            r"C:\\Program Files\tapid.exe"
+        );
+    }
+
+    #[test]
+    fn windows_shims_resolve_sources_relative_to_the_surviving_bin_directory() {
+        let parent = std::path::Path::new("/project/node_modules/.bin");
+        let source = std::path::Path::new("/project/node_modules/tool/cli.js");
+
+        let relative = format!(
+            "..{}tool{}cli.js",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        );
+        assert_eq!(
+            cmd_shim_contents(parent, source),
+            format!("@echo off\r\n@setlocal DisableDelayedExpansion\r\n\"%~dp0{relative}\" %*\r\n")
+        );
+        assert_eq!(
+            powershell_shim_contents(parent, source),
+            format!("& (Join-Path $PSScriptRoot '{relative}') $args\r\n")
+        );
+    }
+
+    #[test]
+    fn cmd_batch_path_escapes_percent_and_preserves_other_characters() {
+        assert_eq!(
+            cmd_batch_path(r"C:\\100%\O'Brien\tapid.exe"),
+            r"C:\\100%%\O'Brien\tapid.exe"
+        );
     }
 }
