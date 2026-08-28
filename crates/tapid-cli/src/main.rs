@@ -7,6 +7,7 @@ mod run;
 
 use clap::Parser;
 use commands::{Command, LockCommand, ManifestCommand};
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -1312,6 +1313,7 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
 const MANAGED_MARKER: &[u8] = b"tapid-managed-v1\n";
 
 fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
+    let _activation_lock = ActivationLock::acquire(project)?;
     let staged = stage.join("node_modules");
     if !staged.is_dir() {
         return Err("install transaction produced an empty node_modules layout".into());
@@ -1343,19 +1345,26 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
         let contents = match fs::read(&marker_backup) {
             Ok(contents) => contents,
             Err(error) => {
-                let _ = fs::rename(&marker_backup, &marker);
-                return Err(format!("cannot read .tapid-managed: {error}"));
+                let restore = restore_marker(&marker, &marker_backup, marker_exists);
+                return Err(match restore {
+                    Ok(()) => format!("cannot read .tapid-managed: {error}"),
+                    Err(restore) => format!("cannot read .tapid-managed: {error}; {restore}"),
+                });
             }
         };
         let still_regular = fs::symlink_metadata(&marker_backup)
             .map(|metadata| metadata.file_type().is_file())
             .unwrap_or(false);
         if !still_regular || contents != MANAGED_MARKER {
-            let _ = fs::rename(&marker_backup, &marker);
-            return Err(if still_regular {
+            let restore = restore_marker(&marker, &marker_backup, marker_exists);
+            let reason = if still_regular {
                 "refusing to replace node_modules with an invalid .tapid-managed marker".into()
             } else {
                 "refusing to use a non-regular .tapid-managed marker".into()
+            };
+            return Err(match restore {
+                Ok(()) => reason,
+                Err(restore) => format!("{reason}; {restore}"),
             });
         }
     }
@@ -1367,30 +1376,33 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
     if destination.exists()
         && let Err(error) = fs::rename(&destination, &backup)
     {
-        if marker_exists {
-            let _ = fs::rename(&marker_backup, &marker);
-        }
-        return Err(format!(
-            "cannot stage existing node_modules for replacement: {error}"
-        ));
+        let restore = restore_marker(&marker, &marker_backup, marker_exists);
+        return Err(match restore {
+            Ok(()) => format!("cannot stage existing node_modules for replacement: {error}"),
+            Err(restore) => {
+                format!("cannot stage existing node_modules for replacement: {error}; {restore}")
+            }
+        });
     }
     if std::env::var_os("TAPID_TEST_FAIL_ACTIVATION").is_some() {
         if backup.exists() {
             let _ = fs::rename(&backup, &destination);
         }
-        if marker_exists {
-            let _ = fs::rename(&marker_backup, &marker);
-        }
-        return Err("install activation failed (injected)".into());
+        let restore = restore_marker(&marker, &marker_backup, marker_exists);
+        return Err(match restore {
+            Ok(()) => "install activation failed (injected)".into(),
+            Err(restore) => format!("install activation failed (injected); {restore}"),
+        });
     }
     if let Err(error) = fs::rename(&staged, &destination) {
         if backup.exists() {
             let _ = fs::rename(&backup, &destination);
         }
-        if marker_exists {
-            let _ = fs::rename(&marker_backup, &marker);
-        }
-        return Err(format!("cannot activate node_modules: {error}"));
+        let restore = restore_marker(&marker, &marker_backup, marker_exists);
+        return Err(match restore {
+            Ok(()) => format!("cannot activate node_modules: {error}"),
+            Err(restore) => format!("cannot activate node_modules: {error}; {restore}"),
+        });
     }
     let marker_temp = project.join(format!(
         ".tapid-managed-{}-{}.tmp",
@@ -1412,12 +1424,14 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
         if backup.exists() {
             let _ = fs::rename(&backup, &destination);
         }
-        if marker_exists {
-            let _ = fs::rename(&marker_backup, &marker);
-        } else {
+        let restore = restore_marker(&marker, &marker_backup, marker_exists);
+        if !marker_exists {
             let _ = fs::remove_file(&marker);
         }
-        return Err(format!("cannot write .tapid-managed: {error}"));
+        return Err(match restore {
+            Ok(()) => format!("cannot write .tapid-managed: {error}"),
+            Err(restore) => format!("cannot write .tapid-managed: {error}; {restore}"),
+        });
     }
     if marker_exists {
         let _ = fs::remove_file(&marker_backup);
@@ -1425,6 +1439,39 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
     let _ = fs::remove_dir_all(&backup);
     let _ = fs::remove_dir_all(stage);
     Ok(())
+}
+
+fn restore_marker(marker: &Path, backup: &Path, marker_exists: bool) -> Result<(), String> {
+    if marker_exists {
+        fs::rename(backup, marker)
+            .map_err(|error| format!("cannot restore .tapid-managed: {error}"))
+    } else {
+        Ok(())
+    }
+}
+
+struct ActivationLock {
+    _file: fs::File,
+}
+
+impl ActivationLock {
+    fn acquire(project: &Path) -> Result<Self, String> {
+        let path = project.join(".tapid-activation.lock");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|error| format!("cannot open node_modules activation lock: {error}"))?;
+        file.try_lock_exclusive().map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                "another node_modules activation is already in progress".to_owned()
+            } else {
+                format!("cannot lock node_modules activation: {error}")
+            }
+        })?;
+        Ok(Self { _file: file })
+    }
 }
 
 fn validate(path: &Path) -> ExitCode {
