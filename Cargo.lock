@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-policy"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "serde",
  "serde_json",
