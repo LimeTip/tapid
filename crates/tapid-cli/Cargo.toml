@@ -30,5 +30,4 @@ time = { version = "0.3", features = ["formatting"] }
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.23"
-
-fs2 = "0.4.3"
+libc = "0.2"

@@ -7,7 +7,6 @@ mod run;
 
 use clap::Parser;
 use commands::{Command, LockCommand, ManifestCommand};
-use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -791,6 +790,13 @@ fn install(
             return ExitCode::from(1);
         }
     };
+    let activation_lock = match ActivationLock::acquire(&project_dir) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
     let manifest = match read_manifest(&project_dir.join("package.json")) {
         Ok(value) => value,
         Err(error) => {
@@ -862,7 +868,7 @@ fn install(
                 return ExitCode::from(1);
             }
         };
-        let result = materialize_install(&project_dir, &lock, input, trees);
+        let result = materialize_install(&project_dir, &lock, input, trees, &activation_lock);
         if result != ExitCode::SUCCESS {
             let _ = rollback_lockfile(&lock_path, lock_backup.as_deref());
             return result;
@@ -917,7 +923,7 @@ fn install(
             return ExitCode::from(1);
         }
     };
-    materialize_with_lock(&project_dir, &lock, input, trees, true)
+    materialize_with_lock(&project_dir, &lock, input, trees, true, &activation_lock)
 }
 
 fn materialize_install(
@@ -925,8 +931,9 @@ fn materialize_install(
     lock: &Lockfile,
     input: LayoutInput,
     trees: BTreeMap<String, PathBuf>,
+    activation_lock: &ActivationLock,
 ) -> ExitCode {
-    materialize_with_lock(project_dir, lock, input, trees, false)
+    materialize_with_lock(project_dir, lock, input, trees, false, activation_lock)
 }
 
 fn materialize_with_lock(
@@ -935,6 +942,7 @@ fn materialize_with_lock(
     input: LayoutInput,
     trees: BTreeMap<String, PathBuf>,
     replayed: bool,
+    activation_lock: &ActivationLock,
 ) -> ExitCode {
     let root = match ManagedRoot::new(project_dir) {
         Ok(value) => value,
@@ -970,7 +978,7 @@ fn materialize_with_lock(
         return ExitCode::from(1);
     }
     let result = materialize_stage(&stage, &plan, &input, &trees)
-        .and_then(|_| activate_node_modules(project_dir, &stage));
+        .and_then(|_| activate_node_modules_with_lock(project_dir, &stage, activation_lock));
     if replayed {
         cleanup_replay_snapshots(&trees);
     }
@@ -1312,8 +1320,17 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
 }
 const MANAGED_MARKER: &[u8] = b"tapid-managed-v1\n";
 
+#[cfg(test)]
 fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
-    let _activation_lock = ActivationLock::acquire(project)?;
+    let activation_lock = ActivationLock::acquire(project)?;
+    activate_node_modules_with_lock(project, stage, &activation_lock)
+}
+
+fn activate_node_modules_with_lock(
+    project: &Path,
+    stage: &Path,
+    _activation_lock: &ActivationLock,
+) -> Result<(), String> {
     let staged = stage.join("node_modules");
     if !staged.is_dir() {
         return Err("install transaction produced an empty node_modules layout".into());
@@ -1342,7 +1359,7 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
     if marker_exists {
         fs::rename(&marker, &marker_backup)
             .map_err(|e| format!("cannot stage .tapid-managed marker: {e}"))?;
-        let contents = match fs::read(&marker_backup) {
+        let contents = match read_marker_backup(&marker_backup) {
             Ok(contents) => contents,
             Err(error) => {
                 let restore = restore_marker(&marker, &marker_backup, marker_exists);
@@ -1394,6 +1411,18 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
             Err(restore) => format!("install activation failed (injected); {restore}"),
         });
     }
+    let staged_is_directory = fs::symlink_metadata(&staged)
+        .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    if !staged_is_directory {
+        let restore = restore_marker(&marker, &marker_backup, marker_exists);
+        return Err(match restore {
+            Ok(()) => "refusing to activate a non-directory install staging tree".into(),
+            Err(restore) => {
+                format!("refusing to activate a non-directory install staging tree; {restore}")
+            }
+        });
+    }
     if let Err(error) = fs::rename(&staged, &destination) {
         if backup.exists() {
             let _ = fs::rename(&backup, &destination);
@@ -1402,6 +1431,23 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
         return Err(match restore {
             Ok(()) => format!("cannot activate node_modules: {error}"),
             Err(restore) => format!("cannot activate node_modules: {error}; {restore}"),
+        });
+    }
+    let destination_is_directory = fs::symlink_metadata(&destination)
+        .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    if !destination_is_directory {
+        let _ = fs::remove_file(&destination);
+        let _ = fs::remove_dir_all(&destination);
+        if backup.exists() {
+            let _ = fs::rename(&backup, &destination);
+        }
+        let restore = restore_marker(&marker, &marker_backup, marker_exists);
+        return Err(match restore {
+            Ok(()) => "refusing to activate a symlinked install staging tree".into(),
+            Err(restore) => {
+                format!("refusing to activate a symlinked install staging tree; {restore}")
+            }
         });
     }
     let marker_temp = project.join(format!(
@@ -1441,8 +1487,47 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn read_marker_backup(path: &Path) -> Result<Vec<u8>, io::Error> {
+    use io::Read;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)?;
+        Ok(contents)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)?;
+        Ok(contents)
+    }
+    #[cfg(not(any(unix, windows)))]
+    fs::read(path)
+}
+
 fn restore_marker(marker: &Path, backup: &Path, marker_exists: bool) -> Result<(), String> {
     if marker_exists {
+        match fs::symlink_metadata(backup) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => {
+                let _ = fs::remove_file(backup);
+                return Err(
+                    "cannot restore .tapid-managed: staged marker is not a regular file".into(),
+                );
+            }
+            Err(error) => return Err(format!("cannot restore .tapid-managed: {error}")),
+        }
         fs::rename(backup, marker)
             .map_err(|error| format!("cannot restore .tapid-managed: {error}"))
     } else {
@@ -1451,26 +1536,26 @@ fn restore_marker(marker: &Path, backup: &Path, marker_exists: bool) -> Result<(
 }
 
 struct ActivationLock {
-    _file: fs::File,
+    path: PathBuf,
 }
 
 impl ActivationLock {
     fn acquire(project: &Path) -> Result<Self, String> {
         let path = project.join(".tapid-activation.lock");
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|error| format!("cannot open node_modules activation lock: {error}"))?;
-        file.try_lock_exclusive().map_err(|error| {
-            if error.kind() == io::ErrorKind::WouldBlock {
+        fs::create_dir(&path).map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
                 "another node_modules activation is already in progress".to_owned()
             } else {
-                format!("cannot lock node_modules activation: {error}")
+                format!("cannot acquire node_modules activation lock: {error}")
             }
         })?;
-        Ok(Self { _file: file })
+        Ok(Self { path })
+    }
+}
+
+impl Drop for ActivationLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
     }
 }
 
