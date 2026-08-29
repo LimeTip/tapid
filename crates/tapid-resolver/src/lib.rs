@@ -222,26 +222,47 @@ fn matches_requirement(version: PackageVersion, raw: &str) -> bool {
         match op {
             '=' => version == base,
             '^' => {
-                let upper = if base.major > 0 {
-                    PackageVersion {
-                        major: base.major + 1,
-                        minor: 0,
-                        patch: 0,
-                    }
-                } else if base.minor > 0 {
-                    PackageVersion {
-                        major: 0,
-                        minor: base.minor + 1,
-                        patch: 0,
-                    }
-                } else {
-                    PackageVersion {
-                        major: 0,
-                        minor: 0,
-                        patch: base.patch + 1,
-                    }
-                };
-                version >= base && version < upper
+                if base.major > 0 {
+                    return base
+                        .major
+                        .checked_add(1)
+                        .map(|major| {
+                            let upper = PackageVersion {
+                                major,
+                                minor: 0,
+                                patch: 0,
+                            };
+                            version >= base && version < upper
+                        })
+                        .unwrap_or(version >= base);
+                }
+                if base.minor > 0 {
+                    return base
+                        .minor
+                        .checked_add(1)
+                        .map(|minor| {
+                            let upper = PackageVersion {
+                                major: 0,
+                                minor,
+                                patch: 0,
+                            };
+                            version >= base && version < upper
+                        })
+                        .unwrap_or(
+                            version >= base && version.major == 0 && version.minor == base.minor,
+                        );
+                }
+                base.patch
+                    .checked_add(1)
+                    .map(|patch| {
+                        let upper = PackageVersion {
+                            major: 0,
+                            minor: 0,
+                            patch,
+                        };
+                        version >= base && version < upper
+                    })
+                    .unwrap_or(version == base)
             }
             '~' => version >= base && version.major == base.major && version.minor == base.minor,
             _ => false,
@@ -422,6 +443,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.selected[0].version.to_string(), "0.2.9");
+    }
+
+    #[test]
+    fn caret_ranges_at_integer_bounds_fail_closed_without_panicking() {
+        let max = u64::MAX;
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![package("foo", &format!("{max}.0.0"), &[])],
+        );
+        let result = resolve_graph(
+            &[dep(
+                "https://registry.npmjs.org",
+                "foo",
+                &format!("^{max}.0.0"),
+            )],
+            &[m],
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(result.selected[0].version.to_string(), format!("{max}.0.0"));
+    }
+
+    #[test]
+    fn zero_major_caret_ranges_at_integer_bounds_fail_closed_without_panicking() {
+        let max = u64::MAX;
+        for (version, requirement) in [
+            (format!("0.{max}.0"), format!("^0.{max}.0")),
+            (format!("0.0.{max}"), format!("^0.0.{max}")),
+        ] {
+            let m = registry(
+                "https://registry.npmjs.org",
+                vec![
+                    package("foo", &version, &[]),
+                    package(
+                        "foo",
+                        if requirement.starts_with("^0.")
+                            && requirement.contains(&format!(".{max}."))
+                        {
+                            "1.0.0"
+                        } else {
+                            "0.1.0"
+                        },
+                        &[],
+                    ),
+                ],
+            );
+            let result = resolve_graph(
+                &[dep("https://registry.npmjs.org", "foo", &requirement)],
+                &[m],
+                Default::default(),
+            )
+            .unwrap();
+            assert_eq!(result.selected[0].version.to_string(), version);
+        }
     }
 
     #[test]
