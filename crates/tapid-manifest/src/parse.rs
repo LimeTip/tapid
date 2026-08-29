@@ -159,7 +159,10 @@ fn parse_string_map(
         .iter()
         .map(|(name, version)| {
             if validate_names {
-                let candidate = name.strip_prefix("jsr:").unwrap_or(name);
+                let candidate = name
+                    .strip_prefix("jsr:")
+                    .or_else(|| name.strip_prefix("npm:"))
+                    .unwrap_or(name);
                 PackageName::from_str(candidate).map_err(ManifestError::InvalidDependencyName)?;
             }
             let version = version
