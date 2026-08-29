@@ -241,10 +241,10 @@ fn matches_requirement(version: PackageVersion, raw: &str) -> bool {
                         patch,
                     })
                 };
-                let Some(upper) = upper else {
-                    return false;
-                };
-                version >= base && version < upper
+                match upper {
+                    Some(upper) => version >= base && version < upper,
+                    None => version >= base,
+                }
             }
             '~' => version >= base && version.major == base.major && version.minor == base.minor,
             _ => false,
@@ -442,8 +442,30 @@ mod tests {
             )],
             &[m],
             Default::default(),
-        );
-        assert!(matches!(result, Err(ResolveError::MissingCandidate { .. })));
+        )
+        .unwrap();
+        assert_eq!(result.selected[0].version.to_string(), format!("{max}.0.0"));
+    }
+
+    #[test]
+    fn zero_major_caret_ranges_at_integer_bounds_fail_closed_without_panicking() {
+        let max = u64::MAX;
+        for (version, requirement) in [
+            (format!("0.{max}.0"), format!("^0.{max}.0")),
+            (format!("0.0.{max}"), format!("^0.0.{max}")),
+        ] {
+            let m = registry(
+                "https://registry.npmjs.org",
+                vec![package("foo", &version, &[])],
+            );
+            let result = resolve_graph(
+                &[dep("https://registry.npmjs.org", "foo", &requirement)],
+                &[m],
+                Default::default(),
+            )
+            .unwrap();
+            assert_eq!(result.selected[0].version.to_string(), version);
+        }
     }
 
     #[test]
