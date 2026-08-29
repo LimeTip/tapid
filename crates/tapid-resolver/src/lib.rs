@@ -223,23 +223,26 @@ fn matches_requirement(version: PackageVersion, raw: &str) -> bool {
             '=' => version == base,
             '^' => {
                 let upper = if base.major > 0 {
-                    PackageVersion {
-                        major: base.major + 1,
+                    base.major.checked_add(1).map(|major| PackageVersion {
+                        major,
                         minor: 0,
                         patch: 0,
-                    }
+                    })
                 } else if base.minor > 0 {
-                    PackageVersion {
+                    base.minor.checked_add(1).map(|minor| PackageVersion {
                         major: 0,
-                        minor: base.minor + 1,
+                        minor,
                         patch: 0,
-                    }
+                    })
                 } else {
-                    PackageVersion {
+                    base.patch.checked_add(1).map(|patch| PackageVersion {
                         major: 0,
                         minor: 0,
-                        patch: base.patch + 1,
-                    }
+                        patch,
+                    })
+                };
+                let Some(upper) = upper else {
+                    return false;
                 };
                 version >= base && version < upper
             }
@@ -422,6 +425,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.selected[0].version.to_string(), "0.2.9");
+    }
+
+    #[test]
+    fn caret_ranges_at_integer_bounds_fail_closed_without_panicking() {
+        let max = u64::MAX;
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![package("foo", &format!("{max}.0.0"), &[])],
+        );
+        let result = resolve_graph(
+            &[dep(
+                "https://registry.npmjs.org",
+                "foo",
+                &format!("^{max}.0.0"),
+            )],
+            &[m],
+            Default::default(),
+        );
+        assert!(matches!(result, Err(ResolveError::MissingCandidate { .. })));
     }
 
     #[test]
