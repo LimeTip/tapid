@@ -306,7 +306,7 @@ $staged = Join-Path $InstallDir (".tapid.tmp." + [guid]::NewGuid().ToString("N")
 $stagedMarker = Join-Path $InstallDir (".tapid-marker.tmp." + [guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
-    Invoke-WebRequest -UseBasicParsing "$base/manifest.json" -OutFile $manifestPath
+    Invoke-WebRequest -UseBasicParsing "$base/release-manifest.json" -OutFile $manifestPath
     $artifactInfo = $VerifierSource | & python.exe - $manifestPath $target $Version
     if ($LASTEXITCODE -ne 0) { Fail "signed release manifest verification failed" }
     $parts = $artifactInfo -split "`t", 4
