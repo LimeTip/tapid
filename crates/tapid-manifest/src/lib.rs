@@ -75,6 +75,17 @@ mod tests {
     }
 
     #[test]
+    fn accepts_explicit_registry_prefixes_in_dependency_keys() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"app","version":"1.0.0","dependencies":{"jsr:@std/path":"^1.0.0","npm:foo":"^1.0.0"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.dependencies()["jsr:@std/path"], "^1.0.0");
+        assert_eq!(manifest.dependencies()["npm:foo"], "^1.0.0");
+    }
+
+    #[test]
     fn rejects_malformed_bin_values_commands_and_targets() {
         for bin in ["null", "[]", "true", "{}"] {
             assert!(
