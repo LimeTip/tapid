@@ -154,31 +154,51 @@ impl Lockfile {
     }
 
     pub fn insert_package(&mut self, package: LockedPackage) -> Result<(), LockfileError> {
-        package.validate()?;
-        let key = package.key();
-        if self.packages.contains_key(&key) {
-            return Err(LockfileError::DuplicatePackage(key));
+        self.insert_packages(std::iter::once(package))
+    }
+
+    /// Inserts a validated package batch, allowing dependencies within the batch.
+    ///
+    /// A lockfile dependency graph need not be acyclic. Single-package insertion
+    /// retains the historical dangling-dependency check, while batch insertion
+    /// lets online materialization commit mutually dependent packages atomically.
+    pub fn insert_packages<I>(&mut self, packages: I) -> Result<(), LockfileError>
+    where
+        I: IntoIterator<Item = LockedPackage>,
+    {
+        let packages: Vec<_> = packages.into_iter().collect();
+        let mut batch = BTreeMap::new();
+        for package in &packages {
+            package.validate()?;
+            let key = package.key();
+            if self.packages.contains_key(&key) || batch.contains_key(&key) {
+                return Err(LockfileError::DuplicatePackage(key));
+            }
+            batch.insert(key, package);
         }
-        for (name, dependency) in &package.dependencies {
-            let target = dependency.parse::<LockfilePackageKey>()?;
-            if dependency == &key {
-                return Err(LockfileError::SelfDependency(key));
-            }
-            if target.name.to_string() != *name {
-                return Err(LockfileError::DependencyNameMismatch {
-                    package: package.key(),
-                    dependency: name.clone(),
-                    target: target.name.to_string(),
-                });
-            }
-            if !self.packages.contains_key(dependency) {
-                return Err(LockfileError::DanglingDependency {
-                    package: package.key(),
-                    dependency: dependency.clone(),
-                });
+        for (key, package) in &batch {
+            for (name, dependency) in &package.dependencies {
+                let target = dependency.parse::<LockfilePackageKey>()?;
+                if dependency == key {
+                    return Err(LockfileError::SelfDependency(key.clone()));
+                }
+                if target.name.to_string() != *name {
+                    return Err(LockfileError::DependencyNameMismatch {
+                        package: key.clone(),
+                        dependency: name.clone(),
+                        target: target.name.to_string(),
+                    });
+                }
+                if !self.packages.contains_key(dependency) && !batch.contains_key(dependency) {
+                    return Err(LockfileError::DanglingDependency {
+                        package: key.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
             }
         }
-        self.packages.insert(key, package);
+        self.packages
+            .extend(packages.into_iter().map(|package| (package.key(), package)));
         Ok(())
     }
 
