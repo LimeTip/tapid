@@ -128,10 +128,27 @@ class InstallerScriptTests(unittest.TestCase):
 
     def test_bootstrap_verifier_is_self_contained_and_fails_closed(self):
         install_text = INSTALL.read_text()
-        self.assertIn("openssl", install_text)
-        self.assertIn("RFC 8785", install_text)
+        self.assertNotIn("pkeyutl", install_text)
+        self.assertNotIn("openssl", install_text)
+        self.assertIn("RFC 8032", install_text)
         self.assertIn("unsupported Ed25519 verifier", install_text)
         self.assertNotIn("release_manifest.py", install_text)
+
+    def test_bootstrap_verifier_accepts_and_rejects_rfc8032_vector(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import bootstrap_verifier
+
+        public_key = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+        signature = bytes.fromhex(
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+            "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        )
+        self.assertTrue(bootstrap_verifier.verify_ed25519(public_key, signature, b""))
+        self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature, b"tampered"))
+        self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature[:-1], b""))
+        self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature + b"\0", b""))
+        self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature[:32] + bootstrap_verifier.L.to_bytes(32, "little"), b""))
 
     def test_uninstall_removes_only_tapid_binary(self):
         with tempfile.TemporaryDirectory() as tmp:
