@@ -660,11 +660,15 @@ const CURL_MAX_TIME_SECONDS: &str = "30";
 const MAX_FETCH_BYTES: usize = 256 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 512 * 1024 * 1024;
 
+fn bounded_read_capacity(max_bytes: usize) -> usize {
+    max_bytes.saturating_add(1).min(64 * 1024)
+}
+
 fn read_bounded<R: Read>(reader: R, max_bytes: usize) -> io::Result<Vec<u8>> {
     let read_limit = max_bytes.checked_add(1).ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "response limit is too large")
     })?;
-    let mut bytes = Vec::with_capacity(read_limit);
+    let mut bytes = Vec::with_capacity(bounded_read_capacity(max_bytes));
     reader.take(read_limit as u64).read_to_end(&mut bytes)?;
     if bytes.len() > max_bytes {
         return Err(io::Error::new(
@@ -1935,9 +1939,17 @@ mod activation_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CURL_CONNECT_TIMEOUT_SECONDS, CURL_MAX_TIME_SECONDS, cmd_batch_path, cmd_shim_contents,
-        curl_fetch_args, powershell_shim_contents, powershell_single_quoted, read_bounded,
+        CURL_CONNECT_TIMEOUT_SECONDS, CURL_MAX_TIME_SECONDS, MAX_ARTIFACT_BYTES,
+        bounded_read_capacity, cmd_batch_path, cmd_shim_contents, curl_fetch_args,
+        powershell_shim_contents, powershell_single_quoted, read_bounded,
     };
+
+    #[test]
+    fn bounded_response_reader_caps_initial_allocation() {
+        assert_eq!(bounded_read_capacity(2), 3);
+        assert_eq!(bounded_read_capacity(MAX_ARTIFACT_BYTES), 64 * 1024);
+        assert!(read_bounded(&b"ok"[..], MAX_ARTIFACT_BYTES).is_ok());
+    }
 
     #[test]
     fn bounded_response_reader_rejects_streams_without_known_size() {
