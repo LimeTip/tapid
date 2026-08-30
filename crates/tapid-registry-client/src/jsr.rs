@@ -187,7 +187,9 @@ fn parse_jsr_dependencies(
             continue;
         };
         let parsed = parse_dependencies(Some(value))?;
-        dependencies.extend(parsed);
+        for (name, requirement) in parsed {
+            dependencies.entry(name).or_insert(requirement);
+        }
     }
     Ok(dependencies)
 }
@@ -290,6 +292,27 @@ mod tests {
             JsrRegistry::new(fake(body, "https://jsr.io/@std/path/meta.json"), origin)
                 .fetch("@std/path")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn direct_dependency_takes_precedence_over_peer_dependency() {
+        let version = serde_json::json!({
+            "manifest": {
+                "dependencies": {"foo": "^1.0.0"},
+                "peerDependencies": {"foo": "^2.0.0", "bar": "^3.0.0"}
+            }
+        });
+
+        let dependencies = parse_jsr_dependencies(version.as_object().unwrap()).unwrap();
+
+        assert_eq!(
+            dependencies.get(&"foo".parse().unwrap()),
+            Some(&"^1.0.0".to_owned())
+        );
+        assert_eq!(
+            dependencies.get(&"bar".parse().unwrap()),
+            Some(&"^3.0.0".to_owned())
         );
     }
 

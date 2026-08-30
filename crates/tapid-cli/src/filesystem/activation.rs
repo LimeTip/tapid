@@ -99,13 +99,16 @@ pub(crate) fn activate_node_modules_with_lock(
         .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
         .unwrap_or(false);
     if !staged_is_directory {
-        let restore = restore_marker(&marker, &marker_backup, marker_exists);
-        return Err(match restore {
-            Ok(()) => "refusing to activate a non-directory install staging tree".into(),
-            Err(restore) => {
-                format!("refusing to activate a non-directory install staging tree; {restore}")
-            }
-        });
+        let backup_restore = restore_node_modules_backup(&destination, &backup);
+        let marker_restore = restore_marker(&marker, &marker_backup, marker_exists);
+        let mut error = "refusing to activate a non-directory install staging tree".to_owned();
+        if let Err(restore) = backup_restore {
+            error.push_str(&format!("; {restore}"));
+        }
+        if let Err(restore) = marker_restore {
+            error.push_str(&format!("; {restore}"));
+        }
+        return Err(error);
     }
     if let Err(error) = fs::rename(&staged, &destination) {
         if backup.exists() {
@@ -219,6 +222,14 @@ fn restore_marker(marker: &Path, backup: &Path, marker_exists: bool) -> Result<(
     }
 }
 
+fn restore_node_modules_backup(destination: &Path, backup: &Path) -> Result<(), String> {
+    if backup.exists() {
+        fs::rename(backup, destination)
+            .map_err(|error| format!("cannot restore existing node_modules: {error}"))?;
+    }
+    Ok(())
+}
+
 pub(crate) struct ActivationLock {
     path: PathBuf,
 }
@@ -278,6 +289,32 @@ mod activation_tests {
                 .unwrap()
                 .file_type()
                 .is_symlink()
+        );
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn non_directory_staging_failure_restores_node_modules_and_marker() {
+        let project = temp_project("restore-node-modules");
+        let stage = project.join("stage");
+        let external = project.join("external");
+        fs::create_dir_all(project.join("node_modules")).unwrap();
+        fs::write(project.join("node_modules/retained"), b"old layout").unwrap();
+        fs::write(project.join(".tapid-managed"), b"tapid-managed-v1\n").unwrap();
+        fs::create_dir_all(&stage).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        symlink(&external, stage.join("node_modules")).unwrap();
+
+        let error = activate_node_modules(&project, &stage).unwrap_err();
+
+        assert!(error.contains("non-directory install staging tree"));
+        assert_eq!(
+            fs::read(project.join("node_modules/retained")).unwrap(),
+            b"old layout"
+        );
+        assert_eq!(
+            fs::read(project.join(".tapid-managed")).unwrap(),
+            b"tapid-managed-v1\n"
         );
         let _ = fs::remove_dir_all(project);
     }

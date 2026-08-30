@@ -217,7 +217,7 @@ fn write_cached_artifact(destination: &Path, digest: &str, bytes: &[u8]) -> Resu
         if existing_digest != digest {
             return Err("cached artifact digest does not match expected digest".into());
         }
-        return Ok(());
+        return prune_cached_artifacts(destination, &path);
     }
     let temp = path.with_file_name(format!(
         ".tapid-release-artifact-tmp-{}",
@@ -227,7 +227,32 @@ fn write_cached_artifact(destination: &Path, digest: &str, bytes: &[u8]) -> Resu
     fs::rename(&temp, &path).map_err(|e| {
         let _ = fs::remove_file(&temp);
         e.to_string()
-    })
+    })?;
+    prune_cached_artifacts(destination, &path)
+}
+
+fn prune_cached_artifacts(destination: &Path, current: &Path) -> Result<(), String> {
+    let directory = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name();
+        let path = entry.path();
+        if Some(name.as_os_str()) != current.file_name()
+            && name
+                .as_encoded_bytes()
+                .starts_with(b".tapid-release-artifact-")
+            && entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_file()
+        {
+            fs::remove_file(path).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn recover_last_known_good(
@@ -347,6 +372,33 @@ mod upgrade_tests {
         );
         assert_eq!(fs::read(cache_path).unwrap(), b"different artifact");
         assert!(!state_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn activated_release_persistence_prunes_superseded_cached_artifacts() {
+        let root = temp("prune-cache");
+        let destination = root.join("tapid");
+        let state_path = root.join(".tapid-release-state.json");
+        let bytes = b"verified artifact";
+        let digest = format!("{:x}", sha2::Sha256::digest(bytes));
+        let state = ReleaseState::new("0.0.7", 7, digest.clone()).unwrap();
+        let superseded = root.join(format!(".tapid-release-artifact-{}", "a".repeat(64)));
+        let prefixed_directory = root.join(".tapid-release-artifact-directory");
+        let unrelated = root.join("unrelated");
+        fs::write(&superseded, b"old artifact").unwrap();
+        fs::create_dir(&prefixed_directory).unwrap();
+        fs::write(&unrelated, b"keep").unwrap();
+
+        persist_activated_release(&destination, &state_path, &state, &digest, bytes).unwrap();
+
+        assert!(!superseded.exists());
+        assert!(prefixed_directory.is_dir());
+        assert_eq!(fs::read(unrelated).unwrap(), b"keep");
+        assert_eq!(
+            fs::read(super::cached_artifact_path(&destination, &digest)).unwrap(),
+            bytes
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

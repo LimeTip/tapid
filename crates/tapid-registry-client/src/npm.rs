@@ -156,11 +156,15 @@ fn parse_npm(
                 })?)
             }
         };
-        let artifact_url = Url::parse(artifact_url)
-            .map_err(|_| {
-                RegistryClientError::Metadata(MetadataError::InvalidArtifact(artifact_url.into()))
-            })?
-            .to_string();
+        let parsed_artifact_url = Url::parse(artifact_url).map_err(|_| {
+            RegistryClientError::Metadata(MetadataError::InvalidArtifact(artifact_url.into()))
+        })?;
+        if parsed_artifact_url.scheme() != "https" {
+            return Err(RegistryClientError::Metadata(
+                MetadataError::InvalidArtifact(artifact_url.into()),
+            ));
+        }
+        let artifact_url = parsed_artifact_url.to_string();
         artifacts.push(RegistryArtifact {
             identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
             artifact_url,
@@ -254,6 +258,21 @@ mod tests {
             result,
             Err(RegistryClientError::Metadata(MetadataError::MissingField(field)))
                 if field == "dist.integrity"
+        ));
+    }
+
+    #[test]
+    fn npm_rejects_non_https_artifact_url() {
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"http://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+
+        let result =
+            NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin).fetch("foo");
+
+        assert!(matches!(
+            result,
+            Err(RegistryClientError::Metadata(MetadataError::InvalidArtifact(url)))
+                if url == "http://cdn.example/foo.tgz"
         ));
     }
 
