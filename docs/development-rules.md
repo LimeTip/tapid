@@ -45,7 +45,7 @@ Run:
 python3 scripts/check_architecture.py
 ```
 
-The checker scans Git-tracked production Rust files and excludes tests and generated or build trees. Eight hundred physical lines is a mandatory architecture review threshold, not an absolute language rule. Crossing it requires either a cohesive split or an explicit exception in `docs/architecture-exceptions.txt` with a concrete rationale. Exceptions are visible debt or deliberate design decisions, not permission for unrelated growth.
+The checker scans Git-tracked production Rust files and excludes tests plus top-level generated or build output trees. Ordinary production modules remain in scope even when their directory is named `build` or `generated`. Eight hundred physical lines is a mandatory architecture review threshold, not an absolute language rule. Crossing it requires either a cohesive split or an explicit exception in `docs/architecture-exceptions.txt` with a concrete rationale. Exceptions are visible debt or deliberate design decisions, not permission for unrelated growth.
 
 `crates/tapid-cli/src/main.rs` has a separate 100 physical line entrypoint threshold. It should contain argument dispatch and exit conversion only. A documented temporary exception can acknowledge existing migration debt, but new behavior should move behind capability interfaces and must not increase that debt without review.
 
