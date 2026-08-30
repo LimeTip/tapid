@@ -212,6 +212,11 @@ fn write_cached_artifact(destination: &Path, digest: &str, bytes: &[u8]) -> Resu
         if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
             return Err("cached artifact must be a regular file".into());
         }
+        let existing = fs::read(&path).map_err(|error| error.to_string())?;
+        let existing_digest = format!("{:x}", Sha256::digest(&existing));
+        if existing_digest != digest {
+            return Err("cached artifact digest does not match expected digest".into());
+        }
         return Ok(());
     }
     let temp = path.with_file_name(format!(
@@ -320,6 +325,28 @@ mod upgrade_tests {
             bytes
         );
         assert_eq!(read_release_state(&state_path).unwrap(), state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn activated_release_persistence_rejects_mismatched_existing_cache() {
+        let root = temp("mismatched-cache");
+        let destination = root.join("tapid");
+        let state_path = root.join(".tapid-release-state.json");
+        let bytes = b"verified artifact";
+        let digest = format!("{:x}", sha2::Sha256::digest(bytes));
+        let state = ReleaseState::new("0.0.7", 7, digest.clone()).unwrap();
+        let cache_path = super::cached_artifact_path(&destination, &digest);
+        fs::write(&cache_path, b"different artifact").unwrap();
+
+        let result = persist_activated_release(&destination, &state_path, &state, &digest, bytes);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "cached artifact digest does not match expected digest"
+        );
+        assert_eq!(fs::read(cache_path).unwrap(), b"different artifact");
+        assert!(!state_path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
