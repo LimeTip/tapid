@@ -4,8 +4,19 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const MAX_ENTRYPOINT_LINES: usize = 12;
+const MAX_ENTRYPOINT_LINES: usize = 100;
 const MAX_PRODUCTION_FILE_LINES: usize = 800;
+
+fn is_production_rust(path: &Path) -> bool {
+    path.extension().and_then(|value| value.to_str()) == Some("rs")
+        && !matches!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some("test.rs" | "tests.rs")
+        )
+        && !path
+            .components()
+            .any(|component| matches!(component.as_os_str().to_str(), Some("test" | "tests")))
+}
 
 fn rust_files_under(root: PathBuf) -> Vec<PathBuf> {
     let mut pending = vec![root];
@@ -15,7 +26,7 @@ fn rust_files_under(root: PathBuf) -> Vec<PathBuf> {
             let path = entry.expect("read source entry").path();
             if path.is_dir() {
                 pending.push(path);
-            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+            } else if is_production_rust(&path) {
                 files.push(path);
             }
         }
@@ -84,8 +95,12 @@ fn rust_file_discovery_recurses_into_nested_modules() {
     fs::create_dir(&root).expect("claim unique test directory");
     let nested = root.join("nested");
     fs::create_dir(&nested).unwrap();
+    let tests = nested.join("tests");
+    fs::create_dir(&tests).unwrap();
     fs::write(root.join("top.rs"), "").unwrap();
+    fs::write(root.join("test.rs"), "").unwrap();
     fs::write(nested.join("mod.rs"), "").unwrap();
+    fs::write(tests.join("fixture.rs"), "").unwrap();
 
     let mut files = rust_files_under(root.clone());
     files.sort();

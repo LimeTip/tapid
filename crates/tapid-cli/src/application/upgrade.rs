@@ -2,6 +2,7 @@ use crate::transport::release;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 use tapid_release_client::{
@@ -233,10 +234,27 @@ fn prune_cached_artifacts(destination: &Path, current_digest: &str) -> Result<()
             && digest.len() == 64
             && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
-            fs::remove_file(entry.path()).map_err(|error| error.to_string())?;
+            let path = entry.path();
+            if sha256_file(&path).as_deref() == Ok(digest) {
+                fs::remove_file(path).map_err(|error| error.to_string())?;
+            }
         }
     }
     Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn write_cached_artifact(destination: &Path, digest: &str, bytes: &[u8]) -> Result<(), String> {
@@ -380,6 +398,9 @@ mod upgrade_tests {
         let legacy_digest = format!("{:x}", sha2::Sha256::digest(b"legacy artifact"));
         let legacy_path = super::cached_artifact_path(&destination, &legacy_digest);
         fs::write(&legacy_path, b"legacy artifact").unwrap();
+        let unrelated_digest = format!("{:x}", sha2::Sha256::digest(b"claimed contents"));
+        let unrelated_path = super::cached_artifact_path(&destination, &unrelated_digest);
+        fs::write(&unrelated_path, b"unrelated user contents").unwrap();
 
         let new_bytes = b"current artifact";
         let new_digest = format!("{:x}", sha2::Sha256::digest(new_bytes));
@@ -395,6 +416,10 @@ mod upgrade_tests {
 
         assert!(!super::cached_artifact_path(&destination, &old_digest).exists());
         assert!(!legacy_path.exists());
+        assert_eq!(
+            fs::read(unrelated_path).unwrap(),
+            b"unrelated user contents"
+        );
         assert_eq!(
             fs::read(super::cached_artifact_path(&destination, &new_digest)).unwrap(),
             new_bytes
