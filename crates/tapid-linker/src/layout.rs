@@ -146,12 +146,12 @@ pub fn plan_materialization(
         (
             &a.id,
             a.peer_context.to_string(),
-            a.platform_context.to_string(),
+            platform_sort_key(&a.platform_context),
         )
             .cmp(&(
                 &b.id,
                 b.peer_context.to_string(),
-                b.platform_context.to_string(),
+                platform_sort_key(&b.platform_context),
             ))
     });
     for pair in instances.windows(2) {
@@ -364,6 +364,15 @@ fn encode_path_component(value: &str) -> String {
         .collect()
 }
 
+fn platform_sort_key(platform: &PlatformContext) -> String {
+    encode_path_component(&format!(
+        "os={};cpu={};libc={}",
+        platform.os.as_deref().unwrap_or_default(),
+        platform.cpu.as_deref().unwrap_or_default(),
+        platform.libc.as_deref().unwrap_or_default(),
+    ))
+}
+
 fn package_name_path(value: &str) -> PathBuf {
     value.split('/').collect()
 }
@@ -497,24 +506,50 @@ mod tests {
         assert_ne!(default_plan.entries[0].target, peer_plan.entries[0].target);
     }
     #[test]
-    fn hyphenated_platform_contexts_have_distinct_targets() {
-        let mut first = instance("plugin", "1.0.0", PeerContext::default());
-        first.platform_context =
+    fn hyphenated_platform_contexts_have_distinct_targets_and_lossless_order_keys() {
+        let first_platform =
             PlatformContext::new(Some("linux-x"), Some("x86_64"), Some("gnu")).unwrap();
-        let mut second = instance("plugin", "1.0.0", PeerContext::default());
-        second.platform_context =
+        let second_platform =
             PlatformContext::new(Some("linux"), Some("x-x86_64"), Some("gnu")).unwrap();
-        let plan = plan_layout(
+        assert_ne!(
+            platform_sort_key(&first_platform),
+            platform_sort_key(&second_platform)
+        );
+        let delimiter_platform =
+            PlatformContext::new(Some("a;cpu=b"), Some("c"), Some("d")).unwrap();
+        let escaped_delimiter_platform =
+            PlatformContext::new(Some("a"), Some("b"), Some("c;cpu=d")).unwrap();
+        assert_ne!(
+            platform_sort_key(&delimiter_platform),
+            platform_sort_key(&escaped_delimiter_platform)
+        );
+
+        let mut contexts = [second_platform.clone(), first_platform.clone()];
+        contexts.sort_by_key(platform_sort_key);
+        assert_eq!(contexts[0], first_platform);
+        assert_eq!(contexts[1], second_platform);
+
+        let mut first = instance("plugin-a", "1.0.0", PeerContext::default());
+        first.platform_context = first_platform;
+        let mut second = instance("plugin-b", "1.0.0", PeerContext::default());
+        second.platform_context = second_platform;
+        let p1 = plan_materialization(
             test_managed_root(),
-            LayoutInput {
-                instances: vec![first, second],
-                root_dependencies: vec![],
-                dependency_edges: vec![],
+            MaterializationInput {
+                instances: vec![first.clone(), second.clone()],
             },
-            Platform::Unix,
         )
         .unwrap();
-        assert_ne!(plan.entries[0].target, plan.entries[1].target);
+        let p2 = plan_materialization(
+            test_managed_root(),
+            MaterializationInput {
+                instances: vec![second, first],
+            },
+        )
+        .unwrap();
+        assert_ne!(p1.entries[0].target, p1.entries[1].target);
+        assert_eq!(p1.entries, p2.entries);
+        assert_eq!(p1.activation, p2.activation);
     }
 
     #[test]
