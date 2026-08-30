@@ -97,7 +97,7 @@ impl RegistrySnapshot {
                 .integrity
                 .map(|v| v.parse().map_err(|_| MetadataError::InvalidIntegrity(v)))
                 .transpose()?;
-            let id = RegistryPackageId::new(registry.clone(), name.clone(), version);
+            let id = RegistryPackageId::new(registry.clone(), name.clone(), version.clone());
             let candidates = packages.entry(name).or_insert_with(Vec::new);
             if candidates
                 .iter()
@@ -134,7 +134,7 @@ impl RegistrySnapshot {
             });
         }
         for candidates in packages.values_mut() {
-            candidates.sort_by_key(|p| std::cmp::Reverse(p.identity.version));
+            candidates.sort_by_key(|p| std::cmp::Reverse(p.identity.version.clone()));
         }
         Ok(Self { registry, packages })
     }

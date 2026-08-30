@@ -50,45 +50,52 @@ impl fmt::Display for PackageName {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PackageVersion {
-    pub major: u64,
-    pub minor: u64,
-    pub patch: u64,
+/// A canonical SemVer package identity without build metadata.
+///
+/// Prerelease identifiers are preserved because npm packages may depend on an
+/// exact prerelease. Build metadata is rejected because it does not participate
+/// in SemVer precedence and would make registry identities ambiguous.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PackageVersion(semver::Version);
+
+impl PackageVersion {
+    pub fn stable(major: u64, minor: u64, patch: u64) -> Self {
+        Self(semver::Version::new(major, minor, patch))
+    }
+
+    pub fn major(&self) -> u64 {
+        self.0.major
+    }
+
+    pub fn minor(&self) -> u64 {
+        self.0.minor
+    }
+
+    pub fn patch(&self) -> u64 {
+        self.0.patch
+    }
+
+    pub fn prerelease(&self) -> Option<&str> {
+        (!self.0.pre.is_empty()).then(|| self.0.pre.as_str())
+    }
 }
 
 impl FromStr for PackageVersion {
     type Err = DomainError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let mut parts = value.split('.');
-        let numbers = [parts.next(), parts.next(), parts.next()];
-        if parts.next().is_some() || numbers.iter().any(Option::is_none) {
+        let version = semver::Version::parse(value)
+            .map_err(|_| DomainError::InvalidPackageVersion(value.to_owned()))?;
+        if !version.build.is_empty() {
             return Err(DomainError::InvalidPackageVersion(value.to_owned()));
         }
-
-        let [Some(major), Some(minor), Some(patch)] = numbers else {
-            unreachable!("checked above");
-        };
-        let parse = |part: &str| {
-            if part.is_empty() || (part.len() > 1 && part.starts_with('0')) {
-                return Err(DomainError::InvalidPackageVersion(value.to_owned()));
-            }
-            part.parse::<u64>()
-                .map_err(|_| DomainError::InvalidPackageVersion(value.to_owned()))
-        };
-
-        Ok(Self {
-            major: parse(major)?,
-            minor: parse(minor)?,
-            patch: parse(patch)?,
-        })
+        Ok(Self(version))
     }
 }
 
 impl fmt::Display for PackageVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+        self.0.fmt(f)
     }
 }
 
@@ -347,6 +354,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_canonical_prerelease_versions_without_build_metadata() {
+        let version = "5.20260811.1-alpha".parse::<PackageVersion>().unwrap();
+        assert_eq!(version.to_string(), "5.20260811.1-alpha");
+        assert_eq!(version.prerelease(), Some("alpha"));
+        assert!("1.2.3+build.1".parse::<PackageVersion>().is_err());
+        assert!("1.2.3-01".parse::<PackageVersion>().is_err());
+    }
+
+    #[test]
     fn accepts_only_sha256_digests() {
         let digest = format!("sha256-{}", "A".repeat(64))
             .parse::<ArtifactDigest>()
@@ -392,7 +408,7 @@ mod tests {
         let first = PackageInstanceId::new(
             "https://one.example".parse().unwrap(),
             name.clone(),
-            version,
+            version.clone(),
         );
         let second = PackageInstanceId::new("https://two.example".parse().unwrap(), name, version);
         assert_ne!(first, second);

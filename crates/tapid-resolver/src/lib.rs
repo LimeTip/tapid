@@ -37,11 +37,18 @@ impl FromStr for Requirement {
         if raw.is_empty() {
             return Err(ResolveError::InvalidRequirement(s.into()));
         }
-        if raw != "*" {
-            for token in raw.split_whitespace() {
-                let (op, value) = requirement_token(token);
-                if token.starts_with(['>', '<']) || parse_requirement_base(op, value).is_none() {
-                    return Err(ResolveError::UnsupportedRange(raw.into()));
+        for clause in raw.split("||") {
+            let clause = clause.trim();
+            if clause.is_empty() {
+                return Err(ResolveError::UnsupportedRange(raw.into()));
+            }
+            if clause != "*" {
+                for token in clause.split_whitespace() {
+                    let (op, value) = requirement_token(token);
+                    if token.starts_with(['>', '<']) || parse_requirement_base(op, value).is_none()
+                    {
+                        return Err(ResolveError::UnsupportedRange(raw.into()));
+                    }
                 }
             }
         }
@@ -59,7 +66,7 @@ fn requirement_token(token: &str) -> (char, &str) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct RequirementBase {
     version: PackageVersion,
     major_only: bool,
@@ -82,11 +89,7 @@ fn parse_requirement_base(op: char, value: &str) -> Option<RequirementBase> {
                 return None;
             }
             value.parse().ok().map(|major| RequirementBase {
-                version: PackageVersion {
-                    major,
-                    minor: 0,
-                    patch: 0,
-                },
+                version: PackageVersion::stable(major, 0, 0),
                 major_only: true,
             })
         })
@@ -134,6 +137,16 @@ pub struct ResolutionOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resolution {
     pub selected: Vec<RegistryPackageId>,
+    pub roots: Vec<RegistryPackageId>,
+    pub dependencies: Vec<ResolvedDependency>,
+}
+
+/// Exact parent-to-child target selected for one dependency edge.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ResolvedDependency {
+    pub parent: RegistryPackageId,
+    pub dependency: PackageName,
+    pub child: RegistryPackageId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,55 +193,102 @@ pub fn resolve_graph(
             "offline resolution requires a cached snapshot",
         ));
     }
-    let mut constraints: BTreeMap<(RegistryOrigin, PackageName), BTreeSet<String>> =
+    let mut root_constraints: BTreeMap<(RegistryOrigin, PackageName), BTreeSet<String>> =
         BTreeMap::new();
-    let mut selected = BTreeMap::new();
-    let mut queue = ds.to_vec();
-    while let Some(dep) = queue.pop() {
-        let key = (dep.registry.clone(), dep.name.clone());
-        constraints
-            .entry(key.clone())
+    for dependency in ds {
+        root_constraints
+            .entry((dependency.registry.clone(), dependency.name.clone()))
             .or_default()
-            .insert(dep.requirement.raw.clone());
-        let reqs: Vec<_> = constraints[&key].iter().cloned().collect();
-        let candidates: Vec<_> = metadata
-            .iter()
-            .filter(|m| m.registry == dep.registry)
-            .flat_map(|m| m.candidates(&dep.name))
-            .filter(|p| reqs.iter().all(|r| matches_requirement(p.version, r)))
-            .collect();
-        let available = available(metadata, &dep.registry, &dep.name);
-        let Some(package) = candidates
-            .into_iter()
-            .max_by(|a, b| a.version.cmp(&b.version))
-        else {
-            return Err(if reqs.len() > 1 {
-                ResolveError::Conflict {
-                    registry: dep.registry.to_string(),
-                    name: dep.name.to_string(),
-                    requirements: reqs,
-                    available,
-                }
-            } else {
-                ResolveError::MissingCandidate {
-                    registry: dep.registry.to_string(),
-                    name: dep.name.to_string(),
-                    requirement: dep.requirement.raw,
-                    available,
-                }
+            .insert(dependency.requirement.raw.clone());
+    }
+
+    let mut selected = BTreeSet::new();
+    let mut selected_packages = BTreeMap::new();
+    let mut roots = Vec::new();
+    let mut queue = Vec::new();
+    for ((registry, name), requirements) in root_constraints {
+        let package = select_package(&registry, &name, &requirements, metadata)?;
+        let id = RegistryPackageId::new(registry, name, package.version.clone());
+        selected.insert(id.clone());
+        selected_packages.insert(id.clone(), package);
+        roots.push(id.clone());
+        queue.push(id);
+    }
+
+    let mut dependencies = BTreeSet::new();
+    let mut expanded = BTreeSet::new();
+    while let Some(parent) = queue.pop() {
+        if !expanded.insert(parent.clone()) {
+            continue;
+        }
+        let package_dependencies = selected_packages
+            .get(&parent)
+            .expect("selected package metadata")
+            .dependencies
+            .clone();
+        for (dependency, requirement) in package_dependencies {
+            let requirements = BTreeSet::from([requirement.raw.clone()]);
+            let child_package =
+                select_package(&parent.registry, &dependency, &requirements, metadata)?;
+            let child = RegistryPackageId::new(
+                parent.registry.clone(),
+                dependency.clone(),
+                child_package.version.clone(),
+            );
+            dependencies.insert(ResolvedDependency {
+                parent: parent.clone(),
+                dependency: dependency.clone(),
+                child: child.clone(),
             });
-        };
-        let id = RegistryPackageId::new(dep.registry.clone(), dep.name.clone(), package.version);
-        let changed = selected.get(&key) != Some(&id);
-        selected.insert(key, id);
-        if changed {
-            queue.extend(package.dependencies.iter().map(|(name, requirement)| {
-                Dependency::new(dep.registry.clone(), name.clone(), requirement.clone())
-            }));
+            if selected.insert(child.clone()) {
+                selected_packages.insert(child.clone(), child_package);
+                queue.push(child);
+            }
         }
     }
+
     Ok(Resolution {
-        selected: selected.into_values().collect(),
+        selected: selected.into_iter().collect(),
+        roots,
+        dependencies: dependencies.into_iter().collect(),
+    })
+}
+
+fn select_package(
+    registry: &RegistryOrigin,
+    name: &PackageName,
+    requirements: &BTreeSet<String>,
+    metadata: &[RegistryMetadata],
+) -> Result<PackageVersionMetadata, ResolveError> {
+    let package = metadata
+        .iter()
+        .filter(|metadata| &metadata.registry == registry)
+        .flat_map(|metadata| metadata.candidates(name))
+        .filter(|package| {
+            requirements
+                .iter()
+                .all(|requirement| matches_requirement(&package.version, requirement))
+        })
+        .max_by(|a, b| a.version.cmp(&b.version))
+        .cloned();
+    package.ok_or_else(|| {
+        let requirements: Vec<_> = requirements.iter().cloned().collect();
+        let available = available(metadata, registry, name);
+        if requirements.len() > 1 {
+            ResolveError::Conflict {
+                registry: registry.to_string(),
+                name: name.to_string(),
+                requirements,
+                available,
+            }
+        } else {
+            ResolveError::MissingCandidate {
+                registry: registry.to_string(),
+                name: name.to_string(),
+                requirement: requirements.into_iter().next().unwrap_or_default(),
+                available,
+            }
+        }
     })
 }
 
@@ -247,78 +307,84 @@ fn available(
     out.dedup();
     out
 }
-fn matches_requirement(version: PackageVersion, raw: &str) -> bool {
-    if raw.trim() == "*" {
-        return true;
-    }
-    raw.split_whitespace().all(|token| {
-        let (op, value) = requirement_token(token);
-        let Some(parsed_base) = parse_requirement_base(op, value) else {
-            return false;
-        };
-        let base = parsed_base.version;
-        match op {
-            '=' => version == base,
-            '^' => {
-                if parsed_base.major_only {
-                    return base
-                        .major
-                        .checked_add(1)
-                        .map(|major| {
-                            let upper = PackageVersion {
-                                major,
-                                minor: 0,
-                                patch: 0,
-                            };
-                            version >= base && version < upper
-                        })
-                        .unwrap_or(version >= base);
-                }
-                if base.major > 0 {
-                    return base
-                        .major
-                        .checked_add(1)
-                        .map(|major| {
-                            let upper = PackageVersion {
-                                major,
-                                minor: 0,
-                                patch: 0,
-                            };
-                            version >= base && version < upper
-                        })
-                        .unwrap_or(version >= base);
-                }
-                if base.minor > 0 {
-                    return base
-                        .minor
-                        .checked_add(1)
-                        .map(|minor| {
-                            let upper = PackageVersion {
-                                major: 0,
-                                minor,
-                                patch: 0,
-                            };
-                            version >= base && version < upper
-                        })
-                        .unwrap_or(
-                            version >= base && version.major == 0 && version.minor == base.minor,
-                        );
-                }
-                base.patch
-                    .checked_add(1)
-                    .map(|patch| {
-                        let upper = PackageVersion {
-                            major: 0,
-                            minor: 0,
-                            patch,
-                        };
-                        version >= base && version < upper
-                    })
-                    .unwrap_or(version == base)
-            }
-            '~' => version >= base && version.major == base.major && version.minor == base.minor,
-            _ => false,
+fn matches_requirement(version: &PackageVersion, raw: &str) -> bool {
+    raw.split("||").any(|clause| {
+        let clause = clause.trim();
+        if clause == "*" {
+            return version.prerelease().is_none();
         }
+        clause.split_whitespace().all(|token| {
+            let (op, value) = requirement_token(token);
+            let Some(parsed_base) = parse_requirement_base(op, value) else {
+                return false;
+            };
+            let base = &parsed_base.version;
+            match op {
+                '=' => version == base,
+                '^' => {
+                    if version.prerelease().is_some()
+                        && (base.prerelease().is_none()
+                            || version.major() != base.major()
+                            || version.minor() != base.minor()
+                            || version.patch() != base.patch())
+                    {
+                        return false;
+                    }
+                    if parsed_base.major_only {
+                        return base
+                            .major()
+                            .checked_add(1)
+                            .map(|major| {
+                                let upper = PackageVersion::stable(major, 0, 0);
+                                version >= base && version < &upper
+                            })
+                            .unwrap_or(version >= base);
+                    }
+                    if base.major() > 0 {
+                        return base
+                            .major()
+                            .checked_add(1)
+                            .map(|major| {
+                                let upper = PackageVersion::stable(major, 0, 0);
+                                version >= base && version < &upper
+                            })
+                            .unwrap_or(version >= base);
+                    }
+                    if base.minor() > 0 {
+                        return base
+                            .minor()
+                            .checked_add(1)
+                            .map(|minor| {
+                                let upper = PackageVersion::stable(0, minor, 0);
+                                version >= base && version < &upper
+                            })
+                            .unwrap_or(
+                                version >= base
+                                    && version.major() == 0
+                                    && version.minor() == base.minor(),
+                            );
+                    }
+                    base.patch()
+                        .checked_add(1)
+                        .map(|patch| {
+                            let upper = PackageVersion::stable(0, 0, patch);
+                            version >= base && version < &upper
+                        })
+                        .unwrap_or(version == base)
+                }
+                '~' => {
+                    (version.prerelease().is_none()
+                        || (base.prerelease().is_some()
+                            && version.major() == base.major()
+                            && version.minor() == base.minor()
+                            && version.patch() == base.patch()))
+                        && version >= base
+                        && version.major() == base.major()
+                        && version.minor() == base.minor()
+                }
+                _ => false,
+            }
+        })
     })
 }
 
@@ -338,7 +404,7 @@ pub fn resolve(
                 .flatten()
                 .map(|p| PackageVersionMetadata {
                     name: p.identity.name.clone(),
-                    version: p.identity.version,
+                    version: p.identity.version.clone(),
                     dependencies: BTreeMap::new(),
                 })
                 .collect(),
@@ -368,6 +434,116 @@ mod tests {
     }
     fn registry(url: &str, packages: Vec<PackageVersionMetadata>) -> RegistryMetadata {
         RegistryMetadata::normalize(url.parse().unwrap(), packages).unwrap()
+    }
+
+    #[test]
+    fn exact_prerelease_selects_only_the_matching_candidate() {
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![
+                package("foo", "2.0.0-rc.23", &[]),
+                package("foo", "2.0.0-rc.24", &[]),
+                package("foo", "2.0.0", &[]),
+            ],
+        );
+        let r = resolve_graph(
+            &[dep("https://registry.npmjs.org", "foo", "2.0.0-rc.24")],
+            &[m],
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            r.selected[0].to_string(),
+            "https://registry.npmjs.org:foo@2.0.0-rc.24"
+        );
+    }
+
+    #[test]
+    fn prerelease_caret_selects_matching_prereleases_and_stable_release() {
+        let prerelease_only = registry(
+            "https://registry.npmjs.org",
+            vec![
+                package("foo", "2.0.0-next.4", &[]),
+                package("foo", "2.0.0-next.6", &[]),
+                package("foo", "2.1.0-next.1", &[]),
+            ],
+        );
+        let selected = resolve_graph(
+            &[dep("https://registry.npmjs.org", "foo", "^2.0.0-next.5")],
+            &[prerelease_only],
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            selected.selected[0].to_string(),
+            "https://registry.npmjs.org:foo@2.0.0-next.6"
+        );
+
+        let with_stable = registry(
+            "https://registry.npmjs.org",
+            vec![
+                package("foo", "2.0.0-next.6", &[]),
+                package("foo", "2.0.0", &[]),
+            ],
+        );
+        let selected = resolve_graph(
+            &[dep("https://registry.npmjs.org", "foo", "^2.0.0-next.5")],
+            &[with_stable],
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            selected.selected[0].to_string(),
+            "https://registry.npmjs.org:foo@2.0.0"
+        );
+    }
+
+    #[test]
+    fn stable_ranges_do_not_select_prerelease_candidates() {
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![package("foo", "2.0.0-rc.24", &[])],
+        );
+        let error = resolve_graph(
+            &[dep("https://registry.npmjs.org", "foo", "*")],
+            &[m],
+            Default::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ResolveError::MissingCandidate { .. }));
+    }
+
+    #[test]
+    fn npm_or_ranges_select_the_highest_matching_alternative() {
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![
+                package("foo", "2.4.1", &[]),
+                package("foo", "2.9.0", &[]),
+                package("foo", "3.1.0", &[]),
+                package("foo", "4.0.0", &[]),
+            ],
+        );
+        let selected = resolve_graph(
+            &[dep("https://registry.npmjs.org", "foo", "^2.4.1 || ^3.0.0")],
+            &[m],
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            selected.selected[0].to_string(),
+            "https://registry.npmjs.org:foo@3.1.0"
+        );
+    }
+
+    #[test]
+    fn malformed_or_ranges_are_rejected() {
+        for requirement in ["|| ^1.0.0", "^1.0.0 ||", "^1.0.0 || || ^2.0.0"] {
+            assert!(matches!(
+                requirement.parse::<Requirement>(),
+                Err(ResolveError::UnsupportedRange(_))
+            ));
+        }
     }
 
     #[test]
@@ -512,6 +688,43 @@ mod tests {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
             vec!["https://jsr.io:a@1.0.0", "https://jsr.io:b@1.0.0"]
+        );
+    }
+
+    #[test]
+    fn different_parents_can_select_different_versions_of_one_dependency() {
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![
+                package("a", "1.0.0", &[("debug", "^3.0.0")]),
+                package("b", "1.0.0", &[("debug", "^4.0.0")]),
+                package("debug", "3.2.7", &[]),
+                package("debug", "4.3.7", &[]),
+            ],
+        );
+
+        let result = resolve_graph(
+            &[
+                dep("https://registry.npmjs.org", "a", "*"),
+                dep("https://registry.npmjs.org", "b", "*"),
+            ],
+            &[m],
+            Default::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result
+                .selected
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec![
+                "https://registry.npmjs.org:a@1.0.0",
+                "https://registry.npmjs.org:b@1.0.0",
+                "https://registry.npmjs.org:debug@3.2.7",
+                "https://registry.npmjs.org:debug@4.3.7",
+            ]
         );
     }
 

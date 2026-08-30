@@ -9,3 +9,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 autoexamples = false
+
+[dependencies]
+semver = "1.0.28"

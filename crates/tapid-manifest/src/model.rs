@@ -67,7 +67,7 @@ impl PackageManifest {
         &self.name
     }
     pub fn version(&self) -> PackageVersion {
-        self.version
+        self.version.clone()
     }
     pub fn is_private(&self) -> bool {
         self.private

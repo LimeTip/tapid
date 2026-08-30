@@ -2,10 +2,32 @@ use crate::TransportError;
 use std::{io::Read, time::Duration};
 use url::Url;
 
+const STANDARD_METADATA_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const STANDARD_ARTIFACT_MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+
 /// A deliberately small boundary: production uses HTTPS, tests can use a local server.
 pub trait HttpTransport: Send + Sync {
     fn get(&self, url: &str) -> Result<HttpResponse, TransportError>;
+
+    /// Fetches a resource with an explicit response media type.
+    ///
+    /// Test and compatibility transports may use the ordinary response when they
+    /// do not support content negotiation.
+    fn get_with_accept(&self, url: &str, _accept: &str) -> Result<HttpResponse, TransportError> {
+        self.get(url)
+    }
 }
+
+impl<T: HttpTransport + ?Sized> HttpTransport for &T {
+    fn get(&self, url: &str) -> Result<HttpResponse, TransportError> {
+        (**self).get(url)
+    }
+
+    fn get_with_accept(&self, url: &str, accept: &str) -> Result<HttpResponse, TransportError> {
+        (**self).get_with_accept(url, accept)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HttpResponse {
     pub status: u16,
@@ -88,6 +110,7 @@ impl HttpsTransport {
             max_response_bytes,
         })
     }
+    /// Creates the bounded transport used for registry metadata.
     pub fn standard() -> Result<Self, TransportError> {
         Self::new(
             [
@@ -96,12 +119,28 @@ impl HttpsTransport {
                 "https://npm.jsr.io",
             ],
             Duration::from_secs(20),
-            4 * 1024 * 1024,
+            STANDARD_METADATA_MAX_RESPONSE_BYTES,
         )
     }
-}
-impl HttpTransport for HttpsTransport {
-    fn get(&self, url: &str) -> Result<HttpResponse, TransportError> {
+
+    /// Creates the separately bounded transport used for package archives.
+    pub fn standard_artifact() -> Result<Self, TransportError> {
+        Self::new(
+            [
+                "https://registry.npmjs.org",
+                "https://jsr.io",
+                "https://npm.jsr.io",
+            ],
+            Duration::from_secs(20),
+            STANDARD_ARTIFACT_MAX_RESPONSE_BYTES,
+        )
+    }
+
+    fn get_internal(
+        &self,
+        url: &str,
+        accept: Option<&str>,
+    ) -> Result<HttpResponse, TransportError> {
         let parsed = Url::parse(url).map_err(|_| TransportError::InvalidUrl(url.into()))?;
         if parsed.scheme() != "https"
             || !self
@@ -111,9 +150,14 @@ impl HttpTransport for HttpsTransport {
         {
             return Err(TransportError::OriginNotAllowed(url.into()));
         }
-        let response = self
-            .client
-            .get(parsed)
+        let mut request = self.client.get(parsed);
+        if let Some(accept) = accept {
+            let value = reqwest::header::HeaderValue::from_str(accept).map_err(|_| {
+                TransportError::InvalidResponse("invalid Accept header value".into())
+            })?;
+            request = request.header(reqwest::header::ACCEPT, value);
+        }
+        let response = request
             .send()
             .map_err(|error| TransportError::Http(error.to_string()))?;
         let status = response.status().as_u16();
@@ -137,5 +181,28 @@ impl HttpTransport for HttpsTransport {
             content_type,
             body,
         })
+    }
+}
+impl HttpTransport for HttpsTransport {
+    fn get(&self, url: &str) -> Result<HttpResponse, TransportError> {
+        self.get_internal(url, None)
+    }
+
+    fn get_with_accept(&self, url: &str, accept: &str) -> Result<HttpResponse, TransportError> {
+        self.get_internal(url, Some(accept))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_transports_keep_metadata_and_artifact_limits_separate() {
+        let metadata = HttpsTransport::standard().unwrap();
+        let artifact = HttpsTransport::standard_artifact().unwrap();
+
+        assert_eq!(metadata.max_response_bytes, 32 * 1024 * 1024);
+        assert_eq!(artifact.max_response_bytes, 512 * 1024 * 1024);
     }
 }

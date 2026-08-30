@@ -54,7 +54,8 @@ pub(crate) fn replay_input(
         snapshots.paths.push(tree.clone());
         let peer = context::parse_peer(&key.peer_context)?;
         let platform = context::parse_platform(&key.platform_context)?;
-        let id = PackageInstanceId::new(key.registry.clone(), key.name.clone(), key.version);
+        let id =
+            PackageInstanceId::new(key.registry.clone(), key.name.clone(), key.version.clone());
         let instance = PackageInstance {
             id,
             peer_context: peer,
