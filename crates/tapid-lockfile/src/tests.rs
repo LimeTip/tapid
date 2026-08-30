@@ -225,8 +225,12 @@ fn peer_and_platform_contexts_change_key_deterministically() {
 fn package_key_roundtrips_contexts_without_loss() {
     let peer = tapid_core::PeerContext::default()
         .with("foo-bar".parse().unwrap(), "1.2.3".parse().unwrap());
-    let platform =
-        tapid_core::PlatformContext::new(Some("linux"), Some("x86_64"), Some("musl")).unwrap();
+    let platform = tapid_core::PlatformContext::new(
+        Some("linux-gnu"),
+        Some("x86_64-unknown"),
+        Some("musl-extra"),
+    )
+    .unwrap();
     let package = LockedPackage::new_with_context(
         "https://registry.example.test",
         "tapid",
@@ -241,6 +245,9 @@ fn package_key_roundtrips_contexts_without_loss() {
     let parsed = key.parse::<super::LockfilePackageKey>().unwrap();
     assert_eq!(parsed.to_string(), key);
     assert!(key.contains("foo%2Dbar"));
+    assert!(key.contains("linux%2Dgnu"));
+    assert!(key.contains("x86_64%2Dunknown"));
+    assert!(key.contains("musl%2Dextra"));
 }
 
 #[test]
