@@ -1,0 +1,4 @@
+# Hard architecture-limit exceptions
+# Format: repository-relative path | concrete rationale
+# Advisory recommendations do not require exceptions.
+# Exceptions acknowledge temporary migration debt under an explicit hard limit.

@@ -378,6 +378,27 @@ fn install_rejects_unverified_artifacts_with_offline_or_frozen() {
 }
 
 #[test]
+fn install_warns_about_unverified_artifacts_before_later_failure() {
+    let dir = temp_dir("unverified-warning-error");
+    let missing_project = dir.join("missing-project");
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--allow-unverified-registry-artifacts",
+            "--project-dir",
+            missing_project.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not authenticated against a registry-declared digest"));
+    assert!(stderr.contains("cannot access project directory"));
+    cleanup(dir);
+}
+
+#[test]
 fn install_allows_missing_integrity_only_with_explicit_warning() {
     let dir = temp_dir("unverified-online");
     let fixture = dir.join("registry.json");
