@@ -1,6 +1,6 @@
 # ADR 0002: Domain-oriented modular monolith
 
-Status: Accepted
+Status: Accepted; source-size enforcement superseded by ADR 0003
 Date: 2026-08-30
 
 ## Context

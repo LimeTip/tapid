@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce Tapid's physical source file architecture thresholds."""
+"""Check Tapid's physical source file architecture guidance."""
 
 import argparse
 import subprocess
@@ -7,7 +7,7 @@ import sys
 from pathlib import Path, PurePosixPath
 
 
-REVIEW_THRESHOLD = 800
+REVIEW_RECOMMENDATION = 800
 CLI_MAIN_PATH = "crates/tapid-cli/src/main.rs"
 CLI_MAIN_THRESHOLD = 100
 EXCEPTIONS_PATH = "docs/architecture-exceptions.txt"
@@ -85,6 +85,7 @@ def check(root):
         path: physical_line_count(root / path) for path in production_files
     }
     exceptions, errors = read_exceptions(root, set(tracked))
+    advisories = []
 
     for path in sorted(exceptions):
         if path not in production_files:
@@ -92,30 +93,33 @@ def check(root):
                 f"{EXCEPTIONS_PATH}: exception path is not a tracked production Rust file: {path}"
             )
             continue
-        threshold = CLI_MAIN_THRESHOLD if path == CLI_MAIN_PATH else REVIEW_THRESHOLD
-        if line_counts[path] <= threshold:
+        if path != CLI_MAIN_PATH:
+            errors.append(
+                f"{EXCEPTIONS_PATH}: exception path has no hard architecture threshold: {path}"
+            )
+            continue
+        if line_counts[path] <= CLI_MAIN_THRESHOLD:
             errors.append(
                 f"{EXCEPTIONS_PATH}: exception is stale at {line_counts[path]} physical lines: {path}"
             )
 
     for path in production_files:
         line_count = line_counts[path]
-        threshold = CLI_MAIN_THRESHOLD if path == CLI_MAIN_PATH else REVIEW_THRESHOLD
-        if line_count <= threshold or path in exceptions:
-            continue
         if path == CLI_MAIN_PATH:
-            errors.append(
-                f"{path}: {line_count} physical lines exceeds entrypoint threshold "
-                f"{CLI_MAIN_THRESHOLD}; keep main.rs to argument dispatch and exit conversion "
-                f"or document an exception in {EXCEPTIONS_PATH}"
-            )
-        else:
-            errors.append(
-                f"{path}: {line_count} physical lines exceeds {REVIEW_THRESHOLD}; "
-                f"split the module or document an exception in {EXCEPTIONS_PATH}"
+            if line_count > CLI_MAIN_THRESHOLD and path not in exceptions:
+                errors.append(
+                    f"{path}: {line_count} physical lines exceeds entrypoint threshold "
+                    f"{CLI_MAIN_THRESHOLD}; keep main.rs to argument dispatch and exit conversion "
+                    f"or document an exception in {EXCEPTIONS_PATH}"
+                )
+        elif line_count > REVIEW_RECOMMENDATION:
+            advisories.append(
+                f"{path}: {line_count} physical lines exceeds the "
+                f"{REVIEW_RECOMMENDATION}-line review recommendation; review cohesion, "
+                "module depth, and navigability before deciding whether to split it"
             )
 
-    return production_files, sorted(errors)
+    return production_files, sorted(advisories), sorted(errors)
 
 
 def parse_args(argv):
@@ -133,7 +137,7 @@ def main(argv=None):
     args = parse_args(argv)
     root = args.root.resolve()
     try:
-        production_files, errors = check(root)
+        production_files, advisories, errors = check(root)
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:
         print(f"Architecture check could not run: {error}")
         return 2
@@ -143,6 +147,11 @@ def main(argv=None):
         for error in errors:
             print(f"- {error}")
         return 1
+
+    if advisories:
+        print("Architecture review recommended:")
+        for advisory in advisories:
+            print(f"- {advisory}")
 
     noun = "file" if len(production_files) == 1 else "files"
     print(

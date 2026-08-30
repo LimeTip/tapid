@@ -45,15 +45,18 @@ class ArchitectureCheckerTests(unittest.TestCase):
             check=False,
         )
 
-    def test_rejects_tracked_production_rust_file_above_review_threshold(self):
+    def test_reports_review_recommendation_above_advisory_threshold(self):
         self.write("crates/example/src/lib.rs", "line\n" * 801)
         self.track("crates/example/src/lib.rs")
 
         result = self.run_checker()
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("crates/example/src/lib.rs: 801 physical lines exceeds 800", result.stdout)
-        self.assertIn("docs/architecture-exceptions.txt", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "crates/example/src/lib.rs: 801 physical lines exceeds the 800-line review recommendation",
+            result.stdout,
+        )
+        self.assertNotIn("docs/architecture-exceptions.txt", result.stdout)
 
     def test_accepts_file_at_review_threshold(self):
         self.write("crates/example/src/lib.rs", "line\n" * 800)
@@ -69,21 +72,27 @@ class ArchitectureCheckerTests(unittest.TestCase):
 
         result = self.run_checker()
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("crates/example/src/build/mod.rs: 801 physical lines", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "crates/example/src/build/mod.rs: 801 physical lines exceeds the 800-line review recommendation",
+            result.stdout,
+        )
 
-    def test_accepts_oversized_file_with_documented_exception(self):
+    def test_rejects_exception_for_advisory_only_file(self):
         self.write("crates/example/src/lib.rs", "line\n" * 801)
         self.write(
             "docs/architecture-exceptions.txt",
-            "crates/example/src/lib.rs | Cohesive parser retained until the planned parser slice.\n",
+            "crates/example/src/lib.rs | Cohesive parser retained after architecture review.\n",
         )
         self.track("crates/example/src/lib.rs", "docs/architecture-exceptions.txt")
 
         result = self.run_checker()
 
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Architecture check passed: 1 production Rust file scanned", result.stdout)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "exception path has no hard architecture threshold: crates/example/src/lib.rs",
+            result.stdout,
+        )
 
     def test_ignores_tests_generated_build_trees_and_untracked_files(self):
         excluded = (
@@ -125,12 +134,14 @@ class ArchitectureCheckerTests(unittest.TestCase):
         self.assertIn("line 1 rationale must be at least", result.stdout)
 
     def test_rejects_stale_exception_below_threshold(self):
-        self.write("crates/example/src/lib.rs", "pub fn small() {}\n")
+        self.write("crates/tapid-cli/src/main.rs", "fn main() {}\n")
         self.write(
             "docs/architecture-exceptions.txt",
-            "crates/example/src/lib.rs | This documented exception is no longer needed.\n",
+            "crates/tapid-cli/src/main.rs | This documented exception is no longer needed.\n",
         )
-        self.track("crates/example/src/lib.rs", "docs/architecture-exceptions.txt")
+        self.track(
+            "crates/tapid-cli/src/main.rs", "docs/architecture-exceptions.txt"
+        )
 
         result = self.run_checker()
 
@@ -149,14 +160,14 @@ class ArchitectureCheckerTests(unittest.TestCase):
             result.stdout,
         )
 
-    def test_reports_violations_in_path_order(self):
+    def test_reports_advisories_in_path_order(self):
         self.write("crates/zeta/src/lib.rs", "line\n" * 801)
         self.write("crates/alpha/src/lib.rs", "line\n" * 802)
         self.track("crates/zeta/src/lib.rs", "crates/alpha/src/lib.rs")
 
         result = self.run_checker()
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertLess(
             result.stdout.index("crates/alpha/src/lib.rs"),
             result.stdout.index("crates/zeta/src/lib.rs"),

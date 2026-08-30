@@ -1,3 +1,4 @@
-# Architecture source-size exceptions
+# Hard architecture-limit exceptions
 # Format: repository-relative path | concrete rationale
-# Exceptions acknowledge reviewed cohesion or migration debt. They are not growth targets.
+# Advisory recommendations do not require exceptions.
+# Exceptions acknowledge temporary migration debt under an explicit hard limit.

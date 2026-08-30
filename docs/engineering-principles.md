@@ -38,8 +38,8 @@ Use an architecture decision record for choices that are cross-cutting, security
 
 ## 7. Treat source size as a review signal
 
-A tracked production Rust file above eight hundred physical lines triggers architecture review. This is not an absolute Rust language rule and does not prove poor design. A cohesive file can exceed the threshold only when `docs/architecture-exceptions.txt` names it and gives a concrete rationale.
+A tracked production Rust file above eight hundred physical lines prompts architecture review. This recommendation does not fail validation, prove poor design, or require an exception. Review the module's cohesion, interface depth, change locality, and navigability. Split it only when doing so creates clearer responsibility or a better seam; a cohesive deep module may remain larger.
 
 The CLI entrypoint has a stricter 100 physical line threshold because entrypoint-only code should dispatch arguments and convert process exits. Existing exceptions expose migration debt. They do not justify adding unrelated behavior.
 
-Run `python3 scripts/check_architecture.py` locally and in relevant validation. The executable guard keeps the written standard observable and reviewable.
+Run `python3 scripts/check_architecture.py` locally and in relevant validation. It reports the 800-line recommendation as an advisory and enforces only explicit hard contracts such as the thin CLI entrypoint threshold.

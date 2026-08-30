@@ -5,7 +5,6 @@ use std::{
 };
 
 const MAX_ENTRYPOINT_LINES: usize = 100;
-const MAX_PRODUCTION_FILE_LINES: usize = 800;
 
 fn is_production_rust(path: &Path) -> bool {
     path.extension().and_then(|value| value.to_str()) == Some("rs")
@@ -109,26 +108,4 @@ fn rust_file_discovery_recurses_into_nested_modules() {
     expected.sort();
     assert_eq!(files, expected);
     fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn production_modules_stay_navigable() {
-    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut oversized = Vec::new();
-
-    for path in rust_files_under(source_root) {
-        let lines = fs::read_to_string(&path)
-            .expect("read Rust source")
-            .lines()
-            .count();
-        if lines > MAX_PRODUCTION_FILE_LINES {
-            oversized.push(format!("{}: {lines}", path.display()));
-        }
-    }
-
-    assert!(
-        oversized.is_empty(),
-        "production Rust files must not exceed {MAX_PRODUCTION_FILE_LINES} lines:\n{}",
-        oversized.join("\n")
-    );
 }
