@@ -245,6 +245,18 @@ fn hex_digest(b: &[u8]) -> String {
 
 pub trait Fetcher {
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String>;
+
+    /// Fetch a response while enforcing the caller's size limit.
+    ///
+    /// Implementations with a streaming transport should enforce this limit
+    /// while reading. The default keeps existing fetchers source-compatible.
+    fn fetch_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        let body = self.fetch(url)?;
+        if body.len() > max_bytes {
+            return Err("response exceeds maximum size".into());
+        }
+        Ok(body)
+    }
 }
 pub fn discover<F: Fetcher>(
     fetcher: &mut F,

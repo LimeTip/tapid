@@ -346,7 +346,16 @@ fn fetch_verified_release<F: Fetcher>(
     let artifact = manifest
         .artifact()
         .ok_or_else(|| ReleaseError::TargetNotFound(target.into()))?;
-    let bytes = fetcher.fetch(&artifact.url).map_err(ReleaseError::Fetch)?;
+    let max_bytes = usize::try_from(artifact.size)
+        .map_err(|_| ReleaseError::Fetch("artifact is too large for this platform".into()))?;
+    if max_bytes > MAX_ARTIFACT_BYTES {
+        return Err(ReleaseError::Fetch(
+            "artifact exceeds maximum archive size".into(),
+        ));
+    }
+    let bytes = fetcher
+        .fetch_with_limit(&artifact.url, max_bytes)
+        .map_err(ReleaseError::Fetch)?;
     manifest.verify_artifact(&bytes)?;
     Ok((manifest, bytes))
 }
@@ -648,8 +657,8 @@ fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 const CURL_CONNECT_TIMEOUT_SECONDS: &str = "10";
 const CURL_MAX_TIME_SECONDS: &str = "30";
-const CURL_MAX_FILESIZE_BYTES: &str = "262144";
 const MAX_FETCH_BYTES: usize = 256 * 1024;
+const MAX_ARTIFACT_BYTES: usize = 512 * 1024 * 1024;
 
 fn read_bounded<R: Read>(reader: R, max_bytes: usize) -> io::Result<Vec<u8>> {
     let read_limit = max_bytes.checked_add(1).ok_or_else(|| {
@@ -666,36 +675,34 @@ fn read_bounded<R: Read>(reader: R, max_bytes: usize) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn curl_fetch_args(url: &str) -> Vec<String> {
-    [
-        "--fail",
-        "--silent",
-        "--show-error",
-        "--location",
-        "--proto",
-        "=https",
-        "--tlsv1.2",
-        "--connect-timeout",
-        CURL_CONNECT_TIMEOUT_SECONDS,
-        "--max-time",
-        CURL_MAX_TIME_SECONDS,
-        "--max-filesize",
-        CURL_MAX_FILESIZE_BYTES,
-        url,
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
+fn curl_fetch_args(url: &str, max_bytes: usize) -> Vec<String> {
+    let mut args = vec![
+        "--fail".to_owned(),
+        "--silent".to_owned(),
+        "--show-error".to_owned(),
+        "--location".to_owned(),
+        "--proto".to_owned(),
+        "=https".to_owned(),
+        "--tlsv1.2".to_owned(),
+        "--connect-timeout".to_owned(),
+        CURL_CONNECT_TIMEOUT_SECONDS.to_owned(),
+        "--max-time".to_owned(),
+        CURL_MAX_TIME_SECONDS.to_owned(),
+        "--max-filesize".to_owned(),
+        max_bytes.to_string(),
+    ];
+    args.push(url.to_owned());
+    args
 }
 
 struct CurlFetcher;
-impl tapid_release_client::Fetcher for CurlFetcher {
-    fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> {
+impl CurlFetcher {
+    fn fetch_limited(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
         if !url.starts_with("https://") {
             return Err("URL must use HTTPS".into());
         }
         let mut child = std::process::Command::new("curl")
-            .args(curl_fetch_args(url))
+            .args(curl_fetch_args(url, max_bytes))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -704,7 +711,7 @@ impl tapid_release_client::Fetcher for CurlFetcher {
             .stdout
             .take()
             .ok_or_else(|| "HTTPS transport unavailable: missing curl output".to_owned())?;
-        let bytes = match read_bounded(stdout, MAX_FETCH_BYTES) {
+        let bytes = match read_bounded(stdout, max_bytes) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                 let _ = child.kill();
@@ -725,6 +732,16 @@ impl tapid_release_client::Fetcher for CurlFetcher {
         } else {
             Err("HTTPS request failed".into())
         }
+    }
+}
+
+impl tapid_release_client::Fetcher for CurlFetcher {
+    fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> {
+        self.fetch_limited(url, MAX_FETCH_BYTES)
+    }
+
+    fn fetch_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        self.fetch_limited(url, max_bytes)
     }
 }
 
@@ -1918,9 +1935,8 @@ mod activation_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CURL_CONNECT_TIMEOUT_SECONDS, CURL_MAX_FILESIZE_BYTES, CURL_MAX_TIME_SECONDS,
-        cmd_batch_path, cmd_shim_contents, curl_fetch_args, powershell_shim_contents,
-        powershell_single_quoted, read_bounded,
+        CURL_CONNECT_TIMEOUT_SECONDS, CURL_MAX_TIME_SECONDS, cmd_batch_path, cmd_shim_contents,
+        curl_fetch_args, powershell_shim_contents, powershell_single_quoted, read_bounded,
     };
 
     #[test]
@@ -1931,7 +1947,7 @@ mod tests {
 
     #[test]
     fn release_fetches_have_bounded_connection_and_total_time() {
-        let args = curl_fetch_args("https://example.test/stable.json");
+        let args = curl_fetch_args("https://example.test/stable.json", 256 * 1024);
         assert_eq!(
             args,
             vec![
@@ -1947,10 +1963,17 @@ mod tests {
                 "--max-time",
                 CURL_MAX_TIME_SECONDS,
                 "--max-filesize",
-                CURL_MAX_FILESIZE_BYTES,
+                "262144",
                 "https://example.test/stable.json",
             ]
         );
+    }
+
+    #[test]
+    fn artifact_fetches_use_the_declared_size_limit() {
+        let args = curl_fetch_args("https://example.test/tapid.tar.gz", 1024 * 1024);
+        assert_eq!(args[args.len() - 2], "1048576");
+        assert_eq!(args.last().unwrap(), "https://example.test/tapid.tar.gz");
     }
 
     #[test]
