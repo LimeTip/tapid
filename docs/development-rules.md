@@ -10,29 +10,56 @@ tapid install
 tapid run dev
 ```
 
-## Rust module structure
+## Architecture rules
 
-Rust source is split by responsibility, not by arbitrary line count:
+1. Build a domain-oriented modular monolith. Group behavior by domain capability, not by technical layer or arbitrary file size.
+2. Design deep modules with small interfaces. Keep implementation private and expose a curated interface through deliberate crate-root re-exports.
+3. Introduce hexagonal ports only at real I/O seams such as network, filesystem, clock, process, and terminal interaction. Do not add traits for hypothetical variation.
+4. Keep domain rules out of `tapid-cli`. `crates/tapid-cli/src/main.rs` is entrypoint-only code for argument dispatch and process exit conversion.
+5. Represent security-sensitive operations as explicit state transitions with validated evidence, authorization, failure, and recovery behavior.
+6. Record consequential or difficult-to-reverse decisions in `docs/adr/`.
 
-- `main.rs`: binary entry point and process exit conversion only.
-- `commands/`: Clap command definitions and one module per user-facing command.
-- `application/`: orchestration across manifest, registry, resolver, store and linker crates.
-- `filesystem/`: safe project path handling and transactional file operations.
-- `output/`: stable human and machine-readable output.
-- Library crates: domain types, parsing, validation and reusable behavior. They must not depend on CLI output or process termination.
+Prefer a directory module only when a capability has a meaningful private hierarchy. A file should normally have one cohesive responsibility. Split it when it contains independently testable concerns, multiple error models, or unrelated reasons to change. Do not split a cohesive algorithm merely to satisfy a number.
 
-Prefer a directory module with `mod.rs` only when a module has a meaningful internal hierarchy. Otherwise use `commands.rs` plus sibling files. Keep public interfaces small and deep, with implementation details private.
+## Strict TDD and vertical slices
 
-A file should normally have one responsibility. Split a file when it contains multiple independently testable concerns, when a section has its own error model, or when navigation requires substantial scrolling. Line count is a signal, not a hard rule. Avoid splitting a cohesive algorithm merely to meet a number.
+Use strict red, green, refactor cycles for production behavior:
 
-## Change discipline
-
-1. Add a focused test at the CLI boundary first.
-2. Run the test and observe the failure.
+1. Add one focused test for an observable behavior.
+2. Run it and confirm that it fails for the expected missing behavior.
 3. Implement the smallest complete vertical slice.
-4. Keep manifest semantics in `tapid-manifest`, registry transport in `tapid-registry-client`, resolution in `tapid-resolver`, storage in `tapid-store`, and materialization in `tapid-linker`.
-5. Use runtime-derived temporary paths in tests.
-6. Preserve existing user files and fail closed on malformed metadata or unverified artifacts.
-7. Run focused tests, formatting, Clippy with warnings denied, workspace tests, and packaging before calling the change complete.
+4. Run the focused test and confirm it passes.
+5. Refactor only while tests remain green.
+6. Add failure and attack-path tests at each affected trust seam.
+7. Run related crate and workspace checks before completion.
 
-Do not add speculative commands, registry publication, sandbox claims, or authentication shortcuts as part of adoption work.
+A vertical slice crosses only the capabilities needed to deliver behavior. Do not build broad horizontal layers, unused ports, or speculative commands. Keep manifest semantics in `tapid-manifest`, registry transport in `tapid-registry-client`, resolution in `tapid-resolver`, storage in `tapid-store`, and materialization in `tapid-linker`.
+
+Tests use runtime-derived temporary paths. Preserve existing user files. Malformed metadata, unverified artifacts, invalid security state transitions, and unsupported recovery paths fail closed.
+
+## Source size review
+
+Run:
+
+```text
+python3 scripts/check_architecture.py
+```
+
+The checker scans Git-tracked production Rust files and excludes tests and generated or build trees. Eight hundred physical lines is a mandatory architecture review threshold, not an absolute language rule. Crossing it requires either a cohesive split or an explicit exception in `docs/architecture-exceptions.txt` with a concrete rationale. Exceptions are visible debt or deliberate design decisions, not permission for unrelated growth.
+
+`crates/tapid-cli/src/main.rs` has a separate 100 physical line entrypoint threshold. It should contain argument dispatch and exit conversion only. A documented temporary exception can acknowledge existing migration debt, but new behavior should move behind capability interfaces and must not increase that debt without review.
+
+## Completion checks
+
+Run the narrow test during each TDD cycle, then the relevant checks:
+
+```text
+python3 -m unittest tests.test_check_architecture -v
+python3 scripts/check_architecture.py
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+cargo package --workspace --locked --allow-dirty
+```
+
+Use ADRs and durable documentation to keep code, tests, security claims, and architecture consistent. Do not add registry publication, sandbox claims, or authentication shortcuts as part of adoption work.

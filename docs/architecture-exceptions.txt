@@ -1,0 +1,7 @@
+# Architecture source-size exceptions
+# Format: repository-relative path | concrete rationale
+# Exceptions acknowledge reviewed cohesion or migration debt. They are not growth targets.
+
+crates/tapid-cli/src/main.rs | Legacy CLI orchestration predates the entrypoint-only rule and will move behind domain capability interfaces through tested vertical slices. New work must not increase this debt without architecture review.
+crates/tapid-linker/src/lib.rs | Link planning, path validation, platform-specific materialization, and atomic activation remain coupled by shared filesystem safety invariants while capability seams are extracted through tests.
+crates/tapid-registry-client/src/lib.rs | Registry routing, origin enforcement, bounded transport, and metadata validation currently share one fail-closed trust seam; split only when tests preserve that seam end to end.
