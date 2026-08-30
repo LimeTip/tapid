@@ -166,6 +166,32 @@ class InstallerScriptTests(unittest.TestCase):
         zero_signature = identity_r + (0).to_bytes(32, "little")
         self.assertTrue(bootstrap_verifier.verify_ed25519(torsion_public_key, zero_signature, b""))
 
+    def test_posix_installer_splits_verified_artifact_fields(self):
+        read_line = next(
+            line.strip()
+            for line in INSTALL.read_text().splitlines()
+            if line.strip().startswith("IFS=")
+            and "archive artifact_url expected expected_size" in line
+        )
+        shell = f"""artifact_info=$(printf 'tapid.tar.gz\thttps://example.test/a\tdeadbeef\t42')
+{read_line}
+$artifact_info
+EOF
+printf '%s|%s|%s|%s\n' "$archive" "$artifact_url" "$expected" "$expected_size"
+"""
+        result = subprocess.run(
+            ["sh", "-c", shell],
+            text=True,
+            capture_output=True,
+            env={"PATH": os.environ["PATH"]},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            "tapid.tar.gz|https://example.test/a|deadbeef|42\n",
+        )
+
+
     def test_uninstall_removes_only_tapid_binary(self):
         with tempfile.TemporaryDirectory() as tmp:
             install_dir = Path(tmp) / "bin"

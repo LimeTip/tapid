@@ -365,7 +365,7 @@ if __name__ == "__main__":
     verify(sys.argv[1], sys.argv[2], sys.argv[3])
 TAPID_BOOTSTRAP_VERIFIER
 )" || fail "signed release manifest verification failed"
-IFS='\t' read -r archive artifact_url expected expected_size <<EOF
+IFS="$(printf '\t')" read -r archive artifact_url expected expected_size <<EOF
 $artifact_info
 EOF
 curl -fsSL "$artifact_url" -o "$tmp_dir/$archive" 2>/dev/null || fail "could not download verified artifact $archive"
