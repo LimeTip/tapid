@@ -166,7 +166,7 @@ pub fn plan_materialization(
     let mut activation = Vec::with_capacity(instances.len());
     for instance in instances {
         let suffix = context_suffix(&instance.peer_context, &instance.platform_context);
-        let name = safe_component(instance.id.name.as_str());
+        let name = package_name_path(instance.id.name.as_str());
         let target = root
             .path
             .join(".tapid")
@@ -184,10 +184,7 @@ pub fn plan_materialization(
             source: instance.tree.root.clone(),
             target: target.clone(),
         });
-        let activation_target = root
-            .path
-            .join("node_modules")
-            .join(instance.id.name.as_str().split('/').collect::<PathBuf>());
+        let activation_target = root.path.join("node_modules").join(name);
         if !root.contains(&activation_target) {
             return Err(PlanError::PathOutsideManagedRoot(activation_target));
         }
@@ -238,7 +235,7 @@ pub fn plan_layout(
             .path
             .join(".tapid")
             .join("instances")
-            .join(safe_component(instance.id.name.as_str()))
+            .join(package_name_path(instance.id.name.as_str()))
             .join(instance.id.version.to_string())
             .join(context_suffix(
                 &instance.peer_context,
@@ -281,21 +278,22 @@ pub fn plan_layout(
         requests.push((Some(edge.parent), edge.child));
     }
     let mut activation = Vec::new();
-    while !requests.is_empty() {
-        let mut pending = Vec::new();
+    let mut pending = requests;
+    while !pending.is_empty() {
+        let mut deferred = Vec::new();
         let mut progressed = false;
-        for (parent, child) in requests {
-            let base = match parent {
+        for (parent, child) in pending {
+            let base = match &parent {
                 None => root.path.join("node_modules"),
                 Some(parent) => {
-                    let Some(parent_location) = locations.get(&parent) else {
-                        pending.push((Some(parent), child));
+                    let Some(parent_location) = locations.get(parent) else {
+                        deferred.push((Some(parent.clone()), child));
                         continue;
                     };
                     parent_location.join("node_modules")
                 }
             };
-            let target = base.join(child.id.name.as_str().split('/').collect::<PathBuf>());
+            let target = base.join(package_name_path(child.id.name.as_str()));
             if !root.contains(&target) {
                 return Err(PlanError::PathOutsideManagedRoot(target));
             }
@@ -318,9 +316,13 @@ pub fn plan_layout(
             progressed = true;
         }
         if !progressed {
-            return Err(PlanError::DependencyCycle);
+            let parent = deferred
+                .first()
+                .and_then(|(parent, _)| parent.as_ref())
+                .expect("only dependency edges can be deferred");
+            return Err(PlanError::UnknownParent(parent.id.clone()));
         }
-        requests = pending;
+        pending = deferred;
     }
     activation.sort_by(|a, b| a.target.cmp(&b.target));
     Ok(MaterializationPlan {
@@ -344,6 +346,9 @@ fn context_suffix(peer: &PeerContext, platform: &PlatformContext) -> String {
     };
     format!("peer={peer}__platform={platform}")
 }
+fn package_name_path(value: &str) -> PathBuf {
+    value.split('/').collect()
+}
 fn safe_component(value: &str) -> String {
     value
         .chars()
@@ -366,7 +371,6 @@ pub enum PlanError {
     DuplicateInstance(PackageInstanceId),
     UnknownInstance(PackageInstanceId),
     UnknownParent(PackageInstanceId),
-    DependencyCycle,
     ConflictingTarget(PathBuf),
     UnsupportedPlatform(Platform),
     InvalidPackageMetadata(String),
@@ -388,7 +392,6 @@ impl fmt::Display for PlanError {
             Self::DuplicateInstance(v) => write!(f, "duplicate package instance: {v:?}"),
             Self::UnknownInstance(v) => write!(f, "unknown package instance: {v:?}"),
             Self::UnknownParent(v) => write!(f, "dependency parent was not placed: {v:?}"),
-            Self::DependencyCycle => write!(f, "dependency graph contains an unplaced cycle"),
             Self::ConflictingTarget(v) => {
                 write!(f, "conflicting activation target: {}", v.display())
             }
@@ -496,35 +499,48 @@ mod tests {
         assert_eq!(p1, p2);
     }
     #[test]
+    fn scoped_package_materialization_preserves_name_segments() {
+        let first = instance("@a/b_c", "1.0.0", PeerContext::default());
+        let second = instance("@a_b/c", "1.0.0", PeerContext::default());
+        let plan = plan_materialization(
+            test_managed_root(),
+            MaterializationInput {
+                instances: vec![first, second],
+            },
+        )
+        .unwrap();
+
+        assert_ne!(plan.entries[0].target, plan.entries[1].target);
+        let targets: Vec<_> = plan
+            .activation
+            .steps
+            .iter()
+            .map(|step| step.target.clone())
+            .collect();
+        assert!(
+            targets.contains(
+                &test_project_root()
+                    .join("node_modules")
+                    .join("@a")
+                    .join("b_c")
+            )
+        );
+        assert!(
+            targets.contains(
+                &test_project_root()
+                    .join("node_modules")
+                    .join("@a_b")
+                    .join("c")
+            )
+        );
+    }
+
+    #[test]
     fn managed_paths_cannot_escape_root() {
         assert!(ManagedRoot::new("relative").is_err());
         let root = test_managed_root();
         assert!(root.contains(&test_project_root().join(".tapid").join("instances")));
         assert!(!root.contains(&test_project_root().join("..").join("else")));
-    }
-    #[test]
-    fn scoped_package_activation_target_preserves_path_segments() {
-        let plan = plan_materialization(
-            test_managed_root(),
-            MaterializationInput {
-                instances: vec![instance("@scope/pkg", "1.0.0", PeerContext::default())],
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            plan.activation.steps[0].target,
-            test_project_root()
-                .join("node_modules")
-                .join("@scope")
-                .join("pkg")
-        );
-        assert!(
-            plan.entries[0]
-                .target
-                .to_string_lossy()
-                .contains("@scope_pkg")
-        );
     }
     #[test]
     fn root_edges_and_nested_edges_get_distinct_node_modules_targets() {
@@ -563,21 +579,21 @@ mod tests {
     }
 
     #[test]
-    fn multi_level_edges_are_placed_after_their_parents() {
-        let x = instance("x", "1.0.0", PeerContext::default());
-        let m = instance("m", "1.0.0", PeerContext::default());
-        let n = instance("n", "1.0.0", PeerContext::default());
+    fn multi_level_dependency_edges_are_processed_after_their_parents() {
+        let root_package = instance("x", "1.0.0", PeerContext::default());
+        let middle = instance("m", "1.0.0", PeerContext::default());
+        let leaf = instance("n", "1.0.0", PeerContext::default());
         let input = LayoutInput {
-            instances: vec![n.clone(), x.clone(), m.clone()],
-            root_dependencies: vec![key(&x)],
+            instances: vec![root_package.clone(), middle.clone(), leaf.clone()],
+            root_dependencies: vec![key(&root_package)],
             dependency_edges: vec![
                 DependencyEdge {
-                    parent: key(&m),
-                    child: key(&n),
+                    parent: key(&middle),
+                    child: key(&leaf),
                 },
                 DependencyEdge {
-                    parent: key(&x),
-                    child: key(&m),
+                    parent: key(&root_package),
+                    child: key(&middle),
                 },
             ],
         };
@@ -585,33 +601,40 @@ mod tests {
         let plan = plan_layout(test_managed_root(), input, Platform::Unix).unwrap();
 
         assert!(plan.activation.steps.iter().any(|step| {
-            step.target == test_project_root().join("node_modules/x/node_modules/m/node_modules/n")
+            step.target
+                == test_project_root()
+                    .join("node_modules")
+                    .join("x")
+                    .join("node_modules")
+                    .join("m")
+                    .join("node_modules")
+                    .join("n")
         }));
     }
 
     #[test]
-    fn unplaceable_dependency_cycle_is_reported_after_worklist_stalls() {
-        let x = instance("x", "1.0.0", PeerContext::default());
-        let m = instance("m", "1.0.0", PeerContext::default());
+    fn unplaceable_dependency_cycle_uses_the_existing_unknown_parent_error() {
+        let first = instance("x", "1.0.0", PeerContext::default());
+        let second = instance("m", "1.0.0", PeerContext::default());
         let input = LayoutInput {
-            instances: vec![x.clone(), m.clone()],
+            instances: vec![first.clone(), second.clone()],
             root_dependencies: vec![],
             dependency_edges: vec![
                 DependencyEdge {
-                    parent: key(&x),
-                    child: key(&m),
+                    parent: key(&first),
+                    child: key(&second),
                 },
                 DependencyEdge {
-                    parent: key(&m),
-                    child: key(&x),
+                    parent: key(&second),
+                    child: key(&first),
                 },
             ],
         };
 
-        assert_eq!(
+        assert!(matches!(
             plan_layout(test_managed_root(), input, Platform::Unix),
-            Err(PlanError::DependencyCycle)
-        );
+            Err(PlanError::UnknownParent(_))
+        ));
     }
 
     #[test]

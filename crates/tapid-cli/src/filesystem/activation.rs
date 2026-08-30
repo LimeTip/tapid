@@ -239,7 +239,10 @@ impl ActivationLock {
         let path = project.join(".tapid-activation.lock");
         fs::create_dir(&path).map_err(|error| {
             if error.kind() == io::ErrorKind::AlreadyExists {
-                "another node_modules activation is already in progress".to_owned()
+                format!(
+                    "another node_modules activation is already in progress (lock: {})",
+                    path.display()
+                )
             } else {
                 format!("cannot acquire node_modules activation lock: {error}")
             }
@@ -256,7 +259,7 @@ impl Drop for ActivationLock {
 
 #[cfg(all(test, unix))]
 mod activation_tests {
-    use super::activate_node_modules;
+    use super::{ActivationLock, activate_node_modules};
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -269,6 +272,22 @@ mod activation_tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn existing_activation_lock_error_includes_the_lock_path() {
+        let project = temp_project("lock-path");
+        let lock_path = project.join(".tapid-activation.lock");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir(&lock_path).unwrap();
+
+        let error = match ActivationLock::acquire(&project) {
+            Ok(_) => panic!("existing lock must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains(&lock_path.display().to_string()));
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]

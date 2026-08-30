@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAX_ENTRYPOINT_LINES: usize = 12;
@@ -73,11 +74,16 @@ fn commands_are_split_by_user_facing_capability() {
 #[test]
 fn rust_file_discovery_recurses_into_nested_modules() {
     let root = std::env::temp_dir().join(format!(
-        "tapid-architecture-recursion-{}",
-        std::process::id()
+        "tapid-architecture-recursion-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos()
     ));
+    fs::create_dir(&root).expect("claim unique test directory");
     let nested = root.join("nested");
-    fs::create_dir_all(&nested).unwrap();
+    fs::create_dir(&nested).unwrap();
     fs::write(root.join("top.rs"), "").unwrap();
     fs::write(nested.join("mod.rs"), "").unwrap();
 

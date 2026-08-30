@@ -153,15 +153,14 @@ pub(crate) fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String
 }
 
 fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        io::Write::write_all(&mut file, bytes)?;
-        file.sync_all()
-    })();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    let result = io::Write::write_all(&mut file, bytes).and_then(|_| file.sync_all());
     if let Err(error) = result {
+        drop(file);
         let _ = fs::remove_file(path);
         return Err(error.to_string());
     }
@@ -219,7 +218,29 @@ pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::write_synced_file;
-    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn synced_file_write_preserves_a_preexisting_file() {
+        let path = std::env::temp_dir().join(format!(
+            "tapid-synced-file-existing-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, b"owned by another process").unwrap();
+
+        let error = write_synced_file(&path, b"replacement").unwrap_err();
+
+        assert!(!error.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), b"owned by another process");
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn synced_file_write_persists_the_complete_payload() {
