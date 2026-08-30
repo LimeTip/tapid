@@ -41,6 +41,33 @@ mod tests {
     }
 
     #[test]
+    fn preserves_unmodeled_package_json_fields_when_updating_dependencies() {
+        let manifest = PackageManifest::parse(
+            r#"{
+                "name": "example-app",
+                "version": "1.2.3",
+                "private": true,
+                "type": "module",
+                "engines": {"node": ">=20"},
+                "exports": {".": "./src/index.js"},
+                "customMetadata": ["kept", 42],
+                "dependencies": {"kleur": "^4.1.5"}
+            }"#,
+        )
+        .unwrap()
+        .with_dependency("chalk", "^5.3.0")
+        .unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&manifest.to_json()).unwrap();
+        assert_eq!(value["type"], "module");
+        assert_eq!(value["engines"]["node"], ">=20");
+        assert_eq!(value["exports"]["."], "./src/index.js");
+        assert_eq!(value["customMetadata"], serde_json::json!(["kept", 42]));
+        assert_eq!(value["dependencies"]["kleur"], "^4.1.5");
+        assert_eq!(value["dependencies"]["chalk"], "^5.3.0");
+    }
+
+    #[test]
     fn rejects_malformed_and_invalid_documents() {
         assert!(PackageManifest::parse("not json").is_err());
         assert!(PackageManifest::parse(r#"{"version":"1.0.0"}"#).is_err());

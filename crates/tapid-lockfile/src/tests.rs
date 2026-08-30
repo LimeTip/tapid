@@ -143,6 +143,41 @@ fn package_fixture() -> LockedPackage {
 }
 
 #[test]
+fn inserts_mutually_dependent_packages_as_one_batch() {
+    let digest = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let integrity = format!("sha512-{}", "A".repeat(86));
+    let mut first = LockedPackage::new(
+        "https://registry.example.com",
+        "first",
+        "1.0.0",
+        &integrity,
+        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .unwrap();
+    let mut second = LockedPackage::new(
+        "https://registry.example.com",
+        "second",
+        "1.0.0",
+        &integrity,
+        "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    )
+    .unwrap();
+    let first_key = first.key();
+    let second_key = second.key();
+    first.add_dependency("second", &second_key).unwrap();
+    second.add_dependency("first", &first_key).unwrap();
+
+    let mut lockfile = Lockfile::new(digest).unwrap();
+    lockfile.insert_packages([first, second]).unwrap();
+
+    assert_eq!(lockfile.packages().len(), 2);
+    assert_eq!(
+        Lockfile::from_json(&lockfile.to_json().unwrap()).unwrap(),
+        lockfile
+    );
+}
+
+#[test]
 fn same_name_and_version_from_two_registries_are_distinct() {
     let mut lockfile =
         Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
