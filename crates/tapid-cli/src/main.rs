@@ -11,8 +11,9 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs, io,
+    io::Read,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{ExitCode, Stdio},
 };
 use tapid_archive::{ArchiveFormat, ArchiveLimits, extract_to};
 use tapid_core::{ArtifactDigest, PackageInstanceId};
@@ -648,6 +649,22 @@ fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String> {
 const CURL_CONNECT_TIMEOUT_SECONDS: &str = "10";
 const CURL_MAX_TIME_SECONDS: &str = "30";
 const CURL_MAX_FILESIZE_BYTES: &str = "262144";
+const MAX_FETCH_BYTES: usize = 256 * 1024;
+
+fn read_bounded<R: Read>(reader: R, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let read_limit = max_bytes.checked_add(1).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "response limit is too large")
+    })?;
+    let mut bytes = Vec::with_capacity(read_limit);
+    reader.take(read_limit as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "response exceeds maximum size",
+        ));
+    }
+    Ok(bytes)
+}
 
 fn curl_fetch_args(url: &str) -> Vec<String> {
     [
@@ -677,14 +694,36 @@ impl tapid_release_client::Fetcher for CurlFetcher {
         if !url.starts_with("https://") {
             return Err("URL must use HTTPS".into());
         }
-        let output = std::process::Command::new("curl")
+        let mut child = std::process::Command::new("curl")
             .args(curl_fetch_args(url))
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
             .map_err(|e| format!("HTTPS transport unavailable: {e}"))?;
-        if output.status.success() {
-            Ok(output.stdout)
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "HTTPS transport unavailable: missing curl output".to_owned())?;
+        let bytes = match read_bounded(stdout, MAX_FETCH_BYTES) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("cannot read HTTPS response: {error}"));
+            }
+        };
+        let status = child
+            .wait()
+            .map_err(|e| format!("cannot finish HTTPS request: {e}"))?;
+        if status.success() {
+            Ok(bytes)
         } else {
-            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+            Err("HTTPS request failed".into())
         }
     }
 }
@@ -1881,8 +1920,14 @@ mod tests {
     use super::{
         CURL_CONNECT_TIMEOUT_SECONDS, CURL_MAX_FILESIZE_BYTES, CURL_MAX_TIME_SECONDS,
         cmd_batch_path, cmd_shim_contents, curl_fetch_args, powershell_shim_contents,
-        powershell_single_quoted,
+        powershell_single_quoted, read_bounded,
     };
+
+    #[test]
+    fn bounded_response_reader_rejects_streams_without_known_size() {
+        assert!(read_bounded(&b"ok"[..], 2).is_ok());
+        assert!(read_bounded(&b"too large"[..], 2).is_err());
+    }
 
     #[test]
     fn release_fetches_have_bounded_connection_and_total_time() {
