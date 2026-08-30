@@ -30,6 +30,9 @@ impl<T: HttpTransport> NpmRegistry<T> {
             .transport
             .get(&url)
             .map_err(RegistryClientError::Transport)?;
+        if response.status == 404 {
+            return Ok(Vec::new());
+        }
         parse_npm(
             &self.origin,
             &name,
@@ -379,6 +382,34 @@ mod tests {
         )
         .fetch("foo");
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn npm_not_found_maps_to_empty_candidates() {
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let mut response = fake(br"not json", "https://registry.npmjs.org/missing");
+        response.status = 404;
+        response.content_type = None;
+
+        let result = NpmRegistry::new(response, origin).fetch("missing").unwrap();
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn npm_other_http_errors_remain_errors() {
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let mut response = fake(br"not json", "https://registry.npmjs.org/unavailable");
+        response.status = 500;
+
+        let result = NpmRegistry::new(response, origin).fetch("unavailable");
+
+        assert!(matches!(
+            result,
+            Err(RegistryClientError::Metadata(MetadataError::HttpStatus(
+                500
+            )))
+        ));
     }
 
     #[test]

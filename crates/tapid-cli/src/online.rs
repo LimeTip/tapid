@@ -212,10 +212,11 @@ pub fn resolve_and_fetch(
             remote_records(&dep.registry, &dep.name, allow_missing_integrity)?
         };
         if packages.is_empty() {
-            return Err(format!(
-                "missing dependency metadata: {}:{}",
-                dep.registry, dep.name
-            ));
+            // An npm 404 is an empty candidate set. Leave it absent from the
+            // resolver metadata so required packages still fail closed during
+            // resolution, while stale historical dependencies do not abort
+            // discovery before candidate selection.
+            continue;
         }
         let mut versions = Vec::new();
         for p in packages {
