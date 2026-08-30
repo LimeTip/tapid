@@ -39,14 +39,57 @@ impl FromStr for Requirement {
         }
         if raw != "*" {
             for token in raw.split_whitespace() {
-                let value = token.trim_start_matches(['^', '~', '=']);
-                if token.starts_with(['>', '<']) || value.parse::<PackageVersion>().is_err() {
+                let (op, value) = requirement_token(token);
+                if token.starts_with(['>', '<']) || parse_requirement_base(op, value).is_none() {
                     return Err(ResolveError::UnsupportedRange(raw.into()));
                 }
             }
         }
         Ok(Self { raw: raw.into() })
     }
+}
+
+fn requirement_token(token: &str) -> (char, &str) {
+    if let Some(value) = token.strip_prefix('^') {
+        ('^', value)
+    } else if let Some(value) = token.strip_prefix('~') {
+        ('~', value)
+    } else {
+        ('=', token.trim_start_matches('='))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RequirementBase {
+    version: PackageVersion,
+    major_only: bool,
+}
+
+fn parse_requirement_base(op: char, value: &str) -> Option<RequirementBase> {
+    value
+        .parse::<PackageVersion>()
+        .ok()
+        .map(|version| RequirementBase {
+            version,
+            major_only: false,
+        })
+        .or_else(|| {
+            if op != '^'
+                || value.is_empty()
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || (value.len() > 1 && value.starts_with('0'))
+            {
+                return None;
+            }
+            value.parse().ok().map(|major| RequirementBase {
+                version: PackageVersion {
+                    major,
+                    minor: 0,
+                    patch: 0,
+                },
+                major_only: true,
+            })
+        })
 }
 
 /// Normalized metadata supplied by a registry adapter. The resolver never fetches it.
@@ -209,19 +252,28 @@ fn matches_requirement(version: PackageVersion, raw: &str) -> bool {
         return true;
     }
     raw.split_whitespace().all(|token| {
-        let (op, value) = if let Some(v) = token.strip_prefix('^') {
-            ('^', v)
-        } else if let Some(v) = token.strip_prefix('~') {
-            ('~', v)
-        } else {
-            ('=', token.trim_start_matches('='))
-        };
-        let Ok(base) = value.parse::<PackageVersion>() else {
+        let (op, value) = requirement_token(token);
+        let Some(parsed_base) = parse_requirement_base(op, value) else {
             return false;
         };
+        let base = parsed_base.version;
         match op {
             '=' => version == base,
             '^' => {
+                if parsed_base.major_only {
+                    return base
+                        .major
+                        .checked_add(1)
+                        .map(|major| {
+                            let upper = PackageVersion {
+                                major,
+                                minor: 0,
+                                patch: 0,
+                            };
+                            version >= base && version < upper
+                        })
+                        .unwrap_or(version >= base);
+                }
                 if base.major > 0 {
                     return base
                         .major
@@ -338,6 +390,62 @@ mod tests {
             r.selected[0].to_string(),
             "https://registry.npmjs.org:foo@1.9.0"
         );
+    }
+
+    #[test]
+    fn major_only_caret_range_selects_highest_matching_major() {
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![
+                package("foo", "3.0.0", &[]),
+                package("foo", "3.9.0", &[]),
+                package("foo", "4.0.0", &[]),
+            ],
+        );
+
+        let r = resolve_graph(
+            &[dep("https://registry.npmjs.org", "foo", "^3")],
+            &[m],
+            Default::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            r.selected[0].to_string(),
+            "https://registry.npmjs.org:foo@3.9.0"
+        );
+    }
+
+    #[test]
+    fn zero_major_only_caret_range_uses_next_major_as_upper_bound() {
+        let m = registry(
+            "https://registry.npmjs.org",
+            vec![
+                package("foo", "0.0.1", &[]),
+                package("foo", "0.9.0", &[]),
+                package("foo", "1.0.0", &[]),
+            ],
+        );
+
+        let r = resolve_graph(
+            &[dep("https://registry.npmjs.org", "foo", "^0")],
+            &[m],
+            Default::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            r.selected[0].to_string(),
+            "https://registry.npmjs.org:foo@0.9.0"
+        );
+    }
+
+    #[test]
+    fn major_only_caret_range_rejects_leading_zeroes() {
+        assert!(matches!(
+            "^03".parse::<Requirement>(),
+            Err(ResolveError::UnsupportedRange(_))
+        ));
     }
 
     #[test]
