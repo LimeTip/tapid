@@ -11,7 +11,9 @@ REVIEW_THRESHOLD = 800
 CLI_MAIN_PATH = "crates/tapid-cli/src/main.rs"
 CLI_MAIN_THRESHOLD = 100
 EXCEPTIONS_PATH = "docs/architecture-exceptions.txt"
-EXCLUDED_PARTS = frozenset({"test", "tests", "target", "generated", "build"})
+MIN_RATIONALE_CHARS = 20
+EXCLUDED_TEST_PARTS = frozenset({"test", "tests"})
+EXCLUDED_TOP_LEVEL_TREES = frozenset({"target", "generated", "build"})
 EXCLUDED_TEST_FILES = frozenset({"test.rs", "tests.rs"})
 
 
@@ -34,7 +36,8 @@ def is_production_rust(path):
     return (
         pure_path.suffix == ".rs"
         and pure_path.name not in EXCLUDED_TEST_FILES
-        and not any(part in EXCLUDED_PARTS for part in pure_path.parts)
+        and pure_path.parts[0] not in EXCLUDED_TOP_LEVEL_TREES
+        and not any(part in EXCLUDED_TEST_PARTS for part in pure_path.parts)
     )
 
 
@@ -55,6 +58,12 @@ def read_exceptions(root, tracked):
         if not separator or not path or not rationale:
             errors.append(
                 f"{EXCEPTIONS_PATH}: line {line_number} must contain a path and rationale"
+            )
+            continue
+        if len(rationale) < MIN_RATIONALE_CHARS:
+            errors.append(
+                f"{EXCEPTIONS_PATH}: line {line_number} rationale must be at least "
+                f"{MIN_RATIONALE_CHARS} characters"
             )
             continue
         if path in exceptions:

@@ -38,7 +38,7 @@ Use an architecture decision record for choices that are cross-cutting, security
 
 ## 7. Treat source size as a review signal
 
-Eight hundred physical lines in a tracked production Rust file triggers architecture review. It is not an absolute Rust language rule and does not prove poor design. A cohesive file can exceed the threshold only when `docs/architecture-exceptions.txt` names it and gives a concrete rationale.
+A tracked production Rust file above eight hundred physical lines triggers architecture review. This is not an absolute Rust language rule and does not prove poor design. A cohesive file can exceed the threshold only when `docs/architecture-exceptions.txt` names it and gives a concrete rationale.
 
 The CLI entrypoint has a stricter 100 physical line threshold because entrypoint-only code should dispatch arguments and convert process exits. Existing exceptions expose migration debt. They do not justify adding unrelated behavior.
 

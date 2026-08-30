@@ -55,6 +55,23 @@ class ArchitectureCheckerTests(unittest.TestCase):
         self.assertIn("crates/example/src/lib.rs: 801 physical lines exceeds 800", result.stdout)
         self.assertIn("docs/architecture-exceptions.txt", result.stdout)
 
+    def test_accepts_file_at_review_threshold(self):
+        self.write("crates/example/src/lib.rs", "line\n" * 800)
+        self.track("crates/example/src/lib.rs")
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_scans_production_module_named_build(self):
+        self.write("crates/example/src/build/mod.rs", "line\n" * 801)
+        self.track("crates/example/src/build/mod.rs")
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("crates/example/src/build/mod.rs: 801 physical lines", result.stdout)
+
     def test_accepts_oversized_file_with_documented_exception(self):
         self.write("crates/example/src/lib.rs", "line\n" * 801)
         self.write(
@@ -75,7 +92,6 @@ class ArchitectureCheckerTests(unittest.TestCase):
             "tests/integration/large.rs",
             "target/debug/build/large.rs",
             "generated/large.rs",
-            "crates/example/src/generated/large.rs",
         )
         for relative_path in excluded:
             self.write(relative_path, "line\n" * 801)
@@ -98,11 +114,21 @@ class ArchitectureCheckerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("line 1 must contain a path and rationale", result.stdout)
 
+    def test_rejects_exception_without_a_concrete_rationale(self):
+        self.write("crates/example/src/lib.rs", "line\n" * 801)
+        self.write("docs/architecture-exceptions.txt", "crates/example/src/lib.rs | x\n")
+        self.track("crates/example/src/lib.rs", "docs/architecture-exceptions.txt")
+
+        result = self.run_checker()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("line 1 rationale must be at least", result.stdout)
+
     def test_rejects_stale_exception_below_threshold(self):
         self.write("crates/example/src/lib.rs", "pub fn small() {}\n")
         self.write(
             "docs/architecture-exceptions.txt",
-            "crates/example/src/lib.rs | No longer needed.\n",
+            "crates/example/src/lib.rs | This documented exception is no longer needed.\n",
         )
         self.track("crates/example/src/lib.rs", "docs/architecture-exceptions.txt")
 
