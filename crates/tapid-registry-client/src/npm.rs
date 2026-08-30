@@ -112,6 +112,12 @@ fn parse_npm(
                 "version entry must be an object".into(),
             ))
         })?;
+        let parsed_version = semver::Version::parse(key).map_err(|_| {
+            RegistryClientError::Metadata(MetadataError::InvalidVersion(key.clone()))
+        })?;
+        if !parsed_version.pre.is_empty() {
+            continue;
+        }
         let version: PackageVersion = key.parse().map_err(|_| {
             RegistryClientError::Metadata(MetadataError::InvalidVersion(key.clone()))
         })?;
@@ -249,6 +255,19 @@ mod tests {
     }
 
     #[test]
+    fn npm_skips_valid_prereleases_during_stable_resolution() {
+        let body = br#"{"name":"foo","versions":{"1.0.0-rc.1":{"name":"foo","version":"1.0.0-rc.1","dist":{"tarball":"https://cdn.example/foo-rc.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}},"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].identity.version.to_string(), "1.0.0");
+    }
+
+    #[test]
     fn npm_missing_integrity_fails_closed() {
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
         let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz"}}}}"#;
@@ -284,6 +303,21 @@ mod tests {
             .fetch_with_options("foo", true)
             .unwrap();
         assert!(result[0].integrity.is_none());
+    }
+
+    #[test]
+    fn npm_rejects_malformed_version_keys() {
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let body = br#"{"name":"foo","versions":{"not-semver":{"name":"foo","version":"not-semver","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+
+        let result =
+            NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin).fetch("foo");
+
+        assert!(matches!(
+            result,
+            Err(RegistryClientError::Metadata(MetadataError::InvalidVersion(version)))
+                if version == "not-semver"
+        ));
     }
 
     #[test]
