@@ -342,10 +342,28 @@ fn context_suffix(peer: &PeerContext, platform: &PlatformContext) -> String {
     let platform = if platform.to_string().is_empty() {
         "no-platform".to_owned()
     } else {
-        safe_component(&platform.to_string())
+        encode_path_component(&format!(
+            "os={};cpu={};libc={}",
+            platform.os.as_deref().unwrap_or_default(),
+            platform.cpu.as_deref().unwrap_or_default(),
+            platform.libc.as_deref().unwrap_or_default(),
+        ))
     };
     format!("peer={peer}__platform={platform}")
 }
+
+fn encode_path_component(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'.' | b'@' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
 fn package_name_path(value: &str) -> PathBuf {
     value.split('/').collect()
 }
@@ -478,6 +496,27 @@ mod tests {
         .unwrap();
         assert_ne!(default_plan.entries[0].target, peer_plan.entries[0].target);
     }
+    #[test]
+    fn hyphenated_platform_contexts_have_distinct_targets() {
+        let mut first = instance("plugin", "1.0.0", PeerContext::default());
+        first.platform_context =
+            PlatformContext::new(Some("linux-x"), Some("x86_64"), Some("gnu")).unwrap();
+        let mut second = instance("plugin", "1.0.0", PeerContext::default());
+        second.platform_context =
+            PlatformContext::new(Some("linux"), Some("x-x86_64"), Some("gnu")).unwrap();
+        let plan = plan_layout(
+            test_managed_root(),
+            LayoutInput {
+                instances: vec![first, second],
+                root_dependencies: vec![],
+                dependency_edges: vec![],
+            },
+            Platform::Unix,
+        )
+        .unwrap();
+        assert_ne!(plan.entries[0].target, plan.entries[1].target);
+    }
+
     #[test]
     fn ordering_is_deterministic() {
         let a = instance("z", "1.0.0", PeerContext::default());

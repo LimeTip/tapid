@@ -101,10 +101,13 @@ pub(crate) fn parse_platform(value: &str) -> Result<PlatformContext, String> {
             .map_err(|e| e.to_string());
     }
     let parts: Vec<_> = value.split('-').collect();
+    if parts.len() != 3 {
+        return Err(format!("invalid platform context: {value}"));
+    }
     PlatformContext::new(
-        parts.first().copied(),
-        parts.get(1).copied(),
-        parts.get(2).copied(),
+        (!parts[0].is_empty()).then_some(parts[0]),
+        (!parts[1].is_empty()).then_some(parts[1]),
+        (!parts[2].is_empty()).then_some(parts[2]),
     )
     .map_err(|e| e.to_string())
 }
@@ -127,6 +130,11 @@ mod tests {
         assert_eq!(parsed.os.as_deref(), Some("linux"));
         assert_eq!(parsed.cpu.as_deref(), Some("x86_64"));
         assert_eq!(parsed.libc.as_deref(), Some("gnu"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_legacy_platform_contexts() {
+        assert!(parse_platform("linux-x86_64-gnu-extra").is_err());
     }
 
     #[test]
