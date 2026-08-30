@@ -35,6 +35,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --all --check
+      - name: Check architecture
+        run: |
+          python scripts/check_architecture.py
+          python -m unittest tests.test_check_architecture
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Run tests

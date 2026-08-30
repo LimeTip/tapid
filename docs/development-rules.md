@@ -56,10 +56,11 @@ Run the narrow test during each TDD cycle, then the relevant checks:
 ```text
 python3 -m unittest tests.test_check_architecture -v
 python3 scripts/check_architecture.py
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-cargo package --workspace --locked --allow-dirty
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+cargo test --manifest-path tests/integration/Cargo.toml --locked
+cargo package --workspace --locked
 ```
 
 Use ADRs and durable documentation to keep code, tests, security claims, and architecture consistent. Do not add registry publication, sandbox claims, or authentication shortcuts as part of adoption work.

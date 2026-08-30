@@ -154,6 +154,8 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 ## Development
 
 ```text
+python3 scripts/check_architecture.py
+python3 -m unittest tests.test_check_architecture
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
