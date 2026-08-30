@@ -82,6 +82,34 @@ pub struct Document {
     pub media_type: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelIndex {
+    pub channel: String,
+    pub manifests: Vec<String>,
+}
+
+const MAX_MANIFESTS_PER_INDEX: usize = 16;
+const MAX_CHANNEL_INDEX_BYTES: usize = 256 * 1024;
+const MAX_MANIFEST_BYTES: usize = 256 * 1024;
+
+impl ChannelIndex {
+    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let index: Self = serde_json::from_slice(bytes)
+            .map_err(|e| Error::InvalidManifest(format!("invalid channel index: {e}")))?;
+        if index.channel != "stable"
+            || index.manifests.is_empty()
+            || index.manifests.len() > MAX_MANIFESTS_PER_INDEX
+            || index.manifests.iter().any(|url| !https(url))
+        {
+            return Err(Error::InvalidManifest(
+                "invalid stable channel index".into(),
+            ));
+        }
+        Ok(index)
+    }
+}
+
 impl ReleaseManifest {
     pub fn parse_and_verify(
         bytes: &[u8],
@@ -217,6 +245,13 @@ fn hex_digest(b: &[u8]) -> String {
 
 pub trait Fetcher {
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String>;
+
+    /// Fetch a response while enforcing the caller's size limit during reads.
+    ///
+    /// Implementations must stop consuming the response once it exceeds
+    /// `max_bytes`; a post-read length check is insufficient for untrusted
+    /// network responses.
+    fn fetch_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String>;
 }
 pub fn discover<F: Fetcher>(
     fetcher: &mut F,
@@ -230,14 +265,30 @@ pub fn discover<F: Fetcher>(
         if !https(endpoint) {
             continue;
         }
-        let body = match fetcher.fetch(endpoint) {
+        let body = match fetcher.fetch_with_limit(endpoint, MAX_CHANNEL_INDEX_BYTES) {
             Ok(body) => body,
             Err(_) => continue,
         };
-        if let Ok(manifest) =
-            ReleaseManifest::parse_and_verify(&body, keyring, target, now, max_age)
-        {
-            return Ok(manifest);
+        if body.len() > MAX_CHANNEL_INDEX_BYTES {
+            continue;
+        }
+        let index = match ChannelIndex::parse(&body) {
+            Ok(index) => index,
+            Err(_) => continue,
+        };
+        for manifest_url in &index.manifests {
+            let body = match fetcher.fetch_with_limit(manifest_url, MAX_MANIFEST_BYTES) {
+                Ok(body) => body,
+                Err(_) => continue,
+            };
+            if body.len() > MAX_MANIFEST_BYTES {
+                continue;
+            }
+            if let Ok(manifest) =
+                ReleaseManifest::parse_and_verify(&body, keyring, target, now, max_age)
+            {
+                return Ok(manifest);
+            }
         }
     }
     Err(Error::AllEndpointsFailed {
