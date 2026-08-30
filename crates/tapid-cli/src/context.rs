@@ -101,13 +101,13 @@ pub(crate) fn parse_platform(value: &str) -> Result<PlatformContext, String> {
             .map_err(|e| e.to_string());
     }
     let parts: Vec<_> = value.split('-').collect();
-    if parts.len() != 3 {
+    if parts.len() > 3 {
         return Err(format!("invalid platform context: {value}"));
     }
     PlatformContext::new(
-        (!parts[0].is_empty()).then_some(parts[0]),
-        (!parts[1].is_empty()).then_some(parts[1]),
-        (!parts[2].is_empty()).then_some(parts[2]),
+        parts.first().filter(|part| !part.is_empty()).copied(),
+        parts.get(1).filter(|part| !part.is_empty()).copied(),
+        parts.get(2).filter(|part| !part.is_empty()).copied(),
     )
     .map_err(|e| e.to_string())
 }
@@ -130,6 +130,18 @@ mod tests {
         assert_eq!(parsed.os.as_deref(), Some("linux"));
         assert_eq!(parsed.cpu.as_deref(), Some("x86_64"));
         assert_eq!(parsed.libc.as_deref(), Some("gnu"));
+    }
+
+    #[test]
+    fn preserves_abbreviated_legacy_platform_contexts() {
+        let one = parse_platform("linux").unwrap();
+        assert_eq!(one.os.as_deref(), Some("linux"));
+        assert_eq!(one.cpu, None);
+        assert_eq!(one.libc, None);
+        let two = parse_platform("linux-x86_64").unwrap();
+        assert_eq!(two.os.as_deref(), Some("linux"));
+        assert_eq!(two.cpu.as_deref(), Some("x86_64"));
+        assert_eq!(two.libc, None);
     }
 
     #[test]
