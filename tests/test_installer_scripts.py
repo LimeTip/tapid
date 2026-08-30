@@ -105,6 +105,17 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("non-empty value", result.stderr)
 
+    def test_installers_request_the_published_signed_manifest_asset(self):
+        workflow = (ROOT / ".github" / "workflows" / "release-publication.yml").read_text()
+        shell = INSTALL.read_text()
+        powershell = (ROOT / "scripts" / "install.ps1").read_text()
+        self.assertIn("publication/release-manifest.json", workflow)
+        self.assertIn("$base/release-manifest.json", shell)
+        self.assertIn('"$base/release-manifest.json"', powershell)
+        self.assertNotIn('"$base/manifest.json"', shell)
+        self.assertNotIn('"$base/manifest.json"', powershell)
+
+
     def test_stable_discovery_endpoint_is_provider_configurable(self):
         install_text = INSTALL.read_text()
         self.assertIn('TAPID_RELEASE_BASE_URL', install_text)
