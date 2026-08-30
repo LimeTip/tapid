@@ -393,15 +393,15 @@ impl LockedPackage {
         self.tree_digest
             .parse::<ArtifactDigest>()
             .map_err(LockfileError::Domain)?;
-        validation::validate_url(&self.registry)?;
+        validation::validate_registry_url(&self.registry)?;
         if let Some(url) = &self.artifact_url {
-            validation::validate_url(url)?;
+            validation::validate_artifact_url(url)?;
         }
         Ok(())
     }
 
     pub fn set_artifact_url(&mut self, url: &str) -> Result<(), LockfileError> {
-        validation::validate_url(url)?;
+        validation::validate_artifact_url(url)?;
         self.artifact_url = Some(url.to_owned());
         Ok(())
     }

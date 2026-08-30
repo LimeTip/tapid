@@ -126,6 +126,25 @@ fn replay_validation_accepts_uppercase_root_manifest_digest() {
 }
 
 #[test]
+fn accepts_scoped_https_artifact_paths_without_allowing_credentials() {
+    let mut package = package_fixture();
+    package
+        .set_artifact_url("https://registry.npmjs.org/@alloc/quick-lru/-/quick-lru-5.2.0.tgz")
+        .unwrap();
+
+    for unsafe_url in [
+        "https://user:secret@registry.npmjs.org/package.tgz",
+        "https://registry.npmjs.org/package.tgz?token=secret",
+        "https://registry.npmjs.org/package.tgz#fragment",
+    ] {
+        assert!(
+            package.set_artifact_url(unsafe_url).is_err(),
+            "accepted {unsafe_url}"
+        );
+    }
+}
+
+#[test]
 fn rejects_invalid_artifact_urls_at_construction_time() {
     let mut package = package_fixture();
     assert!(package.set_artifact_url("file:///tmp/package.tgz").is_err());
