@@ -1,0 +1,86 @@
+use std::{fs, path::Path};
+
+const MAX_ENTRYPOINT_LINES: usize = 12;
+const MAX_PRODUCTION_FILE_LINES: usize = 800;
+
+#[test]
+fn main_is_a_thin_entrypoint() {
+    let main = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    let source = fs::read_to_string(main).expect("read src/main.rs");
+    let significant_lines = source
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+
+    assert!(
+        significant_lines <= MAX_ENTRYPOINT_LINES,
+        "src/main.rs has {significant_lines} significant lines, expected at most {MAX_ENTRYPOINT_LINES}"
+    );
+    assert!(
+        source.contains("tapid::run()"),
+        "entrypoint must call the application facade"
+    );
+}
+
+#[test]
+fn application_modules_do_not_render_or_choose_process_status() {
+    let application_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/application");
+    for entry in fs::read_dir(application_root).expect("read application modules") {
+        let path = entry.expect("read application entry").path();
+        if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("read application module");
+        assert!(
+            !source.contains("println!") && !source.contains("eprintln!"),
+            "{} renders terminal output inside the application layer",
+            path.display()
+        );
+        assert!(
+            !source.contains("ExitCode"),
+            "{} chooses process exit codes inside the application layer",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn commands_are_split_by_user_facing_capability() {
+    let command_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
+    for capability in ["init", "install", "lock", "manifest", "run", "upgrade"] {
+        assert!(
+            command_root.join(format!("{capability}.rs")).is_file(),
+            "missing command capability module: {capability}"
+        );
+    }
+}
+
+#[test]
+fn production_modules_stay_navigable() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut pending = vec![source_root];
+    let mut oversized = Vec::new();
+
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).expect("read source directory") {
+            let path = entry.expect("read source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                let lines = fs::read_to_string(&path)
+                    .expect("read Rust source")
+                    .lines()
+                    .count();
+                if lines > MAX_PRODUCTION_FILE_LINES {
+                    oversized.push(format!("{}: {lines}", path.display()));
+                }
+            }
+        }
+    }
+
+    assert!(
+        oversized.is_empty(),
+        "production Rust files must not exceed {MAX_PRODUCTION_FILE_LINES} lines:\n{}",
+        oversized.join("\n")
+    );
+}
