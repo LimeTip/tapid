@@ -147,7 +147,7 @@ fn inserts_mutually_dependent_packages_as_one_batch() {
     let digest = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let integrity = format!("sha512-{}", "A".repeat(86));
     let mut first = LockedPackage::new(
-        "https://registry.example.test",
+        "https://registry.example.com",
         "first",
         "1.0.0",
         &integrity,
@@ -155,7 +155,7 @@ fn inserts_mutually_dependent_packages_as_one_batch() {
     )
     .unwrap();
     let mut second = LockedPackage::new(
-        "https://registry.example.test",
+        "https://registry.example.com",
         "second",
         "1.0.0",
         &integrity,
