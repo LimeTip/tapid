@@ -49,7 +49,6 @@ impl Drop for ManifestTransaction {
 pub(crate) struct InstallReport {
     pub(crate) package_count: usize,
     pub(crate) replayed: bool,
-    pub(crate) warnings: Vec<String>,
 }
 
 pub(crate) fn run(
@@ -69,10 +68,6 @@ pub(crate) fn run(
             "--allow-unverified-registry-artifacts cannot be used with --offline or --frozen"
                 .to_owned(),
         );
-    }
-    let mut warnings = Vec::new();
-    if allow_unverified_registry_artifacts {
-        warnings.push("warning: npm artifacts without registry integrity are not authenticated against a registry-declared digest".to_owned());
     }
     let project_dir = match fs::canonicalize(project_dir) {
         Ok(path) if path.is_dir() => path,
@@ -151,7 +146,6 @@ pub(crate) fn run(
         return Ok(InstallReport {
             package_count: lock.packages().len(),
             replayed: false,
-            warnings,
         });
     }
     if !lock_path.is_file() {
@@ -192,7 +186,6 @@ pub(crate) fn run(
         InstallReport {
             package_count: lock.packages().len(),
             replayed: true,
-            warnings,
         }
     })
 }

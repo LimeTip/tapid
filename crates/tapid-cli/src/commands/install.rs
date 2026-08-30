@@ -23,6 +23,11 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> ExitCode {
+    if args.allow_unverified_registry_artifacts && !args.offline && !args.frozen {
+        eprintln!(
+            "warning: npm artifacts without registry integrity are not authenticated against a registry-declared digest"
+        );
+    }
     let result = crate::application::install::run(
         &args.project_dir,
         args.package.as_deref(),
@@ -34,9 +39,6 @@ pub(crate) fn run(args: Args) -> ExitCode {
     );
     match result {
         Ok(report) => {
-            for warning in report.warnings {
-                eprintln!("{warning}");
-            }
             if report.replayed {
                 println!("Replayed lockfile: {} package(s)", report.package_count);
             } else {
