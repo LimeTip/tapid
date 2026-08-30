@@ -7,6 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL = ROOT / "scripts" / "install.sh"
+INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
+BOOTSTRAP_VERIFIER = ROOT / "scripts" / "bootstrap_verifier.py"
 UNINSTALL = ROOT / "scripts" / "uninstall.sh"
 
 
@@ -128,10 +130,67 @@ class InstallerScriptTests(unittest.TestCase):
 
     def test_bootstrap_verifier_is_self_contained_and_fails_closed(self):
         install_text = INSTALL.read_text()
-        self.assertIn("openssl", install_text)
-        self.assertIn("RFC 8785", install_text)
+        self.assertNotIn("pkeyutl", install_text)
+        self.assertNotIn("openssl", install_text)
+        self.assertIn("RFC 8032", install_text)
         self.assertIn("unsupported Ed25519 verifier", install_text)
         self.assertNotIn("release_manifest.py", install_text)
+
+    def test_embedded_verifiers_match_standalone_verifier(self):
+        standalone = BOOTSTRAP_VERIFIER.read_text()
+        expected = standalone[standalone.index("# RFC 8032"):standalone.index("def verify(")]
+
+        for script in (INSTALL, INSTALL_PS1):
+            embedded = script.read_text()
+            self.assertIn(expected, embedded, script.name)
+
+    def test_bootstrap_verifier_accepts_and_rejects_rfc8032_vector(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import bootstrap_verifier
+
+        public_key = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+        signature = bytes.fromhex(
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+            "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        )
+        self.assertTrue(bootstrap_verifier.verify_ed25519(public_key, signature, b""))
+        self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature, b"tampered"))
+        self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature[:-1], b""))
+        self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature + b"\0", b""))
+        self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature[:32] + bootstrap_verifier.L.to_bytes(32, "little"), b""))
+        # RFC 8032 uses the cofactored equation and accepts valid torsion
+        # points; rejecting them would not be RFC-compatible.
+        torsion_public_key = bytes.fromhex("ec" + "ff" * 30 + "7f")
+        identity_r = bytes.fromhex("01" + "00" * 31)
+        zero_signature = identity_r + (0).to_bytes(32, "little")
+        self.assertTrue(bootstrap_verifier.verify_ed25519(torsion_public_key, zero_signature, b""))
+
+    def test_posix_installer_splits_verified_artifact_fields(self):
+        read_line = next(
+            line.strip()
+            for line in INSTALL.read_text().splitlines()
+            if line.strip().startswith("IFS=")
+            and "archive artifact_url expected expected_size" in line
+        )
+        shell = f"""artifact_info=$(printf 'tapid.tar.gz\thttps://example.test/a\tdeadbeef\t42')
+{read_line}
+$artifact_info
+EOF
+printf '%s|%s|%s|%s\n' "$archive" "$artifact_url" "$expected" "$expected_size"
+"""
+        result = subprocess.run(
+            ["sh", "-c", shell],
+            text=True,
+            capture_output=True,
+            env={"PATH": os.environ["PATH"]},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            "tapid.tar.gz|https://example.test/a|deadbeef|42\n",
+        )
+
 
     def test_uninstall_removes_only_tapid_binary(self):
         with tempfile.TemporaryDirectory() as tmp:

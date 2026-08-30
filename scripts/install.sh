@@ -227,7 +227,7 @@ curl -fsSL "$base/manifest.json" -o "$manifest" 2>/dev/null || fail "could not d
 artifact_info="$(python3 - "$manifest" "$target" "$VERSION" <<'TAPID_BOOTSTRAP_VERIFIER'
 #!/usr/bin/env python3
 """Self-contained Tapid release-manifest verifier for first-install bootstrap."""
-import base64, hashlib, json, os, re, shutil, subprocess, sys, tempfile
+import base64, hashlib, json, re, sys
 
 PUBLIC_KEY = "eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc="
 PUBLIC_KEY_FINGERPRINT = "sha256-238d16177b1c9ae21b53476d1a9097b5011414a26e6625986ecf1799dacf47f4"
@@ -259,6 +259,53 @@ def jcs(value):
 
 def canonical(value):
     return jcs(value).encode("utf-8")
+
+
+# RFC 8032 Ed25519 verification without a platform crypto CLI.
+Q = 2**255 - 19
+L = 2**252 + 27742317777372353535851937790883648493
+D = (-121665 * pow(121666, Q - 2, Q)) % Q
+I = pow(2, (Q - 1) // 4, Q)
+B = (15112221349535400772501151409588531511454012693041857206046113283949847762202,
+     46316835694926478169428394003475163141307993866256225615783033603165251855960)
+
+def _ed_add(left, right):
+    x1, y1 = left; x2, y2 = right
+    dx = pow(1 + D * x1 * x2 * y1 * y2, Q - 2, Q)
+    dy = pow(1 - D * x1 * x2 * y1 * y2, Q - 2, Q)
+    return ((x1 * y2 + x2 * y1) * dx % Q, (y1 * y2 + x1 * x2) * dy % Q)
+
+def _ed_scalarmult(point, scalar):
+    result = (0, 1)
+    while scalar:
+        if scalar % 2: result = _ed_add(result, point)
+        point = _ed_add(point, point); scalar //= 2
+    return result
+
+def _ed_decode(encoded):
+    if len(encoded) != 32: raise ValueError("invalid Ed25519 point length")
+    value = int.from_bytes(encoded, "little"); sign = value // (1 << 255); y = value % (1 << 255)
+    if y >= Q: raise ValueError("non-canonical Ed25519 point")
+    xx = (y * y - 1) * pow(D * y * y + 1, Q - 2, Q) % Q
+    x = pow(xx, (Q + 3) // 8, Q)
+    if (x * x - xx) % Q: x = x * I % Q
+    if (x * x - xx) % Q or (x == 0 and sign): raise ValueError("invalid Ed25519 point")
+    if x % 2 != sign: x = Q - x
+    return x, y
+
+def verify_ed25519(public_key, signature, message):
+    if len(public_key) != 32 or len(signature) != 64:
+        return False
+    try: public_point = _ed_decode(public_key); signature_point = _ed_decode(signature[:32])
+    except ValueError: return False
+    scalar = int.from_bytes(signature[32:], "little")
+    if scalar >= L: return False
+    challenge = int.from_bytes(hashlib.sha512(signature[:32] + public_key + message).digest(), "little") % L
+    # RFC 8032 verifies the cofactored equation, which also handles
+    # otherwise-valid encoded points outside the prime-order subgroup.
+    return _ed_scalarmult(B, scalar * 8) == _ed_scalarmult(
+        _ed_add(signature_point, _ed_scalarmult(public_point, challenge)), 8
+    )
 
 
 def verify(manifest_path, target, version):
@@ -295,19 +342,8 @@ def verify(manifest_path, target, version):
         fail("signed release manifest signature key material is invalid")
     if "sha256-" + hashlib.sha256(pub).hexdigest() != PUBLIC_KEY_FINGERPRINT:
         fail("embedded production release key fingerprint is invalid")
-    if not shutil.which("openssl"):
-        fail("unsupported Ed25519 verifier: openssl is required")
-    with tempfile.TemporaryDirectory() as directory:
-        payload = os.path.join(directory, "payload")
-        signature_file = os.path.join(directory, "signature")
-        public_file = os.path.join(directory, "public.pem")
-        open(payload, "wb").write(canonical(context))
-        open(signature_file, "wb").write(sig)
-        der = bytes.fromhex("302a300506032b6570032100") + pub
-        open(public_file, "wb").write(b"-----BEGIN PUBLIC KEY-----\n" + base64.encodebytes(der) + b"-----END PUBLIC KEY-----\n")
-        result = subprocess.run(["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", public_file, "-rawin", "-in", payload, "-sigfile", signature_file], capture_output=True)
-        if result.returncode != 0:
-            fail("signed release manifest Ed25519 verification failed")
+    if not verify_ed25519(pub, sig, canonical(context)):
+        fail("signed release manifest Ed25519 verification failed")
     artifacts = value.get("artifacts")
     if not isinstance(artifacts, list):
         fail("signed release manifest artifacts must be an array")
@@ -329,7 +365,7 @@ if __name__ == "__main__":
     verify(sys.argv[1], sys.argv[2], sys.argv[3])
 TAPID_BOOTSTRAP_VERIFIER
 )" || fail "signed release manifest verification failed"
-IFS='\t' read -r archive artifact_url expected expected_size <<EOF
+IFS="$(printf '\t')" read -r archive artifact_url expected expected_size <<EOF
 $artifact_info
 EOF
 curl -fsSL "$artifact_url" -o "$tmp_dir/$archive" 2>/dev/null || fail "could not download verified artifact $archive"
