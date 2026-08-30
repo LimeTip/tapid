@@ -191,6 +191,7 @@ fn upgrade(
     }
     let target = release_target();
     let mut fetcher = CurlFetcher;
+    let mut pending_state = None;
     let (manifest_version, artifact_name, bytes) =
         match fetch_verified_release(&mut fetcher, &endpoints, &keyring, target) {
             Ok(value) => {
@@ -215,14 +216,7 @@ fn upgrade(
                         return ExitCode::from(1);
                     }
                 };
-                if let Err(error) =
-                    write_cached_artifact(&destination, &digest, &value.1).and_then(|_| {
-                        write_release_state(&state_path, &state).map_err(|e| e.to_string())
-                    })
-                {
-                    eprintln!("error: cannot persist verified release state: {error}");
-                    return ExitCode::from(1);
-                }
+                pending_state = Some((state_path, state, digest));
                 let name = value
                     .0
                     .artifact()
@@ -261,16 +255,42 @@ fn upgrade(
         );
         return ExitCode::SUCCESS;
     }
-    match replace_executable(&destination, &executable) {
+    match activate_and_persist(
+        &destination,
+        &executable,
+        pending_state,
+        &bytes,
+        replace_executable,
+    ) {
         Ok(()) => {
             println!("Upgraded Tapid to {}", manifest_version);
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("error: cannot activate verified artifact: {error}");
+            eprintln!("error: {error}");
             ExitCode::from(1)
         }
     }
+}
+
+fn activate_and_persist<F>(
+    destination: &Path,
+    executable: &[u8],
+    pending_state: Option<(PathBuf, ReleaseState, String)>,
+    bytes: &[u8],
+    activate: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path, &[u8]) -> Result<(), String>,
+{
+    activate(destination, executable)
+        .map_err(|error| format!("cannot activate verified artifact: {error}"))?;
+    if let Some((state_path, state, digest)) = pending_state {
+        persist_activated_release(destination, &state_path, &state, &digest, bytes).map_err(
+            |error| format!("activated release but cannot persist last-known-good state: {error}"),
+        )?;
+    }
+    Ok(())
 }
 
 fn release_state_path(destination: &Path) -> PathBuf {
@@ -285,6 +305,17 @@ fn cached_artifact_path(destination: &Path, digest: &str) -> PathBuf {
         .parent()
         .unwrap_or(Path::new("."))
         .join(format!(".tapid-release-artifact-{digest}"))
+}
+
+fn persist_activated_release(
+    destination: &Path,
+    state_path: &Path,
+    state: &ReleaseState,
+    digest: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    write_cached_artifact(destination, digest, bytes)
+        .and_then(|_| write_release_state(state_path, state).map_err(|e| e.to_string()))
 }
 
 fn write_cached_artifact(destination: &Path, digest: &str, bytes: &[u8]) -> Result<(), String> {
@@ -362,12 +393,17 @@ fn fetch_verified_release<F: Fetcher>(
 
 #[cfg(test)]
 mod upgrade_tests {
-    use super::{DEFAULT_STABLE_ENDPOINTS, materialize_artifact, stable_discovery_endpoints};
+    use super::{
+        DEFAULT_STABLE_ENDPOINTS, materialize_artifact, persist_activated_release,
+        stable_discovery_endpoints,
+    };
+    use sha2::Digest;
     use std::{
         fs,
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
+    use tapid_release_client::{ReleaseState, read_release_state};
 
     fn temp(label: &str) -> std::path::PathBuf {
         let n = SystemTime::now()
@@ -377,6 +413,48 @@ mod upgrade_tests {
         let p = std::env::temp_dir().join(format!("tapid-upgrade-{label}-{n}"));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn activated_release_persistence_writes_cache_and_last_known_good_state() {
+        let root = temp("persist");
+        let destination = root.join("tapid");
+        let state_path = root.join(".tapid-release-state.json");
+        let bytes = b"artifact";
+        let digest = format!("{:x}", sha2::Sha256::digest(bytes));
+        let state = ReleaseState::new("0.0.7", 7, digest.clone()).unwrap();
+
+        persist_activated_release(&destination, &state_path, &state, &digest, bytes).unwrap();
+
+        assert_eq!(
+            fs::read(super::cached_artifact_path(&destination, &digest)).unwrap(),
+            bytes
+        );
+        assert_eq!(read_release_state(&state_path).unwrap(), state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_activation_does_not_persist_pending_release_state() {
+        let root = temp("failed-activation");
+        let destination = root.join("tapid");
+        let state_path = root.join(".tapid-release-state.json");
+        let bytes = b"artifact";
+        let digest = format!("{:x}", sha2::Sha256::digest(bytes));
+        let state = ReleaseState::new("0.0.7", 7, digest.clone()).unwrap();
+
+        let result = super::activate_and_persist(
+            &destination,
+            b"executable",
+            Some((state_path.clone(), state, digest.clone())),
+            bytes,
+            |_destination, _executable| Err("injected activation failure".to_owned()),
+        );
+
+        assert!(result.is_err());
+        assert!(!state_path.exists());
+        assert!(!super::cached_artifact_path(&destination, &digest).exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
