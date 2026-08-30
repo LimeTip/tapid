@@ -645,6 +645,29 @@ fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
+const CURL_CONNECT_TIMEOUT_SECONDS: &str = "10";
+const CURL_MAX_TIME_SECONDS: &str = "30";
+
+fn curl_fetch_args(url: &str) -> Vec<String> {
+    [
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--proto",
+        "=https",
+        "--tlsv1.2",
+        "--connect-timeout",
+        CURL_CONNECT_TIMEOUT_SECONDS,
+        "--max-time",
+        CURL_MAX_TIME_SECONDS,
+        url,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
 struct CurlFetcher;
 impl tapid_release_client::Fetcher for CurlFetcher {
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> {
@@ -652,16 +675,7 @@ impl tapid_release_client::Fetcher for CurlFetcher {
             return Err("URL must use HTTPS".into());
         }
         let output = std::process::Command::new("curl")
-            .args([
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--location",
-                "--proto",
-                "=https",
-                "--tlsv1.2",
-                url,
-            ])
+            .args(curl_fetch_args(url))
             .output()
             .map_err(|e| format!("HTTPS transport unavailable: {e}"))?;
         if output.status.success() {
@@ -1862,8 +1876,31 @@ mod activation_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        cmd_batch_path, cmd_shim_contents, powershell_shim_contents, powershell_single_quoted,
+        CURL_CONNECT_TIMEOUT_SECONDS, CURL_MAX_TIME_SECONDS, cmd_batch_path, cmd_shim_contents,
+        curl_fetch_args, powershell_shim_contents, powershell_single_quoted,
     };
+
+    #[test]
+    fn release_fetches_have_bounded_connection_and_total_time() {
+        let args = curl_fetch_args("https://example.test/stable.json");
+        assert_eq!(
+            args,
+            vec![
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--proto",
+                "=https",
+                "--tlsv1.2",
+                "--connect-timeout",
+                CURL_CONNECT_TIMEOUT_SECONDS,
+                "--max-time",
+                CURL_MAX_TIME_SECONDS,
+                "https://example.test/stable.json",
+            ]
+        );
+    }
 
     #[test]
     fn powershell_single_quoted_escapes_apostrophes() {
