@@ -159,6 +159,12 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature[:-1], b""))
         self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature + b"\0", b""))
         self.assertFalse(bootstrap_verifier.verify_ed25519(public_key, signature[:32] + bootstrap_verifier.L.to_bytes(32, "little"), b""))
+        # RFC 8032 uses the cofactored equation and accepts valid torsion
+        # points; rejecting them would not be RFC-compatible.
+        torsion_public_key = bytes.fromhex("ec" + "ff" * 30 + "7f")
+        identity_r = bytes.fromhex("01" + "00" * 31)
+        zero_signature = identity_r + (0).to_bytes(32, "little")
+        self.assertTrue(bootstrap_verifier.verify_ed25519(torsion_public_key, zero_signature, b""))
 
     def test_uninstall_removes_only_tapid_binary(self):
         with tempfile.TemporaryDirectory() as tmp:

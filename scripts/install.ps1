@@ -232,9 +232,11 @@ def verify_ed25519(public_key, signature, message):
     scalar = int.from_bytes(signature[32:], "little")
     if scalar >= L: return False
     challenge = int.from_bytes(hashlib.sha512(signature[:32] + public_key + message).digest(), "little") % L
-    identity = (0, 1)
-    if _ed_scalarmult(public_point, L) != identity or _ed_scalarmult(signature_point, L) != identity: return False
-    return _ed_scalarmult(B, scalar) == _ed_add(signature_point, _ed_scalarmult(public_point, challenge))
+    # RFC 8032 verifies the cofactored equation, which also handles
+    # otherwise-valid encoded points outside the prime-order subgroup.
+    return _ed_scalarmult(B, scalar * 8) == _ed_scalarmult(
+        _ed_add(signature_point, _ed_scalarmult(public_point, challenge)), 8
+    )
 
 
 def verify(manifest_path, target, version):
