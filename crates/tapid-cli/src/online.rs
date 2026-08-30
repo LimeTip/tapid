@@ -383,13 +383,10 @@ pub fn resolve_and_fetch(
         });
         let _ = fs::remove_dir_all(temp);
     }
-    let mut pending: Vec<_> = packages.keys().cloned().collect();
-    while !pending.is_empty() {
-        let mut progressed = false;
-        let mut next = Vec::new();
-        for key in pending {
-            let (mut locked, record, _) = packages.get(&key).cloned().unwrap();
-            let mut ok = true;
+    let locked_packages: Result<Vec<_>, String> = packages
+        .values()
+        .map(|(locked, record, _)| {
+            let mut locked = locked.clone();
             for name in record.dependencies.keys() {
                 let (registry, package) = dep_parts(name)?;
                 let target = selected
@@ -403,26 +400,15 @@ pub fn resolve_and_fetch(
                     &empty_platform,
                 )
                 .to_string();
-                if !packages.contains_key(&target_key) {
-                    ok = false;
-                    break;
-                }
                 locked
                     .add_dependency(&package.to_string(), &target_key)
                     .map_err(|e| e.to_string())?;
             }
-            if !ok {
-                next.push(key);
-                continue;
-            }
-            lock.insert_package(locked).map_err(|e| e.to_string())?;
-            progressed = true;
-        }
-        if !progressed {
-            return Err("dependency graph contains an unmaterializable cycle".into());
-        }
-        pending = next;
-    }
+            Ok(locked)
+        })
+        .collect();
+    lock.insert_packages(locked_packages?)
+        .map_err(|e| e.to_string())?;
     let mut edge_list = Vec::new();
     let mut root_deps = Vec::new();
     for (_, record, id) in packages.values() {
