@@ -12,7 +12,7 @@ The manifest digest payload is a copy of the complete manifest object with the `
 
 Clients must also verify that each artifact filename's embedded version matches the manifest `version`; the schema constrains both to the supported `0.x.y` shape but JSON Schema does not express that cross-field equality.
 
-Discovery fetches use a 10-second connection timeout and a 30-second total transfer timeout per channel-index or manifest request before falling back to the next candidate.
+Discovery fetches use a 10-second connection timeout, a 30-second total transfer timeout, and a 256 KiB response limit per channel-index or manifest request before falling back to the next candidate.
 
 ## Verification order
 

@@ -90,6 +90,7 @@ pub struct ChannelIndex {
 }
 
 const MAX_MANIFESTS_PER_INDEX: usize = 16;
+const MAX_CHANNEL_INDEX_BYTES: usize = 256 * 1024;
 
 impl ChannelIndex {
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
@@ -260,6 +261,9 @@ pub fn discover<F: Fetcher>(
             Ok(body) => body,
             Err(_) => continue,
         };
+        if body.len() > MAX_CHANNEL_INDEX_BYTES {
+            continue;
+        }
         let index = match ChannelIndex::parse(&body) {
             Ok(index) => index,
             Err(_) => continue,

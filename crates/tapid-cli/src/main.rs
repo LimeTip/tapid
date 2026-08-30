@@ -647,6 +647,7 @@ fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 const CURL_CONNECT_TIMEOUT_SECONDS: &str = "10";
 const CURL_MAX_TIME_SECONDS: &str = "30";
+const CURL_MAX_FILESIZE_BYTES: &str = "262144";
 
 fn curl_fetch_args(url: &str) -> Vec<String> {
     [
@@ -661,6 +662,8 @@ fn curl_fetch_args(url: &str) -> Vec<String> {
         CURL_CONNECT_TIMEOUT_SECONDS,
         "--max-time",
         CURL_MAX_TIME_SECONDS,
+        "--max-filesize",
+        CURL_MAX_FILESIZE_BYTES,
         url,
     ]
     .into_iter()
@@ -1876,8 +1879,9 @@ mod activation_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CURL_CONNECT_TIMEOUT_SECONDS, CURL_MAX_TIME_SECONDS, cmd_batch_path, cmd_shim_contents,
-        curl_fetch_args, powershell_shim_contents, powershell_single_quoted,
+        CURL_CONNECT_TIMEOUT_SECONDS, CURL_MAX_FILESIZE_BYTES, CURL_MAX_TIME_SECONDS,
+        cmd_batch_path, cmd_shim_contents, curl_fetch_args, powershell_shim_contents,
+        powershell_single_quoted,
     };
 
     #[test]
@@ -1897,6 +1901,8 @@ mod tests {
                 CURL_CONNECT_TIMEOUT_SECONDS,
                 "--max-time",
                 CURL_MAX_TIME_SECONDS,
+                "--max-filesize",
+                CURL_MAX_FILESIZE_BYTES,
                 "https://example.test/stable.json",
             ]
         );
