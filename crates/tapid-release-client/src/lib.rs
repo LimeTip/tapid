@@ -270,7 +270,7 @@ pub fn discover<F: Fetcher>(
         if !https(endpoint) {
             continue;
         }
-        let body = match fetcher.fetch(endpoint) {
+        let body = match fetcher.fetch_with_limit(endpoint, MAX_CHANNEL_INDEX_BYTES) {
             Ok(body) => body,
             Err(_) => continue,
         };
@@ -282,7 +282,7 @@ pub fn discover<F: Fetcher>(
             Err(_) => continue,
         };
         for manifest_url in &index.manifests {
-            let body = match fetcher.fetch(manifest_url) {
+            let body = match fetcher.fetch_with_limit(manifest_url, MAX_MANIFEST_BYTES) {
                 Ok(body) => body,
                 Err(_) => continue,
             };

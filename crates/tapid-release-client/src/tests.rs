@@ -31,6 +31,42 @@ fn rejects_invalid_channel_index() { let mut f = Fake { responses: [("https://ex
 
 #[test]
 fn tries_manifest_urls_in_index_order_and_bounds_fan_out() { let mut v = manifest(); v["artifacts"][0]["sha256"] = json!(digest(b"hello")); let body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); let mut responses = BTreeMap::new(); responses.insert("https://example.test/stable.json".into(), Ok(channel(&["https://example.test/first", "https://example.test/second"]))); responses.insert("https://example.test/first".into(), Err("invalid".into())); responses.insert("https://example.test/second".into(), Ok(body)); let mut f = Fake { responses, calls: vec![] }; assert!(discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).is_ok()); assert_eq!(f.calls, vec!["https://example.test/stable.json", "https://example.test/first", "https://example.test/second"]); let too_many: Vec<_> = (0..17).map(|_| "https://example.test/manifest").collect(); let mut f = Fake { responses: [("https://example.test/stable.json".into(), Ok(channel(&too_many)))].into_iter().collect(), calls: vec![] }; assert!(discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).is_err()); assert_eq!(f.calls, vec!["https://example.test/stable.json"]); }
+struct LimitAwareFake {
+    responses: BTreeMap<String, Result<Vec<u8>, String>>,
+    calls: Vec<(String, usize)>,
+}
+impl Fetcher for LimitAwareFake {
+    fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> {
+        panic!("unbounded fetch used for {url}");
+    }
+
+    fn fetch_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        self.calls.push((url.into(), max_bytes));
+        self.responses.remove(url).unwrap_or_else(|| Err("missing".into()))
+    }
+}
+
+#[test]
+fn discovery_passes_metadata_limits_to_custom_fetchers() {
+    let mut f = LimitAwareFake {
+        responses: [
+            ("https://example.test/stable.json".into(), Ok(channel(&["https://example.test/manifest"]))),
+            ("https://example.test/manifest".into(), Err("invalid".into())),
+        ]
+        .into_iter()
+        .collect(),
+        calls: vec![],
+    };
+    assert!(discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).is_err());
+    assert_eq!(
+        f.calls,
+        vec![
+            ("https://example.test/stable.json".into(), super::MAX_CHANNEL_INDEX_BYTES),
+            ("https://example.test/manifest".into(), super::MAX_MANIFEST_BYTES),
+        ]
+    );
+}
+
 #[test]
 fn ignores_oversized_channel_index_before_parsing() { let body = vec![b" "[0]; super::MAX_CHANNEL_INDEX_BYTES + 1]; let mut f = Fake { responses: [("https://example.test/stable.json".into(), Ok(body))].into_iter().collect(), calls: vec![] }; assert!(discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).is_err()); assert_eq!(f.calls, vec!["https://example.test/stable.json"]); }
 
