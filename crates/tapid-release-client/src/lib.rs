@@ -82,6 +82,32 @@ pub struct Document {
     pub media_type: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelIndex {
+    pub channel: String,
+    pub manifests: Vec<String>,
+}
+
+const MAX_MANIFESTS_PER_INDEX: usize = 16;
+
+impl ChannelIndex {
+    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let index: Self = serde_json::from_slice(bytes)
+            .map_err(|e| Error::InvalidManifest(format!("invalid channel index: {e}")))?;
+        if index.channel != "stable"
+            || index.manifests.is_empty()
+            || index.manifests.len() > MAX_MANIFESTS_PER_INDEX
+            || index.manifests.iter().any(|url| !https(url))
+        {
+            return Err(Error::InvalidManifest(
+                "invalid stable channel index".into(),
+            ));
+        }
+        Ok(index)
+    }
+}
+
 impl ReleaseManifest {
     pub fn parse_and_verify(
         bytes: &[u8],
@@ -234,10 +260,20 @@ pub fn discover<F: Fetcher>(
             Ok(body) => body,
             Err(_) => continue,
         };
-        if let Ok(manifest) =
-            ReleaseManifest::parse_and_verify(&body, keyring, target, now, max_age)
-        {
-            return Ok(manifest);
+        let index = match ChannelIndex::parse(&body) {
+            Ok(index) => index,
+            Err(_) => continue,
+        };
+        for manifest_url in &index.manifests {
+            let body = match fetcher.fetch(manifest_url) {
+                Ok(body) => body,
+                Err(_) => continue,
+            };
+            if let Ok(manifest) =
+                ReleaseManifest::parse_and_verify(&body, keyring, target, now, max_age)
+            {
+                return Ok(manifest);
+            }
         }
     }
     Err(Error::AllEndpointsFailed {

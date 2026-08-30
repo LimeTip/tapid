@@ -10,6 +10,7 @@ const SECRET: [u8; 32] = [7; 32];
 fn keyring() -> KeyRing { let mut r = KeyRing::new(); r.insert(TrustedKey { key_id: "release-key-1".into(), algorithm: "ed25519".into(), public_key: SigningKey::from_bytes(&SECRET).verifying_key().to_bytes() }).unwrap(); r }
 fn manifest() -> serde_json::Value { json!({"schema":"tapid-release-manifest-v1","product":"tapid","version":"0.0.6","tag":"v0.0.6","commit":"0123456789abcdef0123456789abcdef01234567","created_at":"2026-08-27T10:00:00Z","expires_at":"2026-09-27T10:00:00Z","artifacts":[{"name":"tapid-0.0.6-x86_64-unknown-linux-gnu.tar.gz","target":TARGET,"url":"https://example.test/tapid.tar.gz","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":5}]}) }
 fn signed() -> Vec<u8> { serde_json::to_vec(&release::sign(manifest(), "release-key-1", &SECRET).unwrap()).unwrap() }
+fn channel(urls: &[&str]) -> Vec<u8> { serde_json::to_vec(&json!({"channel": "stable", "manifests": urls})).unwrap() }
 fn digest(bytes: &[u8]) -> String { use sha2::{Digest, Sha256}; format!("{:x}", Sha256::digest(bytes)) }
 struct Fake { responses: BTreeMap<String, Result<Vec<u8>, String>>, calls: Vec<String> }
 impl Fetcher for Fake { fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> { self.calls.push(url.into()); self.responses.remove(url).unwrap_or_else(|| Err("missing".into())) } }
@@ -23,7 +24,13 @@ fn rejects_unknown_fields_non_https_and_wrong_target() { let mut v = manifest();
 #[test]
 fn verifies_artifact_hash_and_size() { let mut v = manifest(); v["artifacts"][0]["sha256"] = json!(digest(b"hello")); let b = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); let r = ReleaseManifest::parse_and_verify(&b, &keyring(), TARGET, NOW, None).unwrap(); assert!(r.verify_artifact(b"hello").is_ok()); assert!(matches!(r.verify_artifact(b"tampered"), Err(Error::ArtifactSizeMismatch { .. }))); }
 #[test]
-fn falls_back_in_order_and_returns_verified_release() { let mut v = manifest(); v["artifacts"][0]["sha256"] = json!(digest(b"hello")); let body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); let mut f = Fake { responses: [("https://one.test/manifest".into(), Err("outage".into())), ("https://two.test/manifest".into(), Ok(body))].into_iter().collect(), calls: vec![] }; let r = discover(&mut f, &["https://one.test/manifest", "https://two.test/manifest"], &keyring(), TARGET, NOW, None).unwrap(); assert_eq!(r.artifact().unwrap().url, "https://example.test/tapid.tar.gz"); assert_eq!(f.calls, vec!["https://one.test/manifest", "https://two.test/manifest"]); }
+fn follows_channel_index_and_falls_back_in_order() { let mut v = manifest(); v["artifacts"][0]["sha256"] = json!(digest(b"hello")); let body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); let mut f = Fake { responses: [("https://one.test/stable.json".into(), Ok(channel(&["https://one.test/manifest"]))), ("https://one.test/manifest".into(), Err("outage".into())), ("https://two.test/stable.json".into(), Ok(channel(&["https://two.test/manifest"]))), ("https://two.test/manifest".into(), Ok(body))].into_iter().collect(), calls: vec![] }; let r = discover(&mut f, &["https://one.test/stable.json", "https://two.test/stable.json"], &keyring(), TARGET, NOW, None).unwrap(); assert_eq!(r.artifact().unwrap().url, "https://example.test/tapid.tar.gz"); assert_eq!(f.calls, vec!["https://one.test/stable.json", "https://one.test/manifest", "https://two.test/stable.json", "https://two.test/manifest"]); }
+
+#[test]
+fn rejects_invalid_channel_index() { let mut f = Fake { responses: [("https://example.test/stable.json".into(), Ok(serde_json::to_vec(&json!({"channel": "beta", "manifests": ["https://example.test/manifest"]})).unwrap()))].into_iter().collect(), calls: vec![] }; let err = discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).unwrap_err(); assert!(matches!(err, Error::AllEndpointsFailed { attempts: 1 })); }
+
+#[test]
+fn tries_manifest_urls_in_index_order_and_bounds_fan_out() { let mut v = manifest(); v["artifacts"][0]["sha256"] = json!(digest(b"hello")); let body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); let mut responses = BTreeMap::new(); responses.insert("https://example.test/stable.json".into(), Ok(channel(&["https://example.test/first", "https://example.test/second"]))); responses.insert("https://example.test/first".into(), Err("invalid".into())); responses.insert("https://example.test/second".into(), Ok(body)); let mut f = Fake { responses, calls: vec![] }; assert!(discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).is_ok()); assert_eq!(f.calls, vec!["https://example.test/stable.json", "https://example.test/first", "https://example.test/second"]); let too_many: Vec<_> = (0..17).map(|_| "https://example.test/manifest").collect(); let mut f = Fake { responses: [("https://example.test/stable.json".into(), Ok(channel(&too_many)))].into_iter().collect(), calls: vec![] }; assert!(discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).is_err()); assert_eq!(f.calls, vec!["https://example.test/stable.json"]); }
 #[test]
 fn last_known_good_round_trips_and_replaces_atomically() { let state = LastKnownGood { version: "0.0.6".into(), artifact_sha256: "a".repeat(64) }; let dir = std::env::temp_dir().join(format!("tapid-release-{}", std::process::id())); let _ = std::fs::create_dir_all(&dir); let path = dir.join("state.json"); write_last_known_good(&path, &state).unwrap(); assert_eq!(read_last_known_good(&path).unwrap(), state); let _ = std::fs::remove_dir_all(dir); }
 
@@ -67,7 +74,7 @@ fn interrupted_replacement_preserves_previous_state() {
 #[test]
 fn all_endpoints_fail_with_deterministic_error() {
     let mut f = Fake { responses: BTreeMap::new(), calls: vec![] };
-    let err = discover(&mut f, &["https://one.test/manifest", "https://two.test/manifest"], &keyring(), TARGET, NOW, None).unwrap_err();
+    let err = discover(&mut f, &["https://one.test/stable.json", "https://two.test/stable.json"], &keyring(), TARGET, NOW, None).unwrap_err();
     assert!(matches!(err, Error::AllEndpointsFailed { attempts: 2 }));
 }
 
