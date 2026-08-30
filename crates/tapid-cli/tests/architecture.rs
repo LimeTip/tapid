@@ -1,7 +1,26 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 const MAX_ENTRYPOINT_LINES: usize = 12;
 const MAX_PRODUCTION_FILE_LINES: usize = 800;
+
+fn rust_files_under(root: PathBuf) -> Vec<PathBuf> {
+    let mut pending = vec![root];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).expect("read source directory") {
+            let path = entry.expect("read source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
 
 #[test]
 fn main_is_a_thin_entrypoint() {
@@ -25,11 +44,7 @@ fn main_is_a_thin_entrypoint() {
 #[test]
 fn application_modules_do_not_render_or_choose_process_status() {
     let application_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/application");
-    for entry in fs::read_dir(application_root).expect("read application modules") {
-        let path = entry.expect("read application entry").path();
-        if path.extension().and_then(|value| value.to_str()) != Some("rs") {
-            continue;
-        }
+    for path in rust_files_under(application_root) {
         let source = fs::read_to_string(&path).expect("read application module");
         assert!(
             !source.contains("println!") && !source.contains("eprintln!"),
@@ -56,25 +71,37 @@ fn commands_are_split_by_user_facing_capability() {
 }
 
 #[test]
+fn rust_file_discovery_recurses_into_nested_modules() {
+    let root = std::env::temp_dir().join(format!(
+        "tapid-architecture-recursion-{}",
+        std::process::id()
+    ));
+    let nested = root.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(root.join("top.rs"), "").unwrap();
+    fs::write(nested.join("mod.rs"), "").unwrap();
+
+    let mut files = rust_files_under(root.clone());
+    files.sort();
+
+    let mut expected = vec![root.join("top.rs"), nested.join("mod.rs")];
+    expected.sort();
+    assert_eq!(files, expected);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn production_modules_stay_navigable() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut pending = vec![source_root];
     let mut oversized = Vec::new();
 
-    while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(directory).expect("read source directory") {
-            let path = entry.expect("read source entry").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
-                let lines = fs::read_to_string(&path)
-                    .expect("read Rust source")
-                    .lines()
-                    .count();
-                if lines > MAX_PRODUCTION_FILE_LINES {
-                    oversized.push(format!("{}: {lines}", path.display()));
-                }
-            }
+    for path in rust_files_under(source_root) {
+        let lines = fs::read_to_string(&path)
+            .expect("read Rust source")
+            .lines()
+            .count();
+        if lines > MAX_PRODUCTION_FILE_LINES {
+            oversized.push(format!("{}: {lines}", path.display()));
         }
     }
 
