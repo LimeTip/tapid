@@ -35,6 +35,24 @@ impl PackageManifest {
         if let Some(value) = object.get("bin") {
             manifest.bin = Some(parse_bin(value, &manifest.name)?);
         }
+        let known_fields = [
+            "name",
+            "version",
+            "private",
+            "description",
+            "license",
+            "dependencies",
+            "devDependencies",
+            "optionalDependencies",
+            "peerDependencies",
+            "scripts",
+            "bin",
+        ];
+        manifest.extra = object
+            .iter()
+            .filter(|(key, _)| !known_fields.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         Ok(manifest)
     }
 }

@@ -16,6 +16,7 @@ pub struct PackageManifest {
     pub(crate) peer_dependencies: BTreeMap<String, String>,
     pub(crate) scripts: BTreeMap<String, String>,
     pub(crate) bin: Option<PackageBin>,
+    pub(crate) extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,6 +59,7 @@ impl PackageManifest {
             peer_dependencies: BTreeMap::new(),
             scripts: BTreeMap::new(),
             bin: None,
+            extra: BTreeMap::new(),
         })
     }
 
@@ -110,7 +112,7 @@ impl PackageManifest {
     }
 
     pub fn to_json(&self) -> String {
-        let value = ManifestDocument {
+        let document = ManifestDocument {
             name: self.name.to_string(),
             version: self.version.to_string(),
             private: self.private,
@@ -134,10 +136,11 @@ impl PackageManifest {
                     })
                     .collect()
             }),
+            extra: &self.extra,
         };
         format!(
             "{}\n",
-            serde_json::to_string_pretty(&value).expect("manifest is serializable")
+            serde_json::to_string_pretty(&document).expect("manifest is serializable")
         )
     }
 }
@@ -166,4 +169,6 @@ struct ManifestDocument<'a> {
     scripts: Option<&'a BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bin: Option<BTreeMap<String, String>>,
+    #[serde(flatten)]
+    extra: &'a BTreeMap<String, serde_json::Value>,
 }
