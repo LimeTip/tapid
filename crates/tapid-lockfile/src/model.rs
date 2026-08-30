@@ -42,6 +42,13 @@ fn canonical_platform_context(context: &PlatformContext) -> String {
     )
 }
 
+fn canonical_artifact_digest(value: &str) -> Result<String, LockfileError> {
+    value
+        .parse::<ArtifactDigest>()
+        .map(|digest| digest.to_string())
+        .map_err(LockfileError::Domain)
+}
+
 fn context_or_dash(context: &str) -> &str {
     if context.is_empty() { "-" } else { context }
 }
@@ -136,9 +143,7 @@ pub struct Lockfile {
 
 impl Lockfile {
     pub fn new(root_manifest_digest: &str) -> Result<Self, LockfileError> {
-        root_manifest_digest
-            .parse::<ArtifactDigest>()
-            .map_err(LockfileError::Domain)?;
+        let root_manifest_digest = canonical_artifact_digest(root_manifest_digest)?;
         Ok(Self {
             lockfile_version: LOCKFILE_VERSION,
             root_manifest_digest: root_manifest_digest.to_owned(),
@@ -197,10 +202,11 @@ impl Lockfile {
 
     /// Checks that this lockfile belongs to the current root manifest.
     pub fn validate_replay(&self, current_root_manifest_digest: &str) -> Result<(), LockfileError> {
+        let current_root_manifest_digest = canonical_artifact_digest(current_root_manifest_digest)?;
         if self.root_manifest_digest != current_root_manifest_digest {
             return Err(LockfileError::RootManifestDigestMismatch {
                 expected: self.root_manifest_digest.clone(),
-                actual: current_root_manifest_digest.to_owned(),
+                actual: current_root_manifest_digest,
             });
         }
         Ok(())
@@ -213,14 +219,12 @@ impl Lockfile {
     }
 
     pub fn from_json(input: &str) -> Result<Self, LockfileError> {
-        let lockfile: Self = serde_json::from_str(input).map_err(LockfileError::Serialization)?;
+        let mut lockfile: Self =
+            serde_json::from_str(input).map_err(LockfileError::Serialization)?;
         if lockfile.lockfile_version != LOCKFILE_VERSION {
             return Err(LockfileError::UnsupportedVersion(lockfile.lockfile_version));
         }
-        lockfile
-            .root_manifest_digest
-            .parse::<ArtifactDigest>()
-            .map_err(LockfileError::Domain)?;
+        lockfile.root_manifest_digest = canonical_artifact_digest(&lockfile.root_manifest_digest)?;
         for (key, package) in &lockfile.packages {
             if key != &package.key() {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));

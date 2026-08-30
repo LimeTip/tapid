@@ -115,6 +115,17 @@ fn replay_validation_requires_current_root_manifest_digest() {
 }
 
 #[test]
+fn replay_validation_accepts_uppercase_root_manifest_digest() {
+    let lowercase = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let uppercase = format!("sha256-{}", lowercase[7..].to_uppercase());
+    let lock_json = format!(
+        r#"{{"lockfileVersion":4,"rootManifestDigest":"{uppercase}","resolverVersion":"0","linkerVersion":"0","packages":{{}}}}"#
+    );
+    let lock = Lockfile::from_json(&lock_json).unwrap();
+    assert!(lock.validate_replay(lowercase).is_ok());
+}
+
+#[test]
 fn rejects_invalid_artifact_urls_at_construction_time() {
     let mut package = package_fixture();
     assert!(package.set_artifact_url("file:///tmp/package.tgz").is_err());
