@@ -99,7 +99,7 @@ pub(crate) fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String
         std::process::id(),
         unique_nonce()
     ));
-    fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+    write_synced_file(&temp, bytes)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -151,6 +151,23 @@ pub(crate) fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String
         Err("executable replacement is unsupported on this operating system".into())
     }
 }
+
+fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(path);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
 pub(crate) fn replace_lockfile(path: &Path, contents: &str) -> Result<Option<PathBuf>, String> {
     let nonce = format!("{}-{}", std::process::id(), unique_nonce());
     let temp = path.with_file_name(format!(".tapid-lock-{nonce}.tmp"));
@@ -197,4 +214,27 @@ pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256-{}", hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_synced_file;
+    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+
+    #[test]
+    fn synced_file_write_persists_the_complete_payload() {
+        let path = std::env::temp_dir().join(format!(
+            "tapid-synced-file-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        write_synced_file(&path, b"new executable").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new executable");
+        fs::remove_file(path).unwrap();
+    }
 }
