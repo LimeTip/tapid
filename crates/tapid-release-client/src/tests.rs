@@ -35,6 +35,25 @@ fn tries_manifest_urls_in_index_order_and_bounds_fan_out() { let mut v = manifes
 fn ignores_oversized_channel_index_before_parsing() { let body = vec![b" "[0]; super::MAX_CHANNEL_INDEX_BYTES + 1]; let mut f = Fake { responses: [("https://example.test/stable.json".into(), Ok(body))].into_iter().collect(), calls: vec![] }; assert!(discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).is_err()); assert_eq!(f.calls, vec!["https://example.test/stable.json"]); }
 
 #[test]
+fn rejects_oversized_manifest_before_parsing() {
+    let mut v = manifest();
+    v["artifacts"][0]["sha256"] = json!(digest(b"hello"));
+    let mut body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap();
+    body.resize(super::MAX_MANIFEST_BYTES + 1, b' ');
+    let mut f = Fake {
+        responses: [
+            ("https://example.test/stable.json".into(), Ok(channel(&["https://example.test/manifest"]))),
+            ("https://example.test/manifest".into(), Ok(body)),
+        ]
+        .into_iter()
+        .collect(),
+        calls: vec![],
+    };
+    assert!(discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).is_err());
+    assert_eq!(f.calls, vec!["https://example.test/stable.json", "https://example.test/manifest"]);
+}
+
+#[test]
 fn last_known_good_round_trips_and_replaces_atomically() { let state = LastKnownGood { version: "0.0.6".into(), artifact_sha256: "a".repeat(64) }; let dir = std::env::temp_dir().join(format!("tapid-release-{}", std::process::id())); let _ = std::fs::create_dir_all(&dir); let path = dir.join("state.json"); write_last_known_good(&path, &state).unwrap(); assert_eq!(read_last_known_good(&path).unwrap(), state); let _ = std::fs::remove_dir_all(dir); }
 
 #[test]
