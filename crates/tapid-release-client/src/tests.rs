@@ -13,7 +13,20 @@ fn signed() -> Vec<u8> { serde_json::to_vec(&release::sign(manifest(), "release-
 fn channel(urls: &[&str]) -> Vec<u8> { serde_json::to_vec(&json!({"channel": "stable", "manifests": urls})).unwrap() }
 fn digest(bytes: &[u8]) -> String { use sha2::{Digest, Sha256}; format!("{:x}", Sha256::digest(bytes)) }
 struct Fake { responses: BTreeMap<String, Result<Vec<u8>, String>>, calls: Vec<String> }
-impl Fetcher for Fake { fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> { self.calls.push(url.into()); self.responses.remove(url).unwrap_or_else(|| Err("missing".into())) } }
+impl Fetcher for Fake {
+    fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> {
+        self.calls.push(url.into());
+        self.responses.remove(url).unwrap_or_else(|| Err("missing".into()))
+    }
+
+    fn fetch_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        let body = self.fetch(url)?;
+        if body.len() > max_bytes {
+            return Err("response exceeds maximum size".into());
+        }
+        Ok(body)
+    }
+}
 
 #[test]
 fn verifies_signed_manifest_and_matching_artifact() { let bytes = b"hello"; let mut v = manifest(); v["artifacts"][0]["sha256"] = json!(digest(bytes)); let body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); let r = ReleaseManifest::parse_and_verify(&body, &keyring(), TARGET, NOW, None).unwrap(); assert_eq!(r.artifact().unwrap().size, 5); }
