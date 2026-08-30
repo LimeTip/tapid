@@ -1,5 +1,3 @@
 # Architecture source-size exceptions
 # Format: repository-relative path | concrete rationale
 # Exceptions acknowledge reviewed cohesion or migration debt. They are not growth targets.
-
-crates/tapid-cli/src/main.rs | Legacy CLI orchestration predates the entrypoint-only rule and will move behind domain capability interfaces through tested vertical slices. New work must not increase this debt without architecture review.
