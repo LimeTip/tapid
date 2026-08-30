@@ -266,7 +266,7 @@ impl PlatformContext {
                     || v.chars().any(char::is_whitespace)
                     || v.chars().any(char::is_control)
                     || v == "-"
-                    || v.contains(['-', '|'])
+                    || v.contains('|')
             })
         {
             return Err(DomainError::InvalidPlatformContext);
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(peer.to_string(), "react@18.2.0");
         let platform = PlatformContext::new(Some("linux"), Some("x86_64"), Some("gnu")).unwrap();
         assert_eq!(platform.to_string(), "linux-x86_64-gnu");
-        assert!(PlatformContext::new(Some("linux-x"), None, None).is_err());
+        assert!(PlatformContext::new(Some("linux-x"), None, None).is_ok());
         assert!(PlatformContext::new(Some("-"), None, None).is_err());
         assert!(PlatformContext::new(Some("linux|custom"), None, None).is_err());
         assert!(PlatformContext::new(Some("linux\u{0000}"), None, None).is_err());
