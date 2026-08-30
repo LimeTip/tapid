@@ -7,6 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL = ROOT / "scripts" / "install.sh"
+INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
+BOOTSTRAP_VERIFIER = ROOT / "scripts" / "bootstrap_verifier.py"
 UNINSTALL = ROOT / "scripts" / "uninstall.sh"
 
 
@@ -133,6 +135,14 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn("RFC 8032", install_text)
         self.assertIn("unsupported Ed25519 verifier", install_text)
         self.assertNotIn("release_manifest.py", install_text)
+
+    def test_embedded_verifiers_match_standalone_verifier(self):
+        standalone = BOOTSTRAP_VERIFIER.read_text()
+        expected = standalone[standalone.index("# RFC 8032"):standalone.index("def verify(")]
+
+        for script in (INSTALL, INSTALL_PS1):
+            embedded = script.read_text()
+            self.assertIn(expected, embedded, script.name)
 
     def test_bootstrap_verifier_accepts_and_rejects_rfc8032_vector(self):
         import sys
