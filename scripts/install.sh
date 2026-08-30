@@ -227,7 +227,7 @@ curl -fsSL "$base/release-manifest.json" -o "$manifest" 2>/dev/null || fail "cou
 artifact_info="$(python3 - "$manifest" "$target" "$VERSION" <<'TAPID_BOOTSTRAP_VERIFIER'
 #!/usr/bin/env python3
 """Self-contained Tapid release-manifest verifier for first-install bootstrap."""
-import base64, hashlib, json, re, sys
+import base64, datetime, hashlib, json, re, sys
 
 PUBLIC_KEY = "eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc="
 PUBLIC_KEY_FINGERPRINT = "sha256-238d16177b1c9ae21b53476d1a9097b5011414a26e6625986ecf1799dacf47f4"
@@ -308,6 +308,24 @@ def verify_ed25519(public_key, signature, message):
     )
 
 
+def parse_time(value):
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        fail("signed release manifest timestamp is invalid")
+    if parsed.tzinfo is None:
+        fail("signed release manifest timestamp must include a timezone")
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def validate_freshness(created_at, expires_at, now=None):
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    created = parse_time(created_at)
+    expires = parse_time(expires_at)
+    if created > now or expires <= now or expires <= created:
+        fail("signed release manifest is stale or not yet valid")
+
+
 def verify(manifest_path, target, version):
     try:
         value = json.loads(open(manifest_path, encoding="utf-8").read())
@@ -344,6 +362,7 @@ def verify(manifest_path, target, version):
         fail("embedded production release key fingerprint is invalid")
     if not verify_ed25519(pub, sig, canonical(context)):
         fail("signed release manifest Ed25519 verification failed")
+    validate_freshness(value.get("created_at"), value.get("expires_at"))
     artifacts = value.get("artifacts")
     if not isinstance(artifacts, list):
         fail("signed release manifest artifacts must be an array")

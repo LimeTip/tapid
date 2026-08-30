@@ -155,6 +155,24 @@ class InstallerScriptTests(unittest.TestCase):
             embedded = script.read_text()
             self.assertIn(expected, embedded, script.name)
 
+    def test_bootstrap_verifier_enforces_signed_manifest_freshness(self):
+        import datetime
+        import sys
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import bootstrap_verifier
+
+        now = datetime.datetime(2026, 8, 27, 12, 0, tzinfo=datetime.timezone.utc)
+        bootstrap_verifier.validate_freshness(
+            "2026-08-27T10:00:00Z", "2026-09-27T10:00:00Z", now
+        )
+        for created, expires in (
+            ("2026-08-27T12:00:01Z", "2026-09-27T10:00:00Z"),
+            ("2026-08-26T10:00:00Z", "2026-08-27T11:59:59Z"),
+            ("2026-08-27T10:00:00Z", "2026-08-27T10:00:00Z"),
+        ):
+            with self.assertRaises(SystemExit):
+                bootstrap_verifier.validate_freshness(created, expires, now)
+
     def test_bootstrap_verifier_accepts_and_rejects_rfc8032_vector(self):
         import sys
         sys.path.insert(0, str(ROOT / "scripts"))
