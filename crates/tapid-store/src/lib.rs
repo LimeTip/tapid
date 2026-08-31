@@ -198,6 +198,27 @@ impl Store {
             }
             let entry = entry?;
             let name = entry.file_name();
+            if shared_replay_lease_owner(&name).is_some() {
+                let path = entry.path();
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if !metadata.file_type().is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "shared replay lease is not a regular file",
+                    )
+                    .into());
+                }
+                if !shared_replay_lease_is_registered(&path)
+                    && try_acquire_stale_replay_lease(&path)?.is_some()
+                {
+                    remove_file_if_unchanged(&path, &metadata);
+                }
+                continue;
+            }
             let Some(pid) = replay_snapshot_owner(&name) else {
                 continue;
             };
@@ -453,7 +474,15 @@ fn copy_tree_contents(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 fn replay_snapshot_owner(name: &std::ffi::OsStr) -> Option<u32> {
-    let name = name.to_str()?.strip_prefix("replay-tree-")?;
+    replay_owner(name, "replay-tree-")
+}
+
+fn shared_replay_lease_owner(name: &std::ffi::OsStr) -> Option<u32> {
+    replay_owner(name, "replay-lease-")
+}
+
+fn replay_owner(name: &std::ffi::OsStr, prefix: &str) -> Option<u32> {
+    let name = name.to_str()?.strip_prefix(prefix)?;
     let (pid, nonce) = name.split_once('-')?;
     if pid.is_empty()
         || nonce.is_empty()
@@ -670,6 +699,13 @@ fn replay_lease_state(snapshot: &Path) -> Option<bool> {
         })
 }
 
+fn shared_replay_lease_is_registered(path: &Path) -> bool {
+    REPLAY_LEASES
+        .get()
+        .and_then(|groups| groups.lock().ok())
+        .is_some_and(|groups| groups.iter().any(|group| group.lease_path == path))
+}
+
 fn mark_replay_lease_ready(snapshot: &Path) -> io::Result<()> {
     let groups = REPLAY_LEASES
         .get()
@@ -701,6 +737,15 @@ fn remove_dir_all_if_unchanged(path: &Path, expected: &fs::Metadata) {
     };
     if same_file_identity(expected, &actual) {
         let _ = fs::remove_dir_all(path);
+    }
+}
+
+fn remove_file_if_unchanged(path: &Path, expected: &fs::Metadata) {
+    let Ok(actual) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if same_file_identity(expected, &actual) {
+        let _ = fs::remove_file(path);
     }
 }
 
@@ -1061,6 +1106,24 @@ mod tests {
         assert!(!stale.exists());
         assert!(live.is_dir());
         assert!(unrelated.is_dir());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_shared_replay_lease_is_recovered_even_when_pid_was_reused() {
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let staging = root.join(".staging");
+        fs::create_dir_all(&staging).unwrap();
+        let stale = staging.join("replay-lease-4242-1");
+        fs::write(&stale, b"lease-v1\n").unwrap();
+        let store = Store::new(&root);
+
+        store
+            .cleanup_stale_replay_snapshots_with(|pid| pid == 4242)
+            .unwrap();
+
+        assert!(!stale.exists());
         let _ = fs::remove_dir_all(root);
     }
 
