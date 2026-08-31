@@ -246,10 +246,12 @@ impl Lockfile {
         }
         lockfile.root_manifest_digest = canonical_artifact_digest(&lockfile.root_manifest_digest)?;
         for (key, package) in &lockfile.packages {
+            // Validate untrusted nested fields before deriving the canonical key.
+            // This keeps malformed lockfiles inside the typed error boundary.
+            package.validate()?;
             if key != &package.key() {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));
             }
-            package.validate()?;
             for (name, dependency) in &package.dependencies {
                 let target = dependency.parse::<LockfilePackageKey>()?;
                 if dependency == key {
