@@ -9,18 +9,25 @@ use std::{
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
 use tapid_registry_client::{RegistryPackageId, RegistrySnapshot};
 
+/// A validated dependency requirement in Tapid's supported npm range subset.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Requirement {
+    /// Canonical trimmed source requirement used for deterministic diagnostics.
     pub raw: String,
 }
 
+/// One registry-qualified dependency constraint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dependency {
+    /// Registry from which candidates must be selected.
     pub registry: RegistryOrigin,
+    /// Package name constrained by this dependency.
     pub name: PackageName,
+    /// Supported version requirement for the package.
     pub requirement: Requirement,
 }
 impl Dependency {
+    /// Creates a registry-qualified dependency constraint.
     pub fn new(registry: RegistryOrigin, name: PackageName, requirement: Requirement) -> Self {
         Self {
             registry,
@@ -53,6 +60,13 @@ impl FromStr for Requirement {
             }
         }
         Ok(Self { raw: raw.into() })
+    }
+}
+
+impl Requirement {
+    /// Returns whether an exact version satisfies this validated requirement.
+    pub fn matches(&self, version: &PackageVersion) -> bool {
+        matches_requirement(version, &self.raw)
     }
 }
 
@@ -98,17 +112,24 @@ fn parse_requirement_base(op: char, value: &str) -> Option<RequirementBase> {
 /// Normalized metadata supplied by a registry adapter. The resolver never fetches it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageVersionMetadata {
+    /// Registry package name for this version record.
     pub name: PackageName,
+    /// Exact canonical version represented by this record.
     pub version: PackageVersion,
+    /// Dependency requirements declared by this exact version.
     pub dependencies: BTreeMap<PackageName, Requirement>,
 }
 
+/// Normalized deterministic package records belonging to one registry origin.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryMetadata {
+    /// Registry origin shared by every package record.
     pub registry: RegistryOrigin,
+    /// Records sorted by package name and descending version after normalization.
     pub packages: Vec<PackageVersionMetadata>,
 }
 impl RegistryMetadata {
+    /// Sorts records deterministically and rejects duplicate exact identities.
     pub fn normalize(
         registry: RegistryOrigin,
         mut packages: Vec<PackageVersionMetadata>,
@@ -128,27 +149,38 @@ impl RegistryMetadata {
     }
 }
 
+/// Network-mode constraints applied to pure resolution.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ResolutionOptions {
+    /// Requires all candidates to be supplied by the caller without fetching.
     pub offline: bool,
+    /// Rejects fresh resolution because frozen mode requires lockfile replay.
     pub frozen: bool,
 }
 
+/// Exact package identities, root selections, and parent-to-child edges for a graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resolution {
+    /// Every exact package identity selected in deterministic order.
     pub selected: Vec<RegistryPackageId>,
+    /// Exact identities selected for direct manifest dependencies.
     pub roots: Vec<RegistryPackageId>,
+    /// Exact dependency edges used by lockfile and linker construction.
     pub dependencies: Vec<ResolvedDependency>,
 }
 
 /// Exact parent-to-child target selected for one dependency edge.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ResolvedDependency {
+    /// Exact parent identity that declares this edge.
     pub parent: RegistryPackageId,
+    /// Dependency name as declared by the parent.
     pub dependency: PackageName,
+    /// Exact child identity selected for this parent edge.
     pub child: RegistryPackageId,
 }
 
+/// Structured deterministic failures from requirement parsing and graph selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveError {
     InvalidRequirement(String),

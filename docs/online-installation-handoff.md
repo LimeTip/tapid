@@ -1,45 +1,28 @@
-# Online installation handoff
+# Online installation status
 
-The CLI's fixture installation path remains available through
-`tapid install --registry-fixture ...`. The non-fixture path is deliberately
-fail-closed until the registry-client contract can carry the metadata required
-for a verified transitive install.
+The CLI supports bounded live npm metadata and artifact retrieval in addition to fixture-driven tests. Registry parsing remains in `tapid-registry-client`; the resolver consumes normalized metadata and performs no network or filesystem work.
 
-## Exact blocking API gaps
+## Current contract
 
-The public `tapid-registry-client` APIs currently provide:
+- npm metadata requests `application/vnd.npm.install-v1+json` and is limited to 32 MiB.
+- Artifact responses are separately limited to 512 MiB.
+- Normal npm candidates require HTTPS tarball URLs and registry-declared SHA-512 integrity.
+- Historical versions with unsupported dependency syntax or missing integrity are excluded without hiding otherwise usable versions.
+- Exact package metadata HTTP 404 and narrowly validated unpublished tombstones produce no candidates. Other malformed or unsuccessful responses fail closed.
+- Metadata is fetched incrementally for packages reached by the selected graph.
+- Distinct parents can select different exact versions of one transitive package.
+- Resolver root selections and exact dependency edges are preserved through lockfile construction, linking, and replay.
+- Lifecycle scripts remain disabled during installation.
 
-- `NpmRegistry::fetch` → `Vec<RegistryArtifact>`
-- `JsrRegistry::fetch` → `Vec<RegistryArtifact>`
-- `RegistryArtifact` fields: package identity, artifact URL, and optional
-  integrity
+The explicit `--allow-unverified-registry-artifacts` compatibility option can retain npm versions without declared integrity for an interactive online install. It emits a warning and cannot be combined with `--offline` or `--frozen`. It does not turn a locally computed digest into registry authentication.
 
-Neither fetch method exposes the dependency map belonging to each selected
-package version. Consequently the CLI cannot construct the normalized
-`PackageVersionMetadata` required by `tapid-resolver` or generate trustworthy
-lockfile dependency edges for transitive packages. `JsrRegistry` currently
-returns `integrity: None`, so it also cannot satisfy the required SHA-512
-verification contract for JSR artifacts.
+## Remaining limitations
 
-The existing `HttpTransport`/`HttpsTransport` boundary can retrieve bounded
-HTTPS response bodies, but parsing registry JSON in the CLI would bypass the
-registry-client's validation boundary and would not fix the missing JSR
-integrity contract. The CLI therefore reports a stable error instead of
-claiming to install a graph that it cannot verify.
+- Live JSR installation and integrity behavior are not verified.
+- Full npm range, alias, tag, peer, optional dependency, workspace, private registry authentication, and platform-condition compatibility are incomplete.
+- Metadata and artifact downloads are currently sequential and do not retry transient transport failures.
+- Frozen replay does not yet implement every npm frozen-lockfile policy rule.
 
-## Required narrow follow-up
+## Required release evidence
 
-Extend `tapid-registry-client` (outside this change's ownership) with a
-per-version metadata result that includes:
-
-1. normalized dependency maps (including the registry/origin semantics needed
-   for npm and JSR dependencies),
-2. artifact URL,
-3. required SHA-512 integrity for both registries, and
-4. a safe artifact-body fetch operation or an explicitly documented way for
-   the CLI to use the bounded transport while retaining URL/origin policy.
-
-After that contract exists, `crates/tapid-cli/src/online.rs` can wire the
-existing HTTPS transport into metadata retrieval, deterministic transitive
-resolution, artifact verification, archive ingestion, lockfile v3 edges, and
-node_modules materialization without ad-hoc registry parsing.
+Before claiming broad npm compatibility, exercise the real Tapid binary against representative applications, verify `tapid.lock`, verified store trees, root and nested `node_modules` placement, offline and frozen replay, root scripts, lint, build, and deployment-related commands. Linux and Windows behavior requires completed CI or VM evidence in addition to local macOS checks.

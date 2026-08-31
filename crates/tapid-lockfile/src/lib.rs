@@ -14,5 +14,6 @@ pub use model::{LockedPackage, Lockfile, LockfilePackageKey};
 
 /// Returns the current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Lockfile schema with an explicit package-tree replay digest.
-pub const LOCKFILE_VERSION: u32 = 4;
+/// Current lockfile schema with exact direct-root package identities.
+pub const LOCKFILE_VERSION: u32 = 5;
+const LEGACY_LOCKFILE_VERSION: u32 = 4;

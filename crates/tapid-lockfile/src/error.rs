@@ -16,6 +16,9 @@ pub enum LockfileError {
         package: String,
         dependency: String,
     },
+    DanglingRoot(String),
+    MissingRoots,
+    NonCanonicalRoots,
     DependencyNameMismatch {
         package: String,
         dependency: String,
@@ -52,6 +55,11 @@ impl fmt::Display for LockfileError {
                 dependency,
             } => {
                 write!(f, "package {package} has dangling dependency {dependency}")
+            }
+            Self::DanglingRoot(root) => write!(f, "lockfile has dangling root package {root}"),
+            Self::MissingRoots => write!(f, "current lockfile schema requires exact root packages"),
+            Self::NonCanonicalRoots => {
+                write!(f, "lockfile root packages must be sorted and unique")
             }
             Self::DependencyNameMismatch {
                 package,

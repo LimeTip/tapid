@@ -8,17 +8,25 @@ use url::Url;
 
 const NPM_INSTALL_V1_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 
+/// Read-only npm metadata and artifact client over an injected transport.
 pub struct NpmRegistry<T> {
     transport: T,
     origin: RegistryOrigin,
 }
 impl<T: HttpTransport> NpmRegistry<T> {
+    /// Creates a client bound to one canonical npm registry origin.
     pub fn new(transport: T, origin: RegistryOrigin) -> Self {
         Self { transport, origin }
     }
+    /// Fetches abbreviated npm metadata and excludes versions without integrity.
     pub fn fetch(&self, package: &str) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
         self.fetch_with_options(package, false)
     }
+    /// Fetches abbreviated npm metadata with an explicit integrity compatibility policy.
+    ///
+    /// When `allow_missing_integrity` is false, versions without registry-declared
+    /// SHA-512 integrity are excluded. Setting it to true preserves those versions
+    /// for a caller that separately warns and records the weaker trust property.
     pub fn fetch_with_options(
         &self,
         package: &str,
@@ -45,6 +53,7 @@ impl<T: HttpTransport> NpmRegistry<T> {
             allow_missing_integrity,
         )
     }
+    /// Downloads one validated artifact URL through this registry's transport policy.
     pub fn download_artifact(
         &self,
         artifact_url: &str,

@@ -514,6 +514,76 @@ fn install_replays_valid_lockfile_without_running_scripts() {
 }
 
 #[test]
+fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
+    let dir = temp_dir("exact-roots");
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"debug":"*","parent":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[
+                {{"registry":"https://registry.npmjs.org","name":"debug","version":"4.0.0","artifact":"{artifact}"}},
+                {{"registry":"https://registry.npmjs.org","name":"debug","version":"3.0.0","artifact":"{artifact}"}},
+                {{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","artifact":"{artifact}","dependencies":{{"debug":"^3.0.0"}}}}
+            ]}}"#
+        ),
+    )
+    .unwrap();
+
+    let online = run(
+        &dir,
+        &[
+            "install",
+            "--allow-unverified-registry-artifacts",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        online.status.success(),
+        "{}",
+        String::from_utf8_lossy(&online.stderr)
+    );
+    fs::remove_dir_all(dir.join("node_modules")).unwrap();
+
+    let replay = run(&dir, &["install", "--offline", "--frozen"]);
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert!(dir.join("node_modules/debug").is_dir());
+    assert!(dir.join("node_modules/parent/node_modules/debug").is_dir());
+
+    let lock_path = dir.join("tapid.lock");
+    let mut legacy: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    legacy["lockfileVersion"] = 4.into();
+    legacy.as_object_mut().unwrap().remove("roots");
+    fs::write(
+        &lock_path,
+        format!("{}\n", serde_json::to_string_pretty(&legacy).unwrap()),
+    )
+    .unwrap();
+    fs::remove_dir_all(dir.join("node_modules")).unwrap();
+
+    let legacy_replay = run(&dir, &["install", "--offline", "--frozen"]);
+    assert!(
+        legacy_replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&legacy_replay.stderr)
+    );
+    assert!(dir.join("node_modules/debug").is_dir());
+    assert!(dir.join("node_modules/parent/node_modules/debug").is_dir());
+    cleanup(dir);
+}
+
+#[test]
 fn install_refuses_to_replace_unmarked_node_modules() {
     let dir = temp_dir("ownership");
     let raw = r#"{"name":"demo","version":"1.0.0"}"#;

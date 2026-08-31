@@ -59,22 +59,27 @@ impl fmt::Display for PackageName {
 pub struct PackageVersion(semver::Version);
 
 impl PackageVersion {
+    /// Constructs a stable package version with no prerelease identifier.
     pub fn stable(major: u64, minor: u64, patch: u64) -> Self {
         Self(semver::Version::new(major, minor, patch))
     }
 
+    /// Returns the SemVer major component.
     pub fn major(&self) -> u64 {
         self.0.major
     }
 
+    /// Returns the SemVer minor component.
     pub fn minor(&self) -> u64 {
         self.0.minor
     }
 
+    /// Returns the SemVer patch component.
     pub fn patch(&self) -> u64 {
         self.0.patch
     }
 
+    /// Returns the canonical prerelease identifier sequence when present.
     pub fn prerelease(&self) -> Option<&str> {
         (!self.0.pre.is_empty()).then(|| self.0.pre.as_str())
     }

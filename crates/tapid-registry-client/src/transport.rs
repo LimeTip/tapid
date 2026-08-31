@@ -30,8 +30,11 @@ impl<T: HttpTransport + ?Sized> HttpTransport for &T {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HttpResponse {
+    /// HTTP status code returned by the bounded request.
     pub status: u16,
+    /// Parsed response Content-Type header when it is valid UTF-8.
     pub content_type: Option<String>,
+    /// Complete response bytes, bounded by the transport instance's configured limit.
     pub body: Vec<u8>,
 }
 
@@ -68,6 +71,8 @@ impl Origin {
     }
 }
 impl HttpsTransport {
+    /// Creates a credential-free HTTPS transport with exact-origin, timeout, redirect,
+    /// and response-size controls.
     pub fn new<I, S>(
         allowed_origins: I,
         timeout: Duration,

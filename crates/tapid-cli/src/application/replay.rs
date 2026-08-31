@@ -68,12 +68,36 @@ pub(crate) fn replay_input(
         instances.push(instance);
     }
     let mut roots = Vec::new();
-    let root_identities = replay_root_identities(manifest)?;
-    let has_root_dependencies = !root_identities.is_empty();
-    for (key, _) in &typed_packages {
-        let encoded = key.to_string();
-        if !has_root_dependencies || replay_root_matches(&root_identities, key) {
-            roots.push(keys[&encoded].clone());
+    if lock.roots().is_empty() {
+        let root_identities = replay_root_identities(manifest)?;
+        if root_identities.is_empty() {
+            roots.extend(keys.values().cloned());
+        } else {
+            for identity in root_identities.keys() {
+                let selected = typed_packages
+                    .iter()
+                    .map(|(key, _)| key)
+                    .filter(|key| {
+                        (&key.registry, &key.name) == (&identity.0, &identity.1)
+                            && replay_root_matches(&root_identities, key)
+                    })
+                    .max_by(|left, right| left.version.cmp(&right.version))
+                    .ok_or_else(|| {
+                        format!(
+                            "legacy lockfile has no exact root candidate for {}:{}",
+                            identity.0, identity.1
+                        )
+                    })?;
+                roots.push(keys[&selected.to_string()].clone());
+            }
+        }
+    } else {
+        for root in lock.roots() {
+            roots.push(
+                keys.get(root)
+                    .cloned()
+                    .ok_or_else(|| format!("missing root package target {root}"))?,
+            );
         }
     }
     let mut edges = Vec::new();
@@ -102,27 +126,44 @@ pub(crate) fn replay_input(
 
 pub(crate) fn replay_root_identities(
     manifest: &PackageManifest,
-) -> Result<std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>, String>
-{
-    let mut identities = std::collections::BTreeSet::new();
+) -> Result<
+    std::collections::BTreeMap<
+        (tapid_core::RegistryOrigin, tapid_core::PackageName),
+        Vec<tapid_resolver::Requirement>,
+    >,
+    String,
+> {
+    let mut identities = std::collections::BTreeMap::new();
     for map in [
         manifest.dependencies(),
         manifest.dev_dependencies(),
         manifest.optional_dependencies(),
     ] {
-        for name in map.keys() {
+        for (name, requirement) in map {
             let (registry, package) = online::dep_parts(name)?;
-            identities.insert((registry, package));
+            identities
+                .entry((registry, package))
+                .or_insert_with(Vec::new)
+                .push(requirement.parse().map_err(|error| format!("{error:?}"))?);
         }
     }
     Ok(identities)
 }
 
 pub(crate) fn replay_root_matches(
-    roots: &std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>,
+    roots: &std::collections::BTreeMap<
+        (tapid_core::RegistryOrigin, tapid_core::PackageName),
+        Vec<tapid_resolver::Requirement>,
+    >,
     key: &tapid_lockfile::LockfilePackageKey,
 ) -> bool {
-    roots.contains(&(key.registry.clone(), key.name.clone()))
+    roots
+        .get(&(key.registry.clone(), key.name.clone()))
+        .is_some_and(|requirements| {
+            requirements
+                .iter()
+                .all(|requirement| requirement.matches(&key.version))
+        })
 }
 
 pub(crate) fn current_platform() -> Platform {

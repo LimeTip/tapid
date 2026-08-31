@@ -1,4 +1,7 @@
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256, Sha512};
 use std::{
@@ -63,6 +66,18 @@ fn integrity(data: &[u8]) -> PackageIntegrity {
     format!("sha512-{}", STANDARD.encode(h.finalize()))
         .parse()
         .expect("sha512 integrity")
+}
+
+fn integrity_matches(expected: &PackageIntegrity, data: &[u8]) -> bool {
+    let Some(encoded) = expected.as_str().strip_prefix("sha512-") else {
+        return false;
+    };
+    let decoded = if encoded.len() == 86 {
+        STANDARD_NO_PAD.decode(encoded)
+    } else {
+        STANDARD.decode(encoded)
+    };
+    decoded.is_ok_and(|decoded| decoded.as_slice() == Sha512::digest(data).as_slice())
 }
 fn root_digest(project: &Path) -> Result<String, String> {
     let data = fs::read(project.join("package.json")).map_err(|e| e.to_string())?;
@@ -386,7 +401,7 @@ pub fn resolve_and_fetch(
         if record
             .integrity
             .as_ref()
-            .is_some_and(|expected| expected != &actual)
+            .is_some_and(|expected| !integrity_matches(expected, &bytes))
         {
             return Err(format!("integrity mismatch for {}", id));
         }
@@ -485,6 +500,17 @@ pub fn resolve_and_fetch(
         .collect();
     lock.insert_packages(locked_packages?)
         .map_err(|e| e.to_string())?;
+    lock.set_roots(resolution.roots.iter().map(|id| {
+        LockfilePackageKey::new(
+            id.registry.clone(),
+            id.name.clone(),
+            id.version.clone(),
+            &empty_peer,
+            &empty_platform,
+        )
+        .to_string()
+    }))
+    .map_err(|e| e.to_string())?;
     let mut edge_list = Vec::new();
     let mut root_deps = Vec::new();
     for edge in &resolution.dependencies {
@@ -532,6 +558,18 @@ pub fn resolve_and_fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn padded_and_unpadded_sha512_sri_verify_against_the_same_digest() {
+        let bytes = b"archive bytes";
+        let padded = integrity(bytes);
+        let unpadded: PackageIntegrity = padded.to_string().trim_end_matches('=').parse().unwrap();
+
+        assert!(integrity_matches(&padded, bytes));
+        assert!(integrity_matches(&unpadded, bytes));
+        assert!(!integrity_matches(&padded, b"different bytes"));
+        assert!(!integrity_matches(&unpadded, b"different bytes"));
+    }
+
     #[test]
     fn explicit_registry_prefixes_are_mapped_safely() {
         let (r, n) = dep_parts("jsr:@std/path").unwrap();

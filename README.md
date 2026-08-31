@@ -48,7 +48,7 @@ tapid run dev
 
 ## Current consumer workflow
 
-The currently supported consumer path is the checked-in fixture and validated lockfile replay. It exercises deterministic installation, managed `node_modules`, root-script execution, argument forwarding, and lifecycle suppression without relying on a live registry.
+The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, root-script execution, argument forwarding, and lifecycle suppression.
 
 For a clean checkout, build Tapid and create the readable consumer fixture through the same helper used by CI:
 
@@ -68,7 +68,7 @@ target/debug/tapid install --offline --frozen --project-dir "$TAPID_FIXTURE_PROJ
 target/debug/tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 0
 ```
 
-The non-fixture online path is deliberately fail-closed for transitive projects until the registry-client metadata contract exposes verified per-version dependency maps and required SHA-512 integrity for all supported registries. Do not treat a successful fixture replay as evidence that general npm installation is production-ready.
+The non-fixture online path requests abbreviated npm install metadata and requires registry-declared SHA-512 integrity by default. Unsupported npm range syntax and malformed historical metadata are filtered or rejected fail-closed according to their scope. Live JSR installation remains unverified. Do not treat fixture replay or one successful npm project as evidence of complete npm compatibility.
 
 `tapid run <script>` reads a root `package.json` script, runs it in the project directory, prepends the managed `node_modules/.bin` directory to `PATH`, forwards arguments after `--`, and returns the child exit status. Root scripts execute arbitrary project code. This is compatibility-oriented process execution, not a sandbox.
 
@@ -81,19 +81,17 @@ tapid run --project-dir ./example test -- --runInBand
 
 ## Installation details
 
-Tapid does not yet publish platform release binaries. For contributor development, install a specific source ref:
+The public installer at `tapid.dev` installs the latest immutable stable release and verifies its signed release metadata:
+
+```bash
+curl -fsSL https://tapid.dev/install.sh | sh
+```
+
+For contributor development, install a specific source ref instead:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \
   | sh -s -- --source-ref main
-```
-
-When signed platform binaries and release metadata are available, the same installer will support a stable release path. Until then, the source-ref workflow above is the only supported installation path.
-
-Future stable-release example:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh | sh
 ```
 
 Select a specific release explicitly:

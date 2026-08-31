@@ -37,6 +37,8 @@ fn serializes_packages_in_canonical_order() {
         )
         .unwrap();
 
+    let roots = lockfile.packages().keys().cloned().collect::<Vec<_>>();
+    lockfile.set_roots(roots).unwrap();
     let json = lockfile.to_json().unwrap();
     assert!(json.find("@tapid/core@1.0.0").unwrap() < json.find("alpha@1.0.0").unwrap());
     assert_eq!(Lockfile::from_json(&json).unwrap(), lockfile);
@@ -126,6 +128,87 @@ fn replay_validation_accepts_uppercase_root_manifest_digest() {
 }
 
 #[test]
+fn exact_roots_use_a_new_schema_version_while_v4_remains_readable() {
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    let package = package_fixture();
+    lockfile.insert_package(package.clone()).unwrap();
+    lockfile.set_roots([package.key()]).unwrap();
+    let current = lockfile.to_json().unwrap();
+    let mut current_value: serde_json::Value = serde_json::from_str(&current).unwrap();
+    assert_eq!(current_value["lockfileVersion"], 5);
+
+    let mut rootless_current = current_value.clone();
+    rootless_current.as_object_mut().unwrap().remove("roots");
+    assert!(Lockfile::from_json(&serde_json::to_string(&rootless_current).unwrap()).is_err());
+
+    current_value["lockfileVersion"] = 4.into();
+    current_value.as_object_mut().unwrap().remove("roots");
+    assert!(Lockfile::from_json(&serde_json::to_string(&current_value).unwrap()).is_ok());
+}
+
+#[test]
+fn deserialized_roots_must_be_unique_sorted_and_semantically_canonical() {
+    let first = package_fixture();
+    let second = LockedPackage::new(
+        "https://registry.npmjs.org",
+        "zeta",
+        "2.0.0",
+        &format!("sha512-{}", "D".repeat(86)),
+        "sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    )
+    .unwrap();
+    let first_key = first.key();
+    let second_key = second.key();
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile.insert_packages([first, second]).unwrap();
+    lockfile
+        .set_roots([first_key.clone(), second_key.clone()])
+        .unwrap();
+    let canonical = lockfile.to_json().unwrap();
+    assert_eq!(
+        Lockfile::from_json(&canonical).unwrap().to_json().unwrap(),
+        canonical
+    );
+
+    let mut duplicate: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+    duplicate["roots"] = serde_json::json!([first_key, first_key]);
+    assert!(Lockfile::from_json(&serde_json::to_string(&duplicate).unwrap()).is_err());
+
+    let mut unordered: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+    unordered["roots"] = serde_json::json!([second_key, first_key]);
+    assert!(Lockfile::from_json(&serde_json::to_string(&unordered).unwrap()).is_err());
+
+    assert!(
+        "https://registry.npmjs.org|demo@1.0.0|peer=not-a-context|platform=-"
+            .parse::<super::LockfilePackageKey>()
+            .is_err()
+    );
+}
+
+#[test]
+fn exact_root_package_keys_roundtrip_and_cannot_dangle() {
+    let package = package_fixture();
+    let root = package.key();
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile.insert_package(package).unwrap();
+    lockfile.set_roots([root.clone()]).unwrap();
+
+    let replayed = Lockfile::from_json(&lockfile.to_json().unwrap()).unwrap();
+    assert_eq!(replayed.roots(), &[root]);
+    assert!(
+        lockfile
+            .set_roots(["https://registry.npmjs.org|missing@1.0.0|peer=-|platform=-"])
+            .is_err()
+    );
+}
+
+#[test]
 fn accepts_scoped_https_artifact_paths_without_allowing_credentials() {
     let mut package = package_fixture();
     package
@@ -188,6 +271,7 @@ fn inserts_mutually_dependent_packages_as_one_batch() {
 
     let mut lockfile = Lockfile::new(digest).unwrap();
     lockfile.insert_packages([first, second]).unwrap();
+    lockfile.set_roots([first_key]).unwrap();
 
     assert_eq!(lockfile.packages().len(), 2);
     assert_eq!(
