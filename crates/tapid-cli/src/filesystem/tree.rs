@@ -170,20 +170,101 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     if !source_meta.is_dir() {
         return Err("store tree root is not a directory".into());
     }
-    let package = source.join("package");
-    let root = match fs::symlink_metadata(&package) {
-        Ok(meta) if meta.file_type().is_symlink() => {
+    let root = archive_package_root(source)?;
+    validate_tree(&root)?;
+    copy_tree_contents(&root, target)
+}
+
+fn validate_tree(root: &Path) -> Result<(), String> {
+    let root_meta = fs::symlink_metadata(root).map_err(|e| e.to_string())?;
+    if !root_meta.is_dir() {
+        return Err(format!(
+            "store tree root is not a directory: {}",
+            root.display()
+        ));
+    }
+    for item in fs::read_dir(root).map_err(|e| e.to_string())? {
+        let item = item.map_err(|e| e.to_string())?;
+        let path = item.path();
+        let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if meta.file_type().is_symlink() {
             return Err(format!(
                 "symlink in store tree is not replayable: {}",
-                package.display()
+                path.display()
             ));
         }
-        Ok(meta) if meta.is_dir() => &package,
-        Ok(_) => source,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => source,
+        if meta.is_dir() {
+            validate_tree(&path)?;
+        } else if !meta.is_file() {
+            return Err(format!("unsupported store tree entry: {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+/// Finds the package root in an extracted npm archive.
+///
+/// npm archives conventionally use `package/`, but valid archives also use a
+/// package-specific wrapper directory. Only a direct manifest or one
+/// unambiguous wrapper manifest is accepted.
+fn archive_package_root(source: &Path) -> Result<PathBuf, String> {
+    let direct_manifest = source.join("package.json");
+    match fs::symlink_metadata(&direct_manifest) {
+        Ok(meta) if meta.is_file() => return Ok(source.to_path_buf()),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "symlink package manifest is not replayable: {}",
+                direct_manifest.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
-    };
-    copy_tree_contents(root, target)
+    }
+
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "symlink in store tree is not replayable: {}",
+                path.display()
+            ));
+        }
+        if !meta.is_dir() {
+            if !meta.is_file() {
+                return Err(format!("unsupported store tree entry: {}", path.display()));
+            }
+            continue;
+        }
+        let manifest = path.join("package.json");
+        match fs::symlink_metadata(&manifest) {
+            Ok(manifest_meta) if manifest_meta.is_file() => candidates.push(path),
+            Ok(manifest_meta) if manifest_meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "symlink package manifest is not replayable: {}",
+                    manifest.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+
+    match candidates.as_slice() {
+        [root] => Ok(root.clone()),
+        [] => Err(format!(
+            "cannot find unambiguous package manifest in {}",
+            source.display()
+        )),
+        _ => Err(format!(
+            "multiple package manifests in archive root {}",
+            source.display()
+        )),
+    }
 }
 
 fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
@@ -206,7 +287,7 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
             copy_tree_contents(&src, &dst)?;
             fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else if meta.is_file() {
-            let mut input = fs::File::open(&src).map_err(|e| e.to_string())?;
+            let mut input = open_regular_file_without_following_symlinks(&src)?;
             let mut output = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -219,6 +300,20 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn open_regular_file_without_following_symlinks(path: &Path) -> Result<fs::File, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(unix))]
+    fs::File::open(path).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -239,6 +334,7 @@ mod copy_tests {
         let source = root.join("source");
         let target = root.join("target");
         fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("package.json"), b"{}\n").unwrap();
         fs::write(source.join("nested").join("data"), b"nested").unwrap();
         let bin = source.join("bin");
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
@@ -276,6 +372,102 @@ mod copy_tests {
                 0o755
             );
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn copy_tree_accepts_a_non_package_wrapper_directory() {
+        use super::copy_tree;
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-wrapper-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(source.join("mdx")).unwrap();
+        fs::write(source.join("mdx/package.json"), b"{\"name\":\"mdx\"}\n").unwrap();
+        fs::write(source.join("mdx/index.js"), b"module.exports = 1;\n").unwrap();
+
+        copy_tree(&source, &target).unwrap();
+        assert!(target.join("package.json").is_file());
+        assert!(target.join("index.js").is_file());
+        assert!(!target.join("mdx").exists());
+
+        let legacy_source = root.join("legacy-source");
+        let legacy_target = root.join("legacy-target");
+        fs::create_dir_all(legacy_source.join("package")).unwrap();
+        fs::write(legacy_source.join("package/package.json"), b"{}\n").unwrap();
+        copy_tree(&legacy_source, &legacy_target).unwrap();
+        assert!(legacy_target.join("package.json").is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn copy_tree_rejects_ambiguous_and_missing_manifests() {
+        use super::copy_tree;
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-wrapper-invalid-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let missing = root.join("missing");
+        fs::create_dir_all(&missing).unwrap();
+        assert!(copy_tree(&missing, &root.join("missing-target")).is_err());
+
+        let ambiguous = root.join("ambiguous");
+        fs::create_dir_all(ambiguous.join("one")).unwrap();
+        fs::create_dir_all(ambiguous.join("two")).unwrap();
+        fs::write(ambiguous.join("one/package.json"), b"{}\n").unwrap();
+        fs::write(ambiguous.join("two/package.json"), b"{}\n").unwrap();
+        assert!(copy_tree(&ambiguous, &root.join("ambiguous-target")).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let symlinked = root.join("symlinked");
+            fs::create_dir_all(&symlinked).unwrap();
+            symlink("missing-package", symlinked.join("package")).unwrap();
+            assert!(copy_tree(&symlinked, &root.join("symlinked-target")).is_err());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_validates_direct_root_before_materialization() {
+        use super::copy_tree;
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-direct-root-validation-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"{}\n").unwrap();
+        fs::write(source.join("valid.js"), b"module.exports = 1;\n").unwrap();
+        symlink("missing.js", source.join("link.js")).unwrap();
+
+        let error = copy_tree(&source, &target).unwrap_err();
+        assert!(error.contains("symlink in store tree is not replayable"));
+        assert!(!target.exists());
         let _ = fs::remove_dir_all(root);
     }
 }
