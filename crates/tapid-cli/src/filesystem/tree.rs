@@ -206,13 +206,7 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
             copy_tree_contents(&src, &dst)?;
             fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else if meta.is_file() {
-            let mut input = fs::File::open(&src).map_err(|e| e.to_string())?;
-            let mut output = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&dst)
-                .map_err(|e| e.to_string())?;
-            io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+            copy_file_isolated(&src, &dst)?;
             fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else {
             return Err(format!("unsupported store tree entry: {}", src.display()));
@@ -221,11 +215,72 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn copy_file_isolated(source: &Path, target: &Path) -> Result<(), String> {
+    COPY_FILE_ISOLATED_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if clone_file(source, target).is_ok() {
+        return Ok(());
+    }
+    let mut input = fs::File::open(source).map_err(|e| e.to_string())?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|e| e.to_string())?;
+    io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn clone_file(source: &Path, target: &Path) -> Result<(), io::Error> {
+    use std::os::fd::AsRawFd;
+    let input = fs::File::open(source)?;
+    let output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    let result = unsafe { libc::ioctl(output.as_raw_fd(), libc::FICLONE, input.as_raw_fd()) };
+    if result == 0 {
+        Ok(())
+    } else {
+        let error = io::Error::last_os_error();
+        drop(output);
+        let _ = fs::remove_file(target);
+        Err(error)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clone_file(source: &Path, target: &Path) -> Result<(), io::Error> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let target = CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
+    let result = unsafe { libc::clonefile(source.as_ptr(), target.as_ptr(), 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn clone_file(_source: &Path, _target: &Path) -> Result<(), io::Error> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "file cloning unavailable",
+    ))
+}
+
+static COPY_FILE_ISOLATED_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(test)]
 mod copy_tests {
     #[test]
     fn copy_tree_handles_nested_directories_and_preserves_executable_mode() {
-        use super::copy_tree;
+        use super::{COPY_FILE_ISOLATED_ATTEMPTS, copy_tree};
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -250,12 +305,22 @@ mod copy_tests {
             fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        COPY_FILE_ISOLATED_ATTEMPTS.store(0, std::sync::atomic::Ordering::Relaxed);
         copy_tree(&source, &target).unwrap();
+        assert_eq!(
+            COPY_FILE_ISOLATED_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
         assert_eq!(
             fs::read(target.join("nested").join("data")).unwrap(),
             b"nested"
         );
         assert!(target.join("bin").is_file());
+        fs::write(target.join("nested").join("data"), b"changed").unwrap();
+        assert_eq!(
+            fs::read(source.join("nested").join("data")).unwrap(),
+            b"nested"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
