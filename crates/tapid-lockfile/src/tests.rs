@@ -1,6 +1,6 @@
 use super::{LockedPackage, Lockfile, VERSION};
 use std::str::FromStr;
-use tapid_core::{ArtifactDigest, PackageName, PackageVersion};
+use tapid_core::{ArtifactDigest, DomainError, PackageName, PackageVersion};
 
 #[test]
 fn version_is_present() {
@@ -275,7 +275,12 @@ fn malformed_nested_registry_returns_an_error_instead_of_panicking() {
         r#"{{"lockfileVersion":4,"rootManifestDigest":"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resolverVersion":"0","linkerVersion":"0","packages":{{"bad-key":{{"registry":"not-a-url","name":"tapid","version":"1.0.0","artifactIntegrity":"sha512-{}","unpackedDigest":"sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","treeDigest":"sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","dependencies":{{}}}}}}}}"#,
         "A".repeat(86)
     );
-    assert!(Lockfile::from_json(&input).is_err());
+    assert!(matches!(
+        Lockfile::from_json(&input),
+        Err(super::LockfileError::Domain(
+            DomainError::InvalidRegistryOrigin(_)
+        ))
+    ));
 }
 
 #[test]
@@ -284,7 +289,12 @@ fn malformed_nested_name_returns_an_error_instead_of_panicking() {
         r#"{{"lockfileVersion":4,"rootManifestDigest":"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resolverVersion":"0","linkerVersion":"0","packages":{{"bad-key":{{"registry":"https://registry.example.test","name":"bad name","version":"1.0.0","artifactIntegrity":"sha512-{}","unpackedDigest":"sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","treeDigest":"sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","dependencies":{{}}}}}}}}"#,
         "A".repeat(86)
     );
-    assert!(Lockfile::from_json(&input).is_err());
+    assert!(matches!(
+        Lockfile::from_json(&input),
+        Err(super::LockfileError::Domain(
+            DomainError::InvalidPackageName(_)
+        ))
+    ));
 }
 
 #[test]
@@ -293,7 +303,12 @@ fn malformed_nested_version_returns_an_error_instead_of_panicking() {
         r#"{{"lockfileVersion":4,"rootManifestDigest":"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resolverVersion":"0","linkerVersion":"0","packages":{{"bad-key":{{"registry":"https://registry.example.test","name":"tapid","version":"not-semver","artifactIntegrity":"sha512-{}","unpackedDigest":"sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","treeDigest":"sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","dependencies":{{}}}}}}}}"#,
         "A".repeat(86)
     );
-    assert!(Lockfile::from_json(&input).is_err());
+    assert!(matches!(
+        Lockfile::from_json(&input),
+        Err(super::LockfileError::Domain(
+            DomainError::InvalidPackageVersion(_)
+        ))
+    ));
 }
 
 #[test]
