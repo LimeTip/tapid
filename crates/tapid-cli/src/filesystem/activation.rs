@@ -1,4 +1,4 @@
-use fs2::FileExt;
+use fs4::{FileExt, TryLockError};
 use std::{
     fs,
     io::{self, Read, Seek, Write},
@@ -242,13 +242,12 @@ impl ActivationLock {
     pub(crate) fn acquire(project: &Path) -> Result<Self, String> {
         let path = project.join(".tapid-activation.lock");
         let mut file = open_lock_file(&path)?;
-        file.try_lock_exclusive().map_err(|error| {
-            if error.kind() == io::ErrorKind::WouldBlock {
-                format!(
-                    "another node_modules activation is already in progress (lock: {})",
-                    path.display()
-                )
-            } else {
+        FileExt::try_lock(&file).map_err(|error| match error {
+            TryLockError::WouldBlock => format!(
+                "another node_modules activation is already in progress (lock: {})",
+                path.display()
+            ),
+            TryLockError::Error(error) => {
                 format!("cannot acquire node_modules activation lock: {error}")
             }
         })?;

@@ -28,7 +28,7 @@ The explicit `--allow-unverified-registry-artifacts` compatibility option can re
 
 ## Required release evidence
 
-Before claiming broad npm compatibility, exercise the real Tapid binary against representative applications, verify `tapid.lock`, verified store trees, root and nested `node_modules` placement, offline and frozen replay, root scripts, lint, build, and deployment-related commands. Linux and Windows behavior requires completed CI or VM evidence in addition to local macOS checks.
+Before claiming broad npm compatibility, exercise the real Tapid binary against representative applications, verify `tapid.lock`, verified store trees, root and nested `node_modules` placement, offline and frozen replay, root scripts, lint, build, and deployment-related commands. Linux and Windows behavior requires evidence from completed CI or VM runs in addition to local macOS checks.
 
 ## Verified store location
 

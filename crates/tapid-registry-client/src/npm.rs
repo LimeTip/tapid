@@ -36,7 +36,7 @@ impl<T: HttpTransport> NpmRegistry<T> {
         let name: PackageName = package.parse().map_err(|_| {
             RegistryClientError::Metadata(MetadataError::InvalidPackageName(package.into()))
         })?;
-        let url = format!("{}/{}", self.origin, package.replace('/', "%2f"));
+        let url = format!("{}/{}", self.origin, package.replace('/', "%2F"));
         let response = self
             .transport
             .get_with_accept(&url, NPM_INSTALL_V1_ACCEPT)
@@ -201,17 +201,21 @@ fn parse_npm(
         let mut dependencies = parse_dependencies(version_entry.get("dependencies"))?;
         let optional_dependencies = parse_dependencies(version_entry.get("optionalDependencies"))?;
         dependencies.retain(|name, _| !optional_dependencies.contains_key(name));
+        let platform = match (
+            parse_platform_list(version_entry.get("os"), "os"),
+            parse_platform_list(version_entry.get("cpu"), "cpu"),
+            parse_platform_list(version_entry.get("libc"), "libc"),
+        ) {
+            (Ok(os), Ok(cpu), Ok(libc)) => PackagePlatform { os, cpu, libc },
+            _ => continue,
+        };
         artifacts.push(RegistryArtifact {
             identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
             artifact_url,
             integrity,
             dependencies,
             optional_dependencies,
-            platform: PackagePlatform {
-                os: parse_platform_list(version_entry.get("os"), "os")?,
-                cpu: parse_platform_list(version_entry.get("cpu"), "cpu")?,
-                libc: parse_platform_list(version_entry.get("libc"), "libc")?,
-            },
+            platform,
             registry_kind: RegistryKind::Npm,
         });
     }
@@ -276,6 +280,11 @@ fn parse_dependencies(
             let requirement = requirement.as_str().ok_or_else(|| {
                 RegistryClientError::Metadata(MetadataError::InvalidDependency(name.clone()))
             })?;
+            let requirement = if requirement.trim().is_empty() {
+                "*"
+            } else {
+                requirement
+            };
             Ok((package, requirement.to_owned()))
         })
         .collect()
@@ -378,6 +387,19 @@ mod tests {
     }
 
     #[test]
+    fn npm_skips_versions_with_malformed_platform_metadata() {
+        let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","os":42,"dist":{"tarball":"https://cdn.example/foo-1.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}},"2.0.0":{"name":"foo","version":"2.0.0","dist":{"tarball":"https://cdn.example/foo-2.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].identity.version.to_string(), "2.0.0");
+    }
+
+    #[test]
     fn npm_metadata_maps_tarball_and_integrity() {
         let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dependencies":{"bar":"^2.0.0"},"dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
@@ -393,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn npm_preserves_empty_historical_dependency_ranges_for_candidate_filtering() {
+    fn npm_normalizes_empty_dependency_ranges_to_wildcards() {
         let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dependencies":{"bar":""},"dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
 
@@ -404,7 +426,7 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(
             artifacts[0].dependencies.get(&"bar".parse().unwrap()),
-            Some(&String::new())
+            Some(&"*".to_owned())
         );
     }
 

@@ -441,6 +441,29 @@ fn install_allows_missing_integrity_only_with_explicit_warning() {
             .contains("not authenticated against a registry-declared digest")
     );
     assert!(dir.join("node_modules").is_dir());
+    let lock: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
+    let package = lock["packages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap();
+    assert_eq!(
+        package["registryIntegrityDeclared"],
+        serde_json::Value::Bool(false)
+    );
+
+    fs::remove_dir_all(dir.join("node_modules")).unwrap();
+    for mode in ["offline", "frozen"] {
+        let replay = run(&dir, &["install", &format!("--{mode}")]);
+        assert_eq!(replay.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&replay.stderr)
+                .contains("lacks registry-declared artifact integrity")
+        );
+        assert!(!dir.join("node_modules").exists());
+    }
     cleanup(dir);
 }
 
@@ -521,6 +544,15 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
     let debug_four = "base64:H4sIAAAAAAAC/+3TsQrCMBRA0cx+hWTWNLGxg38TNRQV09K0Ioj/bqwFobMU1HuWF97yhnBrtzu50mf1a6pjrIL4MJ0U1vYzGU+tbf5+P/fGFKtczLWYQBdb16Tz4j/dZHBnLzdy77ddKRfy4pt4qELaWKWVlveZwO8aus+Gb1fttRWT92/suP91Yeh/Cn32yz51QgcAAAAAAAAAAAAAAPhCD3aP37sAKAAA";
     let debug_three = "base64:H4sIAAAAAAAC/+3TvQrCMBRA4cw+hWTWNDGxg28TNRQV29IfEcR3N8aC0FkK6vmWG+5yh3Bqvzv5ImT1a6pjW5Xiw3SUO5dmNJ5aO/t+P/fG5Csr5lpMoG8738Tz4j/dZOnPQW7kPmz7Qi7kJTTtoSrjxiqttLzPBH7X0H02fLvqrp2YvH/jxv2vc0P/U0jZL1PqhA4AAAAAAAAAAAAAAPCFHl2bEsoAKAAA";
     let parent = "base64:H4sIAAAAAAAC/+3TsQrCMBRA0cx+hWTWNCltB/8mSBAV05BGKYj/bmwLQmcpqPcsD16GDI8b7P5sD64I41SnrvXiw3TWVNUws/nU+v027o1pykqstVjAtUs25u/Ff7pLby9O7mSw0fkkN/LmYndsfV4ZpZWWj5XAz5q6L6arq9QnsXj/pp73Xzcl/S9z/1f22yF1QgcAAAAAAAAAAAAAAPg+TxkNmJgAKAAA";
+    let integrity = |artifact: &str| {
+        let bytes = STANDARD
+            .decode(artifact.strip_prefix("base64:").unwrap())
+            .unwrap();
+        format!("sha512-{}", STANDARD.encode(Sha512::digest(bytes)))
+    };
+    let debug_four_integrity = integrity(debug_four);
+    let debug_three_integrity = integrity(debug_three);
+    let parent_integrity = integrity(parent);
     fs::write(
         dir.join("package.json"),
         r#"{"name":"demo","version":"1.0.0","dependencies":{"debug":"^4.0.0","parent":"1.0.0"}}"#,
@@ -530,9 +562,9 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
         &fixture,
         format!(
             r#"{{"packages":[
-                {{"registry":"https://registry.npmjs.org","name":"debug","version":"4.0.0","artifact":"{debug_four}"}},
-                {{"registry":"https://registry.npmjs.org","name":"debug","version":"3.0.0","artifact":"{debug_three}"}},
-                {{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","artifact":"{parent}","dependencies":{{"debug":"^3.0.0"}}}}
+                {{"registry":"https://registry.npmjs.org","name":"debug","version":"4.0.0","integrity":"{debug_four_integrity}","artifact":"{debug_four}"}},
+                {{"registry":"https://registry.npmjs.org","name":"debug","version":"3.0.0","integrity":"{debug_three_integrity}","artifact":"{debug_three}"}},
+                {{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","integrity":"{parent_integrity}","artifact":"{parent}","dependencies":{{"debug":"^3.0.0"}}}}
             ]}}"#
         ),
     )
@@ -540,12 +572,7 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
 
     let online = run(
         &dir,
-        &[
-            "install",
-            "--allow-unverified-registry-artifacts",
-            "--registry-fixture",
-            fixture.to_str().unwrap(),
-        ],
+        &["install", "--registry-fixture", fixture.to_str().unwrap()],
     );
     assert!(
         online.status.success(),

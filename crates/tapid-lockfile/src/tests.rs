@@ -1,4 +1,21 @@
 use super::{LockedPackage, Lockfile, VERSION};
+
+fn declared_package(
+    registry: &str,
+    name: &str,
+    version: &str,
+    artifact_integrity: &str,
+    unpacked_digest: &str,
+) -> Result<LockedPackage, super::LockfileError> {
+    LockedPackage::new_with_provenance(
+        registry,
+        name,
+        version,
+        artifact_integrity,
+        unpacked_digest,
+        super::RegistryIntegrityProvenance::RegistryDeclared,
+    )
+}
 use std::str::FromStr;
 use tapid_core::{ArtifactDigest, PackageName, PackageVersion};
 
@@ -14,7 +31,7 @@ fn serializes_packages_in_canonical_order() {
             .unwrap();
     lockfile
         .insert_package(
-            LockedPackage::new(
+            declared_package(
                 "https://registry.example.test",
                 "@tapid/core",
                 "1.0.0",
@@ -26,7 +43,7 @@ fn serializes_packages_in_canonical_order() {
         .unwrap();
     lockfile
         .insert_package(
-            LockedPackage::new(
+            declared_package(
                 "https://registry.example.test",
                 "alpha",
                 "1.0.0",
@@ -45,11 +62,75 @@ fn serializes_packages_in_canonical_order() {
 }
 
 #[test]
+fn schema_6_serializes_registry_integrity_provenance() {
+    let package = package_fixture();
+    let key = package.key();
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile.insert_package(package).unwrap();
+    lockfile.set_roots([key.clone()]).unwrap();
+
+    let json: serde_json::Value = serde_json::from_str(&lockfile.to_json().unwrap()).unwrap();
+
+    assert_eq!(
+        json["packages"][key]["registryIntegrityDeclared"],
+        serde_json::Value::Bool(true)
+    );
+}
+
+#[test]
+fn schema_6_rejects_missing_registry_integrity_provenance() {
+    let package = package_fixture();
+    let key = package.key();
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile.insert_package(package).unwrap();
+    lockfile.set_roots([key.clone()]).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&lockfile.to_json().unwrap()).unwrap();
+    json["packages"][&key]
+        .as_object_mut()
+        .unwrap()
+        .remove("registryIntegrityDeclared");
+
+    assert!(matches!(
+        Lockfile::from_json(&serde_json::to_string(&json).unwrap()),
+        Err(super::LockfileError::MissingRegistryIntegrityProvenance(package))
+            if package == key
+    ));
+}
+
+#[test]
+fn replay_rejects_locally_computed_registry_integrity() {
+    let package = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "demo",
+        "1.0.0",
+        "sha512-ndzQj2/g3boQWYtZQd+xKkW0TfhrPjTperEStZq/VaKgGIw/wMEZ9DsrhO9Yo/BpUtwv0kArKxmAWfv+FVKoPg==",
+        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        super::RegistryIntegrityProvenance::LocallyComputed,
+    )
+    .unwrap();
+    let key = package.key();
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile.insert_package(package).unwrap();
+    lockfile.set_roots([key.clone()]).unwrap();
+
+    assert!(matches!(
+        lockfile.validate_replay(lockfile.root_manifest_digest()),
+        Err(super::LockfileError::UnverifiedRegistryArtifact(package)) if package == key
+    ));
+}
+
+#[test]
 fn rejects_machine_specific_or_secret_values() {
     let mut lockfile =
         Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             .unwrap();
-    let mut package = LockedPackage::new(
+    let mut package = declared_package(
         "https://registry.example.test",
         "tapid",
         "1.0.0",
@@ -107,7 +188,7 @@ fn preserves_case_sensitive_sha512_integrity_values() {
     let mut lockfile =
         Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             .unwrap();
-    let package = LockedPackage::new(
+    let package = declared_package(
         "https://registry.example.test",
         "tapid",
         "1.0.0",
@@ -149,7 +230,7 @@ fn replay_validation_accepts_uppercase_root_manifest_digest() {
 }
 
 #[test]
-fn exact_roots_use_a_new_schema_version_while_v4_remains_readable() {
+fn provenance_uses_schema_6_while_v4_remains_readable() {
     let mut lockfile =
         Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             .unwrap();
@@ -162,7 +243,7 @@ fn exact_roots_use_a_new_schema_version_while_v4_remains_readable() {
     lockfile.set_roots([package.key()]).unwrap();
     let current = lockfile.to_json().unwrap();
     let mut current_value: serde_json::Value = serde_json::from_str(&current).unwrap();
-    assert_eq!(current_value["lockfileVersion"], 5);
+    assert_eq!(current_value["lockfileVersion"], 6);
 
     let mut rootless_current = current_value.clone();
     rootless_current.as_object_mut().unwrap().remove("roots");
@@ -177,9 +258,34 @@ fn exact_roots_use_a_new_schema_version_while_v4_remains_readable() {
 }
 
 #[test]
+fn schema_5_requires_regeneration_before_replay() {
+    let package = package_fixture();
+    let key = package.key();
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile.insert_package(package).unwrap();
+    lockfile.set_roots([key]).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&lockfile.to_json().unwrap()).unwrap();
+    json["lockfileVersion"] = 5.into();
+    for package in json["packages"].as_object_mut().unwrap().values_mut() {
+        package
+            .as_object_mut()
+            .unwrap()
+            .remove("registryIntegrityDeclared");
+    }
+
+    let legacy = Lockfile::from_json(&serde_json::to_string(&json).unwrap()).unwrap();
+    assert!(matches!(
+        legacy.validate_replay(legacy.root_manifest_digest()),
+        Err(super::LockfileError::RegenerationRequired(5))
+    ));
+}
+
+#[test]
 fn deserialized_roots_must_be_unique_sorted_and_semantically_canonical() {
     let first = package_fixture();
-    let second = LockedPackage::new(
+    let second = declared_package(
         "https://registry.npmjs.org",
         "zeta",
         "2.0.0",
@@ -247,12 +353,19 @@ fn accepts_scoped_https_artifact_paths_without_allowing_credentials() {
     package
         .set_artifact_url("https://registry.npmjs.org/@alloc/quick-lru/-/quick-lru-5.2.0.tgz")
         .unwrap();
+    package
+        .set_artifact_url("https://registry.npmjs.org/@alloc%2Fquick-lru/package.tgz")
+        .unwrap();
 
     for unsafe_url in [
         "https://user:secret@registry.npmjs.org/package.tgz",
         "HTTPS://@registry.npmjs.org/package.tgz",
         "https://registry.npmjs.org/package.tgz?token=secret",
         "https://registry.npmjs.org/package.tgz#fragment",
+        "https://REGISTRY.npmjs.org/package.tgz",
+        "https://registry.npmjs.org:443/package.tgz",
+        "https://registry.npmjs.org/%7Euser/package.tgz",
+        "https://registry.npmjs.org/@alloc%2fquick-lru/package.tgz",
     ] {
         assert!(
             package.set_artifact_url(unsafe_url).is_err(),
@@ -268,7 +381,7 @@ fn rejects_invalid_artifact_urls_at_construction_time() {
 }
 
 fn package_fixture() -> LockedPackage {
-    LockedPackage::new(
+    declared_package(
         "https://registry.example.test",
         "tapid",
         "1.0.0",
@@ -320,7 +433,7 @@ fn malformed_nested_package_version_returns_a_domain_error() {
 fn inserts_mutually_dependent_packages_as_one_batch() {
     let digest = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let integrity = format!("sha512-{}", "A".repeat(86));
-    let mut first = LockedPackage::new(
+    let mut first = declared_package(
         "https://registry.example.com",
         "first",
         "1.0.0",
@@ -328,7 +441,7 @@ fn inserts_mutually_dependent_packages_as_one_batch() {
         "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     )
     .unwrap();
-    let mut second = LockedPackage::new(
+    let mut second = declared_package(
         "https://registry.example.com",
         "second",
         "1.0.0",
@@ -360,7 +473,7 @@ fn same_name_and_version_from_two_registries_are_distinct() {
     for registry in ["https://one.example", "https://two.example"] {
         lockfile
             .insert_package(
-                LockedPackage::new(
+                declared_package(
                     registry,
                     "tapid",
                     "1.0.0",
@@ -380,14 +493,14 @@ fn peer_and_platform_contexts_change_key_deterministically() {
         .with("react".parse().unwrap(), "18.2.0".parse().unwrap());
     let platform =
         tapid_core::PlatformContext::new(Some("linux"), Some("x86_64"), Some("gnu")).unwrap();
-    let package = LockedPackage::new_with_context(
+    let package = LockedPackage::new_with_context_and_provenance(
         "https://registry.example.test",
         "tapid",
         "1.0.0",
         &format!("sha512-{}", "A".repeat(86)),
         "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        &peer,
-        &platform,
+        (&peer, &platform),
+        super::RegistryIntegrityProvenance::RegistryDeclared,
     )
     .unwrap();
     assert_eq!(
@@ -406,14 +519,14 @@ fn package_key_roundtrips_contexts_without_loss() {
         Some("musl-extra"),
     )
     .unwrap();
-    let package = LockedPackage::new_with_context(
+    let package = LockedPackage::new_with_context_and_provenance(
         "https://registry.example.test",
         "tapid",
         "1.0.0",
         &format!("sha512-{}", "A".repeat(86)),
         "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        &peer,
-        &platform,
+        (&peer, &platform),
+        super::RegistryIntegrityProvenance::RegistryDeclared,
     )
     .unwrap();
     let key = package.key();
@@ -430,14 +543,14 @@ fn package_key_distinguishes_platform_component_boundaries() {
     let first = tapid_core::PlatformContext::new(Some("linux"), Some("x86_64"), None).unwrap();
     let second = tapid_core::PlatformContext::new(Some("linux"), None, Some("x86_64")).unwrap();
     let make = |platform: &tapid_core::PlatformContext| {
-        LockedPackage::new_with_context(
+        LockedPackage::new_with_context_and_provenance(
             "https://registry.example.test",
             "tapid",
             "1.0.0",
             &format!("sha512-{}", "A".repeat(86)),
             "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            &tapid_core::PeerContext::default(),
-            platform,
+            (&tapid_core::PeerContext::default(), platform),
+            super::RegistryIntegrityProvenance::RegistryDeclared,
         )
         .unwrap()
     };

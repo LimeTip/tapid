@@ -162,6 +162,13 @@ fn extract_entries(
                 "archive uses a reserved Tapid metadata path".into(),
             ));
         }
+        let archive_mode = entry.header().mode()?;
+        if archive_mode & 0o111 != 0 && normalized.bytes().any(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            return Err(ExtractError::InvalidArchive(
+                "executable entry path contains a line break".into(),
+            ));
+        }
         let target = destination.join(
             normalized
                 .split('/')
@@ -187,14 +194,8 @@ fn extract_entries(
             .create_new(true)
             .open(&target)?;
         io::copy(&mut entry, &mut out)?;
-        let archive_mode = entry.header().mode()?;
         apply_portable_file_mode(archive_mode, &target)?;
         if archive_mode & 0o111 != 0 {
-            if normalized.bytes().any(|byte| matches!(byte, b'\n' | b'\r')) {
-                return Err(ExtractError::InvalidArchive(
-                    "executable entry path contains a line break".into(),
-                ));
-            }
             executable_paths.push(normalized);
         }
         out.sync_all()?;

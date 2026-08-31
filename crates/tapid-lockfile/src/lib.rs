@@ -10,10 +10,11 @@ mod validation;
 mod tests;
 
 pub use error::LockfileError;
-pub use model::{LockedPackage, Lockfile, LockfilePackageKey};
+pub use model::{LockedPackage, Lockfile, LockfilePackageKey, RegistryIntegrityProvenance};
 
 /// Returns the current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Current lockfile schema with exact direct-root package identities.
-pub const LOCKFILE_VERSION: u32 = 5;
+/// Current lockfile schema with exact direct roots and registry-integrity provenance.
+pub const LOCKFILE_VERSION: u32 = 6;
 const LEGACY_LOCKFILE_VERSION: u32 = 4;
+const PROVENANCE_LEGACY_LOCKFILE_VERSION: u32 = 5;

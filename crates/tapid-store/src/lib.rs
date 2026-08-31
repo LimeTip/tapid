@@ -1,6 +1,6 @@
 //! Filesystem-authoritative, content-addressed artifact ingestion.
 
-use fs2::FileExt;
+use fs4::{FileExt, TryLockError};
 use same_file::Handle;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -528,10 +528,10 @@ fn replay_owner(name: &std::ffi::OsStr, prefix: &str) -> Option<u32> {
 
 fn try_acquire_stale_replay_lease(path: &Path) -> io::Result<Option<File>> {
     let file = OpenOptions::new().read(true).write(true).open(path)?;
-    match FileExt::try_lock_exclusive(&file) {
+    match FileExt::try_lock(&file) {
         Ok(()) => Ok(Some(file)),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
-        Err(error) => Err(error),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(error),
     }
 }
 
@@ -759,7 +759,7 @@ fn remove_file_if_unchanged(path: &Path, expected: &Handle) {
 }
 
 fn lock_replay_lease(file: &File) -> io::Result<()> {
-    FileExt::try_lock_exclusive(file)
+    FileExt::try_lock(file).map_err(io::Error::from)
 }
 
 fn create_staging_file(dir: &Path) -> io::Result<(PathBuf, File)> {

@@ -11,7 +11,7 @@ use tapid_core::{ArtifactDigest, PackageIntegrity, PackageName, PackageVersion, 
 use tapid_linker::{
     DependencyEdge, InstanceKey, LayoutInput, PackageInstance, VerifiedTreeReference,
 };
-use tapid_lockfile::{LockedPackage, Lockfile, LockfilePackageKey};
+use tapid_lockfile::{LockedPackage, Lockfile, LockfilePackageKey, RegistryIntegrityProvenance};
 use tapid_manifest::PackageManifest;
 use tapid_registry_client::{
     HttpsTransport, JsrRegistry, NpmRegistry, PackagePlatform, RegistryArtifact,
@@ -252,6 +252,7 @@ fn current_platform_matches(platform: &PackagePlatform) -> bool {
 /// Registry metadata contains obsolete versions and requirement syntaxes that are
 /// irrelevant when a newer compatible version is selected. Keeping such versions
 /// out of the candidate set prevents historical metadata from aborting resolution.
+#[cfg(test)]
 fn usable_versions(packages: Vec<PackageRecord>) -> Vec<PackageVersionMetadata> {
     let mut versions = Vec::new();
     for package in packages {
@@ -288,73 +289,141 @@ struct NormalizedRecord {
     optional_dependencies: BTreeMap<PackageName, Requirement>,
 }
 
-type NormalizedRecords = BTreeMap<PackageRecordKey, Option<NormalizedRecord>>;
+type NormalizedRecords = BTreeMap<PackageRecordKey, Result<NormalizedRecord, String>>;
 
-fn normalize_record(package: &PackageRecord) -> Option<NormalizedRecord> {
-    let metadata = usable_versions(vec![package.clone()]).pop()?;
+fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String> {
+    if !current_platform_matches(&package.platform) {
+        return Err("version is incompatible with the current platform".to_owned());
+    }
+    let dependencies = package
+        .dependencies
+        .iter()
+        .map(|(name, requirement)| {
+            let parsed_name =
+                name.parse::<PackageName>()
+                    .map_err(|error: tapid_core::DomainError| {
+                        format!("dependency {name} has an unsupported name: {error}")
+                    })?;
+            let parsed_requirement = requirement.parse::<Requirement>().map_err(|error| {
+                format!("dependency {name} has unsupported requirement {requirement}: {error}")
+            })?;
+            Ok((parsed_name, parsed_requirement))
+        })
+        .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
+    let metadata = PackageVersionMetadata {
+        name: package.name.clone(),
+        version: package.version.clone(),
+        dependencies,
+    };
     let optional_dependencies = package
         .optional_dependencies
         .iter()
-        .map(|(name, requirement)| Some((name.parse().ok()?, requirement.parse().ok()?)))
-        .collect::<Option<BTreeMap<PackageName, Requirement>>>()?;
-    Some(NormalizedRecord {
+        .map(|(name, requirement)| {
+            let parsed_name =
+                name.parse::<PackageName>()
+                    .map_err(|error: tapid_core::DomainError| {
+                        format!("optional dependency {name} has an unsupported name: {error}")
+                    })?;
+            let parsed_requirement = requirement.parse::<Requirement>().map_err(|error| {
+                format!(
+                    "optional dependency {name} has unsupported requirement {requirement}: {error}"
+                )
+            })?;
+            Ok((parsed_name, parsed_requirement))
+        })
+        .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
+    Ok(NormalizedRecord {
         metadata,
         optional_dependencies,
     })
 }
 
-fn resolver_metadata(
+fn upsert_resolver_record(
+    key: &PackageRecordKey,
     records: &BTreeMap<PackageRecordKey, PackageRecord>,
-    normalized: &NormalizedRecords,
-) -> Result<Vec<RegistryMetadata>, String> {
+    normalized_records: &NormalizedRecords,
+    metadata: &mut Vec<RegistryMetadata>,
+) -> Result<(), String> {
+    let Some(normalized) = normalized_records
+        .get(key)
+        .and_then(|record| record.as_ref().ok())
+    else {
+        return Ok(());
+    };
     #[cfg(test)]
-    RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
+    RESOLVER_METADATA_VERSION_VISITS.set(RESOLVER_METADATA_VERSION_VISITS.get() + 1);
 
-    let mut by_registry = BTreeMap::<String, Vec<PackageVersionMetadata>>::new();
-    let mut candidates = BTreeMap::<(String, String), Vec<&PackageRecord>>::new();
-    for (key, package) in records {
-        if normalized.get(key).and_then(Option::as_ref).is_none() {
-            continue;
+    let package = records.get(key).expect("record inserted before metadata");
+    let registry_text = package.registry.to_string();
+    let mut package_metadata = normalized.metadata.clone();
+    for (name, requirement) in &normalized.optional_dependencies {
+        let compatible_candidate_exists = records.iter().any(|(candidate_key, candidate)| {
+            candidate_key.0 == registry_text
+                && candidate_key.1 == name.to_string()
+                && normalized_records
+                    .get(candidate_key)
+                    .and_then(|record| record.as_ref().ok())
+                    .is_some()
+                && current_platform_matches(&candidate.platform)
+                && requirement.matches(&candidate.version)
+        });
+        if compatible_candidate_exists {
+            package_metadata
+                .dependencies
+                .insert(name.clone(), requirement.clone());
         }
-        let (registry, name, _) = key;
-        candidates
-            .entry((registry.clone(), name.clone()))
-            .or_default()
-            .push(package);
     }
-    for (key, package) in records {
-        let Some(normalized) = normalized.get(key).and_then(Option::as_ref) else {
+
+    let registry_index = if let Some(index) = metadata
+        .iter()
+        .position(|entry| entry.registry == package.registry)
+    {
+        index
+    } else {
+        metadata.push(
+            RegistryMetadata::normalize(package.registry.clone(), Vec::new())
+                .map_err(|error| error.to_string())?,
+        );
+        metadata.sort_by(|left, right| left.registry.cmp(&right.registry));
+        metadata
+            .iter()
+            .position(|entry| entry.registry == package.registry)
+            .expect("inserted registry metadata")
+    };
+    let registry_metadata = &mut metadata[registry_index];
+    match registry_metadata.packages.binary_search_by(|candidate| {
+        candidate
+            .name
+            .cmp(&package_metadata.name)
+            .then(package_metadata.version.cmp(&candidate.version))
+    }) {
+        Ok(index) => registry_metadata.packages[index] = package_metadata,
+        Err(index) => registry_metadata.packages.insert(index, package_metadata),
+    }
+
+    let inserted_name = &package.name;
+    let inserted_version = &package.version;
+    for parent in &mut registry_metadata.packages {
+        let parent_key = (
+            registry_text.clone(),
+            parent.name.to_string(),
+            parent.version.to_string(),
+        );
+        let Some(parent_record) = normalized_records
+            .get(&parent_key)
+            .and_then(|record| record.as_ref().ok())
+        else {
             continue;
         };
-        let mut metadata = normalized.metadata.clone();
-        let registry = package.registry.to_string();
-        for (name, requirement) in &normalized.optional_dependencies {
-            let name_text = name.to_string();
-            let compatible_candidate_exists = candidates
-                .get(&(registry.clone(), name_text))
-                .is_some_and(|versions| {
-                    versions.iter().any(|candidate| {
-                        current_platform_matches(&candidate.platform)
-                            && requirement.matches(&candidate.version)
-                    })
-                });
-            if compatible_candidate_exists {
-                metadata
-                    .dependencies
-                    .insert(name.clone(), requirement.clone());
-            }
+        if let Some(requirement) = parent_record.optional_dependencies.get(inserted_name)
+            && requirement.matches(inserted_version)
+        {
+            parent
+                .dependencies
+                .insert(inserted_name.clone(), requirement.clone());
         }
-        by_registry.entry(registry).or_default().push(metadata);
     }
-    by_registry
-        .into_iter()
-        .map(|(registry, packages)| {
-            let registry = registry
-                .parse()
-                .map_err(|error: tapid_core::DomainError| error.to_string())?;
-            RegistryMetadata::normalize(registry, packages).map_err(|error| error.to_string())
-        })
-        .collect()
+    Ok(())
 }
 
 type PackageRecordKey = (String, String, String);
@@ -363,20 +432,44 @@ type ResolvedRecords = (Resolution, BTreeMap<PackageRecordKey, PackageRecord>);
 #[cfg(test)]
 thread_local! {
     static RESOLVER_METADATA_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RESOLVER_METADATA_VERSION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn insert_record(
     records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &mut NormalizedRecords,
+    metadata: &mut Vec<RegistryMetadata>,
     package: PackageRecord,
-) {
+) -> Result<(), String> {
     let key = (
         package.registry.to_string(),
         package.name.to_string(),
         package.version.to_string(),
     );
     normalized.insert(key.clone(), normalize_record(&package));
-    records.insert(key, package);
+    records.insert(key.clone(), package);
+    upsert_resolver_record(&key, records, normalized, metadata)
+}
+
+fn discarded_version_diagnostics(
+    normalized: &NormalizedRecords,
+    registry: &str,
+    name: &str,
+) -> String {
+    normalized
+        .iter()
+        .filter_map(|((candidate_registry, candidate_name, version), result)| {
+            (candidate_registry == registry && candidate_name == name)
+                .then(|| {
+                    result
+                        .as_ref()
+                        .err()
+                        .map(|reason| format!("discarded version {version}: {reason}"))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn metadata_progress_checkpoint(fetches: usize) -> bool {
@@ -402,9 +495,11 @@ where
     let mut fetched = BTreeSet::<(String, String)>::new();
     let mut records = BTreeMap::<PackageRecordKey, PackageRecord>::new();
     let mut normalized = NormalizedRecords::new();
+    let mut metadata = Vec::<RegistryMetadata>::new();
 
     loop {
-        let metadata = resolver_metadata(&records, &normalized)?;
+        #[cfg(test)]
+        RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
 
         match resolve_graph(roots, &metadata, ResolutionOptions::default()) {
             Ok(resolution) => {
@@ -436,7 +531,7 @@ where
                         fetched.insert((registry.to_string(), name.to_string()));
                         report_metadata_progress(fetched.len());
                         for package in fetch(&registry, &name)? {
-                            insert_record(&mut records, &mut normalized, package);
+                            insert_record(&mut records, &mut normalized, &mut metadata, package)?;
                         }
                     }
                     continue;
@@ -447,9 +542,16 @@ where
                 for (registry, name) in packages {
                     let key = (registry.clone(), name.clone());
                     if !fetched.insert(key) {
-                        return Err(format!(
+                        let discarded =
+                            discarded_version_diagnostics(&normalized, &registry, &name);
+                        let error = format!(
                             "resolution failed: metadata for {registry}:{name} remains unavailable"
-                        ));
+                        );
+                        return if discarded.is_empty() {
+                            Err(error)
+                        } else {
+                            Err(format!("{error}; {discarded}"))
+                        };
                     }
                     report_metadata_progress(fetched.len());
                     let registry: RegistryOrigin = registry
@@ -459,7 +561,7 @@ where
                         .parse()
                         .map_err(|error: tapid_core::DomainError| error.to_string())?;
                     for package in fetch(&registry, &name)? {
-                        insert_record(&mut records, &mut normalized, package);
+                        insert_record(&mut records, &mut normalized, &mut metadata, package)?;
                     }
                 }
             }
@@ -474,7 +576,12 @@ where
                 };
                 let key = (registry.clone(), name.clone());
                 if !fetched.insert(key) {
-                    return Err(format!("resolution failed: {error}"));
+                    let discarded = discarded_version_diagnostics(&normalized, &registry, &name);
+                    return if discarded.is_empty() {
+                        Err(format!("resolution failed: {error}"))
+                    } else {
+                        Err(format!("resolution failed: {error}; {discarded}"))
+                    };
                 }
                 report_metadata_progress(fetched.len());
                 let registry: RegistryOrigin = registry
@@ -485,7 +592,7 @@ where
                     .map_err(|error: tapid_core::DomainError| error.to_string())?;
                 let packages = fetch(&registry, &name)?;
                 for package in packages {
-                    insert_record(&mut records, &mut normalized, package);
+                    insert_record(&mut records, &mut normalized, &mut metadata, package)?;
                 }
             }
             Err(error) => return Err(format!("resolution failed: {error}")),
@@ -706,14 +813,19 @@ pub fn resolve_and_fetch(
             &platform_context,
         )
         .to_string();
-        let mut locked = LockedPackage::new_with_context(
+        let integrity_provenance = if record.integrity.is_some() {
+            RegistryIntegrityProvenance::RegistryDeclared
+        } else {
+            RegistryIntegrityProvenance::LocallyComputed
+        };
+        let mut locked = LockedPackage::new_with_context_and_provenance(
             &id.registry.to_string(),
             &id.name.to_string(),
             &id.version.to_string(),
             &actual.to_string(),
             &tree_digest.to_string(),
-            &empty_peer,
-            &platform_context,
+            (&empty_peer, &platform_context),
+            integrity_provenance,
         )
         .map_err(|e| e.to_string())?;
         if !record.fixture {
@@ -880,6 +992,28 @@ mod tests {
     }
 
     #[test]
+    fn deep_required_frontier_normalizes_each_version_once() {
+        RESOLVER_METADATA_VERSION_VISITS.set(0);
+        let registry: RegistryOrigin = NPM.parse().unwrap();
+        let root = Dependency::new(registry, "pkg-0".parse().unwrap(), "1.0.0".parse().unwrap());
+
+        let (resolution, _) = resolve_with_fetch(&[root], |_, name| {
+            let index = name.to_string()[4..].parse::<usize>().unwrap();
+            let mut package = named_record(&name.to_string(), "1.0.0", &[]);
+            if index < 31 {
+                package
+                    .dependencies
+                    .insert(format!("pkg-{}", index + 1), "1.0.0".into());
+            }
+            Ok(vec![package])
+        })
+        .unwrap();
+
+        assert_eq!(resolution.selected.len(), 32);
+        assert_eq!(RESOLVER_METADATA_VERSION_VISITS.get(), 32);
+    }
+
+    #[test]
     fn metadata_progress_is_emitted_at_bounded_checkpoints() {
         let checkpoints = (1..=612)
             .filter(|fetches| metadata_progress_checkpoint(*fetches))
@@ -1007,11 +1141,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_historical_dependency_ranges_do_not_hide_usable_versions() {
-        let versions = usable_versions(vec![record("3.0.1", Some("")), record("4.0.5", None)]);
+    fn normalized_empty_dependency_ranges_keep_versions_usable() {
+        let versions = usable_versions(vec![record("3.0.1", Some("*")), record("4.0.5", None)]);
 
-        assert_eq!(versions.len(), 1);
-        assert_eq!(versions[0].version.to_string(), "4.0.5");
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version.to_string(), "3.0.1");
+        assert_eq!(
+            versions[0].dependencies.get(&"popmotion".parse().unwrap()),
+            Some(&"*".parse().unwrap())
+        );
     }
 
     #[test]
@@ -1022,6 +1160,31 @@ mod tests {
         )]);
 
         assert!(versions.is_empty());
+    }
+
+    #[test]
+    fn resolution_error_reports_discarded_version_and_requirement() {
+        let roots = vec![Dependency::new(
+            NPM.parse().unwrap(),
+            "framer-motion".parse().unwrap(),
+            "*".parse().unwrap(),
+        )];
+        let result = resolve_with_fetch(&roots, |_, _| {
+            Ok(vec![record(
+                "2.9.5",
+                Some("git+https://example.test/popmotion.git"),
+            )])
+        });
+        let error = match result {
+            Ok(_) => panic!("unsupported versions must not resolve"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("discarded version 2.9.5"), "{error}");
+        assert!(
+            error.contains("git+https://example.test/popmotion.git"),
+            "{error}"
+        );
     }
 
     #[test]

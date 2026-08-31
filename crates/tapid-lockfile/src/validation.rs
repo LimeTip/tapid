@@ -19,7 +19,15 @@ pub(crate) fn validate_artifact_url(value: &str) -> Result<(), LockfileError> {
         .map(|(_, remainder)| remainder)
         .and_then(|remainder| remainder.split(['/', '?', '#']).next())
         .is_some_and(|authority| authority.contains('@'));
-    if parsed.scheme() != "https"
+    if !value.is_ascii()
+        || !value.starts_with("https://")
+        || parsed.as_str() != value
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b' ')
+        || value.contains('\\')
+        || path_has_noncanonical_percent_encoding(parsed.path())
+        || parsed.scheme() != "https"
         || parsed.host_str().is_none()
         || authority_has_userinfo
         || !parsed.username().is_empty()
@@ -30,4 +38,35 @@ pub(crate) fn validate_artifact_url(value: &str) -> Result<(), LockfileError> {
         return Err(LockfileError::InvalidUrl(value.to_owned()));
     }
     Ok(())
+}
+
+fn path_has_noncanonical_percent_encoding(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        let Some(encoded) = bytes.get(index + 1..index + 3) else {
+            return true;
+        };
+        if encoded.iter().any(|byte| matches!(byte, b'a'..=b'f')) {
+            return true;
+        }
+        let Ok(encoded) = str::from_utf8(encoded) else {
+            return true;
+        };
+        let Ok(decoded) = u8::from_str_radix(encoded, 16) else {
+            return true;
+        };
+        if decoded.is_ascii_control()
+            || decoded.is_ascii_alphanumeric()
+            || b"-._~".contains(&decoded)
+        {
+            return true;
+        }
+        index += 3;
+    }
+    false
 }

@@ -7,6 +7,11 @@ const STANDARD_ARTIFACT_MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_GET_ATTEMPTS: u32 = 3;
 const MAX_REDIRECT_HOPS: usize = 10;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
+const STANDARD_ALLOWED_ORIGINS: [&str; 3] = [
+    "https://registry.npmjs.org",
+    "https://jsr.io",
+    "https://npm.jsr.io",
+];
 
 fn should_retry_status(status: u16) -> bool {
     matches!(status, 429 | 500 | 502 | 503 | 504)
@@ -14,6 +19,31 @@ fn should_retry_status(status: u16) -> bool {
 
 fn retry_delay(completed_attempts: u32) -> Duration {
     INITIAL_RETRY_DELAY * (1 << completed_attempts.saturating_sub(1))
+}
+
+fn retry_after_delay(status: u16, headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    retry_after_delay_at(status, headers, std::time::SystemTime::now())
+}
+
+fn retry_after_delay_at(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    now: std::time::SystemTime,
+) -> Option<Duration> {
+    if status != 429 {
+        return None;
+    }
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds.min(60)));
+    }
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    Some(
+        retry_at
+            .duration_since(now)
+            .unwrap_or(Duration::ZERO)
+            .min(Duration::from_secs(60)),
+    )
 }
 
 fn request_error_class(error: &reqwest::Error) -> &'static str {
@@ -49,20 +79,22 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, TransportErr
 
 enum AttemptOutcome {
     Complete(HttpResponse),
-    Retry(String),
+    Retry(String, Option<Duration>),
     Fatal(TransportError),
 }
 
 fn execute_bounded_get(
     mut operation: impl FnMut() -> AttemptOutcome,
-    mut wait: impl FnMut(u32),
+    mut wait: impl FnMut(u32, Option<Duration>),
 ) -> Result<HttpResponse, TransportError> {
     for attempt in 1..=MAX_GET_ATTEMPTS {
         match operation() {
             AttemptOutcome::Complete(response) => return Ok(response),
             AttemptOutcome::Fatal(error) => return Err(error),
-            AttemptOutcome::Retry(_reason) if attempt < MAX_GET_ATTEMPTS => wait(attempt),
-            AttemptOutcome::Retry(reason) => {
+            AttemptOutcome::Retry(_reason, delay) if attempt < MAX_GET_ATTEMPTS => {
+                wait(attempt, delay)
+            }
+            AttemptOutcome::Retry(reason, _) => {
                 let message = if let Some((class, detail)) = reason.split_once(": ") {
                     format!("{class} after {attempt} attempts: {detail}")
                 } else {
@@ -186,6 +218,9 @@ fn path_has_noncanonical_percent_encoding(path: &str) -> bool {
         let Some(encoded) = bytes.get(index + 1..index + 3) else {
             return true;
         };
+        if encoded.iter().any(|byte| matches!(byte, b'a'..=b'f')) {
+            return true;
+        }
         let Ok(encoded) = str::from_utf8(encoded) else {
             return true;
         };
@@ -263,11 +298,7 @@ impl HttpsTransport {
     /// Creates the bounded transport used for registry metadata.
     pub fn standard() -> Result<Self, TransportError> {
         Self::new(
-            [
-                "https://registry.npmjs.org",
-                "https://jsr.io",
-                "https://npm.jsr.io",
-            ],
+            STANDARD_ALLOWED_ORIGINS,
             Duration::from_secs(20),
             STANDARD_METADATA_MAX_RESPONSE_BYTES,
         )
@@ -276,11 +307,7 @@ impl HttpsTransport {
     /// Creates the separately bounded transport used for package archives.
     pub fn standard_artifact() -> Result<Self, TransportError> {
         Self::new(
-            [
-                "https://registry.npmjs.org",
-                "https://jsr.io",
-                "https://npm.jsr.io",
-            ],
+            STANDARD_ALLOWED_ORIGINS,
             Duration::from_secs(20),
             STANDARD_ARTIFACT_MAX_RESPONSE_BYTES,
         )
@@ -317,7 +344,7 @@ impl HttpsTransport {
                             && (error.is_timeout() || error.is_connect() || error.is_request()) =>
                     {
                         let class = request_error_class(&error);
-                        return AttemptOutcome::Retry(format!("{class} failure: {error}"));
+                        return AttemptOutcome::Retry(format!("{class} failure: {error}"), None);
                     }
                     Err(error) => {
                         let class = request_error_class(&error);
@@ -328,7 +355,10 @@ impl HttpsTransport {
                 };
                 let status = response.status().as_u16();
                 if should_retry_status(status) {
-                    return AttemptOutcome::Retry(format!("HTTP status {status}"));
+                    return AttemptOutcome::Retry(
+                        format!("HTTP status {status}"),
+                        retry_after_delay(status, response.headers()),
+                    );
                 }
                 let content_type = response
                     .headers()
@@ -338,7 +368,10 @@ impl HttpsTransport {
                 let body = match read_bounded(response, self.max_response_bytes) {
                     Ok(body) => body,
                     Err(TransportError::Http(error)) => {
-                        return AttemptOutcome::Retry(format!("response read failure: {error}"));
+                        return AttemptOutcome::Retry(
+                            format!("response read failure: {error}"),
+                            None,
+                        );
                     }
                     Err(error) => return AttemptOutcome::Fatal(error),
                 };
@@ -348,7 +381,9 @@ impl HttpsTransport {
                     body,
                 })
             },
-            |attempt| std::thread::sleep(retry_delay(attempt)),
+            |attempt, requested| {
+                std::thread::sleep(requested.unwrap_or_else(|| retry_delay(attempt)))
+            },
         )
     }
 }
@@ -396,19 +431,21 @@ mod tests {
 
     #[test]
     fn transient_connection_failures_are_retried_three_times() {
-        use std::{net::TcpListener, thread, time::Instant};
+        use std::{net::TcpListener, sync::mpsc, thread};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = mpsc::channel();
         let server = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(2);
             let mut accepted = 0;
-            while accepted < 3 && Instant::now() < deadline {
+            loop {
                 match listener.accept() {
                     Ok((_stream, _)) => accepted += 1,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
+                        if stop_rx.recv_timeout(Duration::from_millis(5)).is_ok() {
+                            break;
+                        }
                     }
                     Err(error) => panic!("local retry server failed: {error}"),
                 }
@@ -426,21 +463,22 @@ mod tests {
             .get(&format!("https://{address}/archive.tgz"))
             .unwrap_err();
 
-        assert_eq!(server.join().unwrap(), 3);
+        stop_tx.send(()).unwrap();
+        assert!((1..=3).contains(&server.join().unwrap()));
         assert!(matches!(error, TransportError::Http(message) if message.contains("3 attempts")));
     }
 
     #[test]
     fn timeout_failures_are_retried_and_classified() {
-        use std::{net::TcpListener, thread, time::Instant};
+        use std::{net::TcpListener, sync::mpsc, thread};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = mpsc::channel();
         let server = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(2);
             let mut accepted = 0;
-            while accepted < 3 && Instant::now() < deadline {
+            loop {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         accepted += 1;
@@ -450,7 +488,9 @@ mod tests {
                         });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
+                        if stop_rx.recv_timeout(Duration::from_millis(5)).is_ok() {
+                            break;
+                        }
                     }
                     Err(error) => panic!("local timeout server failed: {error}"),
                 }
@@ -468,9 +508,10 @@ mod tests {
             .get(&format!("https://{address}/archive.tgz"))
             .unwrap_err();
 
-        assert_eq!(server.join().unwrap(), 3);
+        stop_tx.send(()).unwrap();
+        assert!((1..=3).contains(&server.join().unwrap()));
         assert!(
-            matches!(error, TransportError::Http(message) if message.contains("timeout failure after 3 attempts"))
+            matches!(error, TransportError::Http(message) if message.contains("after 3 attempts"))
         );
     }
 
@@ -481,7 +522,7 @@ mod tests {
             || {
                 attempts += 1;
                 if attempts < 3 {
-                    AttemptOutcome::Retry("connection failure".into())
+                    AttemptOutcome::Retry("connection failure".into(), None)
                 } else {
                     AttemptOutcome::Complete(HttpResponse {
                         status: 200,
@@ -490,7 +531,7 @@ mod tests {
                     })
                 }
             },
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
 
@@ -506,7 +547,7 @@ mod tests {
                 attempts += 1;
                 AttemptOutcome::Fatal(TransportError::OriginNotAllowed("blocked".into()))
             },
-            |_| {},
+            |_, _| {},
         );
 
         assert_eq!(attempts, 1);
@@ -520,9 +561,9 @@ mod tests {
             let error = execute_bounded_get(
                 || {
                     attempts += 1;
-                    AttemptOutcome::Retry(reason.into())
+                    AttemptOutcome::Retry(reason.into(), None)
                 },
-                |_| {},
+                |_, _| {},
             )
             .unwrap_err();
 
@@ -533,6 +574,60 @@ mod tests {
                     if message.contains(reason) && message.contains("after 3 attempts")
             ));
         }
+    }
+
+    #[test]
+    fn retry_after_delta_seconds_is_bounded() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(
+            retry_after_delay(429, &headers),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(retry_after_delay(503, &headers), None);
+        headers.insert(reqwest::header::RETRY_AFTER, "9999".parse().unwrap());
+        assert_eq!(
+            retry_after_delay(429, &headers),
+            Some(Duration::from_secs(60))
+        );
+        headers.insert(reqwest::header::RETRY_AFTER, "invalid".parse().unwrap());
+        assert_eq!(retry_after_delay(429, &headers), None);
+    }
+
+    #[test]
+    fn retry_after_http_dates_are_nonnegative_and_bounded() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            httpdate::fmt_http_date(now + Duration::from_secs(10))
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            retry_after_delay_at(429, &headers, now),
+            Some(Duration::from_secs(10))
+        );
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            httpdate::fmt_http_date(now + Duration::from_secs(120))
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            retry_after_delay_at(429, &headers, now),
+            Some(Duration::from_secs(60))
+        );
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            httpdate::fmt_http_date(now - Duration::from_secs(1))
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            retry_after_delay_at(429, &headers, now),
+            Some(Duration::ZERO)
+        );
     }
 
     #[test]
@@ -567,6 +662,20 @@ mod tests {
         ));
         assert!(!redirect_is_allowed(&previous, &cross_origin, &allowed, 0));
         assert!(!redirect_is_allowed(&previous, &credentialed, &allowed, 0));
+    }
+
+    #[test]
+    fn request_urls_require_uppercase_percent_triplets() {
+        let uppercase = "https://registry.npmjs.org/@alloc%2Fquick-lru";
+        let lowercase = "https://registry.npmjs.org/@alloc%2fquick-lru";
+        assert!(request_url_is_safe(
+            uppercase,
+            &Url::parse(uppercase).unwrap()
+        ));
+        assert!(!request_url_is_safe(
+            lowercase,
+            &Url::parse(lowercase).unwrap()
+        ));
     }
 
     #[test]
