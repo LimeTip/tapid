@@ -15,7 +15,7 @@ Tapid treats manifests, registry metadata, package archives, filesystem trees, l
 - **Root script execution:** `tapid run` is explicit, uses the project directory, prepends only the managed `.bin` directory, forwards arguments, and returns the child status. This is a compatibility boundary, not containment.
 - **Trust artifacts:** `tapid-signatures` provides Ed25519 signing and verification primitives. Trust-envelope signing authenticates the algorithm and key ID in the signed context. Release-manifest signing uses RFC 8785 JCS and the schema-defined `signed_digest` contract. The CLI uses the embedded production public keyring by default and permits an explicitly supplied validated keyring for controlled environments. Structural parsing never claims cryptographic validity.
 - **Stable release installation and upgrade:** First installation and `tapid upgrade` verify the signed release manifest before selecting or downloading an artifact, then verify target, version, SHA-256, size, and safe archive structure. Self-replacement is restricted to a Tapid-managed destination. The first-install bootstrap fails closed when its host lacks the required verifier tooling.
-- **Transport:** HTTPS transport uses an exact-origin allow-list, rejects cross-origin redirects, bounds response bodies, and sends no credentials by default.
+- **Transport:** HTTPS transport uses an exact-origin allow-list, permits at most 10 same-origin redirect hops, rejects cross-origin or credentialed redirects, bounds response bodies, sends no credentials, and limits transient GET retries to three attempts with deterministic delays.
 
 ## Non-goals and residual risks
 
@@ -24,7 +24,7 @@ Tapid treats manifests, registry metadata, package archives, filesystem trees, l
 - Root scripts can execute arbitrary project code through `/bin/sh` on Unix or `cmd.exe` on Windows. Tapid provides no OS sandbox, capability enforcement, malware scanner, executable scanner, or process containment.
 - Archive validation does not decompress or inspect behavior. A validated archive is not necessarily safe software.
 - No provenance verification or transparency-log verification is implemented for release artifacts.
-- Registry TLS and server authenticity depend on the transport and operating system. Private-registry authentication, retries, mirrors, cache eviction, and concurrency leases remain outside this slice.
+- Registry TLS and server authenticity depend on the transport and operating system. Private-registry authentication, mirrors, cache eviction, and concurrency leases remain outside this slice. Retries improve isolated transient-failure tolerance but do not provide failover or availability guarantees.
 - JSR live integrity is unsupported and unverified. Tapid fails closed when JSR metadata lacks an explicit HTTPS npm tarball and valid SHA-512 SRI. It does not treat downloaded bytes or a constructed URL as registry-declared integrity.
 - Linux and Windows consumer validation is configured in GitHub Actions but is not evidence until those jobs execute. Local macOS tests must not be generalized to other platforms.
 

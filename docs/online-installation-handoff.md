@@ -10,6 +10,7 @@ The CLI supports bounded live npm metadata and artifact retrieval in addition to
 - Historical versions with unsupported dependency syntax or missing integrity are excluded without hiding otherwise usable versions.
 - Exact package metadata HTTP 404 and narrowly validated unpublished tombstones produce no candidates. Other malformed or unsuccessful responses fail closed.
 - Metadata is fetched incrementally for packages reached by the selected graph.
+- Metadata and immutable artifact GETs retry a bounded set of transient failures, with three total attempts and deterministic 100 ms and 200 ms delays.
 - Distinct parents can select different exact versions of one transitive package.
 - Resolver root selections and exact dependency edges are preserved through lockfile construction, linking, and replay.
 - Lifecycle scripts remain disabled during installation.
@@ -20,7 +21,7 @@ The explicit `--allow-unverified-registry-artifacts` compatibility option can re
 
 - Live JSR installation and integrity behavior are not verified.
 - Full npm range, alias, tag, peer, optional dependency, workspace, private registry authentication, and platform-condition compatibility are incomplete.
-- Metadata and artifact downloads are currently sequential and do not retry transient transport failures.
+- Metadata and artifact downloads remain sequential; retry delays and per-attempt timeouts are bounded but can extend a single resource fetch.
 - Frozen replay does not yet implement every npm frozen-lockfile policy rule.
 
 ## Required release evidence
