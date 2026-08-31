@@ -297,6 +297,9 @@ fn resolver_metadata(
     records: &BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &NormalizedRecords,
 ) -> Result<Vec<RegistryMetadata>, String> {
+    #[cfg(test)]
+    RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
+
     let mut by_registry = BTreeMap::<String, Vec<PackageVersionMetadata>>::new();
     let mut candidates = BTreeMap::<(String, String), Vec<&PackageRecord>>::new();
     for ((registry, name, _), package) in records {
@@ -343,6 +346,11 @@ fn resolver_metadata(
 type PackageRecordKey = (String, String, String);
 type ResolvedRecords = (Resolution, BTreeMap<PackageRecordKey, PackageRecord>);
 
+#[cfg(test)]
+thread_local! {
+    static RESOLVER_METADATA_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn insert_record(
     records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &mut NormalizedRecords,
@@ -386,29 +394,60 @@ where
 
         match resolve_graph(roots, &metadata, ResolutionOptions::default()) {
             Ok(resolution) => {
-                let next_optional = resolution.selected.iter().find_map(|parent| {
-                    let record = records.get(&(
-                        parent.registry.to_string(),
-                        parent.name.to_string(),
-                        parent.version.to_string(),
-                    ))?;
-                    record.optional_dependencies.keys().find_map(|name| {
-                        let key = (parent.registry.to_string(), name.clone());
-                        (!fetched.contains(&key)).then_some((parent.registry.clone(), name.clone()))
+                let optional_frontier = resolution
+                    .selected
+                    .iter()
+                    .filter_map(|parent| {
+                        records
+                            .get(&(
+                                parent.registry.to_string(),
+                                parent.name.to_string(),
+                                parent.version.to_string(),
+                            ))
+                            .map(|record| (parent, record))
                     })
-                });
-                if let Some((registry, name)) = next_optional {
-                    let name: PackageName = name
-                        .parse()
-                        .map_err(|error: tapid_core::DomainError| error.to_string())?;
-                    fetched.insert((registry.to_string(), name.to_string()));
-                    report_metadata_progress(fetched.len());
-                    for package in fetch(&registry, &name)? {
-                        insert_record(&mut records, &mut normalized, package);
+                    .flat_map(|(parent, record)| {
+                        record.optional_dependencies.keys().filter_map(|name| {
+                            let key = (parent.registry.to_string(), name.clone());
+                            (!fetched.contains(&key))
+                                .then_some((parent.registry.clone(), name.clone()))
+                        })
+                    })
+                    .collect::<BTreeSet<_>>();
+                if !optional_frontier.is_empty() {
+                    for (registry, name) in optional_frontier {
+                        let name: PackageName = name
+                            .parse()
+                            .map_err(|error: tapid_core::DomainError| error.to_string())?;
+                        fetched.insert((registry.to_string(), name.to_string()));
+                        report_metadata_progress(fetched.len());
+                        for package in fetch(&registry, &name)? {
+                            insert_record(&mut records, &mut normalized, package);
+                        }
                     }
                     continue;
                 }
                 return Ok((resolution, records));
+            }
+            Err(ResolveError::MissingMetadata { packages }) => {
+                for (registry, name) in packages {
+                    let key = (registry.clone(), name.clone());
+                    if !fetched.insert(key) {
+                        return Err(format!(
+                            "resolution failed: metadata for {registry}:{name} remains unavailable"
+                        ));
+                    }
+                    report_metadata_progress(fetched.len());
+                    let registry: RegistryOrigin = registry
+                        .parse()
+                        .map_err(|error: tapid_core::DomainError| error.to_string())?;
+                    let name: PackageName = name
+                        .parse()
+                        .map_err(|error: tapid_core::DomainError| error.to_string())?;
+                    for package in fetch(&registry, &name)? {
+                        insert_record(&mut records, &mut normalized, package);
+                    }
+                }
             }
             Err(error @ ResolveError::MissingCandidate { .. })
             | Err(error @ ResolveError::Conflict { .. }) => {
@@ -787,6 +826,32 @@ mod tests {
         assert_eq!(checkpoints.first(), Some(&1));
         assert_eq!(checkpoints.last(), Some(&625));
         assert!(checkpoints.len() <= 14);
+    }
+
+    #[test]
+    fn wide_required_frontier_rebuilds_metadata_only_once_per_wave() {
+        RESOLVER_METADATA_BUILD_COUNT.set(0);
+        let registry: RegistryOrigin = NPM.parse().unwrap();
+        let roots = (0..64)
+            .map(|index| {
+                Dependency::new(
+                    registry.clone(),
+                    format!("pkg-{index}").parse().unwrap(),
+                    "1.0.0".parse().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut fetched = Vec::new();
+
+        let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+            fetched.push(name.to_string());
+            Ok(vec![named_record(&name.to_string(), "1.0.0", &[])])
+        })
+        .unwrap();
+
+        assert_eq!(resolution.selected.len(), 64);
+        assert_eq!(fetched.len(), 64);
+        assert_eq!(RESOLVER_METADATA_BUILD_COUNT.get(), 2);
     }
 
     #[test]

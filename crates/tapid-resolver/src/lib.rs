@@ -228,6 +228,9 @@ pub enum ResolveError {
     DuplicateMetadata {
         package: String,
     },
+    MissingMetadata {
+        packages: Vec<(String, String)>,
+    },
     MissingCandidate {
         registry: String,
         name: String,
@@ -278,8 +281,18 @@ pub fn resolve_graph(
     let mut selected_packages = BTreeMap::new();
     let mut roots = Vec::new();
     let mut queue = Vec::new();
+    let mut missing_metadata = BTreeSet::new();
     for ((registry, name), requirements) in root_constraints {
-        let package = select_package(&registry, &name, &requirements, &candidate_index)?;
+        let package = match select_package(&registry, &name, &requirements, &candidate_index) {
+            Ok(package) => package,
+            Err(ResolveError::MissingCandidate { .. })
+                if !candidate_index.contains_key(&(registry.clone(), name.clone())) =>
+            {
+                missing_metadata.insert((registry.to_string(), name.to_string()));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let id = RegistryPackageId::new(registry, name, package.version.clone());
         selected.insert(id.clone());
         selected_packages.insert(id.clone(), package);
@@ -300,12 +313,22 @@ pub fn resolve_graph(
             .clone();
         for (dependency, requirement) in package_dependencies {
             let requirements = BTreeSet::from([requirement]);
-            let child_package = select_package(
+            let child_package = match select_package(
                 &parent.registry,
                 &dependency,
                 &requirements,
                 &candidate_index,
-            )?;
+            ) {
+                Ok(package) => package,
+                Err(ResolveError::MissingCandidate { .. })
+                    if !candidate_index
+                        .contains_key(&(parent.registry.clone(), dependency.clone())) =>
+                {
+                    missing_metadata.insert((parent.registry.to_string(), dependency.to_string()));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let child = RegistryPackageId::new(
                 parent.registry.clone(),
                 dependency.clone(),
@@ -321,6 +344,12 @@ pub fn resolve_graph(
                 queue.push(child);
             }
         }
+    }
+
+    if !missing_metadata.is_empty() {
+        return Err(ResolveError::MissingMetadata {
+            packages: missing_metadata.into_iter().collect(),
+        });
     }
 
     Ok(Resolution {
@@ -719,6 +748,47 @@ mod tests {
         assert_eq!(
             r.selected[0].to_string(),
             "https://registry.npmjs.org:foo@0.9.0"
+        );
+    }
+
+    #[test]
+    fn missing_metadata_is_reported_as_a_sorted_frontier() {
+        let registry: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let app: PackageName = "app".parse().unwrap();
+        let metadata = RegistryMetadata::normalize(
+            registry.clone(),
+            vec![PackageVersionMetadata {
+                name: app.clone(),
+                version: "1.0.0".parse().unwrap(),
+                dependencies: BTreeMap::from([
+                    ("z-child".parse().unwrap(), req("1.0.0")),
+                    ("a-child".parse().unwrap(), req("1.0.0")),
+                ]),
+            }],
+        )
+        .unwrap();
+
+        let error = resolve_graph(
+            &[Dependency::new(registry, app, req("1.0.0"))],
+            &[metadata],
+            ResolutionOptions::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ResolveError::MissingMetadata {
+                packages: vec![
+                    (
+                        "https://registry.npmjs.org".to_owned(),
+                        "a-child".to_owned()
+                    ),
+                    (
+                        "https://registry.npmjs.org".to_owned(),
+                        "z-child".to_owned()
+                    ),
+                ],
+            }
         );
     }
 
