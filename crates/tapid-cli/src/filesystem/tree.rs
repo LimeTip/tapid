@@ -409,16 +409,31 @@ mod copy_tests {
                 fs::write(&target, b"changed").unwrap();
                 assert_eq!(fs::read(&source).unwrap(), b"source");
             }
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {}
             Err(error)
-                if error.kind() == std::io::ErrorKind::Unsupported
-                    || matches!(
-                        error.raw_os_error(),
-                        Some(code)
-                            if code == libc::EOPNOTSUPP
-                                || code == libc::ENOTSUP
-                                || code == libc::ENOTTY
-                                || code == libc::EINVAL
-                    ) => {}
+                if {
+                    #[cfg(target_os = "macos")]
+                    {
+                        matches!(
+                            error.raw_os_error(),
+                            Some(code)
+                                if code == libc::EOPNOTSUPP
+                                    || code == libc::ENOTSUP
+                                    || code == libc::ENOTTY
+                        )
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        matches!(
+                            error.raw_os_error(),
+                            Some(code)
+                                if code == libc::EOPNOTSUPP
+                                    || code == libc::ENOTSUP
+                                    || code == libc::ENOTTY
+                                    || code == libc::EINVAL
+                        )
+                    }
+                } => {}
             Err(error) => panic!("platform clone failed unexpectedly: {error}"),
         }
 
