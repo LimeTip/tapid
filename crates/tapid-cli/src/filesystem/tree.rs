@@ -239,6 +239,15 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     if clone_directory_tree(&root, target)? {
+        let metadata = target.join(".tapid-executable-modes");
+        match fs::symlink_metadata(&metadata) {
+            Ok(file) if file.file_type().is_file() => {
+                fs::remove_file(metadata).map_err(|error| error.to_string())?;
+            }
+            Ok(_) => return Err("internal executable metadata is not a regular file".into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
         return Ok(());
     }
     copy_tree_contents(&root, target)
@@ -883,6 +892,7 @@ mod copy_tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("package.json"), br#"{"name":"clone-test"}"#).unwrap();
         fs::write(source.join("data.bin"), vec![7_u8; 1024 * 1024]).unwrap();
+        fs::write(source.join(".tapid-executable-modes"), b"data.bin\n").unwrap();
         BYTE_COPY_COUNT.set(0);
         CLONE_CALL_COUNT.set(0);
 
@@ -898,6 +908,7 @@ mod copy_tests {
             1,
             "the package hierarchy should be cloned atomically in one filesystem operation"
         );
+        assert!(!target.join(".tapid-executable-modes").exists());
         fs::write(target.join("data.bin"), b"project mutation").unwrap();
         assert_eq!(
             fs::read(source.join("data.bin")).unwrap(),

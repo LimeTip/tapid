@@ -372,7 +372,9 @@ impl Store {
                         io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
                     ) =>
                 {
-                    self.verified_tree_path(digest)
+                    let existing = self.verified_tree_path(digest);
+                    let _ = fs::remove_dir_all(&staging);
+                    existing
                 }
                 Err(error) => Err(error.into()),
             }
