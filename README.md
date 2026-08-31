@@ -9,7 +9,7 @@ Tapid is a JavaScript and TypeScript package manager written in Rust. It provide
 Source installation is the supported contributor-development path. The immutable public release installer is also available, but the current release remains intended for development evaluation rather than production use.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh | sh -s -- --source-ref main
 ```
 
 The default command builds Tapid from the `main` source branch locally. This is the contributor-development path; use the immutable public release installer below when evaluating a published build.
