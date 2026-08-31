@@ -382,6 +382,49 @@ mod copy_tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn platform_clone_preserves_source_when_storage_supports_it() {
+        let _guard = COPY_TEST_LOCK.lock().unwrap();
+        use super::clone_file;
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-platform-clone-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::write(&source, b"source").unwrap();
+
+        match clone_file(&source, &target) {
+            Ok(()) => {
+                assert_eq!(fs::read(&target).unwrap(), b"source");
+                fs::write(&target, b"changed").unwrap();
+                assert_eq!(fs::read(&source).unwrap(), b"source");
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::Unsupported
+                    || matches!(
+                        error.raw_os_error(),
+                        Some(code)
+                            if code == libc::EOPNOTSUPP
+                                || code == libc::ENOTSUP
+                                || code == libc::ENOTTY
+                                || code == libc::EINVAL
+                    ) => {}
+            Err(error) => panic!("platform clone failed unexpectedly: {error}"),
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn copy_tree_handles_nested_directories_and_preserves_executable_mode() {
         let _guard = COPY_TEST_LOCK.lock().unwrap();
