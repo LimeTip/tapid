@@ -11,4 +11,5 @@ rust-version.workspace = true
 autoexamples = false
 
 [dependencies]
+base64 = "0.22"
 semver = "1.0.28"

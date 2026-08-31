@@ -1306,6 +1306,7 @@ dependencies = [
 name = "tapid-core"
 version = "0.0.3"
 dependencies = [
+ "base64 0.22.1",
  "semver",
 ]
 

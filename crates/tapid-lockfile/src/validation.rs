@@ -15,8 +15,9 @@ pub(crate) fn validate_registry_url(value: &str) -> Result<(), LockfileError> {
 pub(crate) fn validate_artifact_url(value: &str) -> Result<(), LockfileError> {
     let parsed = Url::parse(value).map_err(|_| LockfileError::InvalidUrl(value.to_owned()))?;
     let authority_has_userinfo = value
-        .strip_prefix("https://")
-        .and_then(|remainder| remainder.split('/').next())
+        .split_once("://")
+        .map(|(_, remainder)| remainder)
+        .and_then(|remainder| remainder.split(['/', '?', '#']).next())
         .is_some_and(|authority| authority.contains('@'));
     if parsed.scheme() != "https"
         || parsed.host_str().is_none()

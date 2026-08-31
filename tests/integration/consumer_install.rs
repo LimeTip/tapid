@@ -181,7 +181,7 @@ fn tar_fixture() -> Vec<u8> {
 fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
     let archive = tar_fixture();
     let npm_meta = br#"{"name":"demo","versions":{"1.0.0":{"name":"demo","version":"1.0.0","dist":{"tarball":"https://registry.npmjs.org/demo/-/demo-1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}}"#.to_vec();
-    let jsr_meta = br#"{"scope":"std","name":"path","latest":"1.0.0","versions":{"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/~/std__path/1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}}"#.to_vec();
+    let jsr_meta = br#"{"scope":"std","name":"path","latest":"1.0.0","versions":{"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/~/std__path/1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#.to_vec();
     let fixture = LocalHttpFixture::start(BTreeMap::from([
         ("/demo".into(), (200, npm_meta)),
         ("/@std/path/meta.json".into(), (200, jsr_meta)),

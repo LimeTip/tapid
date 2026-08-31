@@ -374,10 +374,10 @@ impl Lockfile {
             }
         }
         for (key, package) in &lockfile.packages {
+            package.validate()?;
             if key != &package.key() {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));
             }
-            package.validate()?;
             for (name, dependency) in &package.dependencies {
                 let target = dependency.parse::<LockfilePackageKey>()?;
                 if dependency == key {
@@ -512,9 +512,15 @@ impl LockedPackage {
         self.version
             .parse::<PackageVersion>()
             .map_err(LockfileError::Domain)?;
-        self.artifact_integrity
+        let artifact_integrity = self
+            .artifact_integrity
             .parse::<PackageIntegrity>()
             .map_err(LockfileError::Domain)?;
+        if artifact_integrity.to_string() != self.artifact_integrity {
+            return Err(LockfileError::InvalidSha512(
+                self.artifact_integrity.clone(),
+            ));
+        }
         self.unpacked_digest
             .parse::<ArtifactDigest>()
             .map_err(LockfileError::Domain)?;

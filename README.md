@@ -2,17 +2,17 @@
 
 [![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
 
-Tapid is a JavaScript and TypeScript package manager written in Rust. It provides deterministic dependency installation, verified package storage, Node-compatible `node_modules` materialization, lockfile replay, and explicit root-script execution. The current implementation targets a small, explicit npm-compatible subset. Version 0.0.5 is published for development use, but signed platform binaries and production support are not yet available.
+Tapid is a JavaScript and TypeScript package manager written in Rust. It provides deterministic dependency installation, verified package storage, Node-compatible `node_modules` materialization, lockfile replay, and explicit root-script execution. The current implementation targets a small, explicit npm-compatible subset. Version 0.0.6 and signed platform release artifacts are published for development use, but production support is not yet available.
 
 ## Install Tapid
 
-Source installation is the supported developer path today.
+Source installation is the supported contributor-development path. The immutable public release installer is also available, but the current release remains intended for development evaluation rather than production use.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh | bash
 ```
 
-The default command builds Tapid from the `main` source branch locally. This is the development installation path until signed platform release assets are published.
+The default command builds Tapid from the `main` source branch locally. This is the contributor-development path; use the immutable public release installer below when evaluating a published build.
 
 **Windows PowerShell**
 
@@ -124,7 +124,7 @@ Windows uninstall:
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
 ```
 
-The installers use the canonical `LimeTip/tapid` repository by default. Alternate repositories are explicit through `--repo` or `TAPID_REPO`. The uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Source installation remains the explicit development path. Stable installation and `tapid upgrade` now use signed release manifests, the embedded production public key, artifact hash and size verification, safe archive validation, endpoint fallback, and managed atomic replacement. Public stable release advertising still waits for protected CI configuration and clean macOS, Linux, and Windows release exercises.
+The installers use the canonical `LimeTip/tapid` repository by default. Alternate repositories are explicit through `--repo` or `TAPID_REPO`. The uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Source installation remains the explicit development path. Stable installation and `tapid upgrade` now use signed release manifests, the embedded production public key, artifact hash and size verification, safe archive validation, endpoint fallback, and managed atomic replacement. The public stable installer is available, but production-readiness claims still wait for protected CI configuration and clean macOS, Linux, and Windows release exercises.
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
 

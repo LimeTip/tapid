@@ -42,6 +42,11 @@ pub(crate) fn replay_input(
         keep: false,
     };
     let typed_packages = lock.packages_typed().map_err(|e| e.to_string())?;
+    let typed_keys = typed_packages
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let root_keys = replay_root_keys(lock, manifest, &typed_keys)?;
     for (key, package) in &typed_packages {
         let encoded = key.to_string();
         let digest: ArtifactDigest = package
@@ -67,39 +72,14 @@ pub(crate) fn replay_input(
         trees.insert(encoded, tree);
         instances.push(instance);
     }
-    let mut roots = Vec::new();
-    if lock.roots().is_empty() {
-        let root_identities = replay_root_identities(manifest)?;
-        if root_identities.is_empty() {
-            roots.extend(keys.values().cloned());
-        } else {
-            for identity in root_identities.keys() {
-                let selected = typed_packages
-                    .iter()
-                    .map(|(key, _)| key)
-                    .filter(|key| {
-                        (&key.registry, &key.name) == (&identity.0, &identity.1)
-                            && replay_root_matches(&root_identities, key)
-                    })
-                    .max_by(|left, right| left.version.cmp(&right.version))
-                    .ok_or_else(|| {
-                        format!(
-                            "legacy lockfile has no exact root candidate for {}:{}",
-                            identity.0, identity.1
-                        )
-                    })?;
-                roots.push(keys[&selected.to_string()].clone());
-            }
-        }
-    } else {
-        for root in lock.roots() {
-            roots.push(
-                keys.get(root)
-                    .cloned()
-                    .ok_or_else(|| format!("missing root package target {root}"))?,
-            );
-        }
-    }
+    let roots = root_keys
+        .iter()
+        .map(|root| {
+            keys.get(root)
+                .cloned()
+                .ok_or_else(|| format!("missing root package target {root}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut edges = Vec::new();
     for (key, package) in &typed_packages {
         let encoded = key.to_string();
@@ -122,6 +102,81 @@ pub(crate) fn replay_input(
         },
         trees,
     ))
+}
+
+fn replay_root_keys(
+    lock: &Lockfile,
+    manifest: &PackageManifest,
+    typed_keys: &[tapid_lockfile::LockfilePackageKey],
+) -> Result<Vec<String>, String> {
+    let root_identities = replay_root_identities(manifest)?;
+    if root_identities.is_empty() {
+        return if lock.roots().is_empty() && typed_keys.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err("lockfile has packages or roots but the manifest has no direct dependencies".into())
+        };
+    }
+
+    if lock.roots().is_empty() {
+        return root_identities
+            .keys()
+            .map(|identity| {
+                let candidates = typed_keys
+                    .iter()
+                    .filter(|key| {
+                        (&key.registry, &key.name) == (&identity.0, &identity.1)
+                            && replay_root_matches(&root_identities, key)
+                    })
+                    .collect::<Vec<_>>();
+                let Some(highest_version) = candidates.iter().map(|key| &key.version).max() else {
+                    return Err(format!(
+                        "legacy lockfile has no exact root candidate for {}:{}",
+                        identity.0, identity.1
+                    ));
+                };
+                let highest = candidates
+                    .into_iter()
+                    .filter(|key| &key.version == highest_version)
+                    .collect::<Vec<_>>();
+                match highest.as_slice() {
+                    [selected] => Ok(selected.to_string()),
+                    _ => Err(format!(
+                        "legacy lockfile has ambiguous exact root candidates for {}:{} at version {}",
+                        identity.0, identity.1, highest_version
+                    )),
+                }
+            })
+            .collect();
+    }
+
+    let typed_by_key = typed_keys
+        .iter()
+        .map(|key| (key.to_string(), key))
+        .collect::<BTreeMap<_, _>>();
+    let mut matched = BTreeMap::new();
+    for root in lock.roots() {
+        let key = typed_by_key
+            .get(root)
+            .ok_or_else(|| format!("missing root package target {root}"))?;
+        if !replay_root_matches(&root_identities, key) {
+            return Err(format!(
+                "lockfile root {root} does not satisfy a direct manifest dependency"
+            ));
+        }
+        *matched
+            .entry((key.registry.clone(), key.name.clone()))
+            .or_insert(0_usize) += 1;
+    }
+    for identity in root_identities.keys() {
+        if matched.get(identity) != Some(&1) {
+            return Err(format!(
+                "lockfile must contain exactly one root for direct dependency {}:{}",
+                identity.0, identity.1
+            ));
+        }
+    }
+    Ok(lock.roots().to_vec())
 }
 
 pub(crate) fn replay_root_identities(
@@ -183,6 +238,67 @@ pub(crate) fn current_platform() -> Platform {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+
+    fn legacy_lock() -> Lockfile {
+        Lockfile::from_json(
+            r#"{"lockfileVersion":4,"rootManifestDigest":"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resolverVersion":"0","linkerVersion":"0","packages":{}}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn legacy_root_reconstruction_selects_highest_candidate_matching_all_manifest_maps() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"debug":"*"},"devDependencies":{"debug":"^4.0.0"}}"#,
+        )
+        .unwrap();
+        let keys = [
+            "https://registry.npmjs.org|debug@3.0.0|peer=-|platform=-"
+                .parse()
+                .unwrap(),
+            "https://registry.npmjs.org|debug@4.0.0|peer=-|platform=-"
+                .parse()
+                .unwrap(),
+        ];
+
+        assert_eq!(
+            replay_root_keys(&legacy_lock(), &manifest, &keys).unwrap(),
+            ["https://registry.npmjs.org|debug@4.0.0|peer=-|platform=-"]
+        );
+    }
+
+    #[test]
+    fn legacy_root_reconstruction_rejects_ambiguous_highest_contexts() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"debug":"^4.0.0"}}"#,
+        )
+        .unwrap();
+        let origin = "https://registry.npmjs.org";
+        let keys = [
+            format!("{origin}|debug@4.0.0|peer=-|platform=-")
+                .parse()
+                .unwrap(),
+            format!("{origin}|debug@4.0.0|peer=name=react;version=18.2.0|platform=-")
+                .parse()
+                .unwrap(),
+        ];
+
+        let error = replay_root_keys(&legacy_lock(), &manifest, &keys).unwrap_err();
+        assert!(error.contains("ambiguous exact root candidates"));
+    }
+
+    #[test]
+    fn legacy_root_reconstruction_rejects_a_missing_direct_candidate() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"debug":"^4.0.0"}}"#,
+        )
+        .unwrap();
+        let keys = ["https://registry.npmjs.org|debug@3.0.0|peer=-|platform=-"
+            .parse()
+            .unwrap()];
+
+        assert!(replay_root_keys(&legacy_lock(), &manifest, &keys).is_err());
+    }
 
     #[test]
     fn explicit_registry_root_matches_only_its_registry_identity() {

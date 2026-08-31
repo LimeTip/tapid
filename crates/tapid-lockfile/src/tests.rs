@@ -30,7 +30,7 @@ fn serializes_packages_in_canonical_order() {
                 "https://registry.example.test",
                 "alpha",
                 "1.0.0",
-                &format!("sha512-{}", "C".repeat(86)),
+                "sha512-ndzQj2/g3boQWYtZQd+xKkW0TfhrPjTperEStZq/VaKgGIw/wMEZ9DsrhO9Yo/BpUtwv0kArKxmAWfv+FVKoPg==",
                 "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             )
             .unwrap(),
@@ -80,8 +80,30 @@ fn constructors_validate_domain_values() {
 }
 
 #[test]
+fn deserialized_integrity_must_use_canonical_padded_base64() {
+    let package = package_fixture();
+    let key = package.key();
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile.insert_package(package).unwrap();
+    lockfile.set_roots([key.clone()]).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&lockfile.to_json().unwrap()).unwrap();
+    let canonical = json["packages"][&key]["artifactIntegrity"]
+        .as_str()
+        .unwrap();
+    assert!(canonical.ends_with("=="));
+    json["packages"][&key]["artifactIntegrity"] = canonical.trim_end_matches('=').into();
+
+    assert!(matches!(
+        Lockfile::from_json(&serde_json::to_string(&json).unwrap()),
+        Err(super::LockfileError::InvalidSha512(_))
+    ));
+}
+
+#[test]
 fn preserves_case_sensitive_sha512_integrity_values() {
-    let integrity = format!("sha512-{}", "AbCdEfGh".repeat(10) + "AbCdEf");
+    let integrity = "sha512-vjezHzaHfTgpmqTTye2FWJ751nFdp6l4EtqfRsd2sylZY73USlHKS75q67jhw5cb7uMi0xRAdd1MiTHAfaR9TA==".to_owned();
     let mut lockfile =
         Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             .unwrap();
@@ -141,7 +163,10 @@ fn exact_roots_use_a_new_schema_version_while_v4_remains_readable() {
 
     let mut rootless_current = current_value.clone();
     rootless_current.as_object_mut().unwrap().remove("roots");
-    assert!(Lockfile::from_json(&serde_json::to_string(&rootless_current).unwrap()).is_err());
+    assert!(matches!(
+        Lockfile::from_json(&serde_json::to_string(&rootless_current).unwrap()),
+        Err(super::LockfileError::MissingRoots)
+    ));
 
     current_value["lockfileVersion"] = 4.into();
     current_value.as_object_mut().unwrap().remove("roots");
@@ -155,7 +180,7 @@ fn deserialized_roots_must_be_unique_sorted_and_semantically_canonical() {
         "https://registry.npmjs.org",
         "zeta",
         "2.0.0",
-        &format!("sha512-{}", "D".repeat(86)),
+        "sha512-/MmRN7JJVA+b2CiofaMX879ymjOivjQ16Qn+6w0HmmDrfj4VpVRxN2knDRCdgZqbH/2lm5jnuaEgVL1lWkTCAQ==",
         "sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     )
     .unwrap();
@@ -176,17 +201,23 @@ fn deserialized_roots_must_be_unique_sorted_and_semantically_canonical() {
 
     let mut duplicate: serde_json::Value = serde_json::from_str(&canonical).unwrap();
     duplicate["roots"] = serde_json::json!([first_key, first_key]);
-    assert!(Lockfile::from_json(&serde_json::to_string(&duplicate).unwrap()).is_err());
+    assert!(matches!(
+        Lockfile::from_json(&serde_json::to_string(&duplicate).unwrap()),
+        Err(super::LockfileError::NonCanonicalRoots)
+    ));
 
     let mut unordered: serde_json::Value = serde_json::from_str(&canonical).unwrap();
     unordered["roots"] = serde_json::json!([second_key, first_key]);
-    assert!(Lockfile::from_json(&serde_json::to_string(&unordered).unwrap()).is_err());
+    assert!(matches!(
+        Lockfile::from_json(&serde_json::to_string(&unordered).unwrap()),
+        Err(super::LockfileError::NonCanonicalRoots)
+    ));
 
-    assert!(
-        "https://registry.npmjs.org|demo@1.0.0|peer=not-a-context|platform=-"
-            .parse::<super::LockfilePackageKey>()
-            .is_err()
-    );
+    assert!(matches!(
+        "https://registry.example.test|demo@1.0.0|peer=not-a-context|platform=-"
+            .parse::<super::LockfilePackageKey>(),
+        Err(super::LockfileError::InvalidPackageKey(_))
+    ));
 }
 
 #[test]
@@ -201,11 +232,10 @@ fn exact_root_package_keys_roundtrip_and_cannot_dangle() {
 
     let replayed = Lockfile::from_json(&lockfile.to_json().unwrap()).unwrap();
     assert_eq!(replayed.roots(), &[root]);
-    assert!(
-        lockfile
-            .set_roots(["https://registry.npmjs.org|missing@1.0.0|peer=-|platform=-"])
-            .is_err()
-    );
+    assert!(matches!(
+        lockfile.set_roots(["https://registry.npmjs.org|missing@1.0.0|peer=-|platform=-"]),
+        Err(super::LockfileError::DanglingRoot(_))
+    ));
 }
 
 #[test]
@@ -217,6 +247,7 @@ fn accepts_scoped_https_artifact_paths_without_allowing_credentials() {
 
     for unsafe_url in [
         "https://user:secret@registry.npmjs.org/package.tgz",
+        "HTTPS://@registry.npmjs.org/package.tgz",
         "https://registry.npmjs.org/package.tgz?token=secret",
         "https://registry.npmjs.org/package.tgz#fragment",
     ] {
@@ -242,6 +273,44 @@ fn package_fixture() -> LockedPackage {
         "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     )
     .unwrap()
+}
+
+fn malformed_package_field_error(field: &str, value: &str) -> super::LockfileError {
+    let package = package_fixture();
+    let key = package.key();
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile.insert_package(package).unwrap();
+    lockfile.set_roots([key.clone()]).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&lockfile.to_json().unwrap()).unwrap();
+    json["packages"][&key][field] = value.into();
+
+    Lockfile::from_json(&serde_json::to_string(&json).unwrap()).unwrap_err()
+}
+
+#[test]
+fn malformed_nested_registry_returns_a_domain_error() {
+    assert!(matches!(
+        malformed_package_field_error("registry", "http://registry.example.test"),
+        super::LockfileError::Domain(_)
+    ));
+}
+
+#[test]
+fn malformed_nested_package_name_returns_a_domain_error() {
+    assert!(matches!(
+        malformed_package_field_error("name", "../escape"),
+        super::LockfileError::Domain(_)
+    ));
+}
+
+#[test]
+fn malformed_nested_package_version_returns_a_domain_error() {
+    assert!(matches!(
+        malformed_package_field_error("version", "not-semver"),
+        super::LockfileError::Domain(_)
+    ));
 }
 
 #[test]

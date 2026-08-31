@@ -1,5 +1,10 @@
 use std::{fmt, str::FromStr};
 
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PackageName(String);
 
@@ -200,15 +205,20 @@ impl FromStr for PackageIntegrity {
         let Some(encoded) = value.strip_prefix("sha512-") else {
             return Err(DomainError::InvalidPackageIntegrity(value.to_owned()));
         };
-        let valid_length = encoded.len() == 86 || encoded.len() == 88;
-        let valid_characters = encoded
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='));
-        if !valid_length || !valid_characters || (encoded.contains('=') && !encoded.ends_with("=="))
-        {
+        let decoded = if encoded.len() == 86 && !encoded.contains('=') {
+            STANDARD_NO_PAD.decode(encoded)
+        } else if encoded.len() == 88 && encoded.ends_with("==") {
+            STANDARD.decode(encoded)
+        } else {
+            return Err(DomainError::InvalidPackageIntegrity(value.to_owned()));
+        };
+        let Ok(digest) = decoded else {
+            return Err(DomainError::InvalidPackageIntegrity(value.to_owned()));
+        };
+        if digest.len() != 64 {
             return Err(DomainError::InvalidPackageIntegrity(value.to_owned()));
         }
-        Ok(Self(value.to_owned()))
+        Ok(Self(format!("sha512-{}", STANDARD.encode(digest))))
     }
 }
 
@@ -401,9 +411,31 @@ mod tests {
 
     #[test]
     fn integrity_preserves_mixed_case_wire_encoding() {
-        let value = format!("sha512-{}", "AbCdEfGh".repeat(11));
+        let value = "sha512-vjezHzaHfTgpmqTTye2FWJ751nFdp6l4EtqfRsd2sylZY73USlHKS75q67jhw5cb7uMi0xRAdd1MiTHAfaR9TA==".to_owned();
         let integrity = value.parse::<PackageIntegrity>().unwrap();
         assert_eq!(integrity.to_string(), value);
+    }
+
+    #[test]
+    fn package_integrity_requires_canonical_base64_for_exactly_64_bytes() {
+        let unpadded = format!("sha512-{}", "A".repeat(86));
+        let padded = format!("{unpadded}==");
+        assert_eq!(
+            unpadded.parse::<PackageIntegrity>().unwrap().to_string(),
+            padded
+        );
+        assert!(padded.parse::<PackageIntegrity>().is_ok());
+
+        for invalid in [
+            format!("sha512-{}", "A".repeat(88)),
+            format!("sha512-{}=", "A".repeat(86)),
+            format!("sha512-{}===", "A".repeat(85)),
+        ] {
+            assert!(
+                invalid.parse::<PackageIntegrity>().is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,5 @@
-use sha2::{Digest, Sha256};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use sha2::{Digest, Sha256, Sha512};
 use std::{
     fs,
     path::PathBuf,
@@ -517,19 +518,21 @@ fn install_replays_valid_lockfile_without_running_scripts() {
 fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
     let dir = temp_dir("exact-roots");
     let fixture = dir.join("registry.json");
-    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let debug_four = "base64:H4sIAAAAAAAC/+3TsQrCMBRA0cx+hWTWNLGxg38TNRQV09K0Ioj/bqwFobMU1HuWF97yhnBrtzu50mf1a6pjrIL4MJ0U1vYzGU+tbf5+P/fGFKtczLWYQBdb16Tz4j/dZHBnLzdy77ddKRfy4pt4qELaWKWVlveZwO8aus+Gb1fttRWT92/suP91Yeh/Cn32yz51QgcAAAAAAAAAAAAAAPhCD3aP37sAKAAA";
+    let debug_three = "base64:H4sIAAAAAAAC/+3TvQrCMBRA4cw+hWTWNDGxg28TNRQV29IfEcR3N8aC0FkK6vmWG+5yh3Bqvzv5ImT1a6pjW5Xiw3SUO5dmNJ5aO/t+P/fG5Csr5lpMoG8738Tz4j/dZOnPQW7kPmz7Qi7kJTTtoSrjxiqttLzPBH7X0H02fLvqrp2YvH/jxv2vc0P/U0jZL1PqhA4AAAAAAAAAAAAAAPCFHl2bEsoAKAAA";
+    let parent = "base64:H4sIAAAAAAAC/+3TsQrCMBRA0cx+hWTWNCltB/8mSBAV05BGKYj/bmwLQmcpqPcsD16GDI8b7P5sD64I41SnrvXiw3TWVNUws/nU+v027o1pykqstVjAtUs25u/Ff7pLby9O7mSw0fkkN/LmYndsfV4ZpZWWj5XAz5q6L6arq9QnsXj/pp73Xzcl/S9z/1f22yF1QgcAAAAAAAAAAAAAAPg+TxkNmJgAKAAA";
     fs::write(
         dir.join("package.json"),
-        r#"{"name":"demo","version":"1.0.0","dependencies":{"debug":"*","parent":"1.0.0"}}"#,
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"debug":"^4.0.0","parent":"1.0.0"}}"#,
     )
     .unwrap();
     fs::write(
         &fixture,
         format!(
             r#"{{"packages":[
-                {{"registry":"https://registry.npmjs.org","name":"debug","version":"4.0.0","artifact":"{artifact}"}},
-                {{"registry":"https://registry.npmjs.org","name":"debug","version":"3.0.0","artifact":"{artifact}"}},
-                {{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","artifact":"{artifact}","dependencies":{{"debug":"^3.0.0"}}}}
+                {{"registry":"https://registry.npmjs.org","name":"debug","version":"4.0.0","artifact":"{debug_four}"}},
+                {{"registry":"https://registry.npmjs.org","name":"debug","version":"3.0.0","artifact":"{debug_three}"}},
+                {{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","artifact":"{parent}","dependencies":{{"debug":"^3.0.0"}}}}
             ]}}"#
         ),
     )
@@ -559,10 +562,72 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
     );
     assert!(dir.join("node_modules/debug").is_dir());
     assert!(dir.join("node_modules/parent/node_modules/debug").is_dir());
+    assert_eq!(
+        fs::read_to_string(dir.join("node_modules/debug/version.txt")).unwrap(),
+        "debug-4.0.0\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("node_modules/parent/node_modules/debug/version.txt")).unwrap(),
+        "debug-3.0.0\n"
+    );
 
     let lock_path = dir.join("tapid.lock");
-    let mut legacy: serde_json::Value =
+    let canonical: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    let package_keys = canonical["packages"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let debug_three = package_keys
+        .iter()
+        .find(|key| key.contains("|debug@3.0.0|"))
+        .unwrap()
+        .clone();
+    let parent = package_keys
+        .iter()
+        .find(|key| key.contains("|parent@1.0.0|"))
+        .unwrap()
+        .clone();
+
+    let mut transitive_root = canonical.clone();
+    let mut invalid_roots = vec![debug_three, parent.clone()];
+    invalid_roots.sort();
+    transitive_root["roots"] = serde_json::json!(invalid_roots);
+    fs::write(
+        &lock_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&transitive_root).unwrap()
+        ),
+    )
+    .unwrap();
+    fs::remove_dir_all(dir.join("node_modules")).unwrap();
+    let transitive_replay = run(&dir, &["install", "--offline", "--frozen"]);
+    assert!(!transitive_replay.status.success());
+    assert!(
+        String::from_utf8_lossy(&transitive_replay.stderr)
+            .contains("does not satisfy a direct manifest dependency")
+    );
+    assert!(!dir.join("node_modules").exists());
+
+    let mut missing_root = canonical.clone();
+    missing_root["roots"] = serde_json::json!([parent]);
+    fs::write(
+        &lock_path,
+        format!("{}\n", serde_json::to_string_pretty(&missing_root).unwrap()),
+    )
+    .unwrap();
+    let missing_replay = run(&dir, &["install", "--offline", "--frozen"]);
+    assert!(!missing_replay.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_replay.stderr)
+            .contains("must contain exactly one root for direct dependency")
+    );
+    assert!(!dir.join("node_modules").exists());
+
+    let mut legacy = canonical;
     legacy["lockfileVersion"] = 4.into();
     legacy.as_object_mut().unwrap().remove("roots");
     fs::write(
@@ -570,7 +635,6 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
         format!("{}\n", serde_json::to_string_pretty(&legacy).unwrap()),
     )
     .unwrap();
-    fs::remove_dir_all(dir.join("node_modules")).unwrap();
 
     let legacy_replay = run(&dir, &["install", "--offline", "--frozen"]);
     assert!(
@@ -580,6 +644,58 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
     );
     assert!(dir.join("node_modules/debug").is_dir());
     assert!(dir.join("node_modules/parent/node_modules/debug").is_dir());
+    assert_eq!(
+        fs::read_to_string(dir.join("node_modules/debug/version.txt")).unwrap(),
+        "debug-4.0.0\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("node_modules/parent/node_modules/debug/version.txt")).unwrap(),
+        "debug-3.0.0\n"
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn padded_and_unpadded_fixture_integrity_produce_canonical_lockfile_values() {
+    let dir = temp_dir("canonical-integrity");
+    let fixture = dir.join("registry.json");
+    let encoded_artifact = "H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let artifact_bytes = STANDARD.decode(encoded_artifact).unwrap();
+    let padded = format!(
+        "sha512-{}",
+        STANDARD.encode(Sha512::digest(&artifact_bytes))
+    );
+    let unpadded = padded.trim_end_matches('=').to_owned();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"padded":"1.0.0","unpadded":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[
+                {{"registry":"https://registry.npmjs.org","name":"padded","version":"1.0.0","integrity":"{padded}","artifact":"base64:{encoded_artifact}"}},
+                {{"registry":"https://registry.npmjs.org","name":"unpadded","version":"1.0.0","integrity":"{unpadded}","artifact":"base64:{encoded_artifact}"}}
+            ]}}"#
+        ),
+    )
+    .unwrap();
+
+    let output = run(
+        &dir,
+        &["install", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
+    for package in lock["packages"].as_object().unwrap().values() {
+        assert_eq!(package["artifactIntegrity"], padded);
+    }
     cleanup(dir);
 }
 
