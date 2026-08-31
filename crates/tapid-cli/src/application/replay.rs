@@ -137,6 +137,7 @@ fn replay_root_keys(
     typed_keys: &[tapid_lockfile::LockfilePackageKey],
 ) -> Result<Vec<String>, String> {
     let root_identities = replay_root_identities(manifest)?;
+    let optional_only = optional_only_root_identities(manifest)?;
     if root_identities.is_empty() {
         return if lock.roots().is_empty() && typed_keys.is_empty() {
             Ok(Vec::new())
@@ -157,6 +158,9 @@ fn replay_root_keys(
                     })
                     .collect::<Vec<_>>();
                 let Some(highest_version) = candidates.iter().map(|key| &key.version).max() else {
+                    if optional_only.contains(identity) {
+                        return Ok(None);
+                    }
                     return Err(format!(
                         "legacy lockfile has no exact root candidate for {}:{}",
                         identity.0, identity.1
@@ -167,14 +171,15 @@ fn replay_root_keys(
                     .filter(|key| &key.version == highest_version)
                     .collect::<Vec<_>>();
                 match highest.as_slice() {
-                    [selected] => Ok(selected.to_string()),
+                    [selected] => Ok(Some(selected.to_string())),
                     _ => Err(format!(
                         "legacy lockfile has ambiguous exact root candidates for {}:{} at version {}",
                         identity.0, identity.1, highest_version
                     )),
                 }
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map(|roots| roots.into_iter().flatten().collect());
     }
 
     let typed_by_key = typed_keys
@@ -196,6 +201,9 @@ fn replay_root_keys(
             .or_insert(0_usize) += 1;
     }
     for identity in root_identities.keys() {
+        if optional_only.contains(identity) && !matched.contains_key(identity) {
+            continue;
+        }
         if matched.get(identity) != Some(&1) {
             return Err(format!(
                 "lockfile must contain exactly one root for direct dependency {}:{}",
@@ -204,6 +212,26 @@ fn replay_root_keys(
         }
     }
     Ok(lock.roots().to_vec())
+}
+
+fn optional_only_root_identities(
+    manifest: &PackageManifest,
+) -> Result<std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>, String>
+{
+    let mut required = std::collections::BTreeSet::new();
+    for map in [manifest.dependencies(), manifest.dev_dependencies()] {
+        for name in map.keys() {
+            required.insert(online::dep_parts(name)?);
+        }
+    }
+    let mut optional = std::collections::BTreeSet::new();
+    for name in manifest.optional_dependencies().keys() {
+        let identity = online::dep_parts(name)?;
+        if !required.contains(&identity) {
+            optional.insert(identity);
+        }
+    }
+    Ok(optional)
 }
 
 pub(crate) fn replay_root_identities(
@@ -301,6 +329,37 @@ mod replay_tests {
             r#"{"lockfileVersion":4,"rootManifestDigest":"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resolverVersion":"0","linkerVersion":"0","packages":{}}"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn replay_allows_a_platform_omitted_optional_root() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","optionalDependencies":{"native":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let current = Lockfile::new(
+            "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+
+        assert_eq!(
+            replay_root_keys(&current, &manifest, &[]).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            replay_root_keys(&legacy_lock(), &manifest, &[]).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn optional_overlap_does_not_relax_a_required_root() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"native":"1.0.0"},"optionalDependencies":{"native":"1.0.0"}}"#,
+        )
+        .unwrap();
+
+        assert!(replay_root_keys(&legacy_lock(), &manifest, &[]).is_err());
     }
 
     #[test]

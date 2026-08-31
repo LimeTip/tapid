@@ -891,11 +891,14 @@ mod tests {
     }
 
     #[test]
-    fn padded_and_unpadded_sha512_sri_verify_against_the_same_digest() {
+    fn padded_and_unpadded_sha512_inputs_canonicalize_and_verify() {
         let bytes = b"archive bytes";
         let padded = integrity(bytes);
-        let unpadded: PackageIntegrity = padded.to_string().trim_end_matches('=').parse().unwrap();
+        let unpadded_text = padded.to_string().trim_end_matches('=').to_owned();
+        let unpadded: PackageIntegrity = unpadded_text.parse().unwrap();
 
+        assert_ne!(unpadded_text, padded.to_string());
+        assert_eq!(unpadded.to_string(), padded.to_string());
         assert!(integrity_matches(&padded, bytes));
         assert!(integrity_matches(&unpadded, bytes));
         assert!(!integrity_matches(&padded, b"different bytes"));

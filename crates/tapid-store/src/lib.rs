@@ -263,7 +263,11 @@ impl Store {
             }
             let (stale_lease, legacy_stale) = match fs::symlink_metadata(&lease) {
                 Ok(metadata) if metadata.file_type().is_file() && registered.is_none() => {
-                    (try_acquire_stale_replay_lease(&lease)?, false)
+                    match try_acquire_stale_replay_lease(&lease) {
+                        Ok(lease) => (lease, false),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 Ok(_) => (None, false),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => (None, !is_alive(pid)),
