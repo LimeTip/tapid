@@ -117,6 +117,7 @@ class InstallerScriptTests(unittest.TestCase):
 
     def test_release_builds_every_installer_platform(self):
         workflow = (ROOT / ".github" / "workflows" / "release-publication.yml").read_text()
+        ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
         expected_targets = {
             "aarch64-apple-darwin",
             "x86_64-apple-darwin",
@@ -129,6 +130,8 @@ class InstallerScriptTests(unittest.TestCase):
             self.assertIn(f"target: {target}", workflow)
         self.assertIn("expected six release artifacts", workflow)
         self.assertGreaterEqual(workflow.count("ref: ${{ inputs.commit }}"), 2)
+        for runner in ("ubuntu-24.04-arm", "windows-11-arm"):
+            self.assertIn(f"runner: {runner}", ci_workflow)
 
     def test_windows_installer_detects_the_os_architecture(self):
         powershell = INSTALL_PS1.read_text()

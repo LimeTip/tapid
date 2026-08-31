@@ -76,6 +76,41 @@ jobs:
           if (Test-Path -LiteralPath $binary) { throw 'Tapid was not uninstalled' }
           Write-Host 'Windows developer install and uninstall passed.'
 
+  release-platform-build:
+    name: Release target (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: tapid
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            binary: tapid.exe
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain and release target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build release target
+        shell: bash
+        run: cargo build --release --locked --bin tapid --target "${{ matrix.target }}"
+      - name: Verify release binary
+        shell: bash
+        run: test -f "target/${{ matrix.target }}/release/${{ matrix.binary }}"
+      - name: Verify Windows installer architecture detection
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          if ($architecture -ne 'Arm64') {
+            throw "Expected Windows Arm64 OS architecture, got $architecture"
+          }
+
   platform-consumer-validation:
     name: Consumer validation (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
