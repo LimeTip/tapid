@@ -1,5 +1,7 @@
 //! Filesystem-authoritative, content-addressed artifact ingestion.
 
+use fs2::FileExt;
+use same_file::Handle;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -212,10 +214,11 @@ impl Store {
                     )
                     .into());
                 }
+                let identity = Handle::from_path(&path)?;
                 if !shared_replay_lease_is_registered(&path)
                     && try_acquire_stale_replay_lease(&path)?.is_some()
                 {
-                    remove_file_if_unchanged(&path, &metadata);
+                    remove_file_if_unchanged(&path, &identity);
                 }
                 continue;
             }
@@ -234,12 +237,13 @@ impl Store {
                 )
                 .into());
             }
+            let identity = Handle::from_path(entry.path())?;
             let lease = entry.path().join(REPLAY_LEASE);
             let snapshot = entry.path().join("tree");
             let registered = replay_lease_state(&snapshot);
             if registered == Some(true) && !snapshot.exists() {
                 release_replay_lease(&snapshot);
-                remove_dir_all_if_unchanged(&entry.path(), &metadata);
+                remove_dir_all_if_unchanged(&entry.path(), &identity);
                 continue;
             }
             let (stale_lease, legacy_stale) = match fs::symlink_metadata(&lease) {
@@ -251,7 +255,7 @@ impl Store {
                 Err(error) => return Err(error.into()),
             };
             if stale_lease.is_some() || legacy_stale {
-                remove_dir_all_if_unchanged(&entry.path(), &metadata);
+                remove_dir_all_if_unchanged(&entry.path(), &identity);
             }
         }
         Ok(())
@@ -276,7 +280,7 @@ impl Store {
     {
         let source = self.marked_tree_path(digest)?;
         let reservation = create_replay_reservation(&self.root)?;
-        let reservation_metadata = fs::symlink_metadata(&reservation)?;
+        let reservation_identity = Handle::from_path(&reservation)?;
         let snapshot = reservation.join("tree");
         let result = (|| {
             if !clone_tree(&source, &snapshot)? {
@@ -294,12 +298,12 @@ impl Store {
         })();
         if let Err(error) = result {
             release_replay_lease(&snapshot);
-            remove_dir_all_if_unchanged(&reservation, &reservation_metadata);
+            remove_dir_all_if_unchanged(&reservation, &reservation_identity);
             return Err(error);
         }
         if let Err(error) = mark_replay_lease_ready(&snapshot) {
             release_replay_lease(&snapshot);
-            remove_dir_all_if_unchanged(&reservation, &reservation_metadata);
+            remove_dir_all_if_unchanged(&reservation, &reservation_identity);
             return Err(error.into());
         }
         Ok(snapshot)
@@ -495,49 +499,25 @@ fn replay_owner(name: &std::ffi::OsStr, prefix: &str) -> Option<u32> {
     pid.parse::<u32>().ok().filter(|pid| *pid > 0)
 }
 
-#[cfg(unix)]
-fn try_acquire_stale_replay_lease(path: &Path) -> io::Result<Option<File>> {
-    use std::os::fd::AsRawFd;
-
-    let file = OpenOptions::new().read(true).write(true).open(path)?;
-    // SAFETY: flock operates on this live file descriptor and neither reads
-    // nor writes memory through pointers.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        return Ok(Some(file));
-    }
-    let error = io::Error::last_os_error();
-    if error.kind() == io::ErrorKind::WouldBlock {
-        Ok(None)
-    } else {
-        Err(error)
-    }
-}
-
-#[cfg(windows)]
 fn try_acquire_stale_replay_lease(path: &Path) -> io::Result<Option<File>> {
     let file = OpenOptions::new().read(true).write(true).open(path)?;
-    if try_lock_windows_file(&file)? {
-        Ok(Some(file))
-    } else {
-        Ok(None)
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
     }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn try_acquire_stale_replay_lease(_path: &Path) -> io::Result<Option<File>> {
-    // Without a portable advisory-lock primitive, fail safe by retaining the snapshot.
-    Ok(None)
 }
 
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
+    let Some(pid) = rustix::process::Pid::from_raw(pid as _) else {
         return false;
     };
-    // SAFETY: signal 0 performs an existence/permission probe and does not
-    // deliver a signal or transfer ownership of memory.
-    let result = unsafe { libc::kill(pid, 0) };
-    result == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    match rustix::process::test_kill_process(pid) {
+        Ok(()) => true,
+        Err(rustix::io::Errno::SRCH) => false,
+        Err(_) => true,
+    }
 }
 
 #[cfg(windows)]
@@ -638,6 +618,15 @@ fn create_replay_reservation(root: &Path) -> io::Result<PathBuf> {
             let staging = reservation
                 .parent()
                 .ok_or_else(|| io::Error::other("replay reservation has no staging parent"))?;
+            let provisional = reservation.join(".tapid-replay-group-lease");
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&provisional)?;
+            file.write_all(b"lease-v1\n")?;
+            file.sync_all()?;
+            lock_replay_lease(&file)?;
             let mut claimed = None;
             for _ in 0..64 {
                 let candidate = staging.join(format!(
@@ -645,29 +634,22 @@ fn create_replay_reservation(root: &Path) -> io::Result<PathBuf> {
                     std::process::id(),
                     unique_nonce()
                 ));
-                match OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create_new(true)
-                    .open(&candidate)
-                {
-                    Ok(mut file) => {
-                        file.write_all(b"lease-v1\n")?;
-                        file.sync_all()?;
-                        lock_replay_lease(&file)?;
-                        claimed = Some((candidate, file));
+                match fs::hard_link(&provisional, &candidate) {
+                    Ok(()) => {
+                        claimed = Some(candidate);
                         break;
                     }
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                     Err(error) => return Err(error),
                 }
             }
-            let (lease_path, file) = claimed.ok_or_else(|| {
+            let lease_path = claimed.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "cannot allocate shared replay lease",
                 )
             })?;
+            fs::remove_file(&provisional)?;
             groups.push(ReplayLeaseGroup {
                 root: root.to_owned(),
                 lease_path,
@@ -731,127 +713,26 @@ fn release_replay_lease(snapshot: &Path) {
     }
 }
 
-fn remove_dir_all_if_unchanged(path: &Path, expected: &fs::Metadata) {
-    let Ok(actual) = fs::symlink_metadata(path) else {
+fn remove_dir_all_if_unchanged(path: &Path, expected: &Handle) {
+    let Ok(actual) = Handle::from_path(path) else {
         return;
     };
-    if same_file_identity(expected, &actual) {
+    if expected == &actual {
         let _ = fs::remove_dir_all(path);
     }
 }
 
-fn remove_file_if_unchanged(path: &Path, expected: &fs::Metadata) {
-    let Ok(actual) = fs::symlink_metadata(path) else {
+fn remove_file_if_unchanged(path: &Path, expected: &Handle) {
+    let Ok(actual) = Handle::from_path(path) else {
         return;
     };
-    if same_file_identity(expected, &actual) {
+    if expected == &actual {
         let _ = fs::remove_file(path);
     }
 }
 
-#[cfg(unix)]
-fn same_file_identity(expected: &fs::Metadata, actual: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    expected.dev() == actual.dev() && expected.ino() == actual.ino()
-}
-
-#[cfg(windows)]
-fn same_file_identity(_expected: &fs::Metadata, _actual: &fs::Metadata) -> bool {
-    // Stable Rust does not expose Windows file IDs. Refuse cleanup rather than
-    // risk deleting a path that was substituted after reservation.
-    false
-}
-
-#[cfg(not(any(unix, windows)))]
-fn same_file_identity(_expected: &fs::Metadata, _actual: &fs::Metadata) -> bool {
-    false
-}
-
-#[cfg(unix)]
 fn lock_replay_lease(file: &File) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-
-    // SAFETY: flock operates on this live file descriptor and neither reads
-    // nor writes memory through pointers.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn lock_replay_lease(file: &File) -> io::Result<()> {
-    if try_lock_windows_file(file)? {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "replay lease is already locked",
-        ))
-    }
-}
-
-#[cfg(windows)]
-fn try_lock_windows_file(file: &File) -> io::Result<bool> {
-    use std::ffi::c_void;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, GetLastError};
-
-    const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x0000_0001;
-    const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x0000_0002;
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct Overlapped {
-        internal: usize,
-        internal_high: usize,
-        offset: u32,
-        offset_high: u32,
-        event: *mut c_void,
-    }
-
-    unsafe extern "system" {
-        fn LockFileEx(
-            file: *mut c_void,
-            flags: u32,
-            reserved: u32,
-            bytes_low: u32,
-            bytes_high: u32,
-            overlapped: *mut Overlapped,
-        ) -> i32;
-    }
-
-    let mut overlapped = Overlapped::default();
-    // SAFETY: the raw handle remains valid for the call, the OVERLAPPED value
-    // is correctly laid out and live, and the one-byte range is constant.
-    let locked = unsafe {
-        LockFileEx(
-            file.as_raw_handle(),
-            LOCKFILE_FAIL_IMMEDIATELY | LOCKFILE_EXCLUSIVE_LOCK,
-            0,
-            1,
-            0,
-            &raw mut overlapped,
-        )
-    };
-    if locked != 0 {
-        Ok(true)
-    } else {
-        // SAFETY: GetLastError reads thread-local operating-system state.
-        let error = unsafe { GetLastError() };
-        if error == ERROR_LOCK_VIOLATION {
-            Ok(false)
-        } else {
-            Err(io::Error::from_raw_os_error(error as i32))
-        }
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn lock_replay_lease(_file: &File) -> io::Result<()> {
-    Ok(())
+    FileExt::try_lock_exclusive(file)
 }
 
 fn create_staging_file(dir: &Path) -> io::Result<(PathBuf, File)> {

@@ -65,16 +65,19 @@ where
 {
     fn absolute(value: OsString, variable: &str, platform: &str) -> Result<PathBuf, String> {
         let path = PathBuf::from(value);
-        let windows_absolute = platform == "windows"
-            && path.to_str().is_some_and(|value| {
+        let target_absolute = if platform == "windows" {
+            path.to_str().is_some_and(|value| {
                 let bytes = value.as_bytes();
                 (bytes.len() >= 3
                     && bytes[0].is_ascii_alphabetic()
                     && bytes[1] == b':'
                     && matches!(bytes[2], b'\\' | b'/'))
                     || value.starts_with("\\\\")
-            });
-        if !path.is_absolute() && !windows_absolute {
+            })
+        } else {
+            path.to_string_lossy().starts_with('/')
+        };
+        if !target_absolute {
             return Err(format!("{variable} must contain an absolute path"));
         }
         Ok(path)
