@@ -15,7 +15,7 @@ The current contract provides:
 - Rejection of missing, dangling, duplicate, unordered, or noncanonical schema 5 roots.
 - Round-trip parsing and replay validation through `Lockfile::from_json` and `validate_replay`.
 
-Schema `4` remains readable for controlled compatibility. When a schema 4 lockfile has no explicit roots, CLI replay reconstructs one root per direct manifest identity by applying all requirements from dependencies, development dependencies, and optional dependencies, then selecting the highest matching locked version. Replay rejects missing candidates and ambiguous package contexts at the highest version. Schema versions earlier than 4 are not accepted implicitly.
+Schema `4` remains readable for controlled compatibility when package keys use canonical or empty contexts and SHA-512 integrity is padded canonically. When such a schema 4 lockfile has no explicit roots, CLI replay reconstructs one root per direct manifest identity by applying all requirements from dependencies, development dependencies, and optional dependencies, then selecting the highest matching locked version. Replay rejects missing candidates, ambiguous package contexts, and legacy values that cannot be normalized safely. Schema versions earlier than 4 are not accepted implicitly.
 
 Package keys encode empty contexts as `peer=-|platform=-`. Non-empty peer contexts use canonical `name=...;version=...` fields. Platform contexts use fixed canonical fields such as `os=linux;cpu=x86_64;libc=gnu`. Reserved context characters are percent-encoded, and noncanonical wire representations are rejected.
 

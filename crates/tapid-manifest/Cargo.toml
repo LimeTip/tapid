@@ -2,7 +2,7 @@
 name = "tapid-manifest"
 readme = "README.md"
 description = "Manifest parsing and package metadata models for Tapid"
-version = "0.0.5"
+version = "0.0.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -12,7 +12,7 @@ authors.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tapid-core = { version = "0.0.3", path = "../tapid-core" }
+tapid-core = { version = "0.0.4", path = "../tapid-core" }
 
 [lib]
 path = "src/lib.rs"

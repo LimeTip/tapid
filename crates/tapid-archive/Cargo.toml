@@ -2,7 +2,7 @@
 name = "tapid-archive"
 readme = "README.md"
 description = "Safe package archive validation and extraction for Tapid"
-version = "0.0.2"
+version = "0.0.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -2,7 +2,7 @@
 name = "tapid-registry-client"
 readme = "README.md"
 description = "Registry metadata snapshots and transport-independent clients for Tapid"
-version = "0.0.3"
+version = "0.0.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,7 +14,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tapid-core = { version = "0.0.3", path = "../tapid-core" }
+tapid-core = { version = "0.0.4", path = "../tapid-core" }
 url = "2"
 
 [lib]
