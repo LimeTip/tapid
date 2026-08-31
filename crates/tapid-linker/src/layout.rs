@@ -253,7 +253,7 @@ pub fn plan_layout(
             target: path,
         });
     }
-    let mut locations: std::collections::BTreeMap<InstanceKey, PathBuf> =
+    let mut locations: std::collections::BTreeMap<InstanceKey, Vec<(PathBuf, Vec<InstanceKey>)>> =
         std::collections::BTreeMap::new();
     let mut requests = Vec::new();
     let mut roots = input.root_dependencies;
@@ -278,51 +278,63 @@ pub fn plan_layout(
         requests.push((Some(edge.parent), edge.child));
     }
     let mut activation = Vec::new();
-    let mut pending = requests;
-    while !pending.is_empty() {
+    let mut pending = requests.clone();
+    loop {
         let mut deferred = Vec::new();
         let mut progressed = false;
         for (parent, child) in pending {
-            let base = match &parent {
-                None => root.path.join("node_modules"),
+            let bases = match &parent {
+                None => vec![(root.path.join("node_modules"), Vec::new())],
                 Some(parent) => {
-                    let Some(parent_location) = locations.get(parent) else {
+                    let Some(parent_locations) = locations.get(parent) else {
                         deferred.push((Some(parent.clone()), child));
                         continue;
                     };
-                    parent_location.join("node_modules")
+                    parent_locations
+                        .iter()
+                        .map(|(location, ancestors)| {
+                            (location.join("node_modules"), ancestors.clone())
+                        })
+                        .collect()
                 }
             };
-            let target = base.join(package_name_path(child.id.name.as_str()));
-            if !root.contains(&target) {
-                return Err(PlanError::PathOutsideManagedRoot(target));
-            }
-            if let Some(existing) = activation
-                .iter()
-                .find(|step: &&ActivationStep| step.target == target)
-            {
-                if existing.source != storage[&child] {
-                    return Err(PlanError::ConflictingTarget(target));
+            for (base, mut ancestors) in bases {
+                if ancestors.iter().any(|ancestor| ancestor == &child) {
+                    continue;
                 }
+                ancestors.push(child.clone());
+                let target = base.join(package_name_path(child.id.name.as_str()));
+                if !root.contains(&target) {
+                    return Err(PlanError::PathOutsideManagedRoot(target));
+                }
+                if let Some(existing) = activation
+                    .iter()
+                    .find(|step: &&ActivationStep| step.target == target)
+                {
+                    if existing.source != storage[&child] {
+                        return Err(PlanError::ConflictingTarget(target));
+                    }
+                    continue;
+                }
+                locations
+                    .entry(child.clone())
+                    .or_default()
+                    .push((target.clone(), ancestors));
+                activation.push(ActivationStep {
+                    kind: kind.clone(),
+                    source: storage[&child].clone(),
+                    target,
+                });
                 progressed = true;
-                continue;
             }
-            locations.insert(child.clone(), target.clone());
-            activation.push(ActivationStep {
-                kind: kind.clone(),
-                source: storage[&child].clone(),
-                target,
-            });
-            progressed = true;
         }
         if !progressed {
-            let parent = deferred
-                .first()
-                .and_then(|(parent, _)| parent.as_ref())
-                .expect("only dependency edges can be deferred");
-            return Err(PlanError::UnknownParent(parent.id.clone()));
+            if let Some(parent) = deferred.first().and_then(|(parent, _)| parent.as_ref()) {
+                return Err(PlanError::UnknownParent(parent.id.clone()));
+            }
+            break;
         }
-        pending = deferred;
+        pending = requests.clone();
     }
     activation.sort_by(|a, b| a.target.cmp(&b.target));
     Ok(MaterializationPlan {
@@ -678,6 +690,57 @@ mod tests {
     }
 
     #[test]
+    fn reused_parent_instances_materialize_each_transitive_edge() {
+        let first_parent = instance("first", "1.0.0", PeerContext::default());
+        let second_parent = instance("second", "1.0.0", PeerContext::default());
+        let reused = instance("reused", "1.0.0", PeerContext::default());
+        let leaf = instance("leaf", "1.0.0", PeerContext::default());
+        let input = LayoutInput {
+            instances: vec![
+                first_parent.clone(),
+                second_parent.clone(),
+                reused.clone(),
+                leaf.clone(),
+            ],
+            root_dependencies: vec![key(&first_parent), key(&second_parent)],
+            dependency_edges: vec![
+                DependencyEdge {
+                    parent: key(&first_parent),
+                    child: key(&reused),
+                },
+                DependencyEdge {
+                    parent: key(&second_parent),
+                    child: key(&reused),
+                },
+                DependencyEdge {
+                    parent: key(&reused),
+                    child: key(&leaf),
+                },
+            ],
+        };
+
+        let plan = plan_layout(test_managed_root(), input, Platform::Unix).unwrap();
+        let leaf_targets: Vec<_> = plan
+            .activation
+            .steps
+            .iter()
+            .filter(|step| step.target.ends_with("leaf"))
+            .map(|step| step.target.clone())
+            .collect();
+        assert_eq!(leaf_targets.len(), 2);
+        assert!(leaf_targets.iter().any(|target| {
+            target
+                == &test_project_root()
+                    .join("node_modules/first/node_modules/reused/node_modules/leaf")
+        }));
+        assert!(leaf_targets.iter().any(|target| {
+            target
+                == &test_project_root()
+                    .join("node_modules/second/node_modules/reused/node_modules/leaf")
+        }));
+    }
+
+    #[test]
     fn multi_level_dependency_edges_are_processed_after_their_parents() {
         let root_package = instance("x", "1.0.0", PeerContext::default());
         let middle = instance("m", "1.0.0", PeerContext::default());
@@ -708,6 +771,35 @@ mod tests {
                     .join("m")
                     .join("node_modules")
                     .join("n")
+        }));
+    }
+
+    #[test]
+    fn reachable_dependency_cycles_are_materialized_once_per_path() {
+        let first = instance("first", "1.0.0", PeerContext::default());
+        let second = instance("second", "1.0.0", PeerContext::default());
+        let input = LayoutInput {
+            instances: vec![first.clone(), second.clone()],
+            root_dependencies: vec![key(&first)],
+            dependency_edges: vec![
+                DependencyEdge {
+                    parent: key(&first),
+                    child: key(&second),
+                },
+                DependencyEdge {
+                    parent: key(&second),
+                    child: key(&first),
+                },
+            ],
+        };
+
+        let plan = plan_layout(test_managed_root(), input, Platform::Unix).unwrap();
+        assert_eq!(plan.activation.steps.len(), 2);
+        assert!(plan.activation.steps.iter().all(|step| {
+            !step
+                .target
+                .to_string_lossy()
+                .contains("node_modules/first/node_modules/second/node_modules/first")
         }));
     }
 
