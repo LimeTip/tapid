@@ -296,12 +296,16 @@ fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
     let root = LockedPackage::new("https://registry.npmjs.org", "demo", "1.0.0", "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", tree_digest.as_str()).unwrap();
     let mut lock_a = Lockfile::new(tree_digest.as_str()).unwrap();
     lock_a.insert_package(dep.clone()).unwrap();
+    let root_key = root.key();
     lock_a.insert_package(root).unwrap();
+    lock_a.set_roots([root_key]).unwrap();
     let encoded_a = lock_a.to_json().unwrap();
     let mut lock_b = Lockfile::new(tree_digest.as_str()).unwrap();
     lock_b.insert_package(dep).unwrap();
     let root_b = LockedPackage::new("https://registry.npmjs.org", "demo", "1.0.0", "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", tree_digest.as_str()).unwrap();
+    let root_b_key = root_b.key();
     lock_b.insert_package(root_b).unwrap();
+    lock_b.set_roots([root_b_key]).unwrap();
     assert_eq!(encoded_a, lock_b.to_json().unwrap());
     assert!(encoded_a.contains("\"dep\""));
 

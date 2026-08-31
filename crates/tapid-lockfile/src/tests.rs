@@ -107,18 +107,17 @@ fn preserves_case_sensitive_sha512_integrity_values() {
     let mut lockfile =
         Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             .unwrap();
-    lockfile
-        .insert_package(
-            LockedPackage::new(
-                "https://registry.example.test",
-                "tapid",
-                "1.0.0",
-                &integrity,
-                "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            )
-            .unwrap(),
-        )
-        .unwrap();
+    let package = LockedPackage::new(
+        "https://registry.example.test",
+        "tapid",
+        "1.0.0",
+        &integrity,
+        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .unwrap();
+    let root = package.key();
+    lockfile.insert_package(package).unwrap();
+    lockfile.set_roots([root]).unwrap();
     assert!(lockfile.to_json().unwrap().contains(&integrity));
 }
 
@@ -156,6 +155,10 @@ fn exact_roots_use_a_new_schema_version_while_v4_remains_readable() {
             .unwrap();
     let package = package_fixture();
     lockfile.insert_package(package.clone()).unwrap();
+    assert!(matches!(
+        lockfile.to_json(),
+        Err(super::LockfileError::MissingRoots)
+    ));
     lockfile.set_roots([package.key()]).unwrap();
     let current = lockfile.to_json().unwrap();
     let mut current_value: serde_json::Value = serde_json::from_str(&current).unwrap();

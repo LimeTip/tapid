@@ -341,6 +341,12 @@ impl Lockfile {
     }
 
     pub fn to_json(&self) -> Result<String, LockfileError> {
+        if self.lockfile_version == LOCKFILE_VERSION
+            && !self.packages.is_empty()
+            && self.roots.is_empty()
+        {
+            return Err(LockfileError::MissingRoots);
+        }
         serde_json::to_string_pretty(self)
             .map(|json| format!("{json}\n"))
             .map_err(LockfileError::Serialization)
