@@ -187,6 +187,14 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
 }
 
 fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
+    copy_tree_contents_with(source, target, clone_file)
+}
+
+fn copy_tree_contents_with(
+    source: &Path,
+    target: &Path,
+    clone: fn(&Path, &Path) -> Result<(), io::Error>,
+) -> Result<(), String> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -203,10 +211,10 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
             ));
         }
         if meta.is_dir() {
-            copy_tree_contents(&src, &dst)?;
+            copy_tree_contents_with(&src, &dst, clone)?;
             fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else if meta.is_file() {
-            copy_file_isolated(&src, &dst)?;
+            copy_file_isolated(&src, &dst, clone)?;
             fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else {
             return Err(format!("unsupported store tree entry: {}", src.display()));
@@ -215,11 +223,16 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn copy_file_isolated(source: &Path, target: &Path) -> Result<(), String> {
+fn copy_file_isolated(
+    source: &Path,
+    target: &Path,
+    clone: fn(&Path, &Path) -> Result<(), io::Error>,
+) -> Result<(), String> {
     COPY_FILE_ISOLATED_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if clone_file(source, target).is_ok() {
+    if clone(source, target).is_ok() {
         return Ok(());
     }
+    COPY_FILE_BYTE_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut input = fs::File::open(source).map_err(|e| e.to_string())?;
     let mut output = fs::OpenOptions::new()
         .write(true)
@@ -275,11 +288,103 @@ fn clone_file(_source: &Path, _target: &Path) -> Result<(), io::Error> {
 
 static COPY_FILE_ISOLATED_ATTEMPTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+static COPY_FILE_BYTE_FALLBACKS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(test)]
 mod copy_tests {
+    static COPY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn copy_tree_clone_success_bypasses_byte_copy_fallback() {
+        let _guard = COPY_TEST_LOCK.lock().unwrap();
+        use super::{
+            COPY_FILE_BYTE_FALLBACKS, COPY_FILE_ISOLATED_ATTEMPTS, copy_tree_contents_with,
+        };
+        use std::{fs, io, path::Path};
+
+        fn clone_success(source: &Path, target: &Path) -> Result<(), io::Error> {
+            fs::copy(source, target).map(|_| ())
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-copy-clone-success-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let target = root.join("target");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("data"), b"cloned").unwrap();
+
+        COPY_FILE_ISOLATED_ATTEMPTS.store(0, std::sync::atomic::Ordering::Relaxed);
+        COPY_FILE_BYTE_FALLBACKS.store(0, std::sync::atomic::Ordering::Relaxed);
+        copy_tree_contents_with(&source, &target, clone_success).unwrap();
+
+        assert_eq!(
+            COPY_FILE_ISOLATED_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            COPY_FILE_BYTE_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(fs::read(target.join("data")).unwrap(), b"cloned");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn copy_tree_clone_failure_uses_byte_copy_fallback() {
+        let _guard = COPY_TEST_LOCK.lock().unwrap();
+        use super::{
+            COPY_FILE_BYTE_FALLBACKS, COPY_FILE_ISOLATED_ATTEMPTS, copy_tree_contents_with,
+        };
+        use std::{fs, io, path::Path};
+
+        fn clone_failure(_source: &Path, _target: &Path) -> Result<(), io::Error> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "forced test failure",
+            ))
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-copy-clone-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let target = root.join("target");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("data"), b"fallback").unwrap();
+
+        COPY_FILE_ISOLATED_ATTEMPTS.store(0, std::sync::atomic::Ordering::Relaxed);
+        COPY_FILE_BYTE_FALLBACKS.store(0, std::sync::atomic::Ordering::Relaxed);
+        copy_tree_contents_with(&source, &target, clone_failure).unwrap();
+
+        assert_eq!(
+            COPY_FILE_ISOLATED_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            COPY_FILE_BYTE_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(fs::read(target.join("data")).unwrap(), b"fallback");
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn copy_tree_handles_nested_directories_and_preserves_executable_mode() {
+        let _guard = COPY_TEST_LOCK.lock().unwrap();
         use super::{COPY_FILE_ISOLATED_ATTEMPTS, copy_tree};
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
