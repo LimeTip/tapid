@@ -476,6 +476,7 @@ mod copy_tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn copy_tree_validates_direct_root_before_materialization() {
         use super::copy_tree;
