@@ -544,6 +544,7 @@ mod tests {
             let mut header = tar::Header::new_gnu();
             header.set_path("package/index.js").unwrap();
             header.set_size(2);
+            header.set_mode(0o755);
             header.set_cksum();
             builder.append(&header, &b"ok"[..]).unwrap();
             builder.finish().unwrap();
@@ -554,6 +555,18 @@ mod tests {
         let dest = root.join("tree");
         extract_to(&bytes, ArchiveFormat::Tar, &dest, ArchiveLimits::default()).unwrap();
         assert_eq!(fs::read(dest.join("package/index.js")).unwrap(), b"ok");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(dest.join("package/index.js"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0o111
+            );
+        }
         assert!(canonical_tree_digest(&dest).unwrap().starts_with("sha256-"));
         fs::remove_dir_all(&root).unwrap();
     }
@@ -571,5 +584,29 @@ mod tests {
         assert!(extract_to(&bytes, ArchiveFormat::Tar, &dest, limits).is_err());
         assert!(!dest.exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_tree_digest_binds_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-archive-mode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let executable = root.join("tool");
+        fs::write(&executable, b"tool").unwrap();
+        let plain = canonical_tree_digest(&root).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let executable_digest = canonical_tree_digest(&root).unwrap();
+
+        assert_ne!(plain, executable_digest);
+        fs::remove_dir_all(root).unwrap();
     }
 }
