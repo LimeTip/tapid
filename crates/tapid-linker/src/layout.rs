@@ -299,9 +299,6 @@ pub fn plan_layout(
                 }
             };
             for (base, mut ancestors) in bases {
-                if ancestors.iter().any(|ancestor| ancestor == &child) {
-                    continue;
-                }
                 ancestors.push(child.clone());
                 let target = base.join(package_name_path(child.id.name.as_str()));
                 if !root.contains(&target) {
@@ -314,6 +311,12 @@ pub fn plan_layout(
                     if existing.source != storage[&child] {
                         return Err(PlanError::ConflictingTarget(target));
                     }
+                    continue;
+                }
+                if ancestors[..ancestors.len() - 1]
+                    .iter()
+                    .any(|ancestor| ancestor == &child)
+                {
                     continue;
                 }
                 locations
@@ -801,6 +804,36 @@ mod tests {
                 .to_string_lossy()
                 .contains("node_modules/first/node_modules/second/node_modules/first")
         }));
+    }
+
+    #[test]
+    fn cyclic_edge_cannot_hide_conflicting_target() {
+        let first_v1 = instance("first", "1.0.0", PeerContext::default());
+        let first_v2 = instance("first", "2.0.0", PeerContext::default());
+        let second = instance("second", "1.0.0", PeerContext::default());
+        let input = LayoutInput {
+            instances: vec![first_v1.clone(), first_v2.clone(), second.clone()],
+            root_dependencies: vec![key(&first_v1)],
+            dependency_edges: vec![
+                DependencyEdge {
+                    parent: key(&first_v1),
+                    child: key(&second),
+                },
+                DependencyEdge {
+                    parent: key(&second),
+                    child: key(&first_v1),
+                },
+                DependencyEdge {
+                    parent: key(&second),
+                    child: key(&first_v2),
+                },
+            ],
+        };
+
+        assert!(matches!(
+            plan_layout(test_managed_root(), input, Platform::Unix),
+            Err(PlanError::ConflictingTarget(_))
+        ));
     }
 
     #[test]
