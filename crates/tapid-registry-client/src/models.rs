@@ -134,7 +134,7 @@ impl RegistrySnapshot {
             });
         }
         for candidates in packages.values_mut() {
-            candidates.sort_by_key(|p| std::cmp::Reverse(p.identity.version.clone()));
+            candidates.sort_by(|a, b| b.identity.version.cmp(&a.identity.version));
         }
         Ok(Self { registry, packages })
     }

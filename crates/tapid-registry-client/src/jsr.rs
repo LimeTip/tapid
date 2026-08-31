@@ -168,7 +168,7 @@ fn parse_jsr(
             registry_kind: RegistryKind::Jsr,
         });
     }
-    artifacts.sort_by_key(|artifact| std::cmp::Reverse(artifact.identity.version.clone()));
+    artifacts.sort_by(|a, b| b.identity.version.cmp(&a.identity.version));
     Ok(artifacts)
 }
 

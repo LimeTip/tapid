@@ -1,7 +1,4 @@
-use base64::{
-    Engine,
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
-};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use sha2::{Digest, Sha256, Sha512};
 use std::{
@@ -72,16 +69,8 @@ fn integrity(data: &[u8]) -> PackageIntegrity {
         .expect("sha512 integrity")
 }
 
-fn integrity_matches(expected: &PackageIntegrity, data: &[u8]) -> bool {
-    let Some(encoded) = expected.as_str().strip_prefix("sha512-") else {
-        return false;
-    };
-    let decoded = if encoded.len() == 86 {
-        STANDARD_NO_PAD.decode(encoded)
-    } else {
-        STANDARD.decode(encoded)
-    };
-    decoded.is_ok_and(|decoded| decoded.as_slice() == Sha512::digest(data).as_slice())
+fn integrity_matches(expected: &PackageIntegrity, actual: &PackageIntegrity) -> bool {
+    expected == actual
 }
 fn root_digest(project: &Path) -> Result<String, String> {
     let data = fs::read(project.join("package.json")).map_err(|e| e.to_string())?;
@@ -675,7 +664,7 @@ pub fn resolve_and_fetch(
         if record
             .integrity
             .as_ref()
-            .is_some_and(|expected| !integrity_matches(expected, &bytes))
+            .is_some_and(|expected| !integrity_matches(expected, &actual))
         {
             return Err(format!("integrity mismatch for {}", id));
         }
@@ -751,15 +740,18 @@ pub fn resolve_and_fetch(
             eprintln!("Artifact verification progress: {completed}/{artifact_total}");
         }
     }
+    let mut dependencies_by_parent = BTreeMap::new();
+    for edge in &resolution.dependencies {
+        dependencies_by_parent
+            .entry(edge.parent.clone())
+            .or_insert_with(Vec::new)
+            .push(edge);
+    }
     let locked_packages: Result<Vec<_>, String> = packages
         .values()
         .map(|(locked, _, id)| {
             let mut locked = locked.clone();
-            for edge in resolution
-                .dependencies
-                .iter()
-                .filter(|edge| edge.parent == *id)
-            {
+            for edge in dependencies_by_parent.get(id).into_iter().flatten() {
                 let target = &edge.child;
                 let target_platform = platform_contexts
                     .get(target)
@@ -795,38 +787,46 @@ pub fn resolve_and_fetch(
         .to_string()
     }))
     .map_err(|e| e.to_string())?;
+    let instance_keys = instances
+        .iter()
+        .map(|instance| {
+            (
+                (
+                    instance.id.registry.clone(),
+                    instance.id.name.clone(),
+                    instance.id.version.clone(),
+                ),
+                InstanceKey::from(instance),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut edge_list = Vec::new();
     let mut root_deps = Vec::new();
     for edge in &resolution.dependencies {
-        let parent = instances
-            .iter()
-            .find(|i| {
-                i.id.name == edge.parent.name
-                    && i.id.version == edge.parent.version
-                    && i.id.registry == edge.parent.registry
-            })
-            .unwrap();
-        let child = instances
-            .iter()
-            .find(|i| {
-                i.id.name == edge.child.name
-                    && i.id.version == edge.child.version
-                    && i.id.registry == edge.child.registry
-            })
-            .unwrap();
+        let parent = instance_keys
+            .get(&(
+                edge.parent.registry.clone(),
+                edge.parent.name.clone(),
+                edge.parent.version.clone(),
+            ))
+            .ok_or_else(|| format!("missing parent instance for {}", edge.parent))?;
+        let child = instance_keys
+            .get(&(
+                edge.child.registry.clone(),
+                edge.child.name.clone(),
+                edge.child.version.clone(),
+            ))
+            .ok_or_else(|| format!("missing child instance for {}", edge.child))?;
         edge_list.push(DependencyEdge {
-            parent: InstanceKey::from(parent),
-            child: InstanceKey::from(child),
+            parent: parent.clone(),
+            child: child.clone(),
         });
     }
     for id in &resolution.roots {
-        let instance = instances
-            .iter()
-            .find(|i| {
-                i.id.name == id.name && i.id.version == id.version && i.id.registry == id.registry
-            })
-            .unwrap();
-        root_deps.push(InstanceKey::from(instance));
+        let instance = instance_keys
+            .get(&(id.registry.clone(), id.name.clone(), id.version.clone()))
+            .ok_or_else(|| format!("missing root instance for {id}"))?;
+        root_deps.push(instance.clone());
     }
     Ok((
         lock,
@@ -899,10 +899,11 @@ mod tests {
 
         assert_ne!(unpadded_text, padded.to_string());
         assert_eq!(unpadded.to_string(), padded.to_string());
-        assert!(integrity_matches(&padded, bytes));
-        assert!(integrity_matches(&unpadded, bytes));
-        assert!(!integrity_matches(&padded, b"different bytes"));
-        assert!(!integrity_matches(&unpadded, b"different bytes"));
+        let different = integrity(b"different bytes");
+        assert!(integrity_matches(&padded, &integrity(bytes)));
+        assert!(integrity_matches(&unpadded, &integrity(bytes)));
+        assert!(!integrity_matches(&padded, &different));
+        assert!(!integrity_matches(&unpadded, &different));
     }
 
     #[test]

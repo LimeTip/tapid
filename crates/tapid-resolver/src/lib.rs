@@ -84,13 +84,13 @@ impl FromStr for Requirement {
             }
             let mut comparators = Vec::new();
             for token in clause.split_whitespace() {
+                if token.starts_with(['>', '<']) {
+                    return Err(ResolveError::UnsupportedRange(raw.into()));
+                }
                 let (op, value) = requirement_token(token);
                 let Some(base) = parse_requirement_base(op, value) else {
                     return Err(ResolveError::UnsupportedRange(raw.into()));
                 };
-                if token.starts_with(['>', '<']) {
-                    return Err(ResolveError::UnsupportedRange(raw.into()));
-                }
                 comparators.push(RequirementComparator { op, base });
             }
             clauses.push(RequirementClause::Comparators(comparators));
@@ -419,13 +419,13 @@ fn select_package(
 }
 
 fn available(candidates: &[&PackageVersionMetadata]) -> Vec<String> {
-    let mut out: Vec<_> = candidates
+    let mut versions = candidates
         .iter()
-        .map(|package| package.version.to_string())
-        .collect();
-    out.sort();
-    out.dedup();
-    out
+        .map(|package| &package.version)
+        .collect::<Vec<_>>();
+    versions.sort();
+    versions.dedup();
+    versions.into_iter().map(ToString::to_string).collect()
 }
 fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> bool {
     requirement.clauses.iter().any(|clause| match clause {
@@ -749,6 +749,22 @@ mod tests {
             r.selected[0].to_string(),
             "https://registry.npmjs.org:foo@0.9.0"
         );
+    }
+
+    #[test]
+    fn available_versions_use_semver_order_before_rendering() {
+        let first = PackageVersionMetadata {
+            name: "pkg".parse().unwrap(),
+            version: "10.0.0".parse().unwrap(),
+            dependencies: BTreeMap::new(),
+        };
+        let second = PackageVersionMetadata {
+            name: "pkg".parse().unwrap(),
+            version: "2.0.0".parse().unwrap(),
+            dependencies: BTreeMap::new(),
+        };
+
+        assert_eq!(available(&[&first, &second]), vec!["2.0.0", "10.0.0"]);
     }
 
     #[test]

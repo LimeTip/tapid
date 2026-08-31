@@ -410,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn integrity_preserves_mixed_case_wire_encoding() {
+    fn integrity_round_trips_canonical_padded_sha512() {
         let value = "sha512-vjezHzaHfTgpmqTTye2FWJ751nFdp6l4EtqfRsd2sylZY73USlHKS75q67jhw5cb7uMi0xRAdd1MiTHAfaR9TA==".to_owned();
         let integrity = value.parse::<PackageIntegrity>().unwrap();
         assert_eq!(integrity.to_string(), value);

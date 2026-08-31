@@ -275,11 +275,20 @@ fn package_content_root(source: &Path) -> Result<PathBuf, String> {
     }
 
     let mut candidates = Vec::new();
+    let mut unexpected_top_level_entry = false;
     for item in fs::read_dir(source).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
         let path = item.path();
         let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if matches!(
+            item.file_name().to_str(),
+            Some(".tapid-tree" | ".tapid-executable-modes")
+        ) && meta.file_type().is_file()
+        {
+            continue;
+        }
         if meta.file_type().is_symlink() || !meta.is_dir() {
+            unexpected_top_level_entry = true;
             continue;
         }
         let manifest = path.join("package.json");
@@ -295,12 +304,18 @@ fn package_content_root(source: &Path) -> Result<PathBuf, String> {
                     manifest.display()
                 ));
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                unexpected_top_level_entry = true;
+            }
             Err(error) => return Err(error.to_string()),
         }
     }
     match candidates.as_slice() {
-        [root] => Ok(root.clone()),
+        [root] if !unexpected_top_level_entry => Ok(root.clone()),
+        [_] => Err(format!(
+            "installed package tree has package content outside its manifest root: {}",
+            source.display()
+        )),
         [] => Err(format!(
             "installed package manifest is missing from store tree: {}",
             source.display()
@@ -604,6 +619,34 @@ mod copy_tests {
         assert!(target.join("package.json").is_file());
         assert!(target.join("index.d.ts").is_file());
         assert!(!target.join("mdx").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn copy_tree_rejects_package_files_outside_a_single_wrapper() {
+        use super::copy_tree;
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-copy-wrapper-sibling-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        fs::create_dir_all(source.join("package")).unwrap();
+        fs::write(
+            source.join("package/package.json"),
+            br#"{"name":"example"}"#,
+        )
+        .unwrap();
+        fs::write(source.join("README.md"), b"must not be omitted").unwrap();
+
+        let error = copy_tree(&source, &root.join("target")).unwrap_err();
+
+        assert!(error.contains("outside its manifest root"), "{error}");
         let _ = fs::remove_dir_all(root);
     }
 
