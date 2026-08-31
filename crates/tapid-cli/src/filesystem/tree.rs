@@ -445,6 +445,38 @@ mod copy_tests {
 
     #[cfg(unix)]
     #[test]
+    fn copy_tree_rejects_special_file_before_materialization() {
+        use super::copy_tree;
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-copy-special-file-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"{}\n").unwrap();
+        fs::write(source.join("valid.js"), b"module.exports = true;\n").unwrap();
+
+        let status = std::process::Command::new("mkfifo")
+            .arg(source.join("pipe.js"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let error = copy_tree(&source, &target).unwrap_err();
+
+        assert!(error.contains("unsupported store tree entry"));
+        assert!(!target.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn copy_tree_validates_direct_root_before_materialization() {
         use super::copy_tree;
         use std::fs;
