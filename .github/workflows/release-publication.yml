@@ -88,8 +88,14 @@ jobs:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary: tapid
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: tapid
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
+            binary: tapid.exe
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
             binary: tapid.exe
     steps:
       - name: Download validated release source
@@ -118,10 +124,11 @@ jobs:
             echo "release version $VERSION does not match Cargo package version $actual_version" >&2
             exit 1
           }
-          cargo build --release --locked --bin tapid
+          rustup target add "$TARGET"
+          cargo build --release --locked --bin tapid --target "$TARGET"
           staging="$(mktemp -d)"
           trap 'rm -rf "$staging"' EXIT
-          install -m 0755 "target/release/$BINARY" "$staging/$BINARY"
+          install -m 0755 "target/$TARGET/release/$BINARY" "$staging/$BINARY"
           mkdir -p release-artifacts
           tar -czf "release-artifacts/tapid-${VERSION}-${TARGET}.tar.gz" -C "$staging" "$BINARY"
           test -s "release-artifacts/tapid-${VERSION}-${TARGET}.tar.gz"
@@ -142,7 +149,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ inputs.commit }}
           fetch-depth: 1
           persist-credentials: false
       - name: Download build artifacts
@@ -196,7 +203,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ inputs.commit }}
           fetch-depth: 1
           persist-credentials: false
       - name: Download signed manifest
@@ -236,7 +243,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t artifacts < <(find release-artifacts -maxdepth 1 -type f -name '*.tar.gz' -print | sort)
-          test "${#artifacts[@]}" -eq 4 || { echo "expected four release artifacts, found ${#artifacts[@]}" >&2; exit 1; }
+          test "${#artifacts[@]}" -eq 6 || { echo "expected six release artifacts, found ${#artifacts[@]}" >&2; exit 1; }
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --title "Tapid $RELEASE_TAG" --generate-notes
           fi

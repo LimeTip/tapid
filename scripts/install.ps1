@@ -141,7 +141,7 @@ if (-not $Version.StartsWith("v")) {
     $Version = "v$Version"
 }
 
-$architecture = $env:PROCESSOR_ARCHITECTURE
+$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 $target = switch ($architecture) {
     "X64" { "x86_64-pc-windows-msvc" }
     "Arm64" { "aarch64-pc-windows-msvc" }
