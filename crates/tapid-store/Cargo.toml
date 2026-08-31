@@ -13,3 +13,9 @@ tapid-archive = { version = "0.0.2", path = "../tapid-archive" }
 tapid-core = { version = "0.0.3", path = "../tapid-core" }
 sha2 = "0.10"
 hex = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading"] }

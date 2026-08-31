@@ -9,11 +9,39 @@ use std::{
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
 use tapid_registry_client::{RegistryPackageId, RegistrySnapshot};
 
+#[cfg(test)]
+thread_local! {
+    static REQUIREMENT_BASE_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_requirement_base_parse_count() {
+    REQUIREMENT_BASE_PARSE_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn requirement_base_parse_count() -> usize {
+    REQUIREMENT_BASE_PARSE_COUNT.with(std::cell::Cell::get)
+}
+
 /// A validated dependency requirement in Tapid's supported npm range subset.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Requirement {
     /// Canonical trimmed source requirement used for deterministic diagnostics.
     pub raw: String,
+    clauses: Vec<RequirementClause>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RequirementClause {
+    AnyStable,
+    Comparators(Vec<RequirementComparator>),
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RequirementComparator {
+    op: char,
+    base: RequirementBase,
 }
 
 /// One registry-qualified dependency constraint.
@@ -44,29 +72,40 @@ impl FromStr for Requirement {
         if raw.is_empty() {
             return Err(ResolveError::InvalidRequirement(s.into()));
         }
+        let mut clauses = Vec::new();
         for clause in raw.split("||") {
             let clause = clause.trim();
             if clause.is_empty() {
                 return Err(ResolveError::UnsupportedRange(raw.into()));
             }
-            if clause != "*" {
-                for token in clause.split_whitespace() {
-                    let (op, value) = requirement_token(token);
-                    if token.starts_with(['>', '<']) || parse_requirement_base(op, value).is_none()
-                    {
-                        return Err(ResolveError::UnsupportedRange(raw.into()));
-                    }
-                }
+            if clause == "*" {
+                clauses.push(RequirementClause::AnyStable);
+                continue;
             }
+            let mut comparators = Vec::new();
+            for token in clause.split_whitespace() {
+                let (op, value) = requirement_token(token);
+                let Some(base) = parse_requirement_base(op, value) else {
+                    return Err(ResolveError::UnsupportedRange(raw.into()));
+                };
+                if token.starts_with(['>', '<']) {
+                    return Err(ResolveError::UnsupportedRange(raw.into()));
+                }
+                comparators.push(RequirementComparator { op, base });
+            }
+            clauses.push(RequirementClause::Comparators(comparators));
         }
-        Ok(Self { raw: raw.into() })
+        Ok(Self {
+            raw: raw.into(),
+            clauses,
+        })
     }
 }
 
 impl Requirement {
     /// Returns whether an exact version satisfies this validated requirement.
     pub fn matches(&self, version: &PackageVersion) -> bool {
-        matches_requirement(version, &self.raw)
+        matches_requirement(version, self)
     }
 }
 
@@ -80,13 +119,16 @@ fn requirement_token(token: &str) -> (char, &str) {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RequirementBase {
     version: PackageVersion,
     major_only: bool,
 }
 
 fn parse_requirement_base(op: char, value: &str) -> Option<RequirementBase> {
+    #[cfg(test)]
+    REQUIREMENT_BASE_PARSE_COUNT.with(|count| count.set(count.get() + 1));
+
     value
         .parse::<PackageVersion>()
         .ok()
@@ -143,9 +185,6 @@ impl RegistryMetadata {
             }
         }
         Ok(Self { registry, packages })
-    }
-    fn candidates(&self, name: &PackageName) -> impl Iterator<Item = &PackageVersionMetadata> {
-        self.packages.iter().filter(move |p| &p.name == name)
     }
 }
 
@@ -225,13 +264,14 @@ pub fn resolve_graph(
             "offline resolution requires a cached snapshot",
         ));
     }
-    let mut root_constraints: BTreeMap<(RegistryOrigin, PackageName), BTreeSet<String>> =
+    let candidate_index = candidate_index(metadata);
+    let mut root_constraints: BTreeMap<(RegistryOrigin, PackageName), BTreeSet<Requirement>> =
         BTreeMap::new();
     for dependency in ds {
         root_constraints
             .entry((dependency.registry.clone(), dependency.name.clone()))
             .or_default()
-            .insert(dependency.requirement.raw.clone());
+            .insert(dependency.requirement.clone());
     }
 
     let mut selected = BTreeSet::new();
@@ -239,7 +279,7 @@ pub fn resolve_graph(
     let mut roots = Vec::new();
     let mut queue = Vec::new();
     for ((registry, name), requirements) in root_constraints {
-        let package = select_package(&registry, &name, &requirements, metadata)?;
+        let package = select_package(&registry, &name, &requirements, &candidate_index)?;
         let id = RegistryPackageId::new(registry, name, package.version.clone());
         selected.insert(id.clone());
         selected_packages.insert(id.clone(), package);
@@ -259,9 +299,13 @@ pub fn resolve_graph(
             .dependencies
             .clone();
         for (dependency, requirement) in package_dependencies {
-            let requirements = BTreeSet::from([requirement.raw.clone()]);
-            let child_package =
-                select_package(&parent.registry, &dependency, &requirements, metadata)?;
+            let requirements = BTreeSet::from([requirement]);
+            let child_package = select_package(
+                &parent.registry,
+                &dependency,
+                &requirements,
+                &candidate_index,
+            )?;
             let child = RegistryPackageId::new(
                 parent.registry.clone(),
                 dependency.clone(),
@@ -286,16 +330,34 @@ pub fn resolve_graph(
     })
 }
 
+type CandidateIndex<'a> = BTreeMap<(RegistryOrigin, PackageName), Vec<&'a PackageVersionMetadata>>;
+
+fn candidate_index(metadata: &[RegistryMetadata]) -> CandidateIndex<'_> {
+    let mut index = CandidateIndex::new();
+    for registry in metadata {
+        for package in &registry.packages {
+            index
+                .entry((registry.registry.clone(), package.name.clone()))
+                .or_default()
+                .push(package);
+        }
+    }
+    index
+}
+
 fn select_package(
     registry: &RegistryOrigin,
     name: &PackageName,
-    requirements: &BTreeSet<String>,
-    metadata: &[RegistryMetadata],
+    requirements: &BTreeSet<Requirement>,
+    candidates: &CandidateIndex<'_>,
 ) -> Result<PackageVersionMetadata, ResolveError> {
-    let package = metadata
+    let matching = candidates
+        .get(&(registry.clone(), name.clone()))
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let package = matching
         .iter()
-        .filter(|metadata| &metadata.registry == registry)
-        .flat_map(|metadata| metadata.candidates(name))
+        .copied()
         .filter(|package| {
             requirements
                 .iter()
@@ -304,8 +366,11 @@ fn select_package(
         .max_by(|a, b| a.version.cmp(&b.version))
         .cloned();
     package.ok_or_else(|| {
-        let requirements: Vec<_> = requirements.iter().cloned().collect();
-        let available = available(metadata, registry, name);
+        let requirements: Vec<_> = requirements
+            .iter()
+            .map(|requirement| requirement.raw.clone())
+            .collect();
+        let available = available(matching);
         if requirements.len() > 1 {
             ResolveError::Conflict {
                 registry: registry.to_string(),
@@ -324,34 +389,21 @@ fn select_package(
     })
 }
 
-fn available(
-    metadata: &[RegistryMetadata],
-    registry: &RegistryOrigin,
-    name: &PackageName,
-) -> Vec<String> {
-    let mut out: Vec<_> = metadata
+fn available(candidates: &[&PackageVersionMetadata]) -> Vec<String> {
+    let mut out: Vec<_> = candidates
         .iter()
-        .filter(|m| &m.registry == registry)
-        .flat_map(|m| m.candidates(name))
-        .map(|p| p.version.to_string())
+        .map(|package| package.version.to_string())
         .collect();
     out.sort();
     out.dedup();
     out
 }
-fn matches_requirement(version: &PackageVersion, raw: &str) -> bool {
-    raw.split("||").any(|clause| {
-        let clause = clause.trim();
-        if clause == "*" {
-            return version.prerelease().is_none();
-        }
-        clause.split_whitespace().all(|token| {
-            let (op, value) = requirement_token(token);
-            let Some(parsed_base) = parse_requirement_base(op, value) else {
-                return false;
-            };
-            let base = &parsed_base.version;
-            match op {
+fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> bool {
+    requirement.clauses.iter().any(|clause| match clause {
+        RequirementClause::AnyStable => version.prerelease().is_none(),
+        RequirementClause::Comparators(comparators) => comparators.iter().all(|comparator| {
+            let base = &comparator.base.version;
+            match comparator.op {
                 '=' => version == base,
                 '^' => {
                     if version.prerelease().is_some()
@@ -362,7 +414,7 @@ fn matches_requirement(version: &PackageVersion, raw: &str) -> bool {
                     {
                         return false;
                     }
-                    if parsed_base.major_only {
+                    if comparator.base.major_only {
                         return base
                             .major()
                             .checked_add(1)
@@ -416,7 +468,7 @@ fn matches_requirement(version: &PackageVersion, raw: &str) -> bool {
                 }
                 _ => false,
             }
-        })
+        }),
     })
 }
 
@@ -451,6 +503,28 @@ mod tests {
     fn req(s: &str) -> Requirement {
         s.parse().unwrap()
     }
+
+    #[test]
+    fn validated_requirement_reuses_its_parsed_form_when_matching_candidates() {
+        reset_requirement_base_parse_count();
+        let requirement = req("^1.2.3");
+        let parses_after_validation = requirement_base_parse_count();
+        assert!(parses_after_validation > 0);
+
+        for version in ["1.2.3", "1.9.0", "2.0.0"] {
+            assert_eq!(
+                requirement.matches(&version.parse().unwrap()),
+                version != "2.0.0"
+            );
+        }
+
+        assert_eq!(
+            requirement_base_parse_count(),
+            parses_after_validation,
+            "candidate matching must not repeatedly parse the validated requirement"
+        );
+    }
+
     fn dep(registry: &str, name: &str, range: &str) -> Dependency {
         Dependency::new(registry.parse().unwrap(), name.parse().unwrap(), req(range))
     }

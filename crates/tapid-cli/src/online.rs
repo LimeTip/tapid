@@ -16,7 +16,9 @@ use tapid_linker::{
 };
 use tapid_lockfile::{LockedPackage, Lockfile, LockfilePackageKey};
 use tapid_manifest::PackageManifest;
-use tapid_registry_client::{HttpsTransport, JsrRegistry, NpmRegistry, RegistryArtifact};
+use tapid_registry_client::{
+    HttpsTransport, JsrRegistry, NpmRegistry, PackagePlatform, RegistryArtifact,
+};
 use tapid_resolver::{
     Dependency, PackageVersionMetadata, RegistryMetadata, Requirement, Resolution,
     ResolutionOptions, ResolveError, resolve_graph,
@@ -50,6 +52,8 @@ struct PackageRecord {
     integrity: Option<PackageIntegrity>,
     artifact: String,
     dependencies: BTreeMap<String, String>,
+    optional_dependencies: BTreeMap<String, String>,
+    platform: PackagePlatform,
     fixture: bool,
 }
 
@@ -136,9 +140,101 @@ fn remote_records(
                 .into_iter()
                 .map(|(n, r)| (n.to_string(), r))
                 .collect(),
+            optional_dependencies: a
+                .optional_dependencies
+                .into_iter()
+                .map(|(n, r)| (n.to_string(), r))
+                .collect(),
+            platform: a.platform,
             fixture: false,
         })
         .collect())
+}
+
+fn npm_os(value: &str) -> &str {
+    match value {
+        "macos" => "darwin",
+        "windows" => "win32",
+        value => value,
+    }
+}
+
+fn npm_cpu(value: &str) -> &str {
+    match value {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        "x86" => "ia32",
+        value => value,
+    }
+}
+
+fn selected_platform_context_for(
+    os: &str,
+    cpu: &str,
+    libc: Option<&str>,
+    constraints: &PackagePlatform,
+) -> Result<tapid_core::PlatformContext, String> {
+    let libc_context = if constraints.libc.is_empty() {
+        None
+    } else {
+        Some(libc.ok_or("selected package requires a libc platform context")?)
+    };
+    tapid_core::PlatformContext::new(
+        (!constraints.os.is_empty()).then_some(npm_os(os)),
+        (!constraints.cpu.is_empty()).then_some(npm_cpu(cpu)),
+        libc_context,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn current_libc() -> Option<&'static str> {
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    {
+        Some("musl")
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        Some("glibc")
+    }
+    #[cfg(any(
+        not(target_os = "linux"),
+        all(target_os = "linux", not(any(target_env = "musl", target_env = "gnu")))
+    ))]
+    {
+        None
+    }
+}
+
+fn current_platform_matches(platform: &PackagePlatform) -> bool {
+    fn value_matches(values: &[String], current: Option<&str>) -> bool {
+        if values.is_empty() {
+            return true;
+        }
+        let Some(current) = current else {
+            return false;
+        };
+        let mut has_positive = false;
+        let mut positive_match = false;
+        for value in values {
+            if let Some(excluded) = value.strip_prefix('!') {
+                if excluded == current {
+                    return false;
+                }
+            } else {
+                has_positive = true;
+                positive_match |= value == current;
+            }
+        }
+        !has_positive || positive_match
+    }
+
+    let os = npm_os(std::env::consts::OS);
+    let cpu = npm_cpu(std::env::consts::ARCH);
+    let libc = current_libc();
+
+    value_matches(&platform.os, Some(os))
+        && value_matches(&platform.cpu, Some(cpu))
+        && value_matches(&platform.libc, libc)
 }
 
 /// Converts only package versions whose dependency requirements Tapid can resolve.
@@ -149,6 +245,9 @@ fn remote_records(
 fn usable_versions(packages: Vec<PackageRecord>) -> Vec<PackageVersionMetadata> {
     let mut versions = Vec::new();
     for package in packages {
+        if !current_platform_matches(&package.platform) {
+            continue;
+        }
         let dependencies = package
             .dependencies
             .iter()
@@ -173,8 +272,104 @@ fn usable_versions(packages: Vec<PackageRecord>) -> Vec<PackageVersionMetadata> 
     versions
 }
 
+#[derive(Clone)]
+struct NormalizedRecord {
+    metadata: PackageVersionMetadata,
+    optional_dependencies: BTreeMap<PackageName, Requirement>,
+}
+
+type NormalizedRecords = BTreeMap<PackageRecordKey, Option<NormalizedRecord>>;
+
+fn normalize_record(package: &PackageRecord) -> Option<NormalizedRecord> {
+    let metadata = usable_versions(vec![package.clone()]).pop()?;
+    let optional_dependencies = package
+        .optional_dependencies
+        .iter()
+        .map(|(name, requirement)| Some((name.parse().ok()?, requirement.parse().ok()?)))
+        .collect::<Option<BTreeMap<PackageName, Requirement>>>()?;
+    Some(NormalizedRecord {
+        metadata,
+        optional_dependencies,
+    })
+}
+
+fn resolver_metadata(
+    records: &BTreeMap<PackageRecordKey, PackageRecord>,
+    normalized: &NormalizedRecords,
+) -> Result<Vec<RegistryMetadata>, String> {
+    let mut by_registry = BTreeMap::<String, Vec<PackageVersionMetadata>>::new();
+    let mut candidates = BTreeMap::<(String, String), Vec<&PackageRecord>>::new();
+    for ((registry, name, _), package) in records {
+        candidates
+            .entry((registry.clone(), name.clone()))
+            .or_default()
+            .push(package);
+    }
+    for (key, package) in records {
+        let Some(normalized) = normalized.get(key).and_then(Option::as_ref) else {
+            continue;
+        };
+        let mut metadata = normalized.metadata.clone();
+        let registry = package.registry.to_string();
+        for (name, requirement) in &normalized.optional_dependencies {
+            let name_text = name.to_string();
+            let compatible_candidate_exists = candidates
+                .get(&(registry.clone(), name_text))
+                .is_some_and(|versions| {
+                    versions.iter().any(|candidate| {
+                        current_platform_matches(&candidate.platform)
+                            && requirement.matches(&candidate.version)
+                    })
+                });
+            if compatible_candidate_exists {
+                metadata
+                    .dependencies
+                    .insert(name.clone(), requirement.clone());
+            }
+        }
+        by_registry.entry(registry).or_default().push(metadata);
+    }
+    by_registry
+        .into_iter()
+        .map(|(registry, packages)| {
+            let registry = registry
+                .parse()
+                .map_err(|error: tapid_core::DomainError| error.to_string())?;
+            RegistryMetadata::normalize(registry, packages).map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
 type PackageRecordKey = (String, String, String);
 type ResolvedRecords = (Resolution, BTreeMap<PackageRecordKey, PackageRecord>);
+
+fn insert_record(
+    records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
+    normalized: &mut NormalizedRecords,
+    package: PackageRecord,
+) {
+    let key = (
+        package.registry.to_string(),
+        package.name.to_string(),
+        package.version.to_string(),
+    );
+    normalized.insert(key.clone(), normalize_record(&package));
+    records.insert(key, package);
+}
+
+fn metadata_progress_checkpoint(fetches: usize) -> bool {
+    fetches == 1 || fetches.is_multiple_of(50)
+}
+
+fn artifact_progress_checkpoint(completed: usize, total: usize) -> bool {
+    total > 0 && (completed == 1 || completed == total || completed.is_multiple_of(50))
+}
+
+fn report_metadata_progress(fetches: usize) {
+    if metadata_progress_checkpoint(fetches) {
+        eprintln!("Registry metadata progress: {fetches} package(s) fetched");
+    }
+}
 
 /// Resolves incrementally, fetching metadata only when the resolver reaches a
 /// package on its currently selected graph.
@@ -183,23 +378,38 @@ where
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
     let mut fetched = BTreeSet::<(String, String)>::new();
-    let mut records = BTreeMap::<(String, String, String), PackageRecord>::new();
-    let mut metadata_by_registry = BTreeMap::<String, Vec<PackageVersionMetadata>>::new();
+    let mut records = BTreeMap::<PackageRecordKey, PackageRecord>::new();
+    let mut normalized = NormalizedRecords::new();
 
     loop {
-        let metadata = metadata_by_registry
-            .iter()
-            .map(|(registry, packages)| {
-                let registry = registry
-                    .parse()
-                    .map_err(|error: tapid_core::DomainError| error.to_string())?;
-                RegistryMetadata::normalize(registry, packages.clone())
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let metadata = resolver_metadata(&records, &normalized)?;
 
         match resolve_graph(roots, &metadata, ResolutionOptions::default()) {
-            Ok(resolution) => return Ok((resolution, records)),
+            Ok(resolution) => {
+                let next_optional = resolution.selected.iter().find_map(|parent| {
+                    let record = records.get(&(
+                        parent.registry.to_string(),
+                        parent.name.to_string(),
+                        parent.version.to_string(),
+                    ))?;
+                    record.optional_dependencies.keys().find_map(|name| {
+                        let key = (parent.registry.to_string(), name.clone());
+                        (!fetched.contains(&key)).then_some((parent.registry.clone(), name.clone()))
+                    })
+                });
+                if let Some((registry, name)) = next_optional {
+                    let name: PackageName = name
+                        .parse()
+                        .map_err(|error: tapid_core::DomainError| error.to_string())?;
+                    fetched.insert((registry.to_string(), name.to_string()));
+                    report_metadata_progress(fetched.len());
+                    for package in fetch(&registry, &name)? {
+                        insert_record(&mut records, &mut normalized, package);
+                    }
+                    continue;
+                }
+                return Ok((resolution, records));
+            }
             Err(error @ ResolveError::MissingCandidate { .. })
             | Err(error @ ResolveError::Conflict { .. }) => {
                 let (registry, name) = match &error {
@@ -213,6 +423,7 @@ where
                 if !fetched.insert(key) {
                     return Err(format!("resolution failed: {error}"));
                 }
+                report_metadata_progress(fetched.len());
                 let registry: RegistryOrigin = registry
                     .parse()
                     .map_err(|error: tapid_core::DomainError| error.to_string())?;
@@ -220,20 +431,9 @@ where
                     .parse()
                     .map_err(|error: tapid_core::DomainError| error.to_string())?;
                 let packages = fetch(&registry, &name)?;
-                for package in &packages {
-                    records.insert(
-                        (
-                            package.registry.to_string(),
-                            package.name.to_string(),
-                            package.version.to_string(),
-                        ),
-                        package.clone(),
-                    );
+                for package in packages {
+                    insert_record(&mut records, &mut normalized, package);
                 }
-                metadata_by_registry
-                    .entry(registry.to_string())
-                    .or_default()
-                    .extend(usable_versions(packages));
             }
             Err(error) => return Err(format!("resolution failed: {error}")),
         }
@@ -287,6 +487,8 @@ pub fn resolve_and_fetch(
                     integrity,
                     artifact: p.artifact.clone(),
                     dependencies: p.dependencies.clone(),
+                    optional_dependencies: BTreeMap::new(),
+                    platform: PackagePlatform::unrestricted(),
                     fixture: true,
                 },
             );
@@ -335,7 +537,7 @@ pub fn resolve_and_fetch(
     })?;
     let mut lock = Lockfile::new(&root_digest(project)?).map_err(|e| e.to_string())?;
     let empty_peer = tapid_core::PeerContext::default();
-    let empty_platform = tapid_core::PlatformContext::new(None, None, None).unwrap();
+    let mut platform_contexts = BTreeMap::new();
     let mut packages = BTreeMap::new();
     let mut trees = BTreeMap::new();
     let mut instances = Vec::new();
@@ -347,7 +549,8 @@ pub fn resolve_and_fetch(
     } else {
         None
     };
-    for id in &resolution.selected {
+    let artifact_total = resolution.selected.len();
+    for (index, id) in resolution.selected.iter().enumerate() {
         let key3 = (
             id.registry.to_string(),
             id.name.to_string(),
@@ -371,6 +574,13 @@ pub fn resolve_and_fetch(
             records.insert(key3.clone(), p.clone());
             p
         };
+        let platform_context = selected_platform_context_for(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            current_libc(),
+            &record.platform,
+        )?;
+        platform_contexts.insert(id.clone(), platform_context.clone());
         let bytes = if record.fixture {
             if let Some(encoded) = record.artifact.strip_prefix("base64:") {
                 STANDARD
@@ -440,7 +650,7 @@ pub fn resolve_and_fetch(
             id.name.clone(),
             id.version.clone(),
             &empty_peer,
-            &empty_platform,
+            &platform_context,
         )
         .to_string();
         let mut locked = LockedPackage::new_with_context(
@@ -450,7 +660,7 @@ pub fn resolve_and_fetch(
             &actual.to_string(),
             &tree_digest.to_string(),
             &empty_peer,
-            &empty_platform,
+            &platform_context,
         )
         .map_err(|e| e.to_string())?;
         if !record.fixture {
@@ -467,11 +677,15 @@ pub fn resolve_and_fetch(
                 id.version.clone(),
             ),
             peer_context: empty_peer.clone(),
-            platform_context: empty_platform.clone(),
+            platform_context,
             tree: VerifiedTreeReference::new(&tree_digest.to_string(), &tree)
                 .map_err(|e| e.to_string())?,
         });
         let _ = fs::remove_dir_all(temp);
+        let completed = index + 1;
+        if artifact_progress_checkpoint(completed, artifact_total) {
+            eprintln!("Artifact verification progress: {completed}/{artifact_total}");
+        }
     }
     let locked_packages: Result<Vec<_>, String> = packages
         .values()
@@ -483,12 +697,15 @@ pub fn resolve_and_fetch(
                 .filter(|edge| edge.parent == *id)
             {
                 let target = &edge.child;
+                let target_platform = platform_contexts
+                    .get(target)
+                    .ok_or_else(|| format!("missing platform context for {target}"))?;
                 let target_key = LockfilePackageKey::new(
                     target.registry.clone(),
                     target.name.clone(),
                     target.version.clone(),
                     &empty_peer,
-                    &empty_platform,
+                    target_platform,
                 )
                 .to_string();
                 locked
@@ -501,12 +718,15 @@ pub fn resolve_and_fetch(
     lock.insert_packages(locked_packages?)
         .map_err(|e| e.to_string())?;
     lock.set_roots(resolution.roots.iter().map(|id| {
+        let platform = platform_contexts
+            .get(id)
+            .expect("selected root platform context");
         LockfilePackageKey::new(
             id.registry.clone(),
             id.name.clone(),
             id.version.clone(),
             &empty_peer,
-            &empty_platform,
+            platform,
         )
         .to_string()
     }))
@@ -559,6 +779,28 @@ pub fn resolve_and_fetch(
 mod tests {
     use super::*;
     #[test]
+    fn artifact_progress_is_emitted_at_bounded_completion_checkpoints() {
+        let checkpoints = (1..=625)
+            .filter(|completed| artifact_progress_checkpoint(*completed, 625))
+            .collect::<Vec<_>>();
+
+        assert_eq!(checkpoints.first(), Some(&1));
+        assert_eq!(checkpoints.last(), Some(&625));
+        assert!(checkpoints.len() <= 14);
+    }
+
+    #[test]
+    fn metadata_progress_is_emitted_at_bounded_checkpoints() {
+        let checkpoints = (1..=612)
+            .filter(|fetches| metadata_progress_checkpoint(*fetches))
+            .collect::<Vec<_>>();
+
+        assert_eq!(checkpoints.first(), Some(&1));
+        assert_eq!(checkpoints.last(), Some(&600));
+        assert!(checkpoints.len() <= 13);
+    }
+
+    #[test]
     fn padded_and_unpadded_sha512_sri_verify_against_the_same_digest() {
         let bytes = b"archive bytes";
         let padded = integrity(bytes);
@@ -601,8 +843,33 @@ mod tests {
                 .iter()
                 .map(|(name, requirement)| ((*name).into(), (*requirement).into()))
                 .collect(),
+            optional_dependencies: BTreeMap::new(),
+            platform: PackagePlatform::unrestricted(),
             fixture: false,
         }
+    }
+
+    #[test]
+    fn selected_platform_constraints_produce_an_exact_lockfile_context() {
+        let platform = PackagePlatform {
+            os: vec!["darwin".into()],
+            cpu: vec!["arm64".into()],
+            libc: Vec::new(),
+        };
+
+        let context = selected_platform_context_for("macos", "aarch64", None, &platform).unwrap();
+
+        assert_eq!(context.os.as_deref(), Some("darwin"));
+        assert_eq!(context.cpu.as_deref(), Some("arm64"));
+        assert_eq!(context.libc, None);
+    }
+
+    #[test]
+    fn incompatible_package_versions_are_not_usable() {
+        let mut package = named_record("native", "1.0.0", &[]);
+        package.platform.os = vec!["definitely-not-this-platform".into()];
+
+        assert!(usable_versions(vec![package]).is_empty());
     }
 
     #[test]
@@ -647,6 +914,73 @@ mod tests {
 
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].version.to_string(), "7.37.5");
+    }
+
+    #[test]
+    fn unavailable_optional_requirement_does_not_fail_resolution() {
+        let roots = vec![Dependency::new(
+            NPM.parse().unwrap(),
+            "app".parse().unwrap(),
+            "*".parse().unwrap(),
+        )];
+
+        let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+            Ok(match name.to_string().as_str() {
+                "app" => {
+                    let mut package = named_record("app", "1.0.0", &[]);
+                    package
+                        .optional_dependencies
+                        .insert("native".into(), "2.0.0".into());
+                    vec![package]
+                }
+                "native" => vec![named_record("native", "1.0.0", &[])],
+                other => panic!("unexpected metadata fetch for {other}"),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(resolution.selected.len(), 1);
+        assert_eq!(resolution.selected[0].name.to_string(), "app");
+    }
+
+    #[test]
+    fn incremental_resolution_fetches_and_selects_compatible_optional_dependencies() {
+        let roots = vec![Dependency::new(
+            NPM.parse().unwrap(),
+            "app".parse().unwrap(),
+            "*".parse().unwrap(),
+        )];
+        let mut fetched = Vec::new();
+
+        let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+            fetched.push(name.to_string());
+            Ok(match name.to_string().as_str() {
+                "app" => {
+                    let mut package = named_record("app", "1.0.0", &[]);
+                    package
+                        .optional_dependencies
+                        .insert("native".into(), "1.0.0".into());
+                    vec![package]
+                }
+                "native" => vec![named_record("native", "1.0.0", &[])],
+                other => panic!("unexpected metadata fetch for {other}"),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(fetched, vec!["app", "native"]);
+        assert!(
+            resolution
+                .selected
+                .iter()
+                .any(|id| id.name.to_string() == "native")
+        );
+        assert!(
+            resolution
+                .dependencies
+                .iter()
+                .any(|edge| edge.dependency.to_string() == "native")
+        );
     }
 
     #[test]

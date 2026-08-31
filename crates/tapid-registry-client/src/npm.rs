@@ -1,6 +1,7 @@
 use crate::{
-    HttpResponse, HttpTransport, MetadataError, RegistryArtifact, RegistryClientError,
-    RegistryKind, RegistryPackageId, artifact::download_artifact,
+    HttpResponse, HttpTransport, MetadataError, PackagePlatform, RegistryArtifact,
+    RegistryClientError, RegistryKind, RegistryPackageId, artifact::download_artifact,
+    transport::request_url_is_safe,
 };
 use std::collections::BTreeMap;
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
@@ -191,22 +192,67 @@ fn parse_npm(
         let parsed_artifact_url = Url::parse(artifact_url).map_err(|_| {
             RegistryClientError::Metadata(MetadataError::InvalidArtifact(artifact_url.into()))
         })?;
-        if parsed_artifact_url.scheme() != "https" {
+        if !request_url_is_safe(artifact_url, &parsed_artifact_url) {
             return Err(RegistryClientError::Metadata(
                 MetadataError::InvalidArtifact(artifact_url.into()),
             ));
         }
-        let artifact_url = parsed_artifact_url.to_string();
+        let artifact_url = artifact_url.to_owned();
         artifacts.push(RegistryArtifact {
             identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
             artifact_url,
             integrity,
             dependencies: parse_dependencies(version_entry.get("dependencies"))?,
+            optional_dependencies: parse_dependencies(version_entry.get("optionalDependencies"))?,
+            platform: PackagePlatform {
+                os: parse_platform_list(version_entry.get("os"), "os")?,
+                cpu: parse_platform_list(version_entry.get("cpu"), "cpu")?,
+                libc: parse_platform_list(version_entry.get("libc"), "libc")?,
+            },
             registry_kind: RegistryKind::Npm,
         });
     }
     artifacts.sort_by_key(|artifact| std::cmp::Reverse(artifact.identity.version.clone()));
     Ok(artifacts)
+}
+
+fn parse_platform_list(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<Vec<String>, RegistryClientError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values: Vec<&str> = if let Some(value) = value.as_str() {
+        vec![value]
+    } else if let Some(values) = value.as_array() {
+        values
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::InvalidDependency(field.into()))
+            })?
+    } else {
+        return Err(RegistryClientError::Metadata(
+            MetadataError::InvalidDependency(field.into()),
+        ));
+    };
+    if values.len() > 32
+        || values.iter().any(|value| {
+            value.is_empty()
+                || value.len() > 32
+                || !value.is_ascii()
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_!.-".contains(&byte))
+        })
+    {
+        return Err(RegistryClientError::Metadata(
+            MetadataError::InvalidDependency(field.into()),
+        ));
+    }
+    Ok(values.into_iter().map(str::to_owned).collect())
 }
 
 fn parse_dependencies(
@@ -298,6 +344,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(artifacts.len(), 1);
+    }
+
+    #[test]
+    fn npm_maps_platform_compatible_optional_dependency_metadata() {
+        let body = br#"{"name":"parent","versions":{"1.0.0":{"name":"parent","version":"1.0.0","optionalDependencies":{"native":"1.0.0"},"os":["darwin"],"cpu":["arm64"],"libc":["glibc"],"dist":{"tarball":"https://cdn.example/parent.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/parent"), origin)
+            .fetch("parent")
+            .unwrap();
+
+        assert_eq!(
+            artifacts[0]
+                .optional_dependencies
+                .get(&"native".parse().unwrap()),
+            Some(&"1.0.0".to_owned())
+        );
+        assert_eq!(artifacts[0].platform.os, vec!["darwin"]);
+        assert_eq!(artifacts[0].platform.cpu, vec!["arm64"]);
+        assert_eq!(artifacts[0].platform.libc, vec!["glibc"]);
     }
 
     #[test]
@@ -451,6 +516,68 @@ mod tests {
             Err(RegistryClientError::Metadata(MetadataError::InvalidArtifact(url)))
                 if url == "http://cdn.example/foo.tgz"
         ));
+    }
+
+    #[test]
+    fn npm_rejects_noncanonical_artifact_urls() {
+        for (case, artifact_url) in [
+            ("leading space", " https://cdn.example/archive.tgz"),
+            ("path space", "https://cdn.example/archive .tgz"),
+            ("trailing newline", "https://cdn.example/archive.tgz\n"),
+            ("uppercase scheme", "HTTPS://cdn.example/archive.tgz"),
+            ("uppercase host", "https://CDN.EXAMPLE/archive.tgz"),
+            ("backslash", "https://cdn.example\\archive.tgz"),
+            ("empty userinfo", "https://@cdn.example/archive.tgz"),
+            (
+                "Unicode IDNA separator",
+                "https://cdn\u{3002}example/archive.tgz",
+            ),
+            (
+                "explicit default port",
+                "https://cdn.example:443/archive.tgz",
+            ),
+            ("percent-encoded host", "https://%63dn.example/archive.tgz"),
+            (
+                "encoded dot path",
+                "https://cdn.example/a/%2e%2e/archive.tgz",
+            ),
+            ("encoded control path", "https://cdn.example/%0Aarchive.tgz"),
+            (
+                "encoded unreserved path",
+                "https://cdn.example/%61rchive.tgz",
+            ),
+        ] {
+            let body = serde_json::json!({
+                "name": "foo",
+                "versions": {
+                    "1.0.0": {
+                        "name": "foo",
+                        "version": "1.0.0",
+                        "dist": {
+                            "tarball": artifact_url,
+                            "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                        }
+                    }
+                }
+            })
+            .to_string();
+            let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+            let result = NpmRegistry::new(
+                fake(body.as_bytes(), "https://registry.npmjs.org/foo"),
+                origin,
+            )
+            .fetch("foo");
+
+            assert!(
+                matches!(
+                    result,
+                    Err(RegistryClientError::Metadata(MetadataError::InvalidArtifact(url)))
+                        if url == artifact_url
+                ),
+                "npm accepted {case}: {artifact_url:?}"
+            );
+        }
     }
 
     #[test]

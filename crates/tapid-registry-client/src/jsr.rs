@@ -1,6 +1,6 @@
 use crate::{
     HttpResponse, HttpTransport, MetadataError, RegistryArtifact, RegistryClientError,
-    RegistryKind, RegistryPackageId, artifact::download_artifact,
+    RegistryKind, RegistryPackageId, artifact::download_artifact, transport::request_url_is_safe,
 };
 use std::collections::BTreeMap;
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
@@ -145,12 +145,12 @@ fn parse_jsr(
                 let artifact_url = Url::parse(url).map_err(|_| {
                     RegistryClientError::Metadata(MetadataError::InvalidArtifact(url.into()))
                 })?;
-                if artifact_url.scheme() != "https" {
+                if !request_url_is_safe(url, &artifact_url) {
                     return Err(RegistryClientError::Metadata(
                         MetadataError::InvalidArtifact(url.into()),
                     ));
                 }
-                (artifact_url.to_string(), integrity)
+                (url.to_owned(), integrity)
             }
             _ => {
                 return Err(RegistryClientError::Metadata(
@@ -163,6 +163,8 @@ fn parse_jsr(
             artifact_url,
             integrity: Some(integrity),
             dependencies: parse_jsr_dependencies(version_object)?,
+            optional_dependencies: BTreeMap::new(),
+            platform: crate::PackagePlatform::unrestricted(),
             registry_kind: RegistryKind::Jsr,
         });
     }
@@ -327,6 +329,67 @@ mod tests {
                 MetadataError::InvalidIntegrity(_)
             ))
         ));
+    }
+
+    #[test]
+    fn jsr_rejects_noncanonical_artifact_urls() {
+        for (case, artifact_url) in [
+            ("leading space", " https://npm.jsr.io/archive.tgz"),
+            ("path space", "https://npm.jsr.io/archive .tgz"),
+            ("trailing newline", "https://npm.jsr.io/archive.tgz\n"),
+            ("uppercase scheme", "HTTPS://npm.jsr.io/archive.tgz"),
+            ("uppercase host", "https://NPM.JSR.IO/archive.tgz"),
+            ("backslash", "https://npm.jsr.io\\archive.tgz"),
+            ("empty userinfo", "https://@npm.jsr.io/archive.tgz"),
+            (
+                "Unicode IDNA separator",
+                "https://npm\u{3002}jsr.io/archive.tgz",
+            ),
+            (
+                "explicit default port",
+                "https://npm.jsr.io:443/archive.tgz",
+            ),
+            ("percent-encoded host", "https://%6epm.jsr.io/archive.tgz"),
+            (
+                "encoded dot path",
+                "https://npm.jsr.io/a/%2e%2e/archive.tgz",
+            ),
+            ("encoded control path", "https://npm.jsr.io/%0Aarchive.tgz"),
+            (
+                "encoded unreserved path",
+                "https://npm.jsr.io/%61rchive.tgz",
+            ),
+        ] {
+            let body = serde_json::json!({
+                "scope": "std",
+                "name": "path",
+                "versions": {
+                    "1.0.0": {
+                        "npm": {
+                            "tarball": artifact_url,
+                            "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                        }
+                    }
+                }
+            })
+            .to_string();
+            let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
+
+            let result = JsrRegistry::new(
+                fake(body.as_bytes(), "https://jsr.io/@std/path/meta.json"),
+                origin,
+            )
+            .fetch("@std/path");
+
+            assert!(
+                matches!(
+                    result,
+                    Err(RegistryClientError::Metadata(MetadataError::InvalidArtifact(url)))
+                        if url == artifact_url
+                ),
+                "JSR accepted {case}: {artifact_url:?}"
+            );
+        }
     }
 
     #[test]

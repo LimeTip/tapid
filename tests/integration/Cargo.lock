@@ -1246,9 +1246,11 @@ name = "tapid-store"
 version = "0.0.3"
 dependencies = [
  "hex",
+ "libc",
  "sha2",
  "tapid-archive",
  "tapid-core",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

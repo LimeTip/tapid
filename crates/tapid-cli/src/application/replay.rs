@@ -29,11 +29,32 @@ impl Drop for ReplaySnapshotGuard {
     }
 }
 
+fn replay_progress_checkpoint(completed: usize, total: usize) -> bool {
+    total > 0 && (completed == 1 || completed == total || completed.is_multiple_of(50))
+}
+
+fn complete_progress_step<T, E>(
+    completed: usize,
+    total: usize,
+    action: impl FnOnce() -> Result<T, E>,
+    report: impl FnOnce(usize, usize),
+) -> Result<T, E> {
+    let value = action()?;
+    if replay_progress_checkpoint(completed, total) {
+        report(completed, total);
+    }
+    Ok(value)
+}
+
 pub(crate) fn replay_input(
     lock: &Lockfile,
     manifest: &PackageManifest,
     store: &Store,
+    mut report_progress: impl FnMut(usize, usize),
 ) -> Result<(LayoutInput, BTreeMap<String, PathBuf>), String> {
+    store
+        .cleanup_stale_replay_snapshots()
+        .map_err(|error| format!("cannot recover stale replay snapshots: {error}"))?;
     let mut instances = Vec::new();
     let mut keys = BTreeMap::new();
     let mut trees = BTreeMap::new();
@@ -47,15 +68,21 @@ pub(crate) fn replay_input(
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
     let root_keys = replay_root_keys(lock, manifest, &typed_keys)?;
-    for (key, package) in &typed_packages {
+    let package_total = typed_packages.len();
+    for (index, (key, package)) in typed_packages.iter().enumerate() {
+        let completed = index + 1;
         let encoded = key.to_string();
         let digest: ArtifactDigest = package
             .tree_digest()
             .parse()
             .map_err(|e: tapid_core::DomainError| e.to_string())?;
-        let tree = store
-            .verified_tree_snapshot(&digest)
-            .map_err(|e| format!("package {encoded} tree unavailable: {e}"))?;
+        let tree = complete_progress_step(
+            completed,
+            package_total,
+            || store.verified_tree_snapshot(&digest),
+            &mut report_progress,
+        )
+        .map_err(|e| format!("package {encoded} tree unavailable: {e}"))?;
         snapshots.paths.push(tree.clone());
         let peer = context::parse_peer(&key.peer_context)?;
         let platform = context::parse_platform(&key.platform_context)?;
@@ -238,6 +265,36 @@ pub(crate) fn current_platform() -> Platform {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+
+    #[test]
+    fn replay_progress_is_reported_after_snapshot_completion() {
+        let events = std::cell::RefCell::new(Vec::new());
+
+        let value = complete_progress_step(
+            1,
+            1,
+            || {
+                events.borrow_mut().push("snapshot");
+                Ok::<_, ()>(42)
+            },
+            |_, _| events.borrow_mut().push("progress"),
+        )
+        .unwrap();
+
+        assert_eq!(value, 42);
+        assert_eq!(*events.borrow(), ["snapshot", "progress"]);
+    }
+
+    #[test]
+    fn replay_progress_is_emitted_at_bounded_checkpoints() {
+        let checkpoints = (1..=612)
+            .filter(|completed| replay_progress_checkpoint(*completed, 612))
+            .collect::<Vec<_>>();
+
+        assert_eq!(checkpoints.first(), Some(&1));
+        assert_eq!(checkpoints.last(), Some(&612));
+        assert!(checkpoints.len() <= 14);
+    }
 
     fn legacy_lock() -> Lockfile {
         Lockfile::from_json(

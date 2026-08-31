@@ -149,12 +149,35 @@ impl RegistrySnapshot {
     }
 }
 
+/// npm package compatibility constraints used for deterministic platform selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackagePlatform {
+    /// Supported or negated npm operating-system identifiers.
+    pub os: Vec<String>,
+    /// Supported or negated npm CPU architecture identifiers.
+    pub cpu: Vec<String>,
+    /// Supported or negated npm libc identifiers.
+    pub libc: Vec<String>,
+}
+impl PackagePlatform {
+    /// Returns constraints that permit every supported platform.
+    pub fn unrestricted() -> Self {
+        Self {
+            os: Vec::new(),
+            cpu: Vec::new(),
+            libc: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryArtifact {
     pub identity: RegistryPackageId,
     pub artifact_url: String,
     pub integrity: Option<PackageIntegrity>,
     pub dependencies: BTreeMap<PackageName, String>,
+    pub optional_dependencies: BTreeMap<PackageName, String>,
+    pub platform: PackagePlatform,
     pub registry_kind: RegistryKind,
 }
 

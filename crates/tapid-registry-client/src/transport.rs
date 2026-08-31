@@ -148,13 +148,59 @@ impl Origin {
     }
 }
 
-fn request_url_is_safe(url: &Url) -> bool {
-    url.scheme() == "https"
+pub(crate) fn request_url_is_safe(raw: &str, url: &Url) -> bool {
+    if !raw.is_ascii() {
+        return false;
+    }
+    let Some(remainder) = raw.strip_prefix("https://") else {
+        return false;
+    };
+    let Some(authority) = remainder.split(['/', '?', '#']).next() else {
+        return false;
+    };
+    !authority.is_empty()
+        && !authority.starts_with('/')
+        && !authority.contains('@')
+        && url.as_str() == raw
+        && !raw
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b' ')
+        && !raw.contains('\\')
+        && !path_has_noncanonical_percent_encoding(url.path())
+        && url.scheme() == "https"
         && url.host_str().is_some()
         && url.username().is_empty()
         && url.password().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
+}
+
+fn path_has_noncanonical_percent_encoding(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        let Some(encoded) = bytes.get(index + 1..index + 3) else {
+            return true;
+        };
+        let Ok(encoded) = str::from_utf8(encoded) else {
+            return true;
+        };
+        let Ok(decoded) = u8::from_str_radix(encoded, 16) else {
+            return true;
+        };
+        if decoded.is_ascii_control()
+            || decoded.is_ascii_alphanumeric()
+            || b"-._~".contains(&decoded)
+        {
+            return true;
+        }
+        index += 3;
+    }
+    false
 }
 
 fn redirect_is_allowed(
@@ -164,7 +210,7 @@ fn redirect_is_allowed(
     previous_count: usize,
 ) -> bool {
     previous_count <= MAX_REDIRECT_HOPS
-        && request_url_is_safe(next)
+        && request_url_is_safe(next.as_str(), next)
         && Origin::of(previous) == Origin::of(next)
         && allowed.contains(&Origin::of(next))
 }
@@ -246,7 +292,7 @@ impl HttpsTransport {
         accept: Option<&str>,
     ) -> Result<HttpResponse, TransportError> {
         let parsed = Url::parse(url).map_err(|_| TransportError::InvalidUrl(url.into()))?;
-        if !request_url_is_safe(&parsed)
+        if !request_url_is_safe(url, &parsed)
             || !self
                 .allowed_origins
                 .iter()
