@@ -18,7 +18,7 @@ tapid run <SCRIPT> [-- <ARGS>...]
 
 ## Install
 
-The currently supported install paths are validated lockfile replay and the local registry fixture:
+The supported install paths are the live npm path, validated lockfile replay, and the local registry fixture:
 
 ```text
 tapid install --offline --frozen --project-dir ./example

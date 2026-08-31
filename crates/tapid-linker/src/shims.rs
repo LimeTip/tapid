@@ -61,9 +61,11 @@ pub fn plan_shims(
             if !managed_root.contains(&source) {
                 return Err(PlanError::PathOutsideManagedRoot(source));
             }
-            let file_type = std::fs::symlink_metadata(&source)
-                .map_err(|_| PlanError::BinTargetMissing(source.clone()))?
-                .file_type();
+            let file_type = match std::fs::symlink_metadata(&source) {
+                Ok(metadata) => metadata.file_type(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(PlanError::BinTargetMissing(source.clone())),
+            };
             if file_type.is_symlink() || !file_type.is_file() {
                 return Err(PlanError::BinTargetNotRegular(source));
             }
@@ -168,20 +170,19 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_non_regular_bin_targets_are_rejected() {
+    fn missing_bin_targets_are_skipped_and_non_regular_targets_are_rejected() {
         let root = std::env::temp_dir().join(format!("tapid-shims-files-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let missing = shim_package(&root, "missing", r#""missing.js""#, "missing");
         std::fs::remove_file(missing.tree_root.join("cli.js")).unwrap();
-        assert!(matches!(
-            plan_shims(
-                ManagedRoot::new(&root).unwrap(),
-                vec![missing],
-                Platform::Unix
-            ),
-            Err(PlanError::BinTargetMissing(_))
-        ));
+        let missing_plan = plan_shims(
+            ManagedRoot::new(&root).unwrap(),
+            vec![missing],
+            Platform::Unix,
+        )
+        .unwrap();
+        assert!(missing_plan.entries.is_empty());
         let directory = shim_package(&root, "directory", r#""cli.js""#, "directory");
         std::fs::remove_file(directory.tree_root.join("cli.js")).unwrap();
         std::fs::create_dir(directory.tree_root.join("cli.js")).unwrap();

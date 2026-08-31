@@ -198,12 +198,15 @@ fn parse_npm(
             ));
         }
         let artifact_url = artifact_url.to_owned();
+        let mut dependencies = parse_dependencies(version_entry.get("dependencies"))?;
+        let optional_dependencies = parse_dependencies(version_entry.get("optionalDependencies"))?;
+        dependencies.retain(|name, _| !optional_dependencies.contains_key(name));
         artifacts.push(RegistryArtifact {
             identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
             artifact_url,
             integrity,
-            dependencies: parse_dependencies(version_entry.get("dependencies"))?,
-            optional_dependencies: parse_dependencies(version_entry.get("optionalDependencies"))?,
+            dependencies,
+            optional_dependencies,
             platform: PackagePlatform {
                 os: parse_platform_list(version_entry.get("os"), "os")?,
                 cpu: parse_platform_list(version_entry.get("cpu"), "cpu")?,
@@ -348,7 +351,7 @@ mod tests {
 
     #[test]
     fn npm_maps_platform_compatible_optional_dependency_metadata() {
-        let body = br#"{"name":"parent","versions":{"1.0.0":{"name":"parent","version":"1.0.0","optionalDependencies":{"native":"1.0.0"},"os":["darwin"],"cpu":["arm64"],"libc":["glibc"],"dist":{"tarball":"https://cdn.example/parent.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let body = br#"{"name":"parent","versions":{"1.0.0":{"name":"parent","version":"1.0.0","dependencies":{"native":"2.0.0","required":"3.0.0"},"optionalDependencies":{"native":"1.0.0"},"os":["darwin"],"cpu":["arm64"],"libc":["glibc"],"dist":{"tarball":"https://cdn.example/parent.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
         let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/parent"), origin)
             .fetch("parent")
@@ -363,6 +366,15 @@ mod tests {
         assert_eq!(artifacts[0].platform.os, vec!["darwin"]);
         assert_eq!(artifacts[0].platform.cpu, vec!["arm64"]);
         assert_eq!(artifacts[0].platform.libc, vec!["glibc"]);
+        assert!(
+            !artifacts[0]
+                .dependencies
+                .contains_key(&"native".parse().unwrap())
+        );
+        assert_eq!(
+            artifacts[0].dependencies.get(&"required".parse().unwrap()),
+            Some(&"3.0.0".to_owned())
+        );
     }
 
     #[test]

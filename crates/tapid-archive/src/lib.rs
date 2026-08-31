@@ -3,11 +3,13 @@
 #![deny(unsafe_code)]
 
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read};
 use std::path::{Component, Path};
+
+const EXECUTABLE_MANIFEST: &str = ".tapid-executable-modes";
 
 /// Formats accepted by consumer registries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,7 +87,8 @@ fn extract_inner(
 ) -> Result<(), ExtractError> {
     let metadata = archive_metadata(bytes, format)?;
     validate_entries(metadata, limits.validation).map_err(ExtractError::Invalid)?;
-    extract_entries(bytes, format, destination)?;
+    let executable_paths = extract_entries(bytes, format, destination)?;
+    write_executable_manifest(destination, &executable_paths)?;
     Ok(())
 }
 
@@ -139,12 +142,13 @@ fn extract_entries(
     bytes: &[u8],
     format: ArchiveFormat,
     destination: &Path,
-) -> Result<(), ExtractError> {
+) -> Result<Vec<String>, ExtractError> {
     let reader: Box<dyn Read + '_> = match format {
         ArchiveFormat::Tar => Box::new(Cursor::new(bytes)),
         ArchiveFormat::TarGz => Box::new(flate2::read::GzDecoder::new(Cursor::new(bytes))),
     };
     let mut archive = tar::Archive::new(reader);
+    let mut executable_paths = Vec::new();
     for item in archive.entries().map_err(ExtractError::Io)? {
         let mut entry = item.map_err(ExtractError::Io)?;
         let raw = entry
@@ -153,6 +157,11 @@ fn extract_entries(
             .to_string_lossy()
             .into_owned();
         let normalized = normalized_path(&raw).map_err(ExtractError::Invalid)?;
+        if normalized == EXECUTABLE_MANIFEST {
+            return Err(ExtractError::InvalidArchive(
+                "archive uses a reserved Tapid metadata path".into(),
+            ));
+        }
         let target = destination.join(
             normalized
                 .split('/')
@@ -178,10 +187,28 @@ fn extract_entries(
             .create_new(true)
             .open(&target)?;
         io::copy(&mut entry, &mut out)?;
-        apply_portable_file_mode(entry.header().mode()?, &target)?;
+        let archive_mode = entry.header().mode()?;
+        apply_portable_file_mode(archive_mode, &target)?;
+        if archive_mode & 0o111 != 0 {
+            executable_paths.push(normalized);
+        }
         out.sync_all()?;
     }
-    Ok(())
+    executable_paths.sort();
+    Ok(executable_paths)
+}
+
+fn write_executable_manifest(destination: &Path, executable_paths: &[String]) -> io::Result<()> {
+    let mut contents = executable_paths.join("\n");
+    if !contents.is_empty() {
+        contents.push('\n');
+    }
+    let mut manifest = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination.join(EXECUTABLE_MANIFEST))?;
+    std::io::Write::write_all(&mut manifest, contents.as_bytes())?;
+    manifest.sync_all()
 }
 
 #[cfg(unix)]
@@ -209,8 +236,16 @@ fn apply_portable_file_mode(_archive_mode: u32, _target: &Path) -> io::Result<()
 /// other permission bits are ignored. Platforms without Unix executable bits
 /// retain the non-executable regular-file framing.
 pub fn canonical_tree_digest(root: &Path) -> io::Result<String> {
+    let executable_paths = read_executable_manifest(root)?;
     let mut files = Vec::new();
-    collect_tree(root, root, &mut files)?;
+    collect_tree(root, root, executable_paths.as_ref(), &mut files)?;
+    if let Some(paths) = &executable_paths {
+        let mut manifest = paths.iter().cloned().collect::<Vec<_>>().join("\n");
+        if !manifest.is_empty() {
+            manifest.push('\n');
+        }
+        files.push((EXECUTABLE_MANIFEST.to_owned(), 3, manifest.into_bytes()));
+    }
     files.sort();
     let mut h = Sha256::new();
     for (path, kind, data) in files {
@@ -222,9 +257,62 @@ pub fn canonical_tree_digest(root: &Path) -> io::Result<String> {
     }
     Ok(format!("sha256-{}", hex::encode(h.finalize())))
 }
+
+fn read_executable_manifest(root: &Path) -> io::Result<Option<BTreeSet<String>>> {
+    let path = root.join(EXECUTABLE_MANIFEST);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "executable mode manifest is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if metadata.len() > 4 * 1024 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "executable mode manifest is oversized",
+        ));
+    }
+    let contents = fs::read_to_string(&path)?;
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "executable mode manifest is not newline terminated",
+        ));
+    }
+    let mut paths = BTreeSet::new();
+    let mut previous: Option<&str> = None;
+    for value in contents.lines() {
+        let normalized = normalized_path(value)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid executable path"))?;
+        if normalized != value || previous.is_some_and(|previous| previous >= value) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "executable mode manifest is not canonical",
+            ));
+        }
+        let target = root.join(value.split('/').collect::<std::path::PathBuf>());
+        let target_metadata = fs::symlink_metadata(target)?;
+        if !target_metadata.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "executable mode manifest references a non-regular file",
+            ));
+        }
+        paths.insert(value.to_owned());
+        previous = Some(value);
+    }
+    Ok(Some(paths))
+}
+
 fn collect_tree(
     root: &Path,
     current: &Path,
+    executable_paths: Option<&BTreeSet<String>>,
     out: &mut Vec<(String, u8, Vec<u8>)>,
 ) -> io::Result<()> {
     for item in fs::read_dir(current)? {
@@ -235,7 +323,7 @@ fn collect_tree(
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        if rel == ".tapid-tree" {
+        if rel == ".tapid-tree" || rel == EXECUTABLE_MANIFEST {
             continue;
         }
         let m = fs::symlink_metadata(&p)?;
@@ -247,9 +335,20 @@ fn collect_tree(
         }
         if m.is_dir() {
             out.push((rel.clone(), 1, Vec::new()));
-            collect_tree(root, &p, out)?;
+            collect_tree(root, &p, executable_paths, out)?;
         } else if m.is_file() {
-            out.push((rel, portable_file_kind(&m), fs::read(&p)?));
+            let kind = executable_paths.map_or_else(
+                || portable_file_kind(&m),
+                |paths| u8::from(paths.contains(&rel)) * 2,
+            );
+            #[cfg(unix)]
+            if executable_paths.is_some() && kind != portable_file_kind(&m) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "file executable mode differs from the canonical manifest",
+                ));
+            }
+            out.push((rel, kind, fs::read(&p)?));
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -603,7 +702,14 @@ mod tests {
                 0o111
             );
         }
-        assert!(canonical_tree_digest(&dest).unwrap().starts_with("sha256-"));
+        assert_eq!(
+            fs::read_to_string(dest.join(EXECUTABLE_MANIFEST)).unwrap(),
+            "package/index.js\n"
+        );
+        assert_eq!(
+            canonical_tree_digest(&dest).unwrap(),
+            "sha256-011c8f7a278748278e741f3bb6d54af8cdaa14ee84b263bcd68f555fc41e2393"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 

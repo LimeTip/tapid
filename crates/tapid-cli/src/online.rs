@@ -174,7 +174,10 @@ fn selected_platform_context_for(
     libc: Option<&str>,
     constraints: &PackagePlatform,
 ) -> Result<tapid_core::PlatformContext, String> {
-    let libc_context = if constraints.libc.is_empty() {
+    let libc_context = if constraints.libc.is_empty()
+        || npm_os(os) != "linux"
+        || (constraints.libc.iter().all(|value| value.starts_with('!')) && libc.is_none())
+    {
         None
     } else {
         Some(libc.ok_or("selected package requires a libc platform context")?)
@@ -205,7 +208,12 @@ fn current_libc() -> Option<&'static str> {
     }
 }
 
-fn current_platform_matches(platform: &PackagePlatform) -> bool {
+fn platform_matches_for(
+    os: &str,
+    cpu: &str,
+    libc: Option<&str>,
+    platform: &PackagePlatform,
+) -> bool {
     fn value_matches(values: &[String], current: Option<&str>) -> bool {
         if values.is_empty() {
             return true;
@@ -228,13 +236,26 @@ fn current_platform_matches(platform: &PackagePlatform) -> bool {
         !has_positive || positive_match
     }
 
-    let os = npm_os(std::env::consts::OS);
-    let cpu = npm_cpu(std::env::consts::ARCH);
-    let libc = current_libc();
+    let os = npm_os(os);
+    let cpu = npm_cpu(cpu);
+    let libc_matches = if os != "linux"
+        || (libc.is_none() && platform.libc.iter().all(|value| value.starts_with('!')))
+    {
+        true
+    } else {
+        value_matches(&platform.libc, libc)
+    };
 
-    value_matches(&platform.os, Some(os))
-        && value_matches(&platform.cpu, Some(cpu))
-        && value_matches(&platform.libc, libc)
+    value_matches(&platform.os, Some(os)) && value_matches(&platform.cpu, Some(cpu)) && libc_matches
+}
+
+fn current_platform_matches(platform: &PackagePlatform) -> bool {
+    platform_matches_for(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        current_libc(),
+        platform,
+    )
 }
 
 /// Converts only package versions whose dependency requirements Tapid can resolve.
@@ -302,7 +323,11 @@ fn resolver_metadata(
 
     let mut by_registry = BTreeMap::<String, Vec<PackageVersionMetadata>>::new();
     let mut candidates = BTreeMap::<(String, String), Vec<&PackageRecord>>::new();
-    for ((registry, name, _), package) in records {
+    for (key, package) in records {
+        if normalized.get(key).and_then(Option::as_ref).is_none() {
+            continue;
+        }
+        let (registry, name, _) = key;
         candidates
             .entry((registry.clone(), name.clone()))
             .or_default()
@@ -930,6 +955,35 @@ mod tests {
     }
 
     #[test]
+    fn libc_constraints_follow_linux_only_npm_semantics() {
+        let positive = PackagePlatform {
+            os: Vec::new(),
+            cpu: Vec::new(),
+            libc: vec!["glibc".into()],
+        };
+        let exclusion_only = PackagePlatform {
+            os: Vec::new(),
+            cpu: Vec::new(),
+            libc: vec!["!musl".into()],
+        };
+
+        assert!(platform_matches_for("macos", "aarch64", None, &positive));
+        assert!(!platform_matches_for("linux", "x86_64", None, &positive));
+        assert!(platform_matches_for(
+            "linux",
+            "x86_64",
+            None,
+            &exclusion_only
+        ));
+        assert_eq!(
+            selected_platform_context_for("macos", "aarch64", None, &positive)
+                .unwrap()
+                .libc,
+            None
+        );
+    }
+
+    #[test]
     fn incompatible_package_versions_are_not_usable() {
         let mut package = named_record("native", "1.0.0", &[]);
         package.platform.os = vec!["definitely-not-this-platform".into()];
@@ -999,6 +1053,37 @@ mod tests {
                     vec![package]
                 }
                 "native" => vec![named_record("native", "1.0.0", &[])],
+                other => panic!("unexpected metadata fetch for {other}"),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(resolution.selected.len(), 1);
+        assert_eq!(resolution.selected[0].name.to_string(), "app");
+    }
+
+    #[test]
+    fn unusable_optional_candidate_does_not_become_a_required_edge() {
+        let roots = vec![Dependency::new(
+            NPM.parse().unwrap(),
+            "app".parse().unwrap(),
+            "*".parse().unwrap(),
+        )];
+
+        let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+            Ok(match name.to_string().as_str() {
+                "app" => {
+                    let mut package = named_record("app", "1.0.0", &[]);
+                    package
+                        .optional_dependencies
+                        .insert("native".into(), "1.0.0".into());
+                    vec![package]
+                }
+                "native" => vec![named_record(
+                    "native",
+                    "1.0.0",
+                    &[("historical", "git+https://example.test/repo.git")],
+                )],
                 other => panic!("unexpected metadata fetch for {other}"),
             })
         })

@@ -214,10 +214,21 @@ impl Store {
                     )
                     .into());
                 }
-                let identity = Handle::from_path(&path)?;
-                if !shared_replay_lease_is_registered(&path)
-                    && try_acquire_stale_replay_lease(&path)?.is_some()
-                {
+                let identity = match Handle::from_path(&path) {
+                    Ok(identity) => identity,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let stale = if shared_replay_lease_is_registered(&path) {
+                    false
+                } else {
+                    match try_acquire_stale_replay_lease(&path) {
+                        Ok(lease) => lease.is_some(),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error.into()),
+                    }
+                };
+                if stale {
                     remove_file_if_unchanged(&path, &identity);
                 }
                 continue;
@@ -237,7 +248,11 @@ impl Store {
                 )
                 .into());
             }
-            let identity = Handle::from_path(entry.path())?;
+            let identity = match Handle::from_path(entry.path()) {
+                Ok(identity) => identity,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
             let lease = entry.path().join(REPLAY_LEASE);
             let snapshot = entry.path().join("tree");
             let registered = replay_lease_state(&snapshot);
@@ -255,6 +270,7 @@ impl Store {
                 Err(error) => return Err(error.into()),
             };
             if stale_lease.is_some() || legacy_stale {
+                drop(stale_lease);
                 remove_dir_all_if_unchanged(&entry.path(), &identity);
             }
         }
@@ -350,7 +366,12 @@ impl Store {
             fs::create_dir_all(destination.parent().expect("tree destination has parent"))?;
             match fs::rename(&staging, &destination) {
                 Ok(()) => Ok(destination.clone()),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+                    ) =>
+                {
                     self.verified_tree_path(digest)
                 }
                 Err(error) => Err(error.into()),

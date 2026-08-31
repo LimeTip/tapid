@@ -304,12 +304,23 @@ fn package_content_root(source: &Path) -> Result<PathBuf, String> {
 }
 
 fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
+    copy_tree_contents_inner(source, target, true)
+}
+
+fn copy_tree_contents_inner(
+    source: &Path,
+    target: &Path,
+    skip_internal_metadata: bool,
+) -> Result<(), String> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     fs::create_dir(target).map_err(|e| e.to_string())?;
     for item in fs::read_dir(source).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
+        if skip_internal_metadata && item.file_name() == ".tapid-executable-modes" {
+            continue;
+        }
         let src = item.path();
         let dst = target.join(item.file_name());
         let meta = fs::symlink_metadata(&src).map_err(|e| e.to_string())?;
@@ -320,7 +331,7 @@ fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
             ));
         }
         if meta.is_dir() {
-            copy_tree_contents(&src, &dst)?;
+            copy_tree_contents_inner(&src, &dst, false)?;
             fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else if meta.is_file() {
             copy_regular_file(&src, &dst)?;
