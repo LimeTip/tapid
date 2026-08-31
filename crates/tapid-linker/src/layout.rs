@@ -278,6 +278,7 @@ pub fn plan_layout(
         requests.push((Some(edge.parent), edge.child));
     }
     let mut activation = Vec::new();
+    let mut target_sources = std::collections::BTreeMap::new();
     let mut pending = requests.clone();
     loop {
         let mut deferred = Vec::new();
@@ -304,18 +305,23 @@ pub fn plan_layout(
                 if !root.contains(&target) {
                     return Err(PlanError::PathOutsideManagedRoot(target));
                 }
-                if let Some(existing) = activation
-                    .iter()
-                    .find(|step: &&ActivationStep| step.target == target)
-                {
-                    if existing.source != storage[&child] {
+                let source = storage[&child].clone();
+                if let Some(existing) = target_sources.get(&target) {
+                    if existing != &source {
                         return Err(PlanError::ConflictingTarget(target));
                     }
-                    continue;
+                } else {
+                    target_sources.insert(target.clone(), source.clone());
                 }
                 if ancestors[..ancestors.len() - 1]
                     .iter()
                     .any(|ancestor| ancestor == &child)
+                {
+                    continue;
+                }
+                if activation
+                    .iter()
+                    .any(|step: &ActivationStep| step.target == target)
                 {
                     continue;
                 }
@@ -325,7 +331,7 @@ pub fn plan_layout(
                     .push((target.clone(), ancestors));
                 activation.push(ActivationStep {
                     kind: kind.clone(),
-                    source: storage[&child].clone(),
+                    source,
                     target,
                 });
                 progressed = true;
