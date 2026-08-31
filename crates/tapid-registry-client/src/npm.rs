@@ -118,16 +118,33 @@ fn parse_npm(
         ));
     }
     let Some(versions) = root.get("versions") else {
-        let is_tombstone = root.get("name").and_then(|value| value.as_str())
+        let metadata_name_matches =
+            root.get("name").and_then(|value| value.as_str()) == Some(name.to_string().as_str());
+        let is_abbreviated_tombstone = root
+            .get("modified")
+            .and_then(|value| value.as_str())
+            .is_some_and(|modified| !modified.is_empty())
+            && root.keys().all(|key| key == "name" || key == "modified");
+        let is_full_tombstone = root.get("_id").and_then(|value| value.as_str())
             == Some(name.to_string().as_str())
             && root
-                .get("modified")
+                .get("_rev")
                 .and_then(|value| value.as_str())
-                .is_some_and(|modified| !modified.is_empty())
-            && root.keys().all(|key| key == "name" || key == "modified");
+                .is_some_and(|revision| !revision.is_empty())
+            && root
+                .get("time")
+                .and_then(|value| value.as_object())
+                .is_some_and(|time| {
+                    time.get("modified")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|modified| !modified.is_empty())
+                        && time
+                            .get("unpublished")
+                            .is_some_and(serde_json::Value::is_object)
+                });
+        let is_tombstone = metadata_name_matches && (is_abbreviated_tombstone || is_full_tombstone);
         if is_tombstone {
-            // npm's abbreviated representation keeps a narrow name/modified
-            // tombstone for a fully unpublished package.
+            // npm serves abbreviated and full tombstones for fully unpublished packages.
             return Ok(Vec::new());
         }
         return Err(RegistryClientError::Metadata(MetadataError::MissingField(
@@ -280,11 +297,6 @@ fn parse_dependencies(
             let requirement = requirement.as_str().ok_or_else(|| {
                 RegistryClientError::Metadata(MetadataError::InvalidDependency(name.clone()))
             })?;
-            let requirement = if requirement.trim().is_empty() {
-                "*"
-            } else {
-                requirement
-            };
             Ok((package, requirement.to_owned()))
         })
         .collect()
@@ -415,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn npm_normalizes_empty_dependency_ranges_to_wildcards() {
+    fn npm_preserves_empty_historical_dependency_ranges() {
         let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dependencies":{"bar":""},"dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
 
@@ -426,13 +438,25 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(
             artifacts[0].dependencies.get(&"bar".parse().unwrap()),
-            Some(&"*".to_owned())
+            Some(&String::new())
         );
     }
 
     #[test]
     fn npm_unpublished_package_has_no_install_candidates() {
         let body = br#"{"name":"foo","modified":"2026-01-01T00:00:00.000Z"}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
+
+        assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn npm_full_unpublished_package_has_no_install_candidates() {
+        let body = br#"{"_id":"foo","name":"foo","time":{"created":"2012-04-26T00:42:41.775Z","modified":"2025-12-02T22:01:08.798Z","unpublished":{"time":"2025-12-02T22:01:08.798Z","versions":["0.1.0"]}},"_rev":"10-example"}"#;
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
 
         let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)

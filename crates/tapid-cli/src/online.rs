@@ -1141,15 +1141,11 @@ mod tests {
     }
 
     #[test]
-    fn normalized_empty_dependency_ranges_keep_versions_usable() {
-        let versions = usable_versions(vec![record("3.0.1", Some("*")), record("4.0.5", None)]);
+    fn empty_dependency_ranges_exclude_only_affected_versions() {
+        let versions = usable_versions(vec![record("3.0.1", Some("")), record("4.0.5", None)]);
 
-        assert_eq!(versions.len(), 2);
-        assert_eq!(versions[0].version.to_string(), "3.0.1");
-        assert_eq!(
-            versions[0].dependencies.get(&"popmotion".parse().unwrap()),
-            Some(&"*".parse().unwrap())
-        );
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version.to_string(), "4.0.5");
     }
 
     #[test]
