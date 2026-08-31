@@ -16,7 +16,7 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
 pub(crate) fn activate_node_modules_with_lock(
     project: &Path,
     stage: &Path,
-    _activation_lock: &ActivationLock,
+    activation_lock: &ActivationLock,
 ) -> Result<(), String> {
     let staged = stage.join("node_modules");
     if !staged.is_dir() {
@@ -37,11 +37,8 @@ pub(crate) fn activate_node_modules_with_lock(
             "refusing to replace unmarked node_modules; create .tapid-managed to opt in".into(),
         );
     }
-    let marker_backup = project.join(format!(
-        ".tapid-managed-old-{}-{}",
-        std::process::id(),
-        crate::filesystem::atomic::unique_nonce()
-    ));
+    let owner = activation_lock.owner_name();
+    let marker_backup = project.join(format!(".tapid-managed-old-{owner}"));
     // Move the existing marker by name before reading it to close the check/read race.
     if marker_exists {
         fs::rename(&marker, &marker_backup)
@@ -72,11 +69,7 @@ pub(crate) fn activate_node_modules_with_lock(
             });
         }
     }
-    let backup = project.join(format!(
-        ".tapid-node-modules-old-{}-{}",
-        std::process::id(),
-        crate::filesystem::atomic::unique_nonce()
-    ));
+    let backup = project.join(format!(".tapid-node-modules-old-{owner}"));
     if destination.exists()
         && let Err(error) = fs::rename(&destination, &backup)
     {
@@ -273,6 +266,7 @@ impl ActivationLock {
             if !activation_owner_is_valid(&previous_owner) {
                 return Err("refusing to recover a malformed node_modules activation lock".into());
             }
+            recover_owned_activation(project, &previous_owner)?;
             recover_owned_stages(project, &previous_owner)?;
         }
         let owner = format!(
@@ -301,6 +295,12 @@ impl ActivationLock {
             return Err(error);
         }
         Ok(stage)
+    }
+
+    fn owner_name(&self) -> &str {
+        self.owner
+            .strip_suffix('\n')
+            .expect("activation owner is always newline terminated")
     }
 }
 
@@ -370,6 +370,75 @@ fn open_lock_file(path: &Path) -> Result<fs::File, String> {
     Ok(file)
 }
 
+fn recover_owned_activation(project: &Path, owner: &str) -> Result<(), String> {
+    let owner = owner
+        .strip_suffix('\n')
+        .ok_or_else(|| "cannot recover malformed activation owner".to_owned())?;
+    let marker = project.join(".tapid-managed");
+    let marker_backup = project.join(format!(".tapid-managed-old-{owner}"));
+    let destination = project.join("node_modules");
+    let node_backup = project.join(format!(".tapid-node-modules-old-{owner}"));
+
+    let marker_backup_exists = match fs::symlink_metadata(&marker_backup) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            if read_marker_backup(&marker_backup)
+                .map_err(|error| format!("cannot read stale managed marker: {error}"))?
+                != MANAGED_MARKER
+            {
+                return Err("refusing to recover an invalid stale managed marker".into());
+            }
+            true
+        }
+        Ok(_) => return Err("refusing to recover a non-regular stale managed marker".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("cannot inspect stale managed marker: {error}")),
+    };
+    let marker_exists = match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.file_type().is_file() => true,
+        Ok(_) => return Err("refusing to recover with a non-regular managed marker".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("cannot inspect managed marker recovery: {error}")),
+    };
+    if marker_backup_exists {
+        if marker_exists {
+            fs::remove_file(&marker_backup)
+                .map_err(|error| format!("cannot remove stale managed marker: {error}"))?;
+        } else {
+            fs::rename(&marker_backup, &marker)
+                .map_err(|error| format!("cannot restore managed marker: {error}"))?;
+        }
+    }
+
+    let node_backup_exists = match fs::symlink_metadata(&node_backup) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,
+        Ok(_) => return Err("refusing to recover a non-directory node_modules backup".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("cannot inspect node_modules backup: {error}")),
+    };
+    if node_backup_exists {
+        match fs::symlink_metadata(&destination) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                fs::remove_dir_all(&node_backup)
+                    .map_err(|error| format!("cannot remove stale node_modules backup: {error}"))?;
+            }
+            Ok(_) => {
+                return Err(
+                    "refusing to recover with a non-directory node_modules destination".into(),
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::rename(&node_backup, &destination).map_err(|error| {
+                    format!("cannot restore stale node_modules backup: {error}")
+                })?;
+            }
+            Err(error) => {
+                return Err(format!("cannot inspect node_modules recovery: {error}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn recover_owned_stages(project: &Path, owner: &str) -> Result<(), String> {
     let owner_name = owner
         .strip_suffix('\n')
@@ -433,7 +502,7 @@ fn activation_owner_is_valid(owner: &str) -> bool {
 
 #[cfg(all(test, unix))]
 mod activation_tests {
-    use super::{ActivationLock, activate_node_modules};
+    use super::{ActivationLock, MANAGED_MARKER, activate_node_modules, recover_owned_activation};
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -446,6 +515,59 @@ mod activation_tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn stale_activation_backups_restore_the_previous_layout() {
+        let project = temp_project("activation-backup-rollback");
+        let owner = "123-deadbeef\n";
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join(".tapid-managed-old-123-deadbeef"),
+            MANAGED_MARKER,
+        )
+        .unwrap();
+        let backup = project.join(".tapid-node-modules-old-123-deadbeef");
+        fs::create_dir(&backup).unwrap();
+        fs::write(backup.join("old"), b"old").unwrap();
+
+        recover_owned_activation(&project, owner).unwrap();
+
+        assert_eq!(
+            fs::read(project.join(".tapid-managed")).unwrap(),
+            MANAGED_MARKER
+        );
+        assert_eq!(fs::read(project.join("node_modules/old")).unwrap(), b"old");
+        assert!(!backup.exists());
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn stale_activation_backups_roll_forward_an_activated_layout() {
+        let project = temp_project("activation-backup-roll-forward");
+        let owner = "123-deadbeef\n";
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join(".tapid-managed-old-123-deadbeef"),
+            MANAGED_MARKER,
+        )
+        .unwrap();
+        let backup = project.join(".tapid-node-modules-old-123-deadbeef");
+        fs::create_dir(&backup).unwrap();
+        fs::write(backup.join("old"), b"old").unwrap();
+        let destination = project.join("node_modules");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("new"), b"new").unwrap();
+
+        recover_owned_activation(&project, owner).unwrap();
+
+        assert_eq!(
+            fs::read(project.join(".tapid-managed")).unwrap(),
+            MANAGED_MARKER
+        );
+        assert_eq!(fs::read(destination.join("new")).unwrap(), b"new");
+        assert!(!backup.exists());
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]

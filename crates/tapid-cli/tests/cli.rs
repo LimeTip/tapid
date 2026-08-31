@@ -713,7 +713,8 @@ fn install_refuses_to_replace_unmarked_node_modules() {
     fs::write(dir.join("node_modules").join("KEEP"), "user data").unwrap();
     let output = run(&dir, &["install", "--offline"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unmarked node_modules"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unmarked node_modules"), "{stderr}");
     assert_eq!(
         fs::read_to_string(dir.join("node_modules").join("KEEP")).unwrap(),
         "user data"
