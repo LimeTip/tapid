@@ -1,45 +1,43 @@
-# Online installation handoff
+# Online installation status
 
-The CLI's fixture installation path remains available through
-`tapid install --registry-fixture ...`. The non-fixture path is deliberately
-fail-closed until the registry-client contract can carry the metadata required
-for a verified transitive install.
+The CLI supports bounded live npm metadata and artifact retrieval in addition to fixture-driven tests. Registry parsing remains in `tapid-registry-client`; the resolver consumes normalized metadata and performs no network or filesystem work.
 
-## Exact blocking API gaps
+## Current contract
 
-The public `tapid-registry-client` APIs currently provide:
+- npm metadata requests `application/vnd.npm.install-v1+json` and is limited to 32 MiB.
+- Artifact responses are separately limited to 512 MiB.
+- Normal npm candidates require HTTPS tarball URLs and registry-declared SHA-512 integrity.
+- Historical versions with unsupported dependency syntax or missing integrity are excluded without hiding otherwise usable versions.
+- Exact package metadata HTTP 404 and narrowly validated unpublished tombstones produce no candidates. Other malformed or unsuccessful responses fail closed.
+- Metadata is fetched incrementally for packages reached by the selected graph.
+- Verified npm trees materialize from either a direct package root or exactly one named top-level wrapper containing `package.json`; missing and ambiguous roots are rejected before activation.
+- Metadata and immutable artifact GETs retry a bounded set of transient failures, with three total attempts and deterministic 100 ms and 200 ms delays.
+- Distinct parents can select different exact versions of one transitive package.
+- Resolver root selections and exact dependency edges are preserved through lockfile construction, linking, and replay.
+- Project activation uses an operating-system advisory lock and owner-marked staging directories. A later run reclaims only stages matching the prior unlocked owner's exact marker; live, malformed, oversized, symlinked, and ambiguous state fails closed.
+- Lifecycle scripts remain disabled during installation.
 
-- `NpmRegistry::fetch` → `Vec<RegistryArtifact>`
-- `JsrRegistry::fetch` → `Vec<RegistryArtifact>`
-- `RegistryArtifact` fields: package identity, artifact URL, and optional
-  integrity
+The explicit `--allow-unverified-registry-artifacts` compatibility option can retain npm versions without declared integrity for an interactive online install. It emits a warning and cannot be combined with `--offline` or `--frozen`. It does not turn a locally computed digest into registry authentication.
 
-Neither fetch method exposes the dependency map belonging to each selected
-package version. Consequently the CLI cannot construct the normalized
-`PackageVersionMetadata` required by `tapid-resolver` or generate trustworthy
-lockfile dependency edges for transitive packages. `JsrRegistry` currently
-returns `integrity: None`, so it also cannot satisfy the required SHA-512
-verification contract for JSR artifacts.
+## Remaining limitations
 
-The existing `HttpTransport`/`HttpsTransport` boundary can retrieve bounded
-HTTPS response bodies, but parsing registry JSON in the CLI would bypass the
-registry-client's validation boundary and would not fix the missing JSR
-integrity contract. The CLI therefore reports a stable error instead of
-claiming to install a graph that it cannot verify.
+- Live JSR installation and integrity behavior are not verified.
+- Full npm range, alias, tag, peer, optional dependency, workspace, private registry authentication, and platform-condition compatibility are incomplete.
+- Metadata and artifact downloads remain sequential; retry delays and per-attempt timeouts are bounded but can extend a single resource fetch.
+- Frozen replay does not yet implement every npm frozen-lockfile policy rule.
 
-## Required narrow follow-up
+## Required release evidence
 
-Extend `tapid-registry-client` (outside this change's ownership) with a
-per-version metadata result that includes:
+Before claiming broad npm compatibility, exercise the real Tapid binary against representative applications, verify `tapid.lock`, verified store trees, root and nested `node_modules` placement, offline and frozen replay, root scripts, lint, build, and deployment-related commands. Linux and Windows behavior requires evidence from completed CI or VM runs in addition to local macOS checks.
 
-1. normalized dependency maps (including the registry/origin semantics needed
-   for npm and JSR dependencies),
-2. artifact URL,
-3. required SHA-512 integrity for both registries, and
-4. a safe artifact-body fetch operation or an explicitly documented way for
-   the CLI to use the bounded transport while retaining URL/origin policy.
+## Verified store location
 
-After that contract exists, `crates/tapid-cli/src/online.rs` can wire the
-existing HTTPS transport into metadata retrieval, deterministic transitive
-resolution, artifact verification, archive ingestion, lockfile v3 edges, and
-node_modules materialization without ad-hoc registry parsing.
+Tapid keeps its default verified store outside the consumer project so linters, build tools, file watchers, and deployment tooling do not traverse cached package source as application code:
+
+- macOS: `$HOME/Library/Caches/tapid/store`
+- Linux and other Unix platforms: `$XDG_CACHE_HOME/tapid/store`, or `$HOME/.cache/tapid/store` when `XDG_CACHE_HOME` is unset
+- Windows: `%LOCALAPPDATA%\tapid\store`
+
+The selected cache environment path must be absolute. An explicit `--store-dir` continues to override the default for isolated tests and deliberate custom layouts.
+
+Older project-local `.tapid-store` directories are not silently moved or deleted. Run one successful online installation with the new default, then verify offline or frozen replay before removing the legacy directory. Use `--store-dir .tapid-store` only when deliberately replaying the legacy store.

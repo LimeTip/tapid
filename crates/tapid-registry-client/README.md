@@ -7,7 +7,7 @@ Read-only, validated registry metadata and artifact-download boundary for Tapid.
 
 ## npm
 
-`NpmRegistry` accepts an HTTPS npm registry origin, normally `https://registry.npmjs.org`, and package names such as `foo` or `@scope/name`. It reads the `versions` map, validates package and version identity, exposes string dependency requirements, and requires an HTTPS `dist.tarball`. Optional `dist.integrity` must be a valid `sha512-` SRI value. Metadata without integrity remains allowed for npm, subject to the consumer's policy.
+`NpmRegistry` accepts an HTTPS npm registry origin, normally `https://registry.npmjs.org`, and package names such as `foo` or `@scope/name`. It requests npm's abbreviated install metadata, validates package and version identity, exposes string dependency requirements, and requires an HTTPS `dist.tarball`. Normal fetches require a valid SHA-512 `dist.integrity`, normalize equivalent padded and unpadded Base64 to canonical padded SRI, and exclude historical records that omit integrity. The explicit compatibility option can retain missing-integrity records for an interactive install, but those artifacts are not registry-authenticated and the CLI warns before proceeding.
 
 ## JSR
 
@@ -17,6 +17,6 @@ Live JSR installation and live integrity behavior are not verified. Local fixtur
 
 ## Transport contract
 
-`download_artifact` accepts HTTPS URLs and uses an injected transport. `HttpsTransport` allows only configured exact origins, rejects cross-origin redirects, bounds response bodies, and sends no credentials. The standard origins include npmjs.org, jsr.io, and npm.jsr.io. Malformed JSON, URLs, identities, dependencies, and integrity values are rejected.
+`download_artifact` accepts HTTPS URLs and uses an injected transport. `HttpsTransport` allows only configured exact origins, permits at most 10 same-origin redirect hops, rejects cross-origin and credentialed redirects, bounds response bodies, and sends no credentials. Standard metadata reads are limited to 32 MiB and archive reads are separately limited to 512 MiB. Idempotent GETs use at most three attempts with deterministic 100 ms and 200 ms delays for timeouts, connection or request failures, response-read failures, HTTP 429, and selected transient HTTP 5xx responses. Permanent status, origin, redirect-policy, and response-limit failures are not broadened into unbounded retries. The standard origins include npmjs.org, jsr.io, and npm.jsr.io. Malformed JSON, URLs, identities, dependencies, and integrity values are rejected.
 
-The crate is read-only. It does not publish, mutate registry state, authenticate private registries, retry, mirror, or run live calls in unit tests.
+The crate is read-only. It does not publish, mutate registry state, authenticate private registries, mirror, or call live registries in unit tests.

@@ -20,6 +20,8 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      TAPID_SOURCE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,12 +47,25 @@ jobs:
         run: cargo test --workspace --all-features --locked
       - name: Run nested integration workspace
         run: cargo test --manifest-path tests/integration/Cargo.toml --locked
+      - name: Validate Unix developer installer at the checked head
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/tapid-install"
+          bash "$GITHUB_WORKSPACE/scripts/install.sh" \
+            --repo LimeTip/tapid \
+            --source-ref "$TAPID_SOURCE_REF" \
+            --install-dir "$install_dir"
+          "$install_dir/tapid" --help >/dev/null
+          bash "$GITHUB_WORKSPACE/scripts/uninstall.sh" --install-dir "$install_dir"
+          test ! -e "$install_dir/tapid"
       - name: Validate Windows developer installer
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid-install'
-          & "$env:GITHUB_WORKSPACE\scripts\install.ps1" -Repo LimeTip/tapid -SourceRef main -InstallDir $installDir
+          & "$env:GITHUB_WORKSPACE\scripts\install.ps1" -Repo LimeTip/tapid -SourceRef $env:TAPID_SOURCE_REF -InstallDir $installDir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $binary = Join-Path $installDir 'tapid.exe'
           if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Tapid was not installed' }

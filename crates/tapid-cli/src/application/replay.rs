@@ -29,11 +29,32 @@ impl Drop for ReplaySnapshotGuard {
     }
 }
 
+fn replay_progress_checkpoint(completed: usize, total: usize) -> bool {
+    total > 0 && (completed == 1 || completed == total || completed.is_multiple_of(50))
+}
+
+fn complete_progress_step<T, E>(
+    completed: usize,
+    total: usize,
+    action: impl FnOnce() -> Result<T, E>,
+    report: impl FnOnce(usize, usize),
+) -> Result<T, E> {
+    let value = action()?;
+    if replay_progress_checkpoint(completed, total) {
+        report(completed, total);
+    }
+    Ok(value)
+}
+
 pub(crate) fn replay_input(
     lock: &Lockfile,
     manifest: &PackageManifest,
     store: &Store,
+    mut report_progress: impl FnMut(usize, usize),
 ) -> Result<(LayoutInput, BTreeMap<String, PathBuf>), String> {
+    store
+        .cleanup_stale_replay_snapshots()
+        .map_err(|error| format!("cannot recover stale replay snapshots: {error}"))?;
     let mut instances = Vec::new();
     let mut keys = BTreeMap::new();
     let mut trees = BTreeMap::new();
@@ -42,19 +63,31 @@ pub(crate) fn replay_input(
         keep: false,
     };
     let typed_packages = lock.packages_typed().map_err(|e| e.to_string())?;
-    for (key, package) in &typed_packages {
+    let typed_keys = typed_packages
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let root_keys = replay_root_keys(lock, manifest, &typed_keys)?;
+    let package_total = typed_packages.len();
+    for (index, (key, package)) in typed_packages.iter().enumerate() {
+        let completed = index + 1;
         let encoded = key.to_string();
         let digest: ArtifactDigest = package
             .tree_digest()
             .parse()
             .map_err(|e: tapid_core::DomainError| e.to_string())?;
-        let tree = store
-            .verified_tree_snapshot(&digest)
-            .map_err(|e| format!("package {encoded} tree unavailable: {e}"))?;
+        let tree = complete_progress_step(
+            completed,
+            package_total,
+            || store.verified_tree_snapshot(&digest),
+            &mut report_progress,
+        )
+        .map_err(|e| format!("package {encoded} tree unavailable: {e}"))?;
         snapshots.paths.push(tree.clone());
         let peer = context::parse_peer(&key.peer_context)?;
         let platform = context::parse_platform(&key.platform_context)?;
-        let id = PackageInstanceId::new(key.registry.clone(), key.name.clone(), key.version);
+        let id =
+            PackageInstanceId::new(key.registry.clone(), key.name.clone(), key.version.clone());
         let instance = PackageInstance {
             id,
             peer_context: peer,
@@ -66,15 +99,14 @@ pub(crate) fn replay_input(
         trees.insert(encoded, tree);
         instances.push(instance);
     }
-    let mut roots = Vec::new();
-    let root_identities = replay_root_identities(manifest)?;
-    let has_root_dependencies = !root_identities.is_empty();
-    for (key, _) in &typed_packages {
-        let encoded = key.to_string();
-        if !has_root_dependencies || replay_root_matches(&root_identities, key) {
-            roots.push(keys[&encoded].clone());
-        }
-    }
+    let roots = root_keys
+        .iter()
+        .map(|root| {
+            keys.get(root)
+                .cloned()
+                .ok_or_else(|| format!("missing root package target {root}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut edges = Vec::new();
     for (key, package) in &typed_packages {
         let encoded = key.to_string();
@@ -99,29 +131,149 @@ pub(crate) fn replay_input(
     ))
 }
 
-pub(crate) fn replay_root_identities(
+fn replay_root_keys(
+    lock: &Lockfile,
+    manifest: &PackageManifest,
+    typed_keys: &[tapid_lockfile::LockfilePackageKey],
+) -> Result<Vec<String>, String> {
+    let root_identities = replay_root_identities(manifest)?;
+    let optional_only = optional_only_root_identities(manifest)?;
+    if root_identities.is_empty() {
+        return if lock.roots().is_empty() && typed_keys.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err("lockfile has packages or roots but the manifest has no direct dependencies".into())
+        };
+    }
+
+    if lock.roots().is_empty() {
+        return root_identities
+            .keys()
+            .map(|identity| {
+                let candidates = typed_keys
+                    .iter()
+                    .filter(|key| {
+                        (&key.registry, &key.name) == (&identity.0, &identity.1)
+                            && replay_root_matches(&root_identities, key)
+                    })
+                    .collect::<Vec<_>>();
+                let Some(highest_version) = candidates.iter().map(|key| &key.version).max() else {
+                    if optional_only.contains(identity) {
+                        return Ok(None);
+                    }
+                    return Err(format!(
+                        "legacy lockfile has no exact root candidate for {}:{}",
+                        identity.0, identity.1
+                    ));
+                };
+                let highest = candidates
+                    .into_iter()
+                    .filter(|key| &key.version == highest_version)
+                    .collect::<Vec<_>>();
+                match highest.as_slice() {
+                    [selected] => Ok(Some(selected.to_string())),
+                    _ => Err(format!(
+                        "legacy lockfile has ambiguous exact root candidates for {}:{} at version {}",
+                        identity.0, identity.1, highest_version
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|roots| roots.into_iter().flatten().collect());
+    }
+
+    let typed_by_key = typed_keys
+        .iter()
+        .map(|key| (key.to_string(), key))
+        .collect::<BTreeMap<_, _>>();
+    let mut matched = BTreeMap::new();
+    for root in lock.roots() {
+        let key = typed_by_key
+            .get(root)
+            .ok_or_else(|| format!("missing root package target {root}"))?;
+        if !replay_root_matches(&root_identities, key) {
+            return Err(format!(
+                "lockfile root {root} does not satisfy a direct manifest dependency"
+            ));
+        }
+        *matched
+            .entry((key.registry.clone(), key.name.clone()))
+            .or_insert(0_usize) += 1;
+    }
+    for identity in root_identities.keys() {
+        if optional_only.contains(identity) && !matched.contains_key(identity) {
+            continue;
+        }
+        if matched.get(identity) != Some(&1) {
+            return Err(format!(
+                "lockfile must contain exactly one root for direct dependency {}:{}",
+                identity.0, identity.1
+            ));
+        }
+    }
+    Ok(lock.roots().to_vec())
+}
+
+fn optional_only_root_identities(
     manifest: &PackageManifest,
 ) -> Result<std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>, String>
 {
-    let mut identities = std::collections::BTreeSet::new();
+    let mut required = std::collections::BTreeSet::new();
+    for map in [manifest.dependencies(), manifest.dev_dependencies()] {
+        for name in map.keys() {
+            required.insert(online::dep_parts(name)?);
+        }
+    }
+    let mut optional = std::collections::BTreeSet::new();
+    for name in manifest.optional_dependencies().keys() {
+        let identity = online::dep_parts(name)?;
+        if !required.contains(&identity) {
+            optional.insert(identity);
+        }
+    }
+    Ok(optional)
+}
+
+pub(crate) fn replay_root_identities(
+    manifest: &PackageManifest,
+) -> Result<
+    std::collections::BTreeMap<
+        (tapid_core::RegistryOrigin, tapid_core::PackageName),
+        Vec<tapid_resolver::Requirement>,
+    >,
+    String,
+> {
+    let mut identities = std::collections::BTreeMap::new();
     for map in [
         manifest.dependencies(),
         manifest.dev_dependencies(),
         manifest.optional_dependencies(),
     ] {
-        for name in map.keys() {
+        for (name, requirement) in map {
             let (registry, package) = online::dep_parts(name)?;
-            identities.insert((registry, package));
+            identities
+                .entry((registry, package))
+                .or_insert_with(Vec::new)
+                .push(requirement.parse().map_err(|error| format!("{error:?}"))?);
         }
     }
     Ok(identities)
 }
 
 pub(crate) fn replay_root_matches(
-    roots: &std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>,
+    roots: &std::collections::BTreeMap<
+        (tapid_core::RegistryOrigin, tapid_core::PackageName),
+        Vec<tapid_resolver::Requirement>,
+    >,
     key: &tapid_lockfile::LockfilePackageKey,
 ) -> bool {
-    roots.contains(&(key.registry.clone(), key.name.clone()))
+    roots
+        .get(&(key.registry.clone(), key.name.clone()))
+        .is_some_and(|requirements| {
+            requirements
+                .iter()
+                .all(|requirement| requirement.matches(&key.version))
+        })
 }
 
 pub(crate) fn current_platform() -> Platform {
@@ -141,6 +293,128 @@ pub(crate) fn current_platform() -> Platform {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+
+    #[test]
+    fn replay_progress_is_reported_after_snapshot_completion() {
+        let events = std::cell::RefCell::new(Vec::new());
+
+        let value = complete_progress_step(
+            1,
+            1,
+            || {
+                events.borrow_mut().push("snapshot");
+                Ok::<_, ()>(42)
+            },
+            |_, _| events.borrow_mut().push("progress"),
+        )
+        .unwrap();
+
+        assert_eq!(value, 42);
+        assert_eq!(*events.borrow(), ["snapshot", "progress"]);
+    }
+
+    #[test]
+    fn replay_progress_is_emitted_at_bounded_checkpoints() {
+        let checkpoints = (1..=612)
+            .filter(|completed| replay_progress_checkpoint(*completed, 612))
+            .collect::<Vec<_>>();
+
+        assert_eq!(checkpoints.first(), Some(&1));
+        assert_eq!(checkpoints.last(), Some(&612));
+        assert!(checkpoints.len() <= 14);
+    }
+
+    fn legacy_lock() -> Lockfile {
+        Lockfile::from_json(
+            r#"{"lockfileVersion":4,"rootManifestDigest":"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resolverVersion":"0","linkerVersion":"0","packages":{}}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn replay_allows_a_platform_omitted_optional_root() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","optionalDependencies":{"native":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let current = Lockfile::new(
+            "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+
+        assert_eq!(
+            replay_root_keys(&current, &manifest, &[]).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            replay_root_keys(&legacy_lock(), &manifest, &[]).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn optional_overlap_does_not_relax_a_required_root() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"native":"1.0.0"},"optionalDependencies":{"native":"1.0.0"}}"#,
+        )
+        .unwrap();
+
+        assert!(replay_root_keys(&legacy_lock(), &manifest, &[]).is_err());
+    }
+
+    #[test]
+    fn legacy_root_reconstruction_selects_highest_candidate_matching_all_manifest_maps() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"debug":"*"},"devDependencies":{"debug":"^4.0.0"}}"#,
+        )
+        .unwrap();
+        let keys = [
+            "https://registry.npmjs.org|debug@3.0.0|peer=-|platform=-"
+                .parse()
+                .unwrap(),
+            "https://registry.npmjs.org|debug@4.0.0|peer=-|platform=-"
+                .parse()
+                .unwrap(),
+        ];
+
+        assert_eq!(
+            replay_root_keys(&legacy_lock(), &manifest, &keys).unwrap(),
+            ["https://registry.npmjs.org|debug@4.0.0|peer=-|platform=-"]
+        );
+    }
+
+    #[test]
+    fn legacy_root_reconstruction_rejects_ambiguous_highest_contexts() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"debug":"^4.0.0"}}"#,
+        )
+        .unwrap();
+        let origin = "https://registry.npmjs.org";
+        let keys = [
+            format!("{origin}|debug@4.0.0|peer=-|platform=-")
+                .parse()
+                .unwrap(),
+            format!("{origin}|debug@4.0.0|peer=name=react;version=18.2.0|platform=-")
+                .parse()
+                .unwrap(),
+        ];
+
+        let error = replay_root_keys(&legacy_lock(), &manifest, &keys).unwrap_err();
+        assert!(error.contains("ambiguous exact root candidates"));
+    }
+
+    #[test]
+    fn legacy_root_reconstruction_rejects_a_missing_direct_candidate() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"debug":"^4.0.0"}}"#,
+        )
+        .unwrap();
+        let keys = ["https://registry.npmjs.org|debug@3.0.0|peer=-|platform=-"
+            .parse()
+            .unwrap()];
+
+        assert!(replay_root_keys(&legacy_lock(), &manifest, &keys).is_err());
+    }
 
     #[test]
     fn explicit_registry_root_matches_only_its_registry_identity() {

@@ -13,8 +13,8 @@ pub use client::{RegistryClient, RegistryTransport};
 pub use errors::{ClientError, MetadataError, RegistryClientError, TransportError};
 pub use jsr::JsrRegistry;
 pub use models::{
-    FetchMode, PackageMetadata, RawPackageMetadata, RawRegistrySnapshot, RegistryArtifact,
-    RegistryKind, RegistryPackageId, RegistrySnapshot,
+    FetchMode, PackageMetadata, PackagePlatform, RawPackageMetadata, RawRegistrySnapshot,
+    RegistryArtifact, RegistryKind, RegistryPackageId, RegistrySnapshot,
 };
 pub use npm::NpmRegistry;
 pub use transport::{HttpResponse, HttpTransport, HttpsTransport};

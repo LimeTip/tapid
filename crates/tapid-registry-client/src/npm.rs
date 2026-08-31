@@ -1,22 +1,33 @@
 use crate::{
-    HttpResponse, HttpTransport, MetadataError, RegistryArtifact, RegistryClientError,
-    RegistryKind, RegistryPackageId, artifact::download_artifact,
+    HttpResponse, HttpTransport, MetadataError, PackagePlatform, RegistryArtifact,
+    RegistryClientError, RegistryKind, RegistryPackageId, artifact::download_artifact,
+    transport::request_url_is_safe,
 };
 use std::collections::BTreeMap;
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
 use url::Url;
 
+const NPM_INSTALL_V1_ACCEPT: &str = "application/vnd.npm.install-v1+json";
+
+/// Read-only npm metadata and artifact client over an injected transport.
 pub struct NpmRegistry<T> {
     transport: T,
     origin: RegistryOrigin,
 }
 impl<T: HttpTransport> NpmRegistry<T> {
+    /// Creates a client bound to one canonical npm registry origin.
     pub fn new(transport: T, origin: RegistryOrigin) -> Self {
         Self { transport, origin }
     }
+    /// Fetches abbreviated npm metadata and excludes versions without integrity.
     pub fn fetch(&self, package: &str) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
         self.fetch_with_options(package, false)
     }
+    /// Fetches abbreviated npm metadata with an explicit integrity compatibility policy.
+    ///
+    /// When `allow_missing_integrity` is false, versions without registry-declared
+    /// SHA-512 integrity are excluded. Setting it to true preserves those versions
+    /// for a caller that separately warns and records the weaker trust property.
     pub fn fetch_with_options(
         &self,
         package: &str,
@@ -25,11 +36,17 @@ impl<T: HttpTransport> NpmRegistry<T> {
         let name: PackageName = package.parse().map_err(|_| {
             RegistryClientError::Metadata(MetadataError::InvalidPackageName(package.into()))
         })?;
-        let url = format!("{}/{}", self.origin, package.replace('/', "%2f"));
+        let url = format!("{}/{}", self.origin, package.replace('/', "%2F"));
         let response = self
             .transport
-            .get(&url)
+            .get_with_accept(&url, NPM_INSTALL_V1_ACCEPT)
             .map_err(RegistryClientError::Transport)?;
+        if response.status == 404 {
+            // A package may exist only in obsolete dependency metadata. Treat
+            // an exact not-found response as no candidates so graph selection
+            // decides whether the missing package is relevant.
+            return Ok(Vec::new());
+        }
         parse_npm(
             &self.origin,
             &name,
@@ -37,6 +54,7 @@ impl<T: HttpTransport> NpmRegistry<T> {
             allow_missing_integrity,
         )
     }
+    /// Downloads one validated artifact URL through this registry's transport policy.
     pub fn download_artifact(
         &self,
         artifact_url: &str,
@@ -99,35 +117,56 @@ fn parse_npm(
             MetadataError::ConflictingField("name".into()),
         ));
     }
-    let versions = root
-        .get("versions")
-        .and_then(|value| value.as_object())
-        .ok_or_else(|| {
-            RegistryClientError::Metadata(MetadataError::MissingField("versions".into()))
-        })?;
+    let Some(versions) = root.get("versions") else {
+        let metadata_name_matches =
+            root.get("name").and_then(|value| value.as_str()) == Some(name.to_string().as_str());
+        let is_abbreviated_tombstone = root
+            .get("modified")
+            .and_then(|value| value.as_str())
+            .is_some_and(|modified| !modified.is_empty())
+            && root.keys().all(|key| key == "name" || key == "modified");
+        let is_full_tombstone = root.get("_id").and_then(|value| value.as_str())
+            == Some(name.to_string().as_str())
+            && root
+                .get("_rev")
+                .and_then(|value| value.as_str())
+                .is_some_and(|revision| !revision.is_empty())
+            && root
+                .get("time")
+                .and_then(|value| value.as_object())
+                .is_some_and(|time| {
+                    time.get("modified")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|modified| !modified.is_empty())
+                        && time
+                            .get("unpublished")
+                            .is_some_and(serde_json::Value::is_object)
+                });
+        let is_tombstone = metadata_name_matches && (is_abbreviated_tombstone || is_full_tombstone);
+        if is_tombstone {
+            // npm serves abbreviated and full tombstones for fully unpublished packages.
+            return Ok(Vec::new());
+        }
+        return Err(RegistryClientError::Metadata(MetadataError::MissingField(
+            "versions".into(),
+        )));
+    };
+    let versions = versions.as_object().ok_or_else(|| {
+        RegistryClientError::Metadata(MetadataError::InvalidJson(
+            "versions must be an object".into(),
+        ))
+    })?;
     let mut artifacts = Vec::new();
     for (key, value) in versions {
-        let parsed_version = semver::Version::parse(key).map_err(|_| {
-            RegistryClientError::Metadata(MetadataError::InvalidVersion(key.clone()))
-        })?;
-        if !parsed_version.pre.is_empty() {
+        let Ok(version) = key.parse::<PackageVersion>() else {
             continue;
-        }
-        if !parsed_version.build.is_empty() {
-            return Err(RegistryClientError::Metadata(
-                MetadataError::InvalidVersion(key.clone()),
-            ));
-        }
+        };
         let version_entry = value.as_object().ok_or_else(|| {
             RegistryClientError::Metadata(MetadataError::InvalidJson(
                 "version entry must be an object".into(),
             ))
         })?;
-        let version = PackageVersion {
-            major: parsed_version.major,
-            minor: parsed_version.minor,
-            patch: parsed_version.patch,
-        };
+
         if version_entry
             .get("version")
             .and_then(|value| value.as_str())
@@ -155,11 +194,9 @@ fn parse_npm(
         let artifact_url = required_str(dist, "tarball").map_err(RegistryClientError::Metadata)?;
         let integrity = match dist.get("integrity") {
             None if allow_missing_integrity => None,
-            None => {
-                return Err(RegistryClientError::Metadata(MetadataError::MissingField(
-                    "dist.integrity".into(),
-                )));
-            }
+            // Historical npm records may predate integrity metadata. Exclude those
+            // records rather than making newer verifiable releases unusable.
+            None => continue,
             Some(value) => {
                 let value = value.as_str().ok_or_else(|| {
                     RegistryClientError::Metadata(MetadataError::InvalidIntegrity(key.clone()))
@@ -172,22 +209,74 @@ fn parse_npm(
         let parsed_artifact_url = Url::parse(artifact_url).map_err(|_| {
             RegistryClientError::Metadata(MetadataError::InvalidArtifact(artifact_url.into()))
         })?;
-        if parsed_artifact_url.scheme() != "https" {
+        if !request_url_is_safe(artifact_url, &parsed_artifact_url) {
             return Err(RegistryClientError::Metadata(
                 MetadataError::InvalidArtifact(artifact_url.into()),
             ));
         }
-        let artifact_url = parsed_artifact_url.to_string();
+        let artifact_url = artifact_url.to_owned();
+        let mut dependencies = parse_dependencies(version_entry.get("dependencies"))?;
+        let optional_dependencies = parse_dependencies(version_entry.get("optionalDependencies"))?;
+        dependencies.retain(|name, _| !optional_dependencies.contains_key(name));
+        let platform = match (
+            parse_platform_list(version_entry.get("os"), "os"),
+            parse_platform_list(version_entry.get("cpu"), "cpu"),
+            parse_platform_list(version_entry.get("libc"), "libc"),
+        ) {
+            (Ok(os), Ok(cpu), Ok(libc)) => PackagePlatform { os, cpu, libc },
+            _ => continue,
+        };
         artifacts.push(RegistryArtifact {
             identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
             artifact_url,
             integrity,
-            dependencies: parse_dependencies(version_entry.get("dependencies"))?,
+            dependencies,
+            optional_dependencies,
+            platform,
             registry_kind: RegistryKind::Npm,
         });
     }
-    artifacts.sort_by_key(|artifact| std::cmp::Reverse(artifact.identity.version));
+    artifacts.sort_by_key(|artifact| std::cmp::Reverse(artifact.identity.version.clone()));
     Ok(artifacts)
+}
+
+fn parse_platform_list(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<Vec<String>, RegistryClientError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values: Vec<&str> = if let Some(value) = value.as_str() {
+        vec![value]
+    } else if let Some(values) = value.as_array() {
+        values
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::InvalidDependency(field.into()))
+            })?
+    } else {
+        return Err(RegistryClientError::Metadata(
+            MetadataError::InvalidDependency(field.into()),
+        ));
+    };
+    if values.len() > 32
+        || values.iter().any(|value| {
+            value.is_empty()
+                || value.len() > 32
+                || !value.is_ascii()
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_!.-".contains(&byte))
+        })
+    {
+        return Err(RegistryClientError::Metadata(
+            MetadataError::InvalidDependency(field.into()),
+        ));
+    }
+    Ok(values.into_iter().map(str::to_owned).collect())
 }
 
 fn parse_dependencies(
@@ -205,12 +294,9 @@ fn parse_dependencies(
             let package = name.parse().map_err(|_| {
                 RegistryClientError::Metadata(MetadataError::InvalidDependency(name.clone()))
             })?;
-            let requirement = requirement
-                .as_str()
-                .filter(|requirement| !requirement.trim().is_empty())
-                .ok_or_else(|| {
-                    RegistryClientError::Metadata(MetadataError::InvalidDependency(name.clone()))
-                })?;
+            let requirement = requirement.as_str().ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::InvalidDependency(name.clone()))
+            })?;
             Ok((package, requirement.to_owned()))
         })
         .collect()
@@ -246,6 +332,85 @@ mod tests {
         }
     }
 
+    struct AcceptAwareFake {
+        body: Vec<u8>,
+        url: String,
+    }
+    impl HttpTransport for AcceptAwareFake {
+        fn get(&self, _url: &str) -> Result<HttpResponse, TransportError> {
+            panic!("npm metadata must use the accept-aware transport method")
+        }
+
+        fn get_with_accept(&self, url: &str, accept: &str) -> Result<HttpResponse, TransportError> {
+            assert_eq!(url, self.url);
+            assert_eq!(accept, "application/vnd.npm.install-v1+json");
+            Ok(HttpResponse {
+                status: 200,
+                content_type: Some("application/json".into()),
+                body: self.body.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn npm_metadata_requests_the_abbreviated_install_representation() {
+        let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+        let artifacts = NpmRegistry::new(
+            AcceptAwareFake {
+                body: body.to_vec(),
+                url: "https://registry.npmjs.org/foo".into(),
+            },
+            origin,
+        )
+        .fetch("foo")
+        .unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+    }
+
+    #[test]
+    fn npm_maps_platform_compatible_optional_dependency_metadata() {
+        let body = br#"{"name":"parent","versions":{"1.0.0":{"name":"parent","version":"1.0.0","dependencies":{"native":"2.0.0","required":"3.0.0"},"optionalDependencies":{"native":"1.0.0"},"os":["darwin"],"cpu":["arm64"],"libc":["glibc"],"dist":{"tarball":"https://cdn.example/parent.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/parent"), origin)
+            .fetch("parent")
+            .unwrap();
+
+        assert_eq!(
+            artifacts[0]
+                .optional_dependencies
+                .get(&"native".parse().unwrap()),
+            Some(&"1.0.0".to_owned())
+        );
+        assert_eq!(artifacts[0].platform.os, vec!["darwin"]);
+        assert_eq!(artifacts[0].platform.cpu, vec!["arm64"]);
+        assert_eq!(artifacts[0].platform.libc, vec!["glibc"]);
+        assert!(
+            !artifacts[0]
+                .dependencies
+                .contains_key(&"native".parse().unwrap())
+        );
+        assert_eq!(
+            artifacts[0].dependencies.get(&"required".parse().unwrap()),
+            Some(&"3.0.0".to_owned())
+        );
+    }
+
+    #[test]
+    fn npm_skips_versions_with_malformed_platform_metadata() {
+        let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","os":42,"dist":{"tarball":"https://cdn.example/foo-1.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}},"2.0.0":{"name":"foo","version":"2.0.0","dist":{"tarball":"https://cdn.example/foo-2.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].identity.version.to_string(), "2.0.0");
+    }
+
     #[test]
     fn npm_metadata_maps_tarball_and_integrity() {
         let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dependencies":{"bar":"^2.0.0"},"dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
@@ -262,8 +427,8 @@ mod tests {
     }
 
     #[test]
-    fn npm_skips_valid_prereleases_during_stable_resolution() {
-        let body = br#"{"name":"foo","versions":{"1.0.0-rc.1":{"name":"foo","version":"1.0.0-rc.1","dist":{"tarball":"https://cdn.example/foo-rc.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}},"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+    fn npm_preserves_empty_historical_dependency_ranges() {
+        let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dependencies":{"bar":""},"dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
 
         let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
@@ -271,33 +436,129 @@ mod tests {
             .unwrap();
 
         assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].identity.version.to_string(), "1.0.0");
+        assert_eq!(
+            artifacts[0].dependencies.get(&"bar".parse().unwrap()),
+            Some(&String::new())
+        );
     }
 
     #[test]
-    fn npm_skips_non_object_prerelease_entries() {
+    fn npm_unpublished_package_has_no_install_candidates() {
+        let body = br#"{"name":"foo","modified":"2026-01-01T00:00:00.000Z"}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
+
+        assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn npm_full_unpublished_package_has_no_install_candidates() {
+        let body = br#"{"_id":"foo","name":"foo","time":{"created":"2012-04-26T00:42:41.775Z","modified":"2025-12-02T22:01:08.798Z","unpublished":{"time":"2025-12-02T22:01:08.798Z","versions":["0.1.0"]}},"_rev":"10-example"}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
+
+        assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn npm_rejects_arbitrary_metadata_without_versions() {
+        for body in [
+            br#"{}"#.as_slice(),
+            br#"{"name":"foo","error":"temporary failure"}"#.as_slice(),
+            br#"{"name":"foo","modified":"2026-01-01T00:00:00.000Z","extra":true}"#.as_slice(),
+        ] {
+            let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+            let result =
+                NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin).fetch("foo");
+
+            assert!(matches!(
+                result,
+                Err(RegistryClientError::Metadata(MetadataError::MissingField(field)))
+                    if field == "versions"
+            ));
+        }
+    }
+
+    #[test]
+    fn npm_rejects_non_object_versions_metadata() {
+        let body = br#"{"name":"foo","versions":[]}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+        let result =
+            NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin).fetch("foo");
+
+        assert!(matches!(
+            result,
+            Err(RegistryClientError::Metadata(MetadataError::InvalidJson(message)))
+                if message == "versions must be an object"
+        ));
+    }
+
+    #[test]
+    fn npm_retains_valid_prereleases_for_requirement_selection() {
+        let body = br#"{"name":"foo","versions":{"1.0.0-rc.1":{"name":"foo","version":"1.0.0-rc.1","dependencies":{"unenv":"2.0.0-rc.24"},"dist":{"tarball":"https://cdn.example/foo-rc.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}},"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
+
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].identity.version.to_string(), "1.0.0");
+        assert_eq!(artifacts[1].identity.version.to_string(), "1.0.0-rc.1");
+        assert_eq!(
+            artifacts[1]
+                .dependencies
+                .get(&"unenv".parse().unwrap())
+                .map(String::as_str),
+            Some("2.0.0-rc.24")
+        );
+    }
+
+    #[test]
+    fn npm_rejects_non_object_prerelease_entries() {
         let body = br#"{"name":"foo","versions":{"1.0.0-rc.1":null,"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
 
+        let result =
+            NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin).fetch("foo");
+
+        assert!(matches!(
+            result,
+            Err(RegistryClientError::Metadata(MetadataError::InvalidJson(message)))
+                if message == "version entry must be an object"
+        ));
+    }
+
+    #[test]
+    fn npm_skips_stable_historical_versions_without_integrity() {
+        let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo-old.tgz"}},"2.0.0":{"name":"foo","version":"2.0.0","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
         let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
             .fetch("foo")
             .unwrap();
 
         assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].identity.version.to_string(), "1.0.0");
+        assert_eq!(artifacts[0].identity.version.to_string(), "2.0.0");
     }
 
     #[test]
-    fn npm_missing_integrity_fails_closed() {
+    fn npm_missing_integrity_produces_no_unverified_candidates() {
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
         let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz"}}}}"#;
-        let result =
-            NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin).fetch("foo");
-        assert!(matches!(
-            result,
-            Err(RegistryClientError::Metadata(MetadataError::MissingField(field)))
-                if field == "dist.integrity"
-        ));
+
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
+
+        assert!(artifacts.is_empty());
     }
 
     #[test]
@@ -316,6 +577,68 @@ mod tests {
     }
 
     #[test]
+    fn npm_rejects_noncanonical_artifact_urls() {
+        for (case, artifact_url) in [
+            ("leading space", " https://cdn.example/archive.tgz"),
+            ("path space", "https://cdn.example/archive .tgz"),
+            ("trailing newline", "https://cdn.example/archive.tgz\n"),
+            ("uppercase scheme", "HTTPS://cdn.example/archive.tgz"),
+            ("uppercase host", "https://CDN.EXAMPLE/archive.tgz"),
+            ("backslash", "https://cdn.example\\archive.tgz"),
+            ("empty userinfo", "https://@cdn.example/archive.tgz"),
+            (
+                "Unicode IDNA separator",
+                "https://cdn\u{3002}example/archive.tgz",
+            ),
+            (
+                "explicit default port",
+                "https://cdn.example:443/archive.tgz",
+            ),
+            ("percent-encoded host", "https://%63dn.example/archive.tgz"),
+            (
+                "encoded dot path",
+                "https://cdn.example/a/%2e%2e/archive.tgz",
+            ),
+            ("encoded control path", "https://cdn.example/%0Aarchive.tgz"),
+            (
+                "encoded unreserved path",
+                "https://cdn.example/%61rchive.tgz",
+            ),
+        ] {
+            let body = serde_json::json!({
+                "name": "foo",
+                "versions": {
+                    "1.0.0": {
+                        "name": "foo",
+                        "version": "1.0.0",
+                        "dist": {
+                            "tarball": artifact_url,
+                            "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                        }
+                    }
+                }
+            })
+            .to_string();
+            let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+
+            let result = NpmRegistry::new(
+                fake(body.as_bytes(), "https://registry.npmjs.org/foo"),
+                origin,
+            )
+            .fetch("foo");
+
+            assert!(
+                matches!(
+                    result,
+                    Err(RegistryClientError::Metadata(MetadataError::InvalidArtifact(url)))
+                        if url == artifact_url
+                ),
+                "npm accepted {case}: {artifact_url:?}"
+            );
+        }
+    }
+
+    #[test]
     fn npm_missing_integrity_can_be_explicitly_allowed() {
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
         let body = br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz"}}}}"#;
@@ -326,48 +649,40 @@ mod tests {
     }
 
     #[test]
-    fn npm_rejects_malformed_version_keys() {
+    fn npm_skips_malformed_version_keys_without_hiding_usable_versions() {
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
-        let body = br#"{"name":"foo","versions":{"not-semver":{"name":"foo","version":"not-semver","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let body = br#"{"name":"foo","versions":{"not-semver":{"name":"foo","version":"not-semver","dist":{"tarball":"https://cdn.example/bad.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}},"1.0.0":{"name":"foo","version":"1.0.0","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
 
-        let result =
-            NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin).fetch("foo");
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
 
-        assert!(matches!(
-            result,
-            Err(RegistryClientError::Metadata(MetadataError::InvalidVersion(version)))
-                if version == "not-semver"
-        ));
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].identity.version.to_string(), "1.0.0");
     }
 
     #[test]
-    fn npm_rejects_malformed_version_keys_before_entry_validation() {
+    fn npm_skips_malformed_version_keys_before_entry_validation() {
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
         let body = br#"{"name":"foo","versions":{"not-semver":null}}"#;
 
-        let result =
-            NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin).fetch("foo");
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
 
-        assert!(matches!(
-            result,
-            Err(RegistryClientError::Metadata(MetadataError::InvalidVersion(version)))
-                if version == "not-semver"
-        ));
+        assert!(artifacts.is_empty());
     }
 
     #[test]
-    fn npm_rejects_stable_versions_with_build_metadata() {
+    fn npm_skips_stable_versions_with_build_metadata() {
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
         let body = br#"{"name":"foo","versions":{"1.0.0+build":{"name":"foo","version":"1.0.0+build","dist":{"tarball":"https://cdn.example/foo.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
 
-        let result =
-            NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin).fetch("foo");
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin)
+            .fetch("foo")
+            .unwrap();
 
-        assert!(matches!(
-            result,
-            Err(RegistryClientError::Metadata(MetadataError::InvalidVersion(version)))
-                if version == "1.0.0+build"
-        ));
+        assert!(artifacts.is_empty());
     }
 
     #[test]
@@ -379,6 +694,20 @@ mod tests {
         )
         .fetch("foo");
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn npm_package_not_found_has_no_install_candidates() {
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let mut response = fake(
+            br#"{"error":"Not found"}"#,
+            "https://registry.npmjs.org/foo",
+        );
+        response.status = 404;
+
+        let artifacts = NpmRegistry::new(response, origin).fetch("foo").unwrap();
+
+        assert!(artifacts.is_empty());
     }
 
     #[test]

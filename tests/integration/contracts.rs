@@ -113,7 +113,7 @@ fn contracts_flow_from_runtime_fixture_to_deterministic_plan() {
         id: PackageInstanceId::new(
             selected.registry.clone(),
             selected.name.clone(),
-            selected.version,
+            selected.version.clone(),
         ),
         peer_context: PeerContext::default(),
         platform_context: PlatformContext::new(Some("linux"), Some("x86_64"), Some("gnu")).unwrap(),

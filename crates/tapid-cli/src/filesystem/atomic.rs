@@ -30,7 +30,12 @@ pub(crate) fn materialize_artifact(name: &str, bytes: &[u8]) -> Result<Vec<u8>, 
     let result = (|| {
         extract_to(bytes, ArchiveFormat::TarGz, &temp, ArchiveLimits::default())
             .map_err(|e| format!("cannot safely extract verified artifact: {e}"))?;
-        let mut entries = fs::read_dir(&temp).map_err(|e| e.to_string())?;
+        let mut entries = fs::read_dir(&temp)
+            .map_err(|e| e.to_string())?
+            .filter_map(|entry| match entry {
+                Ok(entry) if entry.file_name() == ".tapid-executable-modes" => None,
+                other => Some(other),
+            });
         let first = entries.next().transpose().map_err(|e| e.to_string())?;
         let Some(first) = first else {
             return Err("verified artifact does not contain a tapid executable".into());

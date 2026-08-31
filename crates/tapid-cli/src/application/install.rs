@@ -3,6 +3,7 @@ use crate::filesystem::activation::ActivationLock;
 use crate::{online, package_spec};
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
@@ -51,15 +52,82 @@ pub(crate) struct InstallReport {
     pub(crate) replayed: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum InstallMode {
+    Online,
+    Offline,
+    Frozen,
+}
+
+fn default_store_root_for<F>(platform: &str, mut environment: F) -> Result<PathBuf, String>
+where
+    F: FnMut(&str) -> Option<OsString>,
+{
+    fn absolute(value: OsString, variable: &str, platform: &str) -> Result<PathBuf, String> {
+        let path = PathBuf::from(value);
+        let target_absolute = if platform == "windows" {
+            path.to_str().is_some_and(|value| {
+                let bytes = value.as_bytes();
+                (bytes.len() >= 3
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                    && matches!(bytes[2], b'\\' | b'/'))
+                    || value.starts_with("\\\\")
+            })
+        } else {
+            path.to_string_lossy().starts_with('/')
+        };
+        if !target_absolute {
+            return Err(format!("{variable} must contain an absolute path"));
+        }
+        Ok(path)
+    }
+
+    let root = match platform {
+        "macos" => absolute(
+            environment("HOME").ok_or("HOME is required to locate Tapid's verified store")?,
+            "HOME",
+            platform,
+        )?
+        .join("Library/Caches"),
+        "windows" => absolute(
+            environment("LOCALAPPDATA")
+                .ok_or("LOCALAPPDATA is required to locate Tapid's verified store")?,
+            "LOCALAPPDATA",
+            platform,
+        )?,
+        _ => {
+            if let Some(cache) = environment("XDG_CACHE_HOME") {
+                absolute(cache, "XDG_CACHE_HOME", platform)?
+            } else {
+                absolute(
+                    environment("HOME")
+                        .ok_or("HOME is required to locate Tapid's verified store")?,
+                    "HOME",
+                    platform,
+                )?
+                .join(".cache")
+            }
+        }
+    };
+    Ok(root.join("tapid/store"))
+}
+
+fn default_store_root() -> Result<PathBuf, String> {
+    default_store_root_for(std::env::consts::OS, |name| std::env::var_os(name))
+}
+
 pub(crate) fn run(
     project_dir: &Path,
     package: Option<&str>,
     store_root: Option<&Path>,
-    offline: bool,
-    frozen: bool,
+    mode: InstallMode,
     registry_fixture: Option<&Path>,
     allow_unverified_registry_artifacts: bool,
+    report_replay_progress: impl FnMut(usize, usize),
 ) -> Result<InstallReport, String> {
+    let offline = matches!(mode, InstallMode::Offline);
+    let frozen = matches!(mode, InstallMode::Frozen);
     if package.is_some() && (offline || frozen) {
         return Err("a package argument cannot be used with --offline or --frozen".to_owned());
     }
@@ -108,11 +176,10 @@ pub(crate) fn run(
     };
     let lock_path = project_dir.join("tapid.lock");
     if !offline && !frozen {
-        let store = Store::new(
-            store_root
-                .map(PathBuf::from)
-                .unwrap_or_else(|| project_dir.join(".tapid-store")),
-        );
+        let store = Store::new(match store_root {
+            Some(path) => path.to_owned(),
+            None => default_store_root()?,
+        });
         let (lock, input, trees) = online::resolve_and_fetch(
             &project_dir,
             &manifest,
@@ -176,12 +243,12 @@ pub(crate) fn run(
     if let Err(error) = lock.validate_replay(&current_manifest_digest) {
         return Err(format!("invalid lockfile {}: {error}", lock_path.display()));
     }
-    let store = Store::new(
-        store_root
-            .map(PathBuf::from)
-            .unwrap_or_else(|| project_dir.join(".tapid-store")),
-    );
-    let (input, trees) = crate::application::replay::replay_input(&lock, &manifest, &store)?;
+    let store = Store::new(match store_root {
+        Some(path) => path.to_owned(),
+        None => default_store_root()?,
+    });
+    let (input, trees) =
+        crate::application::replay::replay_input(&lock, &manifest, &store, report_replay_progress)?;
     materialize_with_lock(&project_dir, input, trees, true, &activation_lock).map(|_| {
         InstallReport {
             package_count: lock.packages().len(),
@@ -225,25 +292,24 @@ fn materialize_with_lock(
             return Err(error.to_string());
         }
     };
-    let stage = project_dir.join(format!(
-        ".tapid-install-stage-{}-{}",
-        std::process::id(),
-        crate::filesystem::atomic::unique_nonce()
-    ));
-    if let Err(error) = fs::create_dir(&stage) {
-        if replayed {
-            crate::application::replay::cleanup_replay_snapshots(&trees);
+    let stage = match activation_lock.create_stage(project_dir) {
+        Ok(stage) => stage,
+        Err(error) => {
+            if replayed {
+                crate::application::replay::cleanup_replay_snapshots(&trees);
+            }
+            return Err(error);
         }
-        return Err(format!("cannot create install staging directory: {error}"));
-    }
-    let result = crate::filesystem::tree::materialize_stage(&stage, &plan, &input, &trees)
-        .and_then(|_| {
-            crate::filesystem::activation::activate_node_modules_with_lock(
-                project_dir,
-                &stage,
-                activation_lock,
-            )
-        });
+    };
+    let result =
+        crate::filesystem::tree::materialize_stage(&stage, &plan, &input, &trees, replayed)
+            .and_then(|_| {
+                crate::filesystem::activation::activate_node_modules_with_lock(
+                    project_dir,
+                    &stage,
+                    activation_lock,
+                )
+            });
     if replayed {
         crate::application::replay::cleanup_replay_snapshots(&trees);
     }
@@ -252,4 +318,75 @@ fn materialize_with_lock(
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    fn environment<'a>(
+        entries: &'a [(&'a str, &'a str)],
+    ) -> impl FnMut(&str) -> Option<OsString> + 'a {
+        move |name| {
+            entries
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        }
+    }
+
+    #[test]
+    fn default_store_is_outside_a_macos_consumer_project() {
+        let store =
+            default_store_root_for("macos", environment(&[("HOME", "/Users/example")])).unwrap();
+
+        assert_eq!(
+            store,
+            PathBuf::from("/Users/example/Library/Caches/tapid/store")
+        );
+        assert!(!store.starts_with("/Users/example/source/application"));
+    }
+
+    #[test]
+    fn linux_default_store_prefers_absolute_xdg_cache_home() {
+        let store = default_store_root_for(
+            "linux",
+            environment(&[
+                ("XDG_CACHE_HOME", "/cache/example"),
+                ("HOME", "/home/example"),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(store, PathBuf::from("/cache/example/tapid/store"));
+    }
+
+    #[test]
+    fn windows_default_store_uses_local_application_data() {
+        let store = default_store_root_for(
+            "windows",
+            environment(&[("LOCALAPPDATA", "C:\\Users\\example\\AppData\\Local")]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store,
+            PathBuf::from("C:\\Users\\example\\AppData\\Local").join("tapid/store")
+        );
+    }
+
+    #[test]
+    fn relative_cache_environment_is_rejected() {
+        let error = default_store_root_for(
+            "linux",
+            environment(&[
+                ("XDG_CACHE_HOME", "relative/cache"),
+                ("HOME", "/home/example"),
+            ]),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("absolute"));
+    }
 }

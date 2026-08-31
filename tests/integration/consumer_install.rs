@@ -8,7 +8,7 @@ use std::thread;
 use sha2::{Digest, Sha256};
 use tapid_archive::{ArchiveFormat, ArchiveLimits, canonical_tree_digest, extract_to};
 use tapid_core::{ArtifactDigest, RegistryOrigin};
-use tapid_lockfile::{LockedPackage, Lockfile};
+use tapid_lockfile::{LockedPackage, Lockfile, RegistryIntegrityProvenance};
 use tapid_registry_client::{
     FetchMode, HttpResponse, HttpTransport, JsrRegistry, NpmRegistry, RegistryClient,
     RegistryTransport, TransportError,
@@ -181,7 +181,7 @@ fn tar_fixture() -> Vec<u8> {
 fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
     let archive = tar_fixture();
     let npm_meta = br#"{"name":"demo","versions":{"1.0.0":{"name":"demo","version":"1.0.0","dist":{"tarball":"https://registry.npmjs.org/demo/-/demo-1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}}"#.to_vec();
-    let jsr_meta = br#"{"scope":"std","name":"path","latest":"1.0.0","versions":{"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/~/std__path/1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}}"#.to_vec();
+    let jsr_meta = br#"{"scope":"std","name":"path","latest":"1.0.0","versions":{"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/~/std__path/1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#.to_vec();
     let fixture = LocalHttpFixture::start(BTreeMap::from([
         ("/demo".into(), (200, npm_meta)),
         ("/@std/path/meta.json".into(), (200, jsr_meta)),
@@ -292,18 +292,24 @@ fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
         "transitive dependency must be selected"
     );
 
-    let dep = LockedPackage::new("https://registry.npmjs.org", "dep", "1.0.0", "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", tree_digest.as_str()).unwrap();
-    let root = LockedPackage::new("https://registry.npmjs.org", "demo", "1.0.0", "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", tree_digest.as_str()).unwrap();
+    let dep = LockedPackage::new_with_provenance("https://registry.npmjs.org", "dep", "1.0.0", "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", tree_digest.as_str(), RegistryIntegrityProvenance::RegistryDeclared).unwrap();
+    let root = LockedPackage::new_with_provenance("https://registry.npmjs.org", "demo", "1.0.0", "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", tree_digest.as_str(), RegistryIntegrityProvenance::RegistryDeclared).unwrap();
     let mut lock_a = Lockfile::new(tree_digest.as_str()).unwrap();
     lock_a.insert_package(dep.clone()).unwrap();
+    let root_key = root.key();
     lock_a.insert_package(root).unwrap();
+    lock_a.set_roots([root_key.clone()]).unwrap();
     let encoded_a = lock_a.to_json().unwrap();
     let mut lock_b = Lockfile::new(tree_digest.as_str()).unwrap();
     lock_b.insert_package(dep).unwrap();
-    let root_b = LockedPackage::new("https://registry.npmjs.org", "demo", "1.0.0", "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", tree_digest.as_str()).unwrap();
+    let root_b = LockedPackage::new_with_provenance("https://registry.npmjs.org", "demo", "1.0.0", "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", tree_digest.as_str(), RegistryIntegrityProvenance::RegistryDeclared).unwrap();
+    let root_b_key = root_b.key();
     lock_b.insert_package(root_b).unwrap();
+    lock_b.set_roots([root_b_key]).unwrap();
     assert_eq!(encoded_a, lock_b.to_json().unwrap());
     assert!(encoded_a.contains("\"dep\""));
+    let encoded_json: serde_json::Value = serde_json::from_str(&encoded_a).unwrap();
+    assert_eq!(encoded_json["roots"], serde_json::json!([root_key]));
 
     let client = RegistryClient::new(SnapshotTransport);
     assert!(matches!(

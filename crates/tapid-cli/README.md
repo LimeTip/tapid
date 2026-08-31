@@ -1,6 +1,6 @@
-# tapid-cli
+# tapid
 
-[Crates.io](https://crates.io/crates/tapid-cli) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-cli)
+[Crates.io](https://crates.io/crates/tapid) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-cli)
 
 The `tapid` command-line client for the Tapid JavaScript and TypeScript package manager, written in Rust. It provides deterministic installation and lockfile replay, verified package storage, Node-compatible linking, and explicit root-script execution.
 
@@ -18,14 +18,15 @@ tapid run <SCRIPT> [-- <ARGS>...]
 
 ## Install
 
-The currently supported install paths are validated lockfile replay and the local registry fixture:
+The supported install paths are the live npm path, validated lockfile replay, and the local registry fixture:
 
 ```text
+tapid install --project-dir ./example
 tapid install --offline --frozen --project-dir ./example
 tapid install --registry-fixture ./fixture.json --project-dir ./example
 ```
 
-The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The non-fixture online path remains deliberately fail-closed for transitive projects until the registry client exposes verified per-version dependency maps and required SHA-512 integrity for all supported registries.
+The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 6 locks, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
 
 ## Offline and frozen
 
@@ -55,7 +56,7 @@ Install derives executable shims from verified package `bin` metadata. Unix uses
 
 - Dependency lifecycle scripts are disabled during every install path.
 - Root scripts run only after the explicit `tapid run` command.
-- Full npm semver, aliases, tags, git/file/workspace specs, peer and optional dependency semantics, workspaces, and complete lockfile compatibility are not implemented.
+- Full npm semver, aliases, tags, git/file/workspace specs, peer semantics, workspaces, and complete optional-dependency and lockfile compatibility are not implemented.
 - `add`, `remove`, `update`, `prune`, script approval, private-registry authentication, and package publishing are outside this slice.
 - JSR installation remains fail-closed unless metadata provides both an HTTPS npm tarball URL and a valid SHA-512 SRI value. Live JSR integrity behavior is unsupported and unverified.
 - Linux and Windows execution is configured in CI, but must not be described as locally verified until those jobs have run. macOS local execution does not prove Windows or Linux behavior.

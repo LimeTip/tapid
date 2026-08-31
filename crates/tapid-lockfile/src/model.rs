@@ -5,7 +5,10 @@ use tapid_core::{
     RegistryOrigin,
 };
 
-use crate::{LOCKFILE_VERSION, LockfileError, validation};
+use crate::{
+    LEGACY_LOCKFILE_VERSION, LOCKFILE_VERSION, LockfileError, PROVENANCE_LEGACY_LOCKFILE_VERSION,
+    validation,
+};
 
 fn encode(value: &str) -> String {
     value
@@ -66,6 +69,85 @@ fn parse_context(field: &str, prefix: &str, original: &str) -> Result<String, Lo
     Ok(value.to_owned())
 }
 
+fn percent_decode(value: &str, original: &str) -> Result<String, LockfileError> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err(LockfileError::InvalidPackageKey(original.into()));
+            }
+            let high = (bytes[index + 1] as char)
+                .to_digit(16)
+                .ok_or_else(|| LockfileError::InvalidPackageKey(original.into()))?;
+            let low = (bytes[index + 2] as char)
+                .to_digit(16)
+                .ok_or_else(|| LockfileError::InvalidPackageKey(original.into()))?;
+            decoded.push((high * 16 + low) as u8);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| LockfileError::InvalidPackageKey(original.into()))
+}
+
+fn validate_peer_context(value: &str, original: &str) -> Result<(), LockfileError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let mut context = PeerContext::default();
+    for item in value.split(',') {
+        let (name, version) = item
+            .split_once(";version=")
+            .and_then(|(name, version)| name.strip_prefix("name=").map(|name| (name, version)))
+            .ok_or_else(|| LockfileError::InvalidPackageKey(original.into()))?;
+        context = context.with(
+            percent_decode(name, original)?
+                .parse::<PackageName>()
+                .map_err(LockfileError::Domain)?,
+            percent_decode(version, original)?
+                .parse::<PackageVersion>()
+                .map_err(LockfileError::Domain)?,
+        );
+    }
+    if canonical_peer_context(&context) != value {
+        return Err(LockfileError::InvalidPackageKey(original.into()));
+    }
+    Ok(())
+}
+
+fn validate_platform_context(value: &str, original: &str) -> Result<(), LockfileError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let (os, rest) = value
+        .strip_prefix("os=")
+        .and_then(|value| value.split_once(";cpu="))
+        .ok_or_else(|| LockfileError::InvalidPackageKey(original.into()))?;
+    let (cpu, libc) = rest
+        .split_once(";libc=")
+        .ok_or_else(|| LockfileError::InvalidPackageKey(original.into()))?;
+    let decode = |field: &str| -> Result<Option<String>, LockfileError> {
+        if field.is_empty() {
+            Ok(None)
+        } else {
+            percent_decode(field, original).map(Some)
+        }
+    };
+    let os = decode(os)?;
+    let cpu = decode(cpu)?;
+    let libc = decode(libc)?;
+    let context = PlatformContext::new(os.as_deref(), cpu.as_deref(), libc.as_deref())
+        .map_err(LockfileError::Domain)?;
+    if canonical_platform_context(&context) != value {
+        return Err(LockfileError::InvalidPackageKey(original.into()));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LockfilePackageKey {
     pub registry: RegistryOrigin,
@@ -124,9 +206,8 @@ impl std::str::FromStr for LockfilePackageKey {
             peer_context: parse_context(p[2], "peer=", value)?,
             platform_context: parse_context(p[3], "platform=", value)?,
         };
-        if key.peer_context.contains(' ') || key.platform_context.contains(' ') {
-            return Err(LockfileError::InvalidPackageKey(value.into()));
-        }
+        validate_peer_context(&key.peer_context, value)?;
+        validate_platform_context(&key.platform_context, value)?;
         Ok(key)
     }
 }
@@ -138,6 +219,8 @@ pub struct Lockfile {
     root_manifest_digest: String,
     resolver_version: String,
     linker_version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    roots: Vec<String>,
     packages: BTreeMap<String, LockedPackage>,
 }
 
@@ -149,6 +232,7 @@ impl Lockfile {
             root_manifest_digest: root_manifest_digest.to_owned(),
             resolver_version: "0".to_owned(),
             linker_version: "0".to_owned(),
+            roots: Vec::new(),
             packages: BTreeMap::new(),
         })
     }
@@ -206,6 +290,33 @@ impl Lockfile {
         &self.packages
     }
 
+    /// Replaces the exact root package identities used during replay.
+    pub fn set_roots<I, S>(&mut self, roots: I) -> Result<(), LockfileError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut roots = roots
+            .into_iter()
+            .map(|root| root.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        for root in &roots {
+            root.parse::<LockfilePackageKey>()?;
+            if !self.packages.contains_key(root) {
+                return Err(LockfileError::DanglingRoot(root.clone()));
+            }
+        }
+        self.roots = roots;
+        Ok(())
+    }
+
+    /// Returns exact canonical package keys selected as project roots.
+    pub fn roots(&self) -> &[String] {
+        &self.roots
+    }
+
     /// Returns package entries with their validated typed keys.
     pub fn packages_typed(
         &self,
@@ -229,10 +340,38 @@ impl Lockfile {
                 actual: current_root_manifest_digest,
             });
         }
+        if self.lockfile_version == PROVENANCE_LEGACY_LOCKFILE_VERSION {
+            return Err(LockfileError::RegenerationRequired(
+                PROVENANCE_LEGACY_LOCKFILE_VERSION,
+            ));
+        }
+        if let Some((key, _)) = self
+            .packages
+            .iter()
+            .find(|(_, package)| package.registry_integrity_declared == Some(false))
+        {
+            return Err(LockfileError::UnverifiedRegistryArtifact(key.clone()));
+        }
         Ok(())
     }
 
     pub fn to_json(&self) -> Result<String, LockfileError> {
+        if self.lockfile_version == LOCKFILE_VERSION
+            && !self.packages.is_empty()
+            && self.roots.is_empty()
+        {
+            return Err(LockfileError::MissingRoots);
+        }
+        if self.lockfile_version == LOCKFILE_VERSION
+            && let Some((key, _)) = self
+                .packages
+                .iter()
+                .find(|(_, package)| package.registry_integrity_declared.is_none())
+        {
+            return Err(LockfileError::MissingRegistryIntegrityProvenance(
+                key.clone(),
+            ));
+        }
         serde_json::to_string_pretty(self)
             .map(|json| format!("{json}\n"))
             .map_err(LockfileError::Serialization)
@@ -241,15 +380,46 @@ impl Lockfile {
     pub fn from_json(input: &str) -> Result<Self, LockfileError> {
         let mut lockfile: Self =
             serde_json::from_str(input).map_err(LockfileError::Serialization)?;
-        if lockfile.lockfile_version != LOCKFILE_VERSION {
+        if lockfile.lockfile_version != LOCKFILE_VERSION
+            && lockfile.lockfile_version != LEGACY_LOCKFILE_VERSION
+            && lockfile.lockfile_version != PROVENANCE_LEGACY_LOCKFILE_VERSION
+        {
             return Err(LockfileError::UnsupportedVersion(lockfile.lockfile_version));
         }
         lockfile.root_manifest_digest = canonical_artifact_digest(&lockfile.root_manifest_digest)?;
+        if lockfile.lockfile_version >= PROVENANCE_LEGACY_LOCKFILE_VERSION
+            && !lockfile.packages.is_empty()
+            && lockfile.roots.is_empty()
+        {
+            return Err(LockfileError::MissingRoots);
+        }
+        if lockfile.lockfile_version == LOCKFILE_VERSION
+            && let Some((key, _)) = lockfile
+                .packages
+                .iter()
+                .find(|(_, package)| package.registry_integrity_declared.is_none())
+        {
+            return Err(LockfileError::MissingRegistryIntegrityProvenance(
+                key.clone(),
+            ));
+        }
+        let mut canonical_roots = lockfile.roots.clone();
+        canonical_roots.sort();
+        canonical_roots.dedup();
+        if canonical_roots != lockfile.roots {
+            return Err(LockfileError::NonCanonicalRoots);
+        }
+        for root in &lockfile.roots {
+            root.parse::<LockfilePackageKey>()?;
+            if !lockfile.packages.contains_key(root) {
+                return Err(LockfileError::DanglingRoot(root.clone()));
+            }
+        }
         for (key, package) in &lockfile.packages {
+            package.validate()?;
             if key != &package.key() {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));
             }
-            package.validate()?;
             for (name, dependency) in &package.dependencies {
                 let target = dependency.parse::<LockfilePackageKey>()?;
                 if dependency == key {
@@ -281,6 +451,8 @@ pub struct LockedPackage {
     name: String,
     version: String,
     artifact_integrity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registry_integrity_declared: Option<bool>,
     unpacked_digest: String,
     /// Explicit replay identity for the verified unpacked store tree.
     tree_digest: String,
@@ -293,33 +465,46 @@ pub struct LockedPackage {
     dependencies: BTreeMap<String, String>,
 }
 
+/// Identifies the source of a package artifact integrity value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistryIntegrityProvenance {
+    /// The registry metadata declared the verified integrity value.
+    RegistryDeclared,
+    /// Tapid computed the value locally under an explicit compatibility exception.
+    LocallyComputed,
+}
+
 impl LockedPackage {
-    pub fn new(
+    pub fn new_with_provenance(
         registry: &str,
         name: &str,
         version: &str,
         artifact_integrity: &str,
         unpacked_digest: &str,
+        integrity_provenance: RegistryIntegrityProvenance,
     ) -> Result<Self, LockfileError> {
-        Self::new_with_context(
+        Self::new_with_context_and_provenance(
             registry,
             name,
             version,
             artifact_integrity,
             unpacked_digest,
-            &PeerContext::default(),
-            &PlatformContext::new(None, None, None).unwrap(),
+            (
+                &PeerContext::default(),
+                &PlatformContext::new(None, None, None).unwrap(),
+            ),
+            integrity_provenance,
         )
     }
 
-    pub fn new_with_context(
+    pub fn new_with_context_and_provenance(
         registry: &str,
         name: &str,
         version: &str,
         artifact_integrity: &str,
         unpacked_digest: &str,
-        peer_context: &PeerContext,
-        platform_context: &PlatformContext,
+        contexts: (&PeerContext, &PlatformContext),
+        integrity_provenance: RegistryIntegrityProvenance,
     ) -> Result<Self, LockfileError> {
         let package = Self {
             registry: registry
@@ -338,14 +523,18 @@ impl LockedPackage {
                 .parse::<PackageIntegrity>()
                 .map_err(LockfileError::Domain)?
                 .to_string(),
+            registry_integrity_declared: Some(matches!(
+                integrity_provenance,
+                RegistryIntegrityProvenance::RegistryDeclared
+            )),
             unpacked_digest: unpacked_digest
                 .parse::<ArtifactDigest>()
                 .map_err(LockfileError::Domain)?
                 .to_string(),
             tree_digest: unpacked_digest.to_owned(),
             artifact_url: None,
-            peer_context: canonical_peer_context(peer_context),
-            platform_context: canonical_platform_context(platform_context),
+            peer_context: canonical_peer_context(contexts.0),
+            platform_context: canonical_platform_context(contexts.1),
             dependencies: BTreeMap::new(),
         };
         package.validate()?;
@@ -384,24 +573,33 @@ impl LockedPackage {
         self.version
             .parse::<PackageVersion>()
             .map_err(LockfileError::Domain)?;
-        self.artifact_integrity
+        let artifact_integrity = self
+            .artifact_integrity
             .parse::<PackageIntegrity>()
             .map_err(LockfileError::Domain)?;
+        if artifact_integrity.to_string() != self.artifact_integrity {
+            return Err(LockfileError::InvalidSha512(
+                self.artifact_integrity.clone(),
+            ));
+        }
         self.unpacked_digest
             .parse::<ArtifactDigest>()
             .map_err(LockfileError::Domain)?;
         self.tree_digest
             .parse::<ArtifactDigest>()
             .map_err(LockfileError::Domain)?;
-        validation::validate_url(&self.registry)?;
+        let key = self.key();
+        validate_peer_context(&self.peer_context, &key)?;
+        validate_platform_context(&self.platform_context, &key)?;
+        validation::validate_registry_url(&self.registry)?;
         if let Some(url) = &self.artifact_url {
-            validation::validate_url(url)?;
+            validation::validate_artifact_url(url)?;
         }
         Ok(())
     }
 
     pub fn set_artifact_url(&mut self, url: &str) -> Result<(), LockfileError> {
-        validation::validate_url(url)?;
+        validation::validate_artifact_url(url)?;
         self.artifact_url = Some(url.to_owned());
         Ok(())
     }

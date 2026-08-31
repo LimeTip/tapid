@@ -3,11 +3,13 @@
 #![deny(unsafe_code)]
 
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read};
 use std::path::{Component, Path};
+
+const EXECUTABLE_MANIFEST: &str = ".tapid-executable-modes";
 
 /// Formats accepted by consumer registries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,7 +87,8 @@ fn extract_inner(
 ) -> Result<(), ExtractError> {
     let metadata = archive_metadata(bytes, format)?;
     validate_entries(metadata, limits.validation).map_err(ExtractError::Invalid)?;
-    extract_entries(bytes, format, destination)?;
+    let executable_paths = extract_entries(bytes, format, destination)?;
+    write_executable_manifest(destination, &executable_paths)?;
     Ok(())
 }
 
@@ -139,12 +142,13 @@ fn extract_entries(
     bytes: &[u8],
     format: ArchiveFormat,
     destination: &Path,
-) -> Result<(), ExtractError> {
+) -> Result<Vec<String>, ExtractError> {
     let reader: Box<dyn Read + '_> = match format {
         ArchiveFormat::Tar => Box::new(Cursor::new(bytes)),
         ArchiveFormat::TarGz => Box::new(flate2::read::GzDecoder::new(Cursor::new(bytes))),
     };
     let mut archive = tar::Archive::new(reader);
+    let mut executable_paths = Vec::new();
     for item in archive.entries().map_err(ExtractError::Io)? {
         let mut entry = item.map_err(ExtractError::Io)?;
         let raw = entry
@@ -153,6 +157,18 @@ fn extract_entries(
             .to_string_lossy()
             .into_owned();
         let normalized = normalized_path(&raw).map_err(ExtractError::Invalid)?;
+        if normalized == EXECUTABLE_MANIFEST {
+            return Err(ExtractError::InvalidArchive(
+                "archive uses a reserved Tapid metadata path".into(),
+            ));
+        }
+        let archive_mode = entry.header().mode()?;
+        if archive_mode & 0o111 != 0 && normalized.bytes().any(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            return Err(ExtractError::InvalidArchive(
+                "executable entry path contains a line break".into(),
+            ));
+        }
         let target = destination.join(
             normalized
                 .split('/')
@@ -178,15 +194,64 @@ fn extract_entries(
             .create_new(true)
             .open(&target)?;
         io::copy(&mut entry, &mut out)?;
+        apply_portable_file_mode(archive_mode, &target)?;
+        if archive_mode & 0o111 != 0 {
+            executable_paths.push(normalized);
+        }
         out.sync_all()?;
     }
+    executable_paths.sort();
+    Ok(executable_paths)
+}
+
+fn write_executable_manifest(destination: &Path, executable_paths: &[String]) -> io::Result<()> {
+    let mut contents = executable_paths.join("\n");
+    if !contents.is_empty() {
+        contents.push('\n');
+    }
+    let mut manifest = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination.join(EXECUTABLE_MANIFEST))?;
+    std::io::Write::write_all(&mut manifest, contents.as_bytes())?;
+    manifest.sync_all()
+}
+
+#[cfg(unix)]
+fn apply_portable_file_mode(archive_mode: u32, target: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Preserve only the portable executable distinction. Fixed modes avoid
+    // restoring archive-controlled ownership-style or privilege permissions.
+    let mode = if archive_mode & 0o111 == 0 {
+        0o644
+    } else {
+        0o755
+    };
+    fs::set_permissions(target, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn apply_portable_file_mode(_archive_mode: u32, _target: &Path) -> io::Result<()> {
     Ok(())
 }
 
 /// Hash a tree using sorted relative paths and explicit type/length framing.
+///
+/// On Unix, executable and non-executable regular files are distinct while all
+/// other permission bits are ignored. Platforms without Unix executable bits
+/// retain the non-executable regular-file framing.
 pub fn canonical_tree_digest(root: &Path) -> io::Result<String> {
+    let executable_paths = read_executable_manifest(root)?;
     let mut files = Vec::new();
-    collect_tree(root, root, &mut files)?;
+    collect_tree(root, root, executable_paths.as_ref(), &mut files)?;
+    if let Some(paths) = &executable_paths {
+        let mut manifest = paths.iter().cloned().collect::<Vec<_>>().join("\n");
+        if !manifest.is_empty() {
+            manifest.push('\n');
+        }
+        files.push((EXECUTABLE_MANIFEST.to_owned(), 3, manifest.into_bytes()));
+    }
     files.sort();
     let mut h = Sha256::new();
     for (path, kind, data) in files {
@@ -198,9 +263,62 @@ pub fn canonical_tree_digest(root: &Path) -> io::Result<String> {
     }
     Ok(format!("sha256-{}", hex::encode(h.finalize())))
 }
+
+fn read_executable_manifest(root: &Path) -> io::Result<Option<BTreeSet<String>>> {
+    let path = root.join(EXECUTABLE_MANIFEST);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "executable mode manifest is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if metadata.len() > 4 * 1024 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "executable mode manifest is oversized",
+        ));
+    }
+    let contents = fs::read_to_string(&path)?;
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "executable mode manifest is not newline terminated",
+        ));
+    }
+    let mut paths = BTreeSet::new();
+    let mut previous: Option<&str> = None;
+    for value in contents.lines() {
+        let normalized = normalized_path(value)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid executable path"))?;
+        if normalized != value || previous.is_some_and(|previous| previous >= value) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "executable mode manifest is not canonical",
+            ));
+        }
+        let target = root.join(value.split('/').collect::<std::path::PathBuf>());
+        let target_metadata = fs::symlink_metadata(target)?;
+        if !target_metadata.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "executable mode manifest references a non-regular file",
+            ));
+        }
+        paths.insert(value.to_owned());
+        previous = Some(value);
+    }
+    Ok(Some(paths))
+}
+
 fn collect_tree(
     root: &Path,
     current: &Path,
+    executable_paths: Option<&BTreeSet<String>>,
     out: &mut Vec<(String, u8, Vec<u8>)>,
 ) -> io::Result<()> {
     for item in fs::read_dir(current)? {
@@ -211,7 +329,7 @@ fn collect_tree(
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        if rel == ".tapid-tree" {
+        if rel == ".tapid-tree" || rel == EXECUTABLE_MANIFEST {
             continue;
         }
         let m = fs::symlink_metadata(&p)?;
@@ -223,9 +341,20 @@ fn collect_tree(
         }
         if m.is_dir() {
             out.push((rel.clone(), 1, Vec::new()));
-            collect_tree(root, &p, out)?;
+            collect_tree(root, &p, executable_paths, out)?;
         } else if m.is_file() {
-            out.push((rel, 0, fs::read(&p)?));
+            let kind = executable_paths.map_or_else(
+                || portable_file_kind(&m),
+                |paths| u8::from(paths.contains(&rel)) * 2,
+            );
+            #[cfg(unix)]
+            if executable_paths.is_some() && kind != portable_file_kind(&m) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "file executable mode differs from the canonical manifest",
+                ));
+            }
+            out.push((rel, kind, fs::read(&p)?));
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -234,6 +363,18 @@ fn collect_tree(
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn portable_file_kind(metadata: &fs::Metadata) -> u8 {
+    use std::os::unix::fs::PermissionsExt;
+
+    u8::from(metadata.permissions().mode() & 0o111 != 0) * 2
+}
+
+#[cfg(not(unix))]
+fn portable_file_kind(_metadata: &fs::Metadata) -> u8 {
+    0
 }
 
 /// The kind of an archive member. Archives must not contain device nodes or
@@ -544,6 +685,7 @@ mod tests {
             let mut header = tar::Header::new_gnu();
             header.set_path("package/index.js").unwrap();
             header.set_size(2);
+            header.set_mode(0o755);
             header.set_cksum();
             builder.append(&header, &b"ok"[..]).unwrap();
             builder.finish().unwrap();
@@ -554,8 +696,102 @@ mod tests {
         let dest = root.join("tree");
         extract_to(&bytes, ArchiveFormat::Tar, &dest, ArchiveLimits::default()).unwrap();
         assert_eq!(fs::read(dest.join("package/index.js")).unwrap(), b"ok");
-        assert!(canonical_tree_digest(&dest).unwrap().starts_with("sha256-"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(dest.join("package/index.js"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0o111
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(dest.join(EXECUTABLE_MANIFEST)).unwrap(),
+            "package/index.js\n"
+        );
+        assert_eq!(
+            canonical_tree_digest(&dest).unwrap(),
+            "sha256-011c8f7a278748278e741f3bb6d54af8cdaa14ee84b263bcd68f555fc41e2393"
+        );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn extraction_rejects_executable_paths_with_line_breaks() {
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("package/tool\nname").unwrap();
+            header.set_size(4);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append(&header, &b"tool"[..]).unwrap();
+            builder.finish().unwrap();
+        }
+        let root = std::env::temp_dir().join(format!(
+            "tapid-archive-line-break-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let destination = root.join("tree");
+        fs::create_dir(&root).unwrap();
+
+        let error = extract_to(
+            &bytes,
+            ArchiveFormat::Tar,
+            &destination,
+            ArchiveLimits::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("line break"), "{error}");
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_strips_privilege_bits_and_normalizes_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("package/tool").unwrap();
+            header.set_size(4);
+            header.set_mode(0o7700);
+            header.set_cksum();
+            builder.append(&header, &b"tool"[..]).unwrap();
+            builder.finish().unwrap();
+        }
+        let root = std::env::temp_dir().join(format!(
+            "tapid-archive-privilege-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let dest = root.join("tree");
+
+        extract_to(&bytes, ArchiveFormat::Tar, &dest, ArchiveLimits::default()).unwrap();
+
+        let mode = fs::metadata(dest.join("package/tool"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o755);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -571,5 +807,61 @@ mod tests {
         assert!(extract_to(&bytes, ArchiveFormat::Tar, &dest, limits).is_err());
         assert!(!dest.exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_tree_digest_binds_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-archive-mode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let executable = root.join("tool");
+        fs::write(&executable, b"tool").unwrap();
+        let plain = canonical_tree_digest(&root).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let executable_digest = canonical_tree_digest(&root).unwrap();
+
+        assert_ne!(plain, executable_digest);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_tree_digest_ignores_non_executable_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-archive-portable-mode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let file = root.join("tool");
+        fs::write(&file, b"tool").unwrap();
+
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        let private_plain = canonical_tree_digest(&root).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o664)).unwrap();
+        let shared_plain = canonical_tree_digest(&root).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o700)).unwrap();
+        let private_executable = canonical_tree_digest(&root).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        let shared_executable = canonical_tree_digest(&root).unwrap();
+
+        assert_eq!(private_plain, shared_plain);
+        assert_eq!(private_executable, shared_executable);
+        assert_ne!(private_plain, private_executable);
+        fs::remove_dir_all(root).unwrap();
     }
 }

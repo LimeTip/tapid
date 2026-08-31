@@ -2,10 +2,14 @@
 name = "tapid-core"
 readme = "README.md"
 description = "Core domain types and deterministic validation for the Tapid package manager"
-version = "0.0.3"
+version = "0.0.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
 autoexamples = false
+
+[dependencies]
+base64 = "0.22"
+semver = "1.0.28"

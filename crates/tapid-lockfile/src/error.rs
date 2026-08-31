@@ -9,6 +9,7 @@ pub enum LockfileError {
     InvalidUrl(String),
     InvalidSha512(String),
     UnsupportedVersion(u32),
+    RegenerationRequired(u32),
     DuplicatePackage(String),
     PackageKeyMismatch(String),
     InvalidPackageKey(String),
@@ -16,6 +17,11 @@ pub enum LockfileError {
         package: String,
         dependency: String,
     },
+    DanglingRoot(String),
+    MissingRoots,
+    MissingRegistryIntegrityProvenance(String),
+    UnverifiedRegistryArtifact(String),
+    NonCanonicalRoots,
     DependencyNameMismatch {
         package: String,
         dependency: String,
@@ -40,6 +46,10 @@ impl fmt::Display for LockfileError {
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported lockfile version: {version}")
             }
+            Self::RegenerationRequired(version) => write!(
+                f,
+                "lockfile version {version} lacks required integrity provenance; regenerate it online"
+            ),
             Self::DuplicatePackage(key) => write!(f, "duplicate locked package: {key}"),
             Self::PackageKeyMismatch(key) => {
                 write!(f, "lockfile package key does not match package: {key}")
@@ -52,6 +62,19 @@ impl fmt::Display for LockfileError {
                 dependency,
             } => {
                 write!(f, "package {package} has dangling dependency {dependency}")
+            }
+            Self::DanglingRoot(root) => write!(f, "lockfile has dangling root package {root}"),
+            Self::MissingRoots => write!(f, "current lockfile schema requires exact root packages"),
+            Self::MissingRegistryIntegrityProvenance(package) => write!(
+                f,
+                "current lockfile schema requires registry integrity provenance for {package}"
+            ),
+            Self::UnverifiedRegistryArtifact(package) => write!(
+                f,
+                "lockfile package lacks registry-declared artifact integrity: {package}"
+            ),
+            Self::NonCanonicalRoots => {
+                write!(f, "lockfile root packages must be sorted and unique")
             }
             Self::DependencyNameMismatch {
                 package,

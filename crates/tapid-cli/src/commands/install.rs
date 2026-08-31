@@ -28,14 +28,21 @@ pub(crate) fn run(args: Args) -> ExitCode {
             "warning: npm artifacts without registry integrity are not authenticated against a registry-declared digest"
         );
     }
+    let mode = if args.offline {
+        crate::application::install::InstallMode::Offline
+    } else if args.frozen {
+        crate::application::install::InstallMode::Frozen
+    } else {
+        crate::application::install::InstallMode::Online
+    };
     let result = crate::application::install::run(
         &args.project_dir,
         args.package.as_deref(),
         args.store_dir.as_deref(),
-        args.offline,
-        args.frozen,
+        mode,
         args.registry_fixture.as_deref(),
         args.allow_unverified_registry_artifacts,
+        |completed, total| eprintln!("Replay snapshot progress: {completed}/{total}"),
     );
     match result {
         Ok(report) => {
