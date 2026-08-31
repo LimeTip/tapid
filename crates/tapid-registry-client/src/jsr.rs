@@ -89,6 +89,22 @@ fn jsr_metadata_url(origin: &RegistryOrigin, package: &str) -> Result<String, Re
     Ok(url.to_string())
 }
 
+/// Parses JSR package metadata into artifacts ordered from highest to lowest version.
+///
+/// The metadata must identify the requested package and provide HTTPS npm tarball
+/// URLs with valid integrity values.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let artifacts = parse_jsr(&origin, &name, metadata_json)?;
+/// assert_eq!(artifacts[0].identity.version, highest_version);
+/// # Ok::<(), RegistryClientError>(())
+/// ```
+///
+/// # Returns
+///
+/// The package artifacts sorted by descending semantic version.
 fn parse_jsr(
     origin: &RegistryOrigin,
     name: &PackageName,

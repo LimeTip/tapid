@@ -19,6 +19,27 @@ impl<T: HttpTransport> NpmRegistry<T> {
     pub fn fetch(&self, package: &str) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
         self.fetch_with_options(package, false)
     }
+    /// Fetches package metadata from the npm registry and converts eligible versions into registry artifacts.
+    ///
+    /// An exact HTTP 404 is represented as an empty artifact list. When `allow_missing_integrity` is
+    /// `false`, artifacts without integrity metadata are excluded.
+    ///
+    /// # Arguments
+    ///
+    /// * `package` — The npm package name to fetch.
+    /// * `allow_missing_integrity` — Whether to include artifacts that lack integrity metadata.
+    ///
+    /// # Returns
+    ///
+    /// The available registry artifacts, or an error if the package name, response, or metadata is invalid.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # let registry = /* an initialized NpmRegistry */;
+    /// let artifacts = registry.fetch_with_options("example-package", false)?;
+    /// # Ok::<(), RegistryClientError>(())
+    /// ```
     pub fn fetch_with_options(
         &self,
         package: &str,
@@ -93,6 +114,25 @@ fn required_str<'a>(
         .ok_or_else(|| MetadataError::MissingField(key.into()))
 }
 
+/// Parses npm package metadata into registry artifacts.
+///
+/// Versions without integrity metadata are excluded unless `allow_missing_integrity` is `true`.
+///
+/// # Examples
+///
+/// ```
+/// let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+/// let name: PackageName = "example".parse().unwrap();
+/// let body = br#"{"name":"example","modified":"2024-01-01T00:00:00Z"}"#;
+///
+/// let artifacts = parse_npm(&origin, &name, body, false).unwrap();
+/// assert!(artifacts.is_empty());
+/// ```
+///
+/// # Errors
+///
+/// Returns a [`RegistryClientError`] when the metadata is malformed, inconsistent,
+/// contains an invalid artifact URL or integrity value, or has invalid dependencies.
 fn parse_npm(
     origin: &RegistryOrigin,
     name: &PackageName,
@@ -200,6 +240,29 @@ fn parse_npm(
     Ok(artifacts)
 }
 
+/// Converts dependency metadata into a map of package names and version requirements.
+///
+/// Missing dependency metadata produces an empty map. Each dependency requirement must
+/// be represented by a string.
+///
+/// # Examples
+///
+/// ```
+/// let dependencies = serde_json::json!({ "serde": "^1.0" });
+/// let parsed = parse_dependencies(Some(&dependencies)).unwrap();
+/// let package: PackageName = "serde".parse().unwrap();
+///
+/// assert_eq!(parsed.get(&package), Some(&"^1.0".to_owned()));
+/// ```
+///
+/// # Errors
+///
+/// Returns a metadata error if the dependency value is not an object, a package name is
+/// invalid, or a requirement is not a string.
+///
+/// # Returns
+///
+/// A map from package names to their dependency requirement strings.
 fn parse_dependencies(
     value: Option<&serde_json::Value>,
 ) -> Result<BTreeMap<PackageName, String>, RegistryClientError> {
@@ -258,6 +321,18 @@ mod tests {
         url: String,
     }
     impl HttpTransport for AcceptAwareFake {
+        /// Rejects generic metadata requests because npm metadata requires an accept-aware transport.
+        ///
+        /// # Panics
+        ///
+        /// Always panics when called.
+        ///
+        /// # Examples
+        ///
+        /// ```should_panic
+        /// # let registry = /* an NpmRegistry instance */ todo!();
+        /// registry.get("https://registry.npmjs.org/package");
+        /// ```
         fn get(&self, _url: &str) -> Result<HttpResponse, TransportError> {
             panic!("npm metadata must use the accept-aware transport method")
         }

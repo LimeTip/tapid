@@ -9,20 +9,71 @@ const STANDARD_ARTIFACT_MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
 pub trait HttpTransport: Send + Sync {
     fn get(&self, url: &str) -> Result<HttpResponse, TransportError>;
 
-    /// Fetches a resource with an explicit response media type.
+    /// Fetches a resource while requesting the specified response media type.
     ///
-    /// Test and compatibility transports may use the ordinary response when they
-    /// do not support content negotiation.
+    /// Implementations that do not support content negotiation may return the ordinary response.
+    ///
+    /// # Parameters
+    ///
+    /// * `url` - URL of the resource to fetch.
+    /// * `accept` - Response media type to request.
+    ///
+    /// # Returns
+    ///
+    /// The HTTP response.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), TransportError> {
+    /// let transport = HttpsTransport::standard()?;
+    /// let response = transport.get_with_accept(
+    ///     "https://example.com/metadata",
+    ///     "application/json",
+    /// )?;
+    /// # let _ = response;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn get_with_accept(&self, url: &str, _accept: &str) -> Result<HttpResponse, TransportError> {
         self.get(url)
     }
 }
 
 impl<T: HttpTransport + ?Sized> HttpTransport for &T {
+    /// Performs an HTTP GET request through the referenced transport.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let response = transport.get("https://example.com")?;
+    /// # Ok::<(), TransportError>(())
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// The HTTP response or a transport error.
     fn get(&self, url: &str) -> Result<HttpResponse, TransportError> {
         (**self).get(url)
     }
 
+    /// Requests a resource with a specified response media type.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The resource URL.
+    /// * `accept` - The accepted response media type.
+    ///
+    /// # Returns
+    ///
+    /// The HTTP response returned for the request.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let response = transport.get_with_accept("https://example.com/data", "application/json")?;
+    /// # Ok::<(), TransportError>(())
+    /// ```
     fn get_with_accept(&self, url: &str, accept: &str) -> Result<HttpResponse, TransportError> {
         (**self).get_with_accept(url, accept)
     }
@@ -68,6 +119,26 @@ impl Origin {
     }
 }
 impl HttpsTransport {
+    /// Creates an HTTPS transport restricted to the specified origins and response size limit.
+    ///
+    /// Redirects remain within the allow-listed origins and cannot cross origins.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an origin is invalid, the allow-list is empty, the response
+    /// limit is zero, or the HTTP client cannot be constructed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let transport = HttpsTransport::new(
+    ///     ["https://registry.example.com"],
+    ///     std::time::Duration::from_secs(20),
+    ///     32 * 1024 * 1024,
+    /// )?;
+    /// # let _ = transport;
+    /// # Ok::<(), TransportError>(())
+    /// ```
     pub fn new<I, S>(
         allowed_origins: I,
         timeout: Duration,
@@ -110,7 +181,16 @@ impl HttpsTransport {
             max_response_bytes,
         })
     }
-    /// Creates the bounded transport used for registry metadata.
+    /// Creates a bounded transport for fetching registry metadata from supported HTTPS origins.
+    ///
+    /// The transport uses a 20-second timeout and limits responses to 32 MiB.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let transport = HttpsTransport::standard();
+    /// assert!(transport.is_ok());
+    /// ```
     pub fn standard() -> Result<Self, TransportError> {
         Self::new(
             [
@@ -123,7 +203,17 @@ impl HttpsTransport {
         )
     }
 
-    /// Creates the separately bounded transport used for package archives.
+    /// Creates a transport for package archives with the standard timeout and response-size limit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let transport = HttpsTransport::standard_artifact().unwrap();
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// A configured transport allowing requests to the npm and JSR registries.
     pub fn standard_artifact() -> Result<Self, TransportError> {
         Self::new(
             [
@@ -136,6 +226,28 @@ impl HttpsTransport {
         )
     }
 
+    /// Performs an HTTPS GET request for an allowed origin and collects the response body.
+    ///
+    /// An optional `Accept` header can be supplied for content negotiation. The response
+    /// body must not exceed the configured maximum size.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let response = transport.get_internal("https://registry.example/package", Some("application/json"))?;
+    /// assert_eq!(response.status, 200);
+    /// # Ok::<(), TransportError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the URL is invalid, the origin is not allowed, the
+    /// `Accept` header is invalid, the request fails, or the response exceeds the
+    /// configured size limit.
+    ///
+    /// # Returns
+    ///
+    /// The HTTP status, content type, and body of the response.
     fn get_internal(
         &self,
         url: &str,
@@ -184,10 +296,43 @@ impl HttpsTransport {
     }
 }
 impl HttpTransport for HttpsTransport {
+    /// Retrieves a response from the specified HTTPS URL.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let response = transport.get("https://example.com")?;
+    /// assert!(response.status.is_success());
+    /// # Ok::<(), TransportError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`TransportError`] if the request fails or the response cannot be read.
     fn get(&self, url: &str) -> Result<HttpResponse, TransportError> {
         self.get_internal(url, None)
     }
 
+    /// Retrieves a resource while requesting a specific response media type.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tapid_registry_client::transport::{HttpTransport, HttpsTransport};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let transport = HttpsTransport::standard()?;
+    /// let response = transport.get_with_accept(
+    ///     "https://registry.example.com/metadata",
+    ///     "application/json",
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// The HTTP response received from the requested URL.
     fn get_with_accept(&self, url: &str, accept: &str) -> Result<HttpResponse, TransportError> {
         self.get_internal(url, Some(accept))
     }

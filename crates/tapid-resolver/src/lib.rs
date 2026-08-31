@@ -32,6 +32,21 @@ impl Dependency {
 
 impl FromStr for Requirement {
     type Err = ResolveError;
+    /// Parses and validates a package version requirement.
+    ///
+    /// Whitespace surrounding the requirement is removed. Supported requirements include exact versions,
+    /// wildcards, caret and tilde ranges, whitespace-conjoined clauses, and `||` alternatives.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requirement is empty, malformed, or uses an unsupported range.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let requirement = "^1.2.3".parse::<Requirement>();
+    /// assert!(requirement.is_ok());
+    /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let raw = s.trim();
         if raw.is_empty() {
@@ -56,6 +71,14 @@ impl FromStr for Requirement {
     }
 }
 
+/// Splits a requirement token into its operator and version text.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(requirement_token("^1.2.3"), ('^', "1.2.3"));
+/// assert_eq!(requirement_token("=1.2.3"), ('=', "1.2.3"));
+/// ```
 fn requirement_token(token: &str) -> (char, &str) {
     if let Some(value) = token.strip_prefix('^') {
         ('^', value)
@@ -72,6 +95,15 @@ struct RequirementBase {
     major_only: bool,
 }
 
+/// Parses a version requirement base, including numeric major-only caret requirements.
+///
+/// # Examples
+///
+/// ```
+/// assert!(parse_requirement_base('^', "2").is_some());
+/// assert!(parse_requirement_base('=', "1.2.3").is_some());
+/// assert!(parse_requirement_base('~', "2").is_none());
+/// ```
 fn parse_requirement_base(op: char, value: &str) -> Option<RequirementBase> {
     value
         .parse::<PackageVersion>()
@@ -177,7 +209,31 @@ impl fmt::Display for ResolveError {
 }
 impl std::error::Error for ResolveError {}
 
-/// Resolve a transitive graph from normalized metadata. No network or filesystem access occurs.
+/// Resolves root and transitive package requirements using normalized registry metadata without network or filesystem access.
+///
+/// The returned resolution contains selected packages, root packages, and dependency edges. Each requirement is resolved within its associated registry.
+///
+/// # Examples
+///
+/// ```
+/// let resolution = resolve_graph(
+///     &[],
+///     &[],
+///     ResolutionOptions {
+///         offline: false,
+///         frozen: false,
+///     },
+/// )
+/// .unwrap();
+///
+/// assert!(resolution.selected.is_empty());
+/// assert!(resolution.roots.is_empty());
+/// assert!(resolution.dependencies.is_empty());
+/// ```
+///
+/// # Errors
+///
+/// Returns an error when the selected resolution mode is unsupported, metadata contains duplicate entries, or a requirement has no compatible package version.
 pub fn resolve_graph(
     ds: &[Dependency],
     metadata: &[RegistryMetadata],
@@ -254,6 +310,20 @@ pub fn resolve_graph(
     })
 }
 
+/// Selects the highest available version of a package that satisfies all requirements.
+///
+/// # Errors
+///
+/// Returns [`ResolveError::MissingCandidate`] when no version satisfies a single
+/// requirement, or [`ResolveError::Conflict`] when multiple requirements cannot
+/// be satisfied together.
+///
+/// # Examples
+///
+/// ```
+/// let requirements = ["^1.0".to_owned()].into_iter().collect();
+/// assert!(requirements.contains("^1.0"));
+/// ```
 fn select_package(
     registry: &RegistryOrigin,
     name: &PackageName,
@@ -292,6 +362,17 @@ fn select_package(
     })
 }
 
+/// Lists the distinct versions available for a package in a registry, in ascending order.
+///
+/// # Examples
+///
+/// ```
+/// # let metadata: &[RegistryMetadata] = &[];
+/// # let registry: &RegistryOrigin = todo!();
+/// # let name: &PackageName = todo!();
+/// let versions = available(metadata, registry, name);
+/// assert!(versions.is_empty());
+/// ```
 fn available(
     metadata: &[RegistryMetadata],
     registry: &RegistryOrigin,
@@ -307,6 +388,20 @@ fn available(
     out.dedup();
     out
 }
+/// Determines whether a package version satisfies a requirement expression.
+///
+/// Supports exact versions, wildcards, caret and tilde ranges, whitespace-conjoined
+/// constraints, and `||` alternatives. Stable ranges do not match prerelease versions
+/// unless the prerelease is explicitly included in the requirement.
+///
+/// # Examples
+///
+/// ```
+/// let version = PackageVersion::stable(1, 4, 0);
+///
+/// assert!(matches_requirement(&version, "^1.0.0"));
+/// assert!(!matches_requirement(&version, "^2.0.0"));
+/// ```
 fn matches_requirement(version: &PackageVersion, raw: &str) -> bool {
     raw.split("||").any(|clause| {
         let clause = clause.trim();
@@ -388,7 +483,36 @@ fn matches_requirement(version: &PackageVersion, raw: &str) -> bool {
     })
 }
 
-/// Compatibility entry point for metadata snapshots without dependency maps.
+/// Resolves dependency requirements using registry snapshots without dependency metadata.
+///
+/// The snapshots are treated as available package versions, so resolution covers the
+/// supplied requirements but does not traverse package dependencies.
+///
+/// # Parameters
+///
+/// * `ds` - Root dependency requirements to resolve.
+/// * `snapshots` - Registry package snapshots used as resolution candidates.
+/// * `options` - Resolution mode options.
+///
+/// # Returns
+///
+/// The resolved package graph.
+///
+/// # Examples
+///
+/// ```
+/// let resolution = resolve(
+///     &[],
+///     &[],
+///     ResolutionOptions {
+///         offline: false,
+///         frozen: false,
+///     },
+/// )
+/// .unwrap();
+///
+/// assert!(resolution.roots.is_empty());
+/// ```
 pub fn resolve(
     ds: &[Dependency],
     snapshots: &[RegistrySnapshot],

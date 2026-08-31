@@ -63,12 +63,42 @@ impl PackageManifest {
         })
     }
 
+    /// Gets the package name.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let manifest = PackageManifest::new("example", "1.0.0").unwrap();
+    /// assert_eq!(manifest.name().to_string(), "example");
+    /// ```
+    ///
+    /// Returns a reference to the package name.
     pub fn name(&self) -> &PackageName {
         &self.name
     }
+    /// Gets the package version.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let manifest = PackageManifest::new("example", "1.0.0").unwrap();
+    /// assert_eq!(manifest.version().to_string(), "1.0.0");
+    /// ```
+    ///
+    /// Returns the package version.
     pub fn version(&self) -> PackageVersion {
         self.version.clone()
     }
+    /// Determines whether the package is marked as private.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let manifest = PackageManifest::new("example", "1.0.0").unwrap();
+    /// assert!(!manifest.is_private());
+    /// ```
+    ///
+    /// Returns `true` for private packages and `false` for public packages.
     pub fn is_private(&self) -> bool {
         self.private
     }

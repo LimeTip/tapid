@@ -45,6 +45,14 @@ impl FromStr for PackageName {
 }
 
 impl fmt::Display for PackageName {
+    /// Formats the package version using its canonical representation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let version = PackageVersion::stable(1, 2, 3);
+    /// assert_eq!(version.to_string(), "1.2.3");
+    /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
@@ -59,22 +67,68 @@ impl fmt::Display for PackageName {
 pub struct PackageVersion(semver::Version);
 
 impl PackageVersion {
+    /// Creates a stable package version from its major, minor, and patch components.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let version = PackageVersion::stable(1, 2, 3);
+    /// assert_eq!(version.major(), 1);
+    /// assert_eq!(version.minor(), 2);
+    /// assert_eq!(version.patch(), 3);
+    /// ```
     pub fn stable(major: u64, minor: u64, patch: u64) -> Self {
         Self(semver::Version::new(major, minor, patch))
     }
 
+    /// Gets the major component of the package version.
+    ///
+    /// # Returns
+    ///
+    /// The major version number.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let version = PackageVersion::stable(2, 3, 4);
+    /// assert_eq!(version.major(), 2);
+    /// ```
     pub fn major(&self) -> u64 {
         self.0.major
     }
 
+    /// Returns the minor version component.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let version = PackageVersion::stable(1, 2, 3);
+    /// assert_eq!(version.minor(), 2);
+    /// ```
     pub fn minor(&self) -> u64 {
         self.0.minor
     }
 
+    /// Gets the patch component of the package version.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let version = PackageVersion::stable(1, 2, 3);
+    /// assert_eq!(version.patch(), 3);
+    /// ```
     pub fn patch(&self) -> u64 {
         self.0.patch
     }
 
+    /// Gets the prerelease identifier of the package version.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let version: PackageVersion = "1.2.3-alpha".parse().unwrap();
+    /// assert_eq!(version.prerelease(), Some("alpha"));
+    /// ```
     pub fn prerelease(&self) -> Option<&str> {
         (!self.0.pre.is_empty()).then(|| self.0.pre.as_str())
     }
@@ -83,6 +137,14 @@ impl PackageVersion {
 impl FromStr for PackageVersion {
     type Err = DomainError;
 
+    /// Parses a package version, accepting prerelease identifiers and rejecting build metadata.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let version: PackageVersion = "1.2.3-alpha.1".parse().unwrap();
+    /// assert_eq!(version.prerelease(), Some("alpha.1"));
+    /// ```
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let version = semver::Version::parse(value)
             .map_err(|_| DomainError::InvalidPackageVersion(value.to_owned()))?;
@@ -94,6 +156,14 @@ impl FromStr for PackageVersion {
 }
 
 impl fmt::Display for PackageVersion {
+    /// Formats the package version using its canonical representation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let version = PackageVersion::stable(1, 2, 3);
+    /// assert_eq!(version.to_string(), "1.2.3");
+    /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }

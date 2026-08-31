@@ -29,6 +29,24 @@ impl Drop for ReplaySnapshotGuard {
     }
 }
 
+/// Reconstructs layout input and temporary tree paths from a lockfile.
+///
+/// The returned tree snapshots are preserved when reconstruction succeeds and
+/// cleaned up if reconstruction fails.
+///
+/// # Examples
+///
+/// ```
+/// # fn example(lock: &Lockfile, manifest: &PackageManifest, store: &Store) {
+/// let (layout, trees) = replay_input(lock, manifest, store).expect("valid lockfile");
+/// assert_eq!(layout.instances.len(), trees.len());
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if the lockfile, package contexts, artifact digests, tree
+/// snapshots, or dependency references are invalid or unavailable.
 pub(crate) fn replay_input(
     lock: &Lockfile,
     manifest: &PackageManifest,

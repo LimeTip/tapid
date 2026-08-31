@@ -374,6 +374,18 @@ impl LockedPackage {
         &self.dependencies
     }
 
+    /// Validates the package identity, digests, registry, and optional artifact URL.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # let package: LockedPackage = todo!();
+    /// package.validate().expect("package should be valid");
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when all package fields are valid; otherwise, the validation error.
     fn validate(&self) -> Result<(), LockfileError> {
         self.registry
             .parse::<RegistryOrigin>()
@@ -400,6 +412,31 @@ impl LockedPackage {
         Ok(())
     }
 
+    /// Validates and sets the package's artifact URL.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut package = LockedPackage::new(
+    ///     "https://registry.example.com",
+    ///     "example",
+    ///     "1.0.0",
+    ///     "sha512-abc",
+    ///     "sha512-def",
+    /// ).unwrap();
+    ///
+    /// package
+    ///     .set_artifact_url("https://registry.example.com/example-1.0.0.tgz")
+    ///     .unwrap();
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `url` is not a valid artifact URL.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after storing the URL, or a `LockfileError` describing validation failure.
     pub fn set_artifact_url(&mut self, url: &str) -> Result<(), LockfileError> {
         validation::validate_artifact_url(url)?;
         self.artifact_url = Some(url.to_owned());

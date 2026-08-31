@@ -71,6 +71,19 @@ impl fmt::Display for RegistryPackageId {
 }
 
 impl RegistrySnapshot {
+    /// Normalizes raw registry metadata into a validated registry snapshot.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let raw = RawRegistrySnapshot {
+    ///     registry: "https://registry.npmjs.org".to_owned(),
+    ///     packages: Vec::new(),
+    /// };
+    ///
+    /// let snapshot = RegistrySnapshot::normalize(raw).unwrap();
+    /// assert!(snapshot.packages().is_empty());
+    /// ```
     pub fn normalize(raw: RawRegistrySnapshot) -> Result<Self, MetadataError> {
         let registry: RegistryOrigin = raw
             .registry

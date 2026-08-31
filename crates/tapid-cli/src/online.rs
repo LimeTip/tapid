@@ -84,6 +84,20 @@ pub(crate) fn dep_parts(name: &str) -> Result<(RegistryOrigin, PackageName), Str
             .map_err(|e: tapid_core::DomainError| e.to_string())?,
     ))
 }
+/// Loads a registry fixture from a JSON file and validates that it contains packages.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read, the JSON is invalid, or the fixture contains no packages.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+///
+/// let result = fixture(Path::new("missing-registry-fixture.json"));
+/// assert!(result.is_err());
+/// ```
 fn fixture(path: &Path) -> Result<Fixture, String> {
     let f: Fixture = serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
         .map_err(|e| format!("invalid registry fixture: {e}"))?;
@@ -93,6 +107,26 @@ fn fixture(path: &Path) -> Result<Fixture, String> {
     Ok(f)
 }
 
+/// Fetches package metadata from a supported registry and converts it into package records.
+///
+/// # Parameters
+///
+/// * `allow_missing_integrity` permits npm metadata entries without an integrity value.
+///
+/// # Returns
+///
+/// A list of package records derived from the registry metadata, or an error describing
+/// an unsupported registry or metadata fetch failure.
+///
+/// # Examples
+///
+/// ```no_run
+/// # let transport: HttpsTransport = unimplemented!();
+/// # let registry: RegistryOrigin = unimplemented!();
+/// # let name: PackageName = unimplemented!();
+/// let records = remote_records(&transport, &registry, &name, false)?;
+/// # Ok::<(), String>(())
+/// ```
 fn remote_records(
     transport: &HttpsTransport,
     registry: &RegistryOrigin,
@@ -126,11 +160,16 @@ fn remote_records(
         .collect())
 }
 
-/// Converts only package versions whose dependency requirements Tapid can resolve.
+/// Filters package metadata to versions with parseable dependency names and requirements.
 ///
-/// Registry metadata contains obsolete versions and requirement syntaxes that are
-/// irrelevant when a newer compatible version is selected. Keeping such versions
-/// out of the candidate set prevents historical metadata from aborting resolution.
+/// Versions containing dependency syntax that cannot be parsed are excluded.
+///
+/// # Examples
+///
+/// ```
+/// let versions = usable_versions(Vec::new());
+/// assert!(versions.is_empty());
+/// ```
 fn usable_versions(packages: Vec<PackageRecord>) -> Vec<PackageVersionMetadata> {
     let mut versions = Vec::new();
     for package in packages {
@@ -161,8 +200,22 @@ fn usable_versions(packages: Vec<PackageRecord>) -> Vec<PackageVersionMetadata> 
 type PackageRecordKey = (String, String, String);
 type ResolvedRecords = (Resolution, BTreeMap<PackageRecordKey, PackageRecord>);
 
-/// Resolves incrementally, fetching metadata only when the resolver reaches a
-/// package on its currently selected graph.
+/// Resolves dependencies incrementally by fetching metadata only for packages required to continue resolution.
+///
+/// Metadata is fetched at most once for each registry and package pair. Returns the resolved graph and
+/// fetched package records, or an error if resolution or metadata retrieval fails.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (resolution, records) = resolve_with_fetch(&roots, |registry, name| {
+///     fetch_package_records(registry, name)
+/// )?;
+/// ```
+///
+/// # Returns
+///
+/// A resolved dependency graph and the package records fetched during resolution.
 fn resolve_with_fetch<F>(roots: &[Dependency], mut fetch: F) -> Result<ResolvedRecords, String>
 where
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
@@ -225,6 +278,29 @@ where
     }
 }
 
+/// Resolves project dependencies, fetches and verifies their package artifacts, and builds lockfile and layout data.
+///
+/// # Examples
+///
+/// ```no_run
+/// # let project = std::path::Path::new(".");
+/// # let manifest: PackageManifest = unimplemented!();
+/// # let store: Store = unimplemented!();
+/// let (lockfile, layout, trees) = resolve_and_fetch(
+///     project,
+///     &manifest,
+///     &store,
+///     None,
+///     false,
+/// )?;
+/// # let _: (Lockfile, LayoutInput, std::collections::BTreeMap<String, std::path::PathBuf>) =
+/// #     (lockfile, layout, trees);
+/// # Ok::<(), String>(())
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if dependency metadata or artifacts cannot be read, fetched, parsed, verified, extracted, or stored.
 pub fn resolve_and_fetch(
     project: &Path,
     manifest: &PackageManifest,
@@ -542,6 +618,19 @@ mod tests {
         assert_eq!(n.to_string(), "foo");
     }
 
+    /// Creates a package record for `framer-motion` with an optional `popmotion` dependency.
+    
+    ///
+    
+    /// # Examples
+    
+    ///
+    
+    /// ```
+    
+    /// let package = record("1.0.0", Some("^2.0.0"));
+    
+    /// ```
     fn record(version: &str, dependency_requirement: Option<&str>) -> PackageRecord {
         named_record(
             "framer-motion",
@@ -552,6 +641,17 @@ mod tests {
         )
     }
 
+    /// Creates an npm package record with the specified version and dependencies.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let record = named_record("example", "1.0.0", &[]);
+    /// assert_eq!(record.name.to_string(), "example");
+    /// assert_eq!(record.version.to_string(), "1.0.0");
+    /// ```
+    ///
+    /// `dependencies` contains package names paired with their version requirements.
     fn named_record(name: &str, version: &str, dependencies: &[(&str, &str)]) -> PackageRecord {
         PackageRecord {
             registry: NPM.parse().unwrap(),
