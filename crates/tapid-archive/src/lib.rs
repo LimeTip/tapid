@@ -178,12 +178,36 @@ fn extract_entries(
             .create_new(true)
             .open(&target)?;
         io::copy(&mut entry, &mut out)?;
+        apply_portable_file_mode(entry.header().mode()?, &target)?;
         out.sync_all()?;
     }
     Ok(())
 }
 
+#[cfg(unix)]
+fn apply_portable_file_mode(archive_mode: u32, target: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Preserve only the portable executable distinction. Fixed modes avoid
+    // restoring archive-controlled ownership-style or privilege permissions.
+    let mode = if archive_mode & 0o111 == 0 {
+        0o644
+    } else {
+        0o755
+    };
+    fs::set_permissions(target, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn apply_portable_file_mode(_archive_mode: u32, _target: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// Hash a tree using sorted relative paths and explicit type/length framing.
+///
+/// On Unix, executable and non-executable regular files are distinct while all
+/// other permission bits are ignored. Platforms without Unix executable bits
+/// retain the non-executable regular-file framing.
 pub fn canonical_tree_digest(root: &Path) -> io::Result<String> {
     let mut files = Vec::new();
     collect_tree(root, root, &mut files)?;
@@ -225,7 +249,7 @@ fn collect_tree(
             out.push((rel.clone(), 1, Vec::new()));
             collect_tree(root, &p, out)?;
         } else if m.is_file() {
-            out.push((rel, 0, fs::read(&p)?));
+            out.push((rel, portable_file_kind(&m), fs::read(&p)?));
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -234,6 +258,18 @@ fn collect_tree(
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn portable_file_kind(metadata: &fs::Metadata) -> u8 {
+    use std::os::unix::fs::PermissionsExt;
+
+    u8::from(metadata.permissions().mode() & 0o111 != 0) * 2
+}
+
+#[cfg(not(unix))]
+fn portable_file_kind(_metadata: &fs::Metadata) -> u8 {
+    0
 }
 
 /// The kind of an archive member. Archives must not contain device nodes or
@@ -571,6 +607,44 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn extraction_strips_privilege_bits_and_normalizes_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("package/tool").unwrap();
+            header.set_size(4);
+            header.set_mode(0o7700);
+            header.set_cksum();
+            builder.append(&header, &b"tool"[..]).unwrap();
+            builder.finish().unwrap();
+        }
+        let root = std::env::temp_dir().join(format!(
+            "tapid-archive-privilege-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let dest = root.join("tree");
+
+        extract_to(&bytes, ArchiveFormat::Tar, &dest, ArchiveLimits::default()).unwrap();
+
+        let mode = fs::metadata(dest.join("package/tool"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o755);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn extraction_rejects_traversal_before_writing() {
         let bytes = vec![0u8; 32];
@@ -607,6 +681,38 @@ mod tests {
         let executable_digest = canonical_tree_digest(&root).unwrap();
 
         assert_ne!(plain, executable_digest);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_tree_digest_ignores_non_executable_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "tapid-archive-portable-mode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let file = root.join("tool");
+        fs::write(&file, b"tool").unwrap();
+
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        let private_plain = canonical_tree_digest(&root).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o664)).unwrap();
+        let shared_plain = canonical_tree_digest(&root).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o700)).unwrap();
+        let private_executable = canonical_tree_digest(&root).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        let shared_executable = canonical_tree_digest(&root).unwrap();
+
+        assert_eq!(private_plain, shared_plain);
+        assert_eq!(private_executable, shared_executable);
+        assert_ne!(private_plain, private_executable);
         fs::remove_dir_all(root).unwrap();
     }
 }
