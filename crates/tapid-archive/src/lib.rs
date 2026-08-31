@@ -190,6 +190,11 @@ fn extract_entries(
         let archive_mode = entry.header().mode()?;
         apply_portable_file_mode(archive_mode, &target)?;
         if archive_mode & 0o111 != 0 {
+            if normalized.bytes().any(|byte| matches!(byte, b'\n' | b'\r')) {
+                return Err(ExtractError::InvalidArchive(
+                    "executable entry path contains a line break".into(),
+                ));
+            }
             executable_paths.push(normalized);
         }
         out.sync_all()?;
@@ -711,6 +716,43 @@ mod tests {
             "sha256-011c8f7a278748278e741f3bb6d54af8cdaa14ee84b263bcd68f555fc41e2393"
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn extraction_rejects_executable_paths_with_line_breaks() {
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("package/tool\nname").unwrap();
+            header.set_size(4);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append(&header, &b"tool"[..]).unwrap();
+            builder.finish().unwrap();
+        }
+        let root = std::env::temp_dir().join(format!(
+            "tapid-archive-line-break-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let destination = root.join("tree");
+        fs::create_dir(&root).unwrap();
+
+        let error = extract_to(
+            &bytes,
+            ArchiveFormat::Tar,
+            &destination,
+            ArchiveLimits::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("line break"), "{error}");
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
