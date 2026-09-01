@@ -1,0 +1,12 @@
+{
+  "name": "tapid-public-release-consumer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "verify": "node verify.mjs"
+  },
+  "dependencies": {
+    "is-number": "7.0.0"
+  }
+}

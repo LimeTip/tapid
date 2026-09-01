@@ -1,0 +1,217 @@
+name: Public release smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Resolve the current stable release or verify an explicit tag"
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - tag
+      tag:
+        description: "Explicit v0.x.y tag (required in tag mode; empty in stable mode)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-release-smoke-${{ inputs.mode }}-${{ inputs.tag || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  verify-release:
+    name: Resolve and verify public release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Check out public verifier
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate requested release mode
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            stable)
+              test -z "$REQUESTED_TAG" || {
+                echo "tag must be empty in stable mode" >&2
+                exit 1
+              }
+              ;;
+            tag)
+              [[ "$REQUESTED_TAG" =~ ^v0\.[0-9]+\.[0-9]+$ ]] || {
+                echo "tag mode requires an explicit v0.x.y tag" >&2
+                exit 1
+              }
+              ;;
+            *)
+              echo "unsupported release mode" >&2
+              exit 1
+              ;;
+          esac
+      - name: Verify unauthenticated public evidence
+        id: release
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          args=(--mode "$MODE" --skip-website --output public-release-evidence.json)
+          if [[ "$MODE" == tag ]]; then
+            args+=(--tag "$REQUESTED_TAG")
+          fi
+          python3 .github/release/public_release.py "${args[@]}" >/dev/null
+          version="$(jq -er '.release.version' public-release-evidence.json)"
+          resolved_tag="$(jq -er '.release.tag' public-release-evidence.json)"
+          [[ "$version" =~ ^0\.[0-9]+\.[0-9]+$ ]]
+          test "$resolved_tag" = "v$version"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$resolved_tag" >> "$GITHUB_OUTPUT"
+      - name: Upload public release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-release-evidence
+          path: public-release-evidence.json
+          if-no-files-found: error
+          retention-days: 14
+
+  unix-consumer:
+    name: Unix public installer and consumer replay
+    needs: verify-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out consumer probe
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install and replay with the public binary
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          EXPECTED_VERSION: ${{ needs.verify-release.outputs.version }}
+          EXPECTED_TAG: ${{ needs.verify-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d "$RUNNER_TEMP/tapid-public-unix.XXXXXX")"
+          trap 'rm -rf "$root"' EXIT
+          export HOME="$root/home"
+          install_root="$root/bin"
+          project="$root/project"
+          store="$root/store"
+          mkdir -p "$HOME" "$install_root" "$project" "$store"
+
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 60 \
+            https://tapid.dev/install.sh -o "$root/install.sh"
+          if [[ "$MODE" == stable ]]; then
+            sh "$root/install.sh" --install-dir "$install_root"
+          else
+            sh "$root/install.sh" --version "$EXPECTED_TAG" --install-dir "$install_root"
+          fi
+
+          binary="$install_root/tapid"
+          test -f "$binary" && test ! -L "$binary"
+          test "$("$binary" --version)" = "tapid $EXPECTED_VERSION"
+
+          cp tests/public-release-consumer/package.json \
+            tests/public-release-consumer/verify.mjs "$project/"
+          "$binary" install --project-dir "$project" --store-dir "$store"
+          (cd "$project" && npm run verify)
+          rm -rf "$project/node_modules"
+          test ! -e "$project/node_modules"
+          "$binary" install --frozen --project-dir "$project" --store-dir "$store"
+          (cd "$project" && npm run verify)
+
+          printf '{"schema":"tapid-public-smoke-result-v1","platform":"unix","mode":"%s","tag":"%s","version":"%s","install":"passed","consumer":"passed","frozen_replay":"passed"}\n' \
+            "$MODE" "$EXPECTED_TAG" "$EXPECTED_VERSION" > unix-result.json
+      - name: Upload redacted Unix result
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-smoke-unix
+          path: unix-result.json
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-installer:
+    name: Windows public installer (${{ matrix.platform }})
+    needs: verify-release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            platform: windows-x86_64
+          - runner: windows-11-arm
+            platform: windows-aarch64
+    steps:
+      - name: Install and verify the public binary
+        shell: pwsh
+        env:
+          MODE: ${{ inputs.mode }}
+          EXPECTED_VERSION: ${{ needs.verify-release.outputs.version }}
+          EXPECTED_TAG: ${{ needs.verify-release.outputs.tag }}
+          RESULT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'tapid-public-install.ps1'
+          $installDir = Join-Path $env:RUNNER_TEMP 'tapid-public-bin'
+          Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 'https://tapid.dev/install.ps1' -OutFile $installer
+
+          if ($env:MODE -eq 'stable') {
+            & $installer -InstallDir $installDir
+          } else {
+            & $installer -Version $env:EXPECTED_TAG -InstallDir $installDir
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $binary = Join-Path $installDir 'tapid.exe'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw 'public installer did not create tapid.exe'
+          }
+          $item = Get-Item -LiteralPath $binary -Force
+          if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'installed tapid.exe must be a regular file, not a reparse point'
+          }
+          $reportedVersion = (& $binary --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($reportedVersion -ne "tapid $env:EXPECTED_VERSION") {
+            throw "installed version '$reportedVersion' did not match verified public release"
+          }
+
+          $result = [ordered]@{
+            schema = 'tapid-public-smoke-result-v1'
+            platform = $env:RESULT_PLATFORM
+            mode = $env:MODE
+            tag = $env:EXPECTED_TAG
+            version = $env:EXPECTED_VERSION
+            install = 'passed'
+            version_check = 'passed'
+          }
+          $result | ConvertTo-Json -Compress | Set-Content -Encoding ascii windows-result.json
+      - name: Upload redacted Windows result
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-smoke-${{ matrix.platform }}
+          path: windows-result.json
+          if-no-files-found: error
+          retention-days: 14
