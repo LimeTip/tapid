@@ -164,6 +164,11 @@ class InstallerScriptTests(unittest.TestCase):
             advance,
         )
 
+    def test_windows_release_member_listing_remains_an_array_for_one_member(self):
+        powershell = INSTALL_PS1.read_text()
+        self.assertIn("$members = @(& tar.exe -tzf $archivePath)", powershell)
+        self.assertNotIn("$members = & tar.exe -tzf $archivePath", powershell)
+
     def test_windows_installer_detects_the_os_architecture(self):
         powershell = INSTALL_PS1.read_text()
         self.assertIn("RuntimeInformation]::OSArchitecture", powershell)
