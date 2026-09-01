@@ -92,6 +92,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain and release target
         uses: dtolnay/rust-toolchain@stable
         with:
