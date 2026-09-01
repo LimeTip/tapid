@@ -36,7 +36,7 @@ The deterministic plan computes the topological publication order. Do not replac
 
 ## Package-closure preflight
 
-Issue #28 is a hard prerequisite. From a clean checkout at the exact planned commit, run:
+Issue #28 and registry-resolved standalone packaging are explicit gates. From a clean checkout at the exact planned commit, run:
 
 ```bash
 cargo package --workspace --locked
@@ -46,9 +46,9 @@ git diff --check
 git status --short --branch
 ```
 
-Inspect the packaged `tapid` manifest and confirm that internal path dependencies were rewritten to explicit registry version requirements. Confirm normal registry resolution, not only local workspace compilation. Hosted run `33533691942` is useful historical evidence but does not replace this exact-commit gate.
+Inspect the packaged manifests and confirm internal path dependencies were rewritten with explicit registry version requirements. Hosted run `33533691942` is useful historical evidence but does not replace this exact-commit gate.
 
-If packaging fails because a changed internal dependency is not yet published, ensure the dependency and all required direct dependents are in the reviewed closure. Do not use `--allow-dirty`, `--no-verify`, or an unrequested manual publication to claim the gate passed.
+Before the planned dependency versions exist on crates.io, standalone packaging of a dependent may fail only because a required version in the reviewed closure is not yet registry-visible. Record that expected pre-publication result. Build and hash proposed archives through the planner's isolated pre-publication path, publish sequentially, and rerun normal `cargo package -p tapid --locked` after the dependency closure is visible. Do not use `--allow-dirty`, hide any unrelated verification failure, or claim the final registry-resolved gate passed before it actually does.
 
 ## Create the read-only plan
 

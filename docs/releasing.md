@@ -31,7 +31,7 @@ Do not combine the environments, credentials, or approvals. Keep branch protecti
 2. Choose a `0.x.y` version and matching `v0.x.y` tag. Update every changed publishable crate's package version. For a `0.x` dependency, update direct dependents whenever their requirement does not accept the new version. In particular, `^0.0.N` does not accept `0.0.(N+1)`. Bump a dependent package if that dependent must be republished.
 3. Update the root lockfile through Cargo. Also regenerate every affected nested lockfile through Cargo, including `tests/integration/Cargo.lock`. Never hand-edit a lockfile.
 4. Add `docs/releases/<version>.md` and make package metadata and release documentation agree on the version.
-5. Run the source and package gates from a clean tree:
+5. Run the source and pre-publication package gates from a clean tree:
 
    ```bash
    python3 scripts/check_architecture.py
@@ -45,7 +45,7 @@ Do not combine the environments, credentials, or approvals. Keep branch protecti
    git status --short --branch
    ```
 
-6. Treat issue #28 as a package-closure gate. Confirm that `cargo package --workspace --locked` and the separate `tapid` package both resolve registry dependencies, and inspect the packaged `tapid` manifest to confirm internal path dependencies were rewritten with explicit registry version requirements. Hosted run `33533691942` is prior evidence, not a substitute for fresh evidence at the release commit. Stop if the issue reproduces or has not been dispositioned for the exact commit.
+6. Treat issue #28 and standalone `tapid` packaging as explicit evidence gates. `cargo package --workspace --locked` must pass and the packaged manifests must contain explicit registry version requirements for internal path dependencies. Before those exact internal versions are published, `cargo package -p tapid --locked` may fail only because crates.io does not yet contain a dependency version that is included in the reviewed publication closure. Record that expected pre-publication blocker rather than claiming the standalone package passed. Any API, manifest, lockfile, or requirement failure remains blocking. After the dependency closure is published, rerun `cargo package -p tapid --locked` and require it to pass before release completion. Hosted run `33533691942` is prior evidence, not a substitute for fresh evidence at the release commit.
 7. Merge all release preparation to `main`. Re-run the gates against the exact resulting commit. Do not release from an unmerged branch or dirty worktree.
 
 ## Phase 2: Generate and review dry-run plans
