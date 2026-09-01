@@ -15,6 +15,17 @@ on:
         description: "Explicit v0.x.y tag (required in tag mode; empty in stable mode)"
         required: false
         type: string
+  workflow_call:
+    inputs:
+      mode:
+        description: "Resolve the current stable release or verify an explicit tag"
+        required: true
+        type: string
+      tag:
+        description: "Explicit v0.x.y tag (required in tag mode; empty in stable mode)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read

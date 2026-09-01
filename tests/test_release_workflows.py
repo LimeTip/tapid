@@ -35,6 +35,20 @@ class ReleaseWorkflowTests(unittest.TestCase):
             with self.subTest(contract=contract):
                 self.assertIn(contract, workflow)
 
+    def test_public_smoke_is_reusable_and_runs_after_publication(self):
+        smoke = (
+            ROOT / ".github" / "workflows" / "release-public-smoke.yml"
+        ).read_text()
+        publication = (
+            ROOT / ".github" / "workflows" / "release-publication.yml"
+        ).read_text()
+
+        self.assertIn("workflow_call:", smoke)
+        self.assertIn("uses: ./.github/workflows/release-public-smoke.yml", publication)
+        self.assertIn("needs: advance-stable", publication)
+        self.assertIn("mode: tag", publication)
+        self.assertIn("tag: ${{ inputs.tag }}", publication)
+
 
 if __name__ == "__main__":
     unittest.main()

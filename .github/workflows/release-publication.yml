@@ -394,3 +394,13 @@ jobs:
               publication/release-manifest.json "$target" "$RELEASE_TAG" >/dev/null
           done
           gh release edit "$RELEASE_TAG" --draft=false --latest
+
+  public-smoke:
+    name: Verify published release on public consumers
+    needs: advance-stable
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-public-smoke.yml
+    with:
+      mode: tag
+      tag: ${{ inputs.tag }}
