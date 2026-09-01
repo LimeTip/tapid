@@ -115,6 +115,47 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertNotIn('"$base/manifest.json"', shell)
         self.assertNotIn('"$base/manifest.json"', powershell)
 
+    def test_release_builds_every_installer_platform(self):
+        workflow = (ROOT / ".github" / "workflows" / "release-publication.yml").read_text()
+        ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        expected_targets = {
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu",
+            "aarch64-pc-windows-msvc",
+            "x86_64-pc-windows-msvc",
+        }
+        for target in expected_targets:
+            self.assertIn(f"target: {target}", workflow)
+        self.assertIn("expected six release artifacts", workflow)
+        self.assertGreaterEqual(workflow.count("ref: ${{ inputs.commit }}"), 2)
+        self.assertIn('rustc -vV | sed -n \'s/^host: //p\'', workflow)
+        self.assertIn('"$staging/$BINARY" --version', workflow)
+        self.assertIn('gh release create "$RELEASE_TAG" --verify-tag --draft', workflow)
+        self.assertIn('gh release edit "$RELEASE_TAG" --draft=false --latest', workflow)
+        for target in expected_targets:
+            self.assertIn(
+                f'"tapid-${{{{ inputs.version }}}}-{target}.tar.gz"', workflow
+            )
+        for runner in ("ubuntu-24.04-arm", "windows-11-arm"):
+            self.assertIn(f"runner: {runner}", ci_workflow)
+
+    def test_release_publication_serializes_each_tag_and_rechecks_freshness(self):
+        workflow = (ROOT / ".github" / "workflows" / "release-publication.yml").read_text()
+        self.assertIn("group: protected-release-${{ inputs.tag }}", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        advance = workflow.split("  advance-stable:", 1)[1]
+        upload = advance.index("gh release upload")
+        final_verify = advance.rindex("scripts/bootstrap_verifier.py")
+        publish = advance.index('gh release edit "$RELEASE_TAG" --draft=false --latest')
+        self.assertGreater(final_verify, upload)
+        self.assertLess(final_verify, publish)
+
+    def test_windows_installer_detects_the_os_architecture(self):
+        powershell = INSTALL_PS1.read_text()
+        self.assertIn("RuntimeInformation]::OSArchitecture", powershell)
+        self.assertNotIn("$env:PROCESSOR_ARCHITECTURE", powershell)
 
     def test_stable_discovery_endpoint_is_provider_configurable(self):
         install_text = INSTALL.read_text()
