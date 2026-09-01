@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -23,11 +24,14 @@ class ReleasePublicationTests(unittest.TestCase):
                                  serialization.NoEncryption()).decode()
 
     def run_manifest(self, env, artifact, *extra):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        created_at = (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        expires_at = (now + timedelta(days=30)).isoformat().replace("+00:00", "Z")
         return subprocess.run(
             [
                 "python3", str(MANIFEST), "--version", "0.0.7", "--tag", "v0.0.7",
                 "--commit", "0123456789abcdef0123456789abcdef01234567",
-                "--created-at", "2026-08-27T10:00:00Z", "--expires-at", "2026-09-27T10:00:00Z",
+                "--created-at", created_at, "--expires-at", expires_at,
                 "--base-url", "https://downloads.example.test/v0.0.7",
                 "--artifact", f"x86_64-unknown-linux-gnu={artifact}",
                 "--output", str(Path(artifact).parent / "manifest.json"), *extra,
@@ -75,6 +79,79 @@ class ReleasePublicationTests(unittest.TestCase):
             result = self.run_manifest(env, str(artifact))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("RELEASE_SIGNING_KEY", result.stderr)
+
+    def test_manifest_rejects_malformed_or_noncanonical_freshness_timestamps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "tapid-0.0.7-x86_64-unknown-linux-gnu.tar.gz"
+            artifact.write_bytes(b"bytes")
+            env = os.environ.copy()
+            env["RELEASE_SIGNING_KEY"] = self.generated_key(directory)
+            env["RELEASE_SIGNING_KEY_ID"] = "test-key"
+            cases = (
+                ("not-a-time", "2026-09-27T10:00:00Z"),
+                ("2026-08-27T10:00:00", "2026-09-27T10:00:00Z"),
+                ("2026-08-27T10:00:00+00:00", "2026-09-27T10:00:00Z"),
+            )
+            for created_at, expires_at in cases:
+                with self.subTest(created_at=created_at, expires_at=expires_at):
+                    result = self.run_manifest(
+                        env,
+                        str(artifact),
+                        "--created-at",
+                        created_at,
+                        "--expires-at",
+                        expires_at,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("canonical UTC RFC3339", result.stderr)
+
+    def test_manifest_requires_expiry_after_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "tapid-0.0.7-x86_64-unknown-linux-gnu.tar.gz"
+            artifact.write_bytes(b"bytes")
+            env = os.environ.copy()
+            env["RELEASE_SIGNING_KEY"] = self.generated_key(directory)
+            env["RELEASE_SIGNING_KEY_ID"] = "test-key"
+            for expires_at in ("2026-08-27T10:00:00Z", "2026-08-27T09:59:59Z"):
+                with self.subTest(expires_at=expires_at):
+                    result = self.run_manifest(
+                        env,
+                        str(artifact),
+                        "--expires-at",
+                        expires_at,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("expires_at must be later than created_at", result.stderr)
+
+    def test_manifest_requires_a_current_freshness_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "tapid-0.0.7-x86_64-unknown-linux-gnu.tar.gz"
+            artifact.write_bytes(b"bytes")
+            env = os.environ.copy()
+            env["RELEASE_SIGNING_KEY"] = self.generated_key(directory)
+            env["RELEASE_SIGNING_KEY_ID"] = "test-key"
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            future = self.run_manifest(
+                env,
+                str(artifact),
+                "--created-at",
+                (now + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+                "--expires-at",
+                (now + timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+            )
+            self.assertNotEqual(future.returncode, 0)
+            self.assertIn("created_at must not be in the future", future.stderr)
+
+            expired = self.run_manifest(
+                env,
+                str(artifact),
+                "--created-at",
+                (now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+                "--expires-at",
+                (now - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            )
+            self.assertNotEqual(expired.returncode, 0)
+            self.assertIn("expires_at must be in the future", expired.stderr)
 
     def test_rust_verifier_accepts_manifest_signed_by_production_protocol(self):
         with tempfile.TemporaryDirectory() as directory:

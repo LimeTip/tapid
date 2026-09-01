@@ -35,6 +35,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: protected-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
 jobs:
   prepare-source:
     name: Validate immutable release source
@@ -124,11 +128,21 @@ jobs:
             echo "release version $VERSION does not match Cargo package version $actual_version" >&2
             exit 1
           }
+          rust_host="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$rust_host" = "$TARGET" || {
+            echo "runner Rust host $rust_host does not match release target $TARGET" >&2
+            exit 1
+          }
           rustup target add "$TARGET"
           cargo build --release --locked --bin tapid --target "$TARGET"
           staging="$(mktemp -d)"
           trap 'rm -rf "$staging"' EXIT
           install -m 0755 "target/$TARGET/release/$BINARY" "$staging/$BINARY"
+          reported_version="$("$staging/$BINARY" --version | tr -d '\r')"
+          test "$reported_version" = "tapid $VERSION" || {
+            echo "packaged binary reported '$reported_version', expected 'tapid $VERSION'" >&2
+            exit 1
+          }
           mkdir -p release-artifacts
           tar -czf "release-artifacts/tapid-${VERSION}-${TARGET}.tar.gz" -C "$staging" "$BINARY"
           test -s "release-artifacts/tapid-${VERSION}-${TARGET}.tar.gz"
@@ -167,10 +181,26 @@ jobs:
           test -n "${RELEASE_SIGNING_KEY:-}" || { echo 'Signing secret is missing' >&2; exit 1; }
           test -n "${RELEASE_SIGNING_KEY_ID:-}" || { echo 'Signing key id is missing' >&2; exit 1; }
           mapfile -t files < <(find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print | sort)
-          test "${#files[@]}" -gt 0 || { echo 'No required release artifacts found' >&2; exit 1; }
+          expected_names=(
+            "tapid-${{ inputs.version }}-aarch64-apple-darwin.tar.gz"
+            "tapid-${{ inputs.version }}-aarch64-pc-windows-msvc.tar.gz"
+            "tapid-${{ inputs.version }}-aarch64-unknown-linux-gnu.tar.gz"
+            "tapid-${{ inputs.version }}-x86_64-apple-darwin.tar.gz"
+            "tapid-${{ inputs.version }}-x86_64-pc-windows-msvc.tar.gz"
+            "tapid-${{ inputs.version }}-x86_64-unknown-linux-gnu.tar.gz"
+          )
+          test "${#files[@]}" -eq "${#expected_names[@]}" || {
+            echo "expected six release artifacts, found ${#files[@]}" >&2
+            exit 1
+          }
           args=()
-          for file in "${files[@]}"; do
+          for index in "${!files[@]}"; do
+            file=${files[$index]}
             name=$(basename "$file")
+            test "$name" = "${expected_names[$index]}" || {
+              echo "unexpected release artifact '$name', expected '${expected_names[$index]}'" >&2
+              exit 1
+            }
             case "$name" in
               tapid-${{ inputs.version }}-[A-Za-z0-9._-]*.tar.gz|tapid-${{ inputs.version }}-[A-Za-z0-9._-]*.zip) ;;
               *) echo "invalid release artifact filename: $name" >&2; exit 1 ;;
@@ -224,6 +254,18 @@ jobs:
           cargo run --locked --quiet --manifest-path .github/release/verifier/Cargo.toml -- \
             publication/release-manifest.json crates/tapid-signatures/data/release-keyring.json \
             '${{ inputs.version }}' '${{ inputs.tag }}' '${{ inputs.commit }}'
+          targets=(
+            aarch64-apple-darwin
+            aarch64-pc-windows-msvc
+            aarch64-unknown-linux-gnu
+            x86_64-apple-darwin
+            x86_64-pc-windows-msvc
+            x86_64-unknown-linux-gnu
+          )
+          for target in "${targets[@]}"; do
+            python3 scripts/bootstrap_verifier.py \
+              publication/release-manifest.json "$target" '${{ inputs.tag }}' >/dev/null
+          done
       - name: Build ordered provider-neutral stable metadata
         env:
           ENDPOINTS: ${{ inputs.manifest_endpoints }}
@@ -243,10 +285,58 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t artifacts < <(find release-artifacts -maxdepth 1 -type f -name '*.tar.gz' -print | sort)
+          expected_assets=(
+            "release-manifest.json"
+            "stable.json"
+            "tapid-${{ inputs.version }}-aarch64-apple-darwin.tar.gz"
+            "tapid-${{ inputs.version }}-aarch64-pc-windows-msvc.tar.gz"
+            "tapid-${{ inputs.version }}-aarch64-unknown-linux-gnu.tar.gz"
+            "tapid-${{ inputs.version }}-x86_64-apple-darwin.tar.gz"
+            "tapid-${{ inputs.version }}-x86_64-pc-windows-msvc.tar.gz"
+            "tapid-${{ inputs.version }}-x86_64-unknown-linux-gnu.tar.gz"
+          )
           test "${#artifacts[@]}" -eq 6 || { echo "expected six release artifacts, found ${#artifacts[@]}" >&2; exit 1; }
+          for index in "${!artifacts[@]}"; do
+            expected_index=$((index + 2))
+            name=$(basename "${artifacts[$index]}")
+            test "$name" = "${expected_assets[$expected_index]}" || {
+              echo "unexpected release artifact '$name', expected '${expected_assets[$expected_index]}'" >&2
+              exit 1
+            }
+          done
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --title "Tapid $RELEASE_TAG" --generate-notes
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Tapid $RELEASE_TAG" --generate-notes
+          else
+            test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .draft)" = true || {
+              echo "release $RELEASE_TAG already exists publicly; refusing to replace its assets" >&2
+              exit 1
+            }
           fi
           gh release upload "$RELEASE_TAG" \
             "${artifacts[@]}" \
             publication/release-manifest.json publication/stable.json --clobber
+          mapfile -t published_assets < <(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.assets[].name' | sort)
+          test "${#published_assets[@]}" -eq "${#expected_assets[@]}" || {
+            echo "draft release contains ${#published_assets[@]} assets, expected ${#expected_assets[@]}" >&2
+            exit 1
+          }
+          for index in "${!expected_assets[@]}"; do
+            test "${published_assets[$index]}" = "${expected_assets[$index]}" || {
+              echo "unexpected draft asset '${published_assets[$index]}', expected '${expected_assets[$index]}'" >&2
+              exit 1
+            }
+          done
+          # Recheck freshness after upload and inspection, immediately before publication.
+          targets=(
+            aarch64-apple-darwin
+            aarch64-pc-windows-msvc
+            aarch64-unknown-linux-gnu
+            x86_64-apple-darwin
+            x86_64-pc-windows-msvc
+            x86_64-unknown-linux-gnu
+          )
+          for target in "${targets[@]}"; do
+            python3 scripts/bootstrap_verifier.py \
+              publication/release-manifest.json "$target" "$RELEASE_TAG" >/dev/null
+          done
+          gh release edit "$RELEASE_TAG" --draft=false --latest
