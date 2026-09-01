@@ -55,11 +55,12 @@ jobs:
       - name: Build package archives and recompute the read-only plan
         env:
           PLAN_DIR: ${{ runner.temp }}/crates-publication-preflight
+          SOURCE_COMMIT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
           mkdir -p "$PLAN_DIR"
           python3 scripts/crates_release.py plan \
-            --commit '${{ inputs.commit }}' \
+            --commit "$SOURCE_COMMIT" \
             --output "$PLAN_DIR/recomputed-plan.json"
       - name: Bind the plan to the reviewed digest
         id: plan-state
@@ -98,11 +99,13 @@ jobs:
       - name: Exercise the no-mutation execution path
         env:
           PLAN_DIR: ${{ runner.temp }}/crates-publication-preflight
+          REVIEWED_DIGEST: ${{ inputs.plan_digest }}
+          SOURCE_COMMIT: ${{ inputs.commit }}
         run: |
           python3 .github/release/crates_publish.py \
             --plan "$PLAN_DIR/crates-plan.json" \
-            --expect-digest '${{ inputs.plan_digest }}' \
-            --commit '${{ inputs.commit }}' \
+            --expect-digest "$REVIEWED_DIGEST" \
+            --commit "$SOURCE_COMMIT" \
             --progress "$PLAN_DIR/dry-run-progress.json" \
             --dry-run
       - name: Upload reviewed preflight evidence
@@ -149,11 +152,13 @@ jobs:
         env:
           REVIEWED_DIR: ${{ runner.temp }}/crates-publication-reviewed
           MUTATION_DIR: ${{ runner.temp }}/crates-publication-mutation
+          REVIEWED_DIGEST: ${{ inputs.plan_digest }}
+          SOURCE_COMMIT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
           mkdir -p "$MUTATION_DIR"
           python3 scripts/crates_release.py plan \
-            --commit '${{ inputs.commit }}' \
+            --commit "$SOURCE_COMMIT" \
             --output "$MUTATION_DIR/recomputed-plan.json"
           python3 - <<'PY'
           import json
@@ -166,7 +171,7 @@ jobs:
 
           reviewed = json.loads(Path(os.environ["REVIEWED_DIR"], "crates-plan.json").read_text())
           recomputed = json.loads(Path(os.environ["MUTATION_DIR"], "recomputed-plan.json").read_text())
-          expected = "${{ inputs.plan_digest }}"
+          expected = os.environ["REVIEWED_DIGEST"]
           completed = crates_publish.validate_recomputed_plan(
               reviewed, recomputed, expected
           )
@@ -182,11 +187,13 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
           REVIEWED_DIR: ${{ runner.temp }}/crates-publication-reviewed
           MUTATION_DIR: ${{ runner.temp }}/crates-publication-mutation
+          REVIEWED_DIGEST: ${{ inputs.plan_digest }}
+          SOURCE_COMMIT: ${{ inputs.commit }}
         run: |
           python3 .github/release/crates_publish.py \
             --plan "$REVIEWED_DIR/crates-plan.json" \
-            --expect-digest '${{ inputs.plan_digest }}' \
-            --commit '${{ inputs.commit }}' \
+            --expect-digest "$REVIEWED_DIGEST" \
+            --commit "$SOURCE_COMMIT" \
             --progress "$MUTATION_DIR/progress.json"
       - name: Verify tapid through the registry with a clean Cargo home
         env:

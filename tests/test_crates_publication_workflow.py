@@ -1,4 +1,3 @@
-import re
 import unittest
 from pathlib import Path
 
@@ -8,9 +7,10 @@ WORKFLOW = ROOT / ".github" / "workflows" / "crates-publication.yml"
 
 
 class CratesPublicationWorkflowTests(unittest.TestCase):
-    def test_reviewed_digest_validation_accepts_only_prefixed_sha256(self):
+    def test_reviewed_inputs_require_canonical_validation(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
+        self.assertIn('[[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]', workflow)
         self.assertIn(
             '[[ "$REVIEWED_DIGEST" =~ ^sha256-[0-9a-f]{64}$ ]]',
             workflow,
@@ -19,6 +19,31 @@ class CratesPublicationWorkflowTests(unittest.TestCase):
             '[[ "$REVIEWED_DIGEST" =~ ^[0-9a-f]{64}$ ]]',
             workflow,
         )
+
+    def test_dispatch_input_expressions_never_appear_in_run_scripts(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        lines = workflow.splitlines()
+        run_scripts = []
+        for index, line in enumerate(lines):
+            if line.lstrip() != "run: |":
+                continue
+            indentation = len(line) - len(line.lstrip())
+            script_lines = []
+            for candidate in lines[index + 1 :]:
+                candidate_indentation = len(candidate) - len(candidate.lstrip())
+                if candidate.strip() and candidate_indentation <= indentation:
+                    break
+                script_lines.append(candidate)
+            run_scripts.append("\n".join(script_lines))
+
+        self.assertTrue(run_scripts)
+        for script in run_scripts:
+            with self.subTest(script=script[:80]):
+                self.assertNotRegex(
+                    script,
+                    r"\$\{\{\s*inputs\.(?:commit|plan_digest)\s*\}\}",
+                )
+
     def test_preflight_recovers_a_digest_bound_exact_publication_prefix(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
