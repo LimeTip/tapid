@@ -370,11 +370,28 @@ mod tests {
     fn packing_binds_manifest_metadata_to_packed_bytes() {
         let p = tree(&[("x", b"before")]);
         let artifact = pack(&PackageSource::new(&p, "1.0.0")).unwrap();
-        assert_eq!(artifact.manifest.files[0].size, 6);
-        assert!(artifact.bytes.windows(6).any(|window| window == b"before"));
+        let mut cursor = b"TAPID-PACK-1\n".len();
+        let read_field = |bytes: &[u8], cursor: &mut usize| {
+            let end = *cursor + 8;
+            let len = u64::from_le_bytes(bytes[*cursor..end].try_into().unwrap()) as usize;
+            *cursor = end;
+            let end = *cursor + len;
+            let field = bytes[*cursor..end].to_vec();
+            *cursor = end;
+            field
+        };
+        assert_eq!(read_field(&artifact.bytes, &mut cursor), b"1.0.0");
+        assert_eq!(read_field(&artifact.bytes, &mut cursor), b"x");
+        let end = cursor + 8;
+        let packed_size = u64::from_le_bytes(artifact.bytes[cursor..end].try_into().unwrap());
+        cursor = end;
+        let packed_data = &artifact.bytes[cursor..cursor + packed_size as usize];
+
+        assert_eq!(artifact.manifest.files[0].size, packed_size);
+        assert_eq!(packed_data, b"before");
         assert_eq!(
             artifact.manifest.files[0].digest,
-            artifact_digest(b"before")
+            artifact_digest(packed_data)
         );
     }
 
