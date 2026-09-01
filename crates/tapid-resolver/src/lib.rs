@@ -533,9 +533,13 @@ fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> b
                     match comparator.op {
                         RequirementOperator::Exact => match comparator.base.precision {
                             RequirementPrecision::Full => version == base,
-                            RequirementPrecision::Major => version.major() == base.major(),
+                            RequirementPrecision::Major => {
+                                version >= base && version.major() == base.major()
+                            }
                             RequirementPrecision::Minor => {
-                                version.major() == base.major() && version.minor() == base.minor()
+                                version >= base
+                                    && version.major() == base.major()
+                                    && version.minor() == base.minor()
                             }
                         },
                         RequirementOperator::Caret => {
@@ -857,9 +861,15 @@ mod tests {
 
     #[test]
     fn partial_range_intersection_allows_explicit_matching_prerelease() {
+        let below_major_floor: Requirement = "2 2.0.0-beta.1".parse().unwrap();
+        assert!(!below_major_floor.matches(&"2.0.0-beta.1".parse().unwrap()));
+
         let major: Requirement = "2 2.1.0-beta.1".parse().unwrap();
         assert!(major.matches(&"2.1.0-beta.1".parse().unwrap()));
         assert!(!major.matches(&"2.1.0-beta.2".parse().unwrap()));
+
+        let below_minor_floor: Requirement = "2.1 2.1.0-beta.1".parse().unwrap();
+        assert!(!below_minor_floor.matches(&"2.1.0-beta.1".parse().unwrap()));
 
         let minor: Requirement = "2.1 2.1.1-beta.1".parse().unwrap();
         assert!(minor.matches(&"2.1.1-beta.1".parse().unwrap()));
