@@ -142,6 +142,8 @@ def validate_plan(plan):
         raise ValueError("release plan digest does not match its contents")
     release_identity.validate_version_tag(plan.get("version"), plan.get("tag"))
     release_identity.validate_commit(plan.get("commit"))
+    if plan.get("repository") != "LimeTip/tapid":
+        raise ValueError("repository must be LimeTip/tapid")
     created_at = _parse_timestamp(plan.get("created_at"), "created_at")
     expires_at = _parse_timestamp(plan.get("expires_at"), "expires_at")
     if expires_at - created_at != release_identity.FRESHNESS_DURATION:

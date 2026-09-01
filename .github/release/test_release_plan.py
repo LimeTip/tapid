@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
@@ -83,6 +84,17 @@ def adapter_responses(release_code=1, release_stderr="release not found"):
 
 
 class ReleaseRepositoryTests(unittest.TestCase):
+    def test_subprocess_runner_applies_a_bounded_timeout(self):
+        with mock.patch.object(release_repository.subprocess, "run") as run:
+            release_repository.subprocess_runner(
+                ["git", "ls-remote", "origin", "refs/heads/main"]
+            )
+
+        timeout = run.call_args.kwargs.get("timeout")
+        self.assertIsNotNone(timeout)
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, 300)
+
     def test_gathers_exact_commit_snapshot_without_mutation(self):
         runner = FakeRunner(adapter_responses())
         repository, github = release_repository.gather_snapshots(
@@ -406,6 +418,28 @@ class ReleasePlanTests(unittest.TestCase):
         plan["plan_digest"] = release_plan.release_identity.plan_digest(unsigned)
 
         with self.assertRaisesRegex(ValueError, "workflow dispatch inputs"):
+            release_plan.validate_plan(plan)
+
+    def test_plan_validation_rejects_a_rehashed_noncanonical_repository(self):
+        repository, github = valid_snapshots()
+        plan = release_plan.build_release_plan(
+            {"repository": "LimeTip/tapid", "version": "0.12.3", "commit": COMMIT},
+            repository,
+            github,
+            NOW,
+        )
+        plan["repository"] = "attacker/tapid"
+        urls = release_identity.github_release_urls(
+            plan["repository"], plan["version"], plan["tag"]
+        )
+        plan["urls"] = urls
+        plan["workflow_dispatch"]["base_url"] = urls["base_url"]
+        plan["workflow_dispatch"]["manifest_endpoints"] = urls["manifest_endpoint"]
+        unsigned = dict(plan)
+        unsigned.pop("plan_digest")
+        plan["plan_digest"] = release_identity.plan_digest(unsigned)
+
+        with self.assertRaisesRegex(ValueError, "repository must be LimeTip/tapid"):
             release_plan.validate_plan(plan)
 
     def test_plan_validation_rejects_rehashed_noncanonical_freshness(self):

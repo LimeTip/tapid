@@ -7,9 +7,18 @@ from datetime import timezone
 import release_identity
 
 
+ADAPTER_TIMEOUT_SECONDS = 120
+
+
 def subprocess_runner(command):
     """Run one adapter command without a shell or inherited stdin."""
-    return subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=ADAPTER_TIMEOUT_SECONDS,
+    )
 
 
 def _run(runner, command, label, accepted=(0,)):
