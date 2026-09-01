@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+CRATES_WORKFLOW = ROOT / ".github" / "workflows" / "crates-publication.yml"
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
@@ -48,6 +49,41 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("needs: advance-stable", publication)
         self.assertIn("mode: tag", publication)
         self.assertIn("tag: ${{ inputs.tag }}", publication)
+
+    def test_crates_publication_is_digest_bound_protected_and_resumable(self):
+        workflow = CRATES_WORKFLOW.read_text()
+        required_contracts = (
+            "commit:",
+            "plan_digest:",
+            "dry_run:",
+            "group: crates-publication",
+            "cancel-in-progress: false",
+            "contents: read",
+            "environment: crates-io-release",
+            "id-token: write",
+            "rust-lang/crates-io-auth-action@v1",
+            "actions/upload-artifact@v4",
+            "actions/download-artifact@v4",
+            "scripts/crates_release.py plan",
+            ".github/release/crates_publish.py",
+            "--expect-digest",
+            "CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}",
+            "cargo package -p tapid --locked",
+            "cargo install tapid --version",
+        )
+        for contract in required_contracts:
+            with self.subTest(contract=contract):
+                self.assertIn(contract, workflow)
+
+        preflight = workflow.split("  publish:", 1)[0]
+        self.assertNotIn("id-token: write", preflight)
+        self.assertNotIn("CARGO_REGISTRY_TOKEN", preflight)
+        self.assertNotIn("environment: crates-io-release", preflight)
+        self.assertNotIn("contents: write", workflow)
+        self.assertIn("${{ runner.temp }}/crates-publication-preflight", workflow)
+        self.assertIn("${{ runner.temp }}/crates-publication-mutation", workflow)
+        self.assertNotIn("mkdir -p publication", workflow)
+        self.assertNotIn("mkdir -p mutation", workflow)
 
 
 if __name__ == "__main__":
