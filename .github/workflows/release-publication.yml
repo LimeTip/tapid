@@ -424,3 +424,6 @@ jobs:
     uses: ./.github/workflows/release-public-smoke.yml
     with:
       mode: stable
+      expected_version: ${{ inputs.version }}
+      expected_tag: ${{ inputs.tag }}
+      expected_commit: ${{ inputs.commit }}

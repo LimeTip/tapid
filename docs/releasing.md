@@ -153,7 +153,7 @@ If a job fails while the release is still a draft, keep it draft. Diagnose the c
 
 Public promotion is not completion. `.github/workflows/release-publication.yml` invokes `.github/workflows/release-public-smoke.yml` after promotion in `stable` mode. The automatic run must verify the promoted release through GitHub's latest-release path, exercise the installers' default stable discovery, verify all release assets, execute the consumer replay, and verify website delivery. It does not pass `--skip-website`.
 
-Before declaring the release complete, require that automatic stable-mode run to pass on the exact promoted release. The same workflow may be dispatched manually in `stable` mode for a no-mutation rerun, but a manual rerun does not replace the automatic post-promotion gate.
+Before declaring the release complete, require that automatic stable-mode run to pass on the exact promoted version, tag, and commit supplied by the publication workflow. Stable discovery must resolve that identity before installer or consumer checks proceed. The same workflow may be dispatched manually in `stable` mode for a no-mutation rerun, but a manual rerun does not replace the automatic post-promotion gate.
 
 The smoke workflow must use unauthenticated public reads and read-only repository permission. Require its `tapid-public-release-verification-v1` evidence to prove:
 
@@ -188,7 +188,7 @@ Require byte-for-byte equality between:
 - `scripts/install.sh` and `https://tapid.dev/install.sh`;
 - `scripts/install.ps1` and `https://tapid.dev/install.ps1`.
 
-Also require rendered homepage, getting-started, and release-page content to identify the intended release. A working GitHub release with stale website content is not a completed website deployment. Record website evidence separately from cryptographic release evidence. Wiring the mandatory website check into a protected workflow is an acceptance requirement for future automation, not behavior provided by the current workflow.
+Also require rendered homepage, getting-started, and release-page content to identify the intended release. A working GitHub release with stale website content is not a completed website deployment. Record website evidence separately from cryptographic release evidence. The protected post-promotion smoke enforces this website gate.
 
 ## Recovery by publication state
 

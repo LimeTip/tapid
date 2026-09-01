@@ -265,6 +265,7 @@ def build_publication_plan(
             "archive_size": observation["archive_size"],
             "archive_content_sha256": observation.get("archive_content_sha256"),
             "published_content_sha256": observation.get("published_content_sha256"),
+            "published_archive_size": observation.get("published_archive_size"),
             "prior_registry_versions": sorted(
                 (
                     version for version in observation["registry_versions"]

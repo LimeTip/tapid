@@ -76,7 +76,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("needs: advance-stable", publication)
         self.assertIn("mode: stable", publication)
         public_smoke_call = publication.split("  public-smoke:", 1)[1]
-        self.assertNotIn("tag:", public_smoke_call)
+        self.assertNotIn("tag:", public_smoke_call.split("expected_tag:", 1)[0])
+        self.assertIn("expected_version: ${{ inputs.version }}", public_smoke_call)
+        self.assertIn("expected_tag: ${{ inputs.tag }}", public_smoke_call)
+        self.assertIn("expected_commit: ${{ inputs.commit }}", public_smoke_call)
+        for expected_input in ("expected_version:", "expected_tag:", "expected_commit:"):
+            self.assertIn(expected_input, smoke)
+        self.assertIn('test "$version" = "$EXPECTED_VERSION"', smoke)
+        self.assertIn('test "$resolved_tag" = "$EXPECTED_TAG"', smoke)
+        self.assertIn('test "$resolved_commit" = "$EXPECTED_COMMIT"', smoke)
 
     def test_public_smoke_proves_latest_default_installers_website_and_run_evidence(self):
         smoke = (

@@ -470,6 +470,7 @@ def collect_package_evidence(metadata, registry, package_adapter):
             observation["published_archive_sha256"] = hashlib.sha256(
                 published_archive
             ).hexdigest()
+            observation["published_archive_size"] = len(published_archive)
             observation["published_content_sha256"] = package_content_sha256(
                 published_archive
             )

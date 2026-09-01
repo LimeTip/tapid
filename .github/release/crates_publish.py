@@ -196,12 +196,22 @@ def recover_reviewed_plan(current, expected_digest):
     remaining = current.get("publication_order")
     if not isinstance(remaining, list):
         raise PublicationError("recomputed publication order is malformed")
-    eligible = sorted(
-        name for name, item in entries.items()
-        if item.get("action") == "skip"
-        and item.get("classification") == "unchanged"
-        and item.get("observed_registry_checksum") == item.get("archive_sha256")
-    )
+    def recoverable(item):
+        if item.get("action") != "skip" or item.get("classification") != "unchanged":
+            return False
+        byte_exact = item.get("observed_registry_checksum") == item.get("archive_sha256")
+        archive_content = item.get("archive_content_sha256")
+        content_exact = (
+            item.get("observed_registry_checksum") == item.get("expected_registry_checksum")
+            and isinstance(item.get("published_archive_size"), int)
+            and item["published_archive_size"] > 0
+            and isinstance(archive_content, str)
+            and crates_plan._SHA256_RE.fullmatch(archive_content)
+            and archive_content == item.get("published_content_sha256")
+        )
+        return byte_exact or content_exact
+
+    eligible = sorted(name for name, item in entries.items() if recoverable(item))
     if len(eligible) > 20:
         raise PublicationError("too many exact registry candidates to recover safely")
     edges = {
@@ -219,6 +229,9 @@ def recover_reviewed_plan(current, expected_digest):
             candidate_entries = {item["name"]: item for item in candidate["packages"]}
             for name in completed:
                 item = candidate_entries[name]
+                if item.get("observed_registry_checksum") != item.get("archive_sha256"):
+                    item["archive_sha256"] = item["observed_registry_checksum"]
+                    item["archive_size"] = item["published_archive_size"]
                 item["classification"] = (
                     "changed" if item.get("prior_registry_versions") else "unpublished"
                 )
@@ -227,6 +240,8 @@ def recover_reviewed_plan(current, expected_digest):
                 item["observed_registry_checksum"] = None
                 if "published_content_sha256" in item:
                     item["published_content_sha256"] = None
+                if "published_archive_size" in item:
+                    item["published_archive_size"] = None
             candidate["publication_order"] = candidate_order
             candidate["plan_digest"] = crates_plan.digest_publication_plan(candidate)
             if candidate["plan_digest"] == expected_digest:
@@ -263,13 +278,30 @@ def validate_recomputed_plan(reviewed, current, expected_digest):
     if set(reviewed_packages) != set(current_packages):
         raise PublicationError("recomputed package set drift")
     immutable_fields = (
-        "name", "version", "internal_dependencies", "archive_sha256",
-        "archive_size", "archive_content_sha256", "prior_registry_versions",
+        "name", "version", "internal_dependencies", "archive_content_sha256",
+        "prior_registry_versions",
         "expected_registry_checksum",
     )
     for name, original in reviewed_packages.items():
         observed = current_packages[name]
         if any(observed.get(field) != original.get(field) for field in immutable_fields):
+            raise PublicationError(f"package archive drift for {name} {original.get('version')}")
+        semantic_completed_prefix = (
+            original.get("action") == "publish"
+            and observed.get("action") == "skip"
+            and observed.get("classification") == "unchanged"
+            and original.get("archive_sha256") == original.get("expected_registry_checksum")
+            and observed.get("observed_registry_checksum") == original.get("archive_sha256")
+            and observed.get("published_archive_size") == original.get("archive_size")
+            and isinstance(original.get("archive_content_sha256"), str)
+            and crates_plan._SHA256_RE.fullmatch(original["archive_content_sha256"])
+            and original["archive_content_sha256"] == observed.get("archive_content_sha256")
+            == observed.get("published_content_sha256")
+        )
+        if not semantic_completed_prefix and (
+            observed.get("archive_sha256") != original.get("archive_sha256")
+            or observed.get("archive_size") != original.get("archive_size")
+        ):
             raise PublicationError(f"package archive drift for {name} {original.get('version')}")
 
     completed = []

@@ -196,6 +196,53 @@ class CratesPublishTests(unittest.TestCase):
             ["already-published", "published"],
         )
 
+    def test_recovers_prefix_when_only_generated_archive_metadata_drifted(self):
+        reviewed = publication_plan(
+            (("core", "0.0.2", b"reviewed-core"), ("app", "0.0.2", b"app"))
+        )
+        core = reviewed["packages"][0]
+        reviewed["packages"][1]["internal_dependencies"] = [
+            {"name": "core", "requirement": "^0.0.2"}
+        ]
+        core["archive_content_sha256"] = "c" * 64
+        core["published_content_sha256"] = None
+        core["published_archive_size"] = None
+        reviewed["plan_digest"] = crates_plan.digest_publication_plan(reviewed)
+
+        current = copy.deepcopy(reviewed)
+        current_core = current["packages"][0]
+        current_core["classification"] = "unchanged"
+        current_core["action"] = "skip"
+        current_core["archive_sha256"] = "d" * 64
+        current_core["archive_size"] = core["archive_size"] + 7
+        current_core["observed_registry_checksum"] = core["archive_sha256"]
+        current_core["published_content_sha256"] = core["archive_content_sha256"]
+        current_core["published_archive_size"] = core["archive_size"]
+        current["publication_order"] = ["app"]
+        current["plan_digest"] = crates_plan.digest_publication_plan(current)
+
+        recovered = crates_publish.recover_reviewed_plan(
+            current, reviewed["plan_digest"]
+        )
+        self.assertEqual(recovered, reviewed)
+        self.assertEqual(
+            crates_publish.validate_recomputed_plan(
+                recovered, current, reviewed["plan_digest"]
+            ),
+            ["core"],
+        )
+
+        missing_content = copy.deepcopy(current)
+        missing_content["packages"][0]["archive_content_sha256"] = None
+        missing_content["packages"][0]["published_content_sha256"] = None
+        missing_content["plan_digest"] = crates_plan.digest_publication_plan(missing_content)
+        with self.assertRaisesRegex(
+            crates_publish.PublicationError, "not an exact published prefix"
+        ):
+            crates_publish.recover_reviewed_plan(
+                missing_content, reviewed["plan_digest"]
+            )
+
     def test_dry_run_packages_but_never_mutates_or_claims_registry_verification(self):
         plan = publication_plan((("core", "0.0.2", b"core"),))
         entry = plan["packages"][0]

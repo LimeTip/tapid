@@ -15,6 +15,18 @@ on:
         description: "Explicit v0.x.y tag (required in tag mode; empty in stable mode)"
         required: false
         type: string
+      expected_version:
+        description: "Expected stable version when binding a protected publication"
+        required: false
+        type: string
+      expected_tag:
+        description: "Expected stable tag when binding a protected publication"
+        required: false
+        type: string
+      expected_commit:
+        description: "Expected stable source commit when binding a protected publication"
+        required: false
+        type: string
   workflow_call:
     inputs:
       mode:
@@ -23,6 +35,18 @@ on:
         type: string
       tag:
         description: "Explicit v0.x.y tag (required in tag mode; empty in stable mode)"
+        required: false
+        default: ""
+        type: string
+      expected_version:
+        required: false
+        default: ""
+        type: string
+      expected_tag:
+        required: false
+        default: ""
+        type: string
+      expected_commit:
         required: false
         default: ""
         type: string
@@ -52,6 +76,9 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           REQUESTED_TAG: ${{ inputs.tag }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          EXPECTED_TAG: ${{ inputs.expected_tag }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
         run: |
           set -euo pipefail
           case "$MODE" in
@@ -72,12 +99,28 @@ jobs:
               exit 1
               ;;
           esac
+          expected_count=0
+          for value in "$EXPECTED_VERSION" "$EXPECTED_TAG" "$EXPECTED_COMMIT"; do
+            test -z "$value" || expected_count=$((expected_count + 1))
+          done
+          test "$expected_count" -eq 0 || test "$expected_count" -eq 3 || {
+            echo "expected release identity must be fully specified or empty" >&2
+            exit 1
+          }
+          if [[ "$expected_count" -eq 3 ]]; then
+            [[ "$EXPECTED_VERSION" =~ ^0\.[0-9]+\.[0-9]+$ ]]
+            test "$EXPECTED_TAG" = "v$EXPECTED_VERSION"
+            [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          fi
       - name: Verify unauthenticated public evidence
         id: release
         shell: bash
         env:
           MODE: ${{ inputs.mode }}
           REQUESTED_TAG: ${{ inputs.tag }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          EXPECTED_TAG: ${{ inputs.expected_tag }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
         run: |
           set -euo pipefail
           args=(--mode "$MODE" --output public-release-evidence.json)
@@ -89,8 +132,14 @@ jobs:
           python3 .github/release/public_release.py "${args[@]}" >/dev/null
           version="$(jq -er '.release.version' public-release-evidence.json)"
           resolved_tag="$(jq -er '.release.tag' public-release-evidence.json)"
+          resolved_commit="$(jq -er '.release.commit' public-release-evidence.json)"
           [[ "$version" =~ ^0\.[0-9]+\.[0-9]+$ ]]
           test "$resolved_tag" = "v$version"
+          if [[ -n "$EXPECTED_VERSION" ]]; then
+            test "$version" = "$EXPECTED_VERSION"
+            test "$resolved_tag" = "$EXPECTED_TAG"
+            test "$resolved_commit" = "$EXPECTED_COMMIT"
+          fi
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'tag=%s\n' "$resolved_tag" >> "$GITHUB_OUTPUT"
       - name: Upload public release evidence
