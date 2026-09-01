@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -116,7 +117,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "contents: read",
             "environment: crates-io-release",
             "id-token: write",
-            "rust-lang/crates-io-auth-action@v1",
+            "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18",
             "actions/upload-artifact@v4",
             "actions/download-artifact@v4",
             "scripts/crates_release.py plan",
@@ -139,6 +140,25 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("${{ runner.temp }}/crates-publication-mutation", workflow)
         self.assertNotIn("mkdir -p publication", workflow)
         self.assertNotIn("mkdir -p mutation", workflow)
+
+    def test_crates_io_auth_action_is_pinned_to_reviewed_v1_0_5_commit(self):
+        workflow = CRATES_WORKFLOW.read_text()
+        auth_action_refs = re.findall(
+            r"uses:\s+rust-lang/crates-io-auth-action@([^\s#]+)", workflow
+        )
+
+        self.assertEqual(
+            auth_action_refs,
+            ["c6f97d42243bad5fab37ca0427f495c86d5b1a18"],
+        )
+        self.assertIn(
+            "uses: rust-lang/crates-io-auth-action@"
+            "c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5",
+            workflow,
+        )
+        self.assertTrue(
+            all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in auth_action_refs)
+        )
 
 
 if __name__ == "__main__":
