@@ -75,14 +75,23 @@ def main(
     registry = registry or crates_repository.CratesIoClient()
     with tempfile.TemporaryDirectory(prefix="tapid-crates-plan-") as temporary:
         if package_adapter is None:
-            package_adapter = lambda name, version: crates_repository.package_crate(
-                name,
-                version,
+            packaged_workspace = crates_repository.package_workspace(
+                cargo_metadata,
                 workspace,
                 Path(temporary),
                 run=run,
                 cargo_home=Path(temporary) / "cargo-home",
             )
+
+            def package_adapter(name, version):
+                packaged = packaged_workspace.get(name)
+                expected_name = "{}-{}.crate".format(name, version)
+                if packaged is None or Path(packaged["archive_path"]).name != expected_name:
+                    raise crates_repository.RepositoryError(
+                        "workspace package evidence does not match Cargo metadata"
+                    )
+                return packaged
+
         observations = crates_repository.collect_package_evidence(
             cargo_metadata, registry, package_adapter
         )

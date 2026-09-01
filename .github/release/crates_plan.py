@@ -193,7 +193,7 @@ def build_publication_plan(
                 dependency.get("path") is not None
                 and dependency["name"] in all_workspace
                 and dependency["name"] not in workspace
-                and dependency.get("kind") in (None, "normal")
+                and dependency.get("kind") in (None, "normal", "build")
             ):
                 raise ValueError(
                     f"{name} depends on non-publishable workspace package {dependency['name']}"
@@ -202,7 +202,7 @@ def build_publication_plan(
             dependency for dependency in item.get("dependencies", ())
             if dependency.get("path") is not None
             and dependency["name"] in workspace
-            and dependency.get("kind") in (None, "normal")
+            and dependency.get("kind") in (None, "normal", "build")
         ]
         for dependency in internal:
             _requirement_accepts(dependency.get("req"), workspace[dependency["name"]]["version"])
@@ -249,7 +249,7 @@ def build_publication_plan(
                 for dependency in item.get("dependencies", ())
                 if dependency.get("path") is not None
                 and dependency["name"] in workspace
-                and dependency.get("kind") in (None, "normal")
+                and dependency.get("kind") in (None, "normal", "build")
             ],
             "archive_sha256": observation["archive_sha256"],
             "archive_size": observation["archive_size"],
@@ -266,7 +266,7 @@ def build_publication_plan(
                 dependency.get("path") is not None
                 and dependency_name in proposed
                 and dependency_name in workspace
-                and dependency.get("kind") in (None, "normal")
+                and dependency.get("kind") in (None, "normal", "build")
                 and not _requirement_accepts(
                     dependency.get("req"), workspace[dependency_name]["version"]
                 )
@@ -286,6 +286,7 @@ def build_publication_plan(
         "source_commit": source_commit,
         "cargo_lock_sha256": cargo_lock_sha256,
         "integration_lock_sha256": integration_lock_sha256,
+        "package_verification": "archives-hashed-without-registry-verification",
         "packages": entries,
         "publication_order": _topological_order(proposed, edges),
         "required_dependent_updates": required_updates,

@@ -52,7 +52,7 @@ Before the planned dependency versions exist on crates.io, standalone packaging 
 
 ## Create the read-only plan
 
-The planner needs no publishing credential and performs no registry mutation:
+The planner needs no publishing credential and performs no registry mutation. It requires Cargo 1.89 or newer because stabilized workspace packaging overlays selected workspace packages while their new internal dependency versions are not yet registry-visible:
 
 ```bash
 COMMIT=$(git rev-parse origin/main)
@@ -70,9 +70,9 @@ Review the complete `tapid-crates-publication-plan-v1` JSON and its canonical pl
 - changed, unpublished, and unchanged classifications are correct;
 - every required `0.x` dependent version or requirement update is satisfied;
 - publication order is deterministic and dependency-first;
-- every proposed crate passed isolated `cargo package -p <name> --locked`;
-- each generated `.crate` archive has the recorded digest;
-- final `tapid` package verification resolves registry dependencies;
+- the plan explicitly reports `archives-hashed-without-registry-verification` as its pre-publication package-verification mode;
+- each generated `.crate` archive has the recorded digest and was created before mutation;
+- normal registry-resolved workspace and `tapid` package verification remains a required post-publication gate;
 - nested integration lockfile preflight passes;
 - only intended entries are marked `publish`.
 

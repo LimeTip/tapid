@@ -26,6 +26,7 @@ _PACKAGE_ENVIRONMENT_ALLOWLIST = {
 }
 _SEMVER_CORE_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _SEMVER_IDENTIFIER_RE = re.compile(r"^[0-9A-Za-z-]+$")
+_CARGO_VERSION_RE = re.compile(r"^cargo (0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\b")
 
 
 class RepositoryError(RuntimeError):
@@ -48,6 +49,19 @@ def _run_checked(command, *, run, **kwargs):
             "command failed ({}): {}".format(result.returncode, detail or command[0])
         )
     return result
+
+
+def _require_workspace_packaging_cargo(*, run, cwd, env):
+    """Require stabilized Cargo workspace packaging support."""
+    result = _run_checked(["cargo", "--version"], run=run, cwd=cwd, env=env)
+    matched = _CARGO_VERSION_RE.match((result.stdout or "").strip())
+    if matched is None:
+        raise RepositoryError("malformed cargo --version output")
+    version = tuple(int(component) for component in matched.groups())
+    if version < (1, 89, 0):
+        raise RepositoryError(
+            "Cargo 1.89 or newer is required for pre-publication workspace packaging"
+        )
 
 
 def read_locked_metadata(workspace, *, run=subprocess.run):
@@ -224,6 +238,87 @@ def package_crate(
         "archive_sha256": hashlib.sha256(archive).hexdigest(),
         "archive_size": len(archive),
     }
+
+
+def package_workspace(
+    metadata,
+    workspace,
+    output_directory,
+    *,
+    run=subprocess.run,
+    cargo_home=None,
+):
+    """Package and hash every workspace archive before registry mutation.
+
+    Registry-backed Cargo verification is intentionally deferred until the
+    dependency-ordered versions are visible on crates.io.
+    """
+    output_directory = Path(output_directory)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    members = set(metadata["workspace_members"])
+    packages = sorted(
+        (
+            item
+            for item in metadata["packages"]
+            if item["id"] in members and _is_crates_io_publishable(item)
+        ),
+        key=lambda item: item["name"],
+    )
+    if len({item["name"] for item in packages}) != len(packages):
+        raise RepositoryError("Cargo metadata contains duplicate publishable package names")
+
+    with tempfile.TemporaryDirectory(
+        prefix="cargo-package-workspace-", dir=output_directory
+    ) as isolated:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key in _PACKAGE_ENVIRONMENT_ALLOWLIST
+        }
+        safe_cargo_home = Path(cargo_home) if cargo_home else Path(isolated) / "cargo-home"
+        environment["HOME"] = str(safe_cargo_home.parent / "home")
+        environment["CARGO_HOME"] = str(safe_cargo_home)
+        environment["CARGO_TARGET_DIR"] = isolated
+        _require_workspace_packaging_cargo(
+            run=run,
+            cwd=Path(isolated),
+            env=environment,
+        )
+        _run_checked(
+            [
+                "cargo",
+                "package",
+                "--manifest-path",
+                str(Path(workspace).resolve() / "Cargo.toml"),
+                "--workspace",
+                "--locked",
+                "--no-verify",
+            ],
+            run=run,
+            cwd=Path(isolated),
+            env=environment,
+        )
+
+        packaged = {}
+        for package in packages:
+            name = package["name"]
+            version = package["version"]
+            generated = Path(isolated) / "package" / "{}-{}.crate".format(name, version)
+            if not generated.is_file():
+                raise RepositoryError(
+                    "cargo package did not create the expected archive for {} {}".format(
+                        name, version
+                    )
+                )
+            destination = output_directory / generated.name
+            shutil.copyfile(generated, destination)
+            archive = destination.read_bytes()
+            packaged[name] = {
+                "archive_path": str(destination),
+                "archive_sha256": hashlib.sha256(archive).hexdigest(),
+                "archive_size": len(archive),
+            }
+    return packaged
 
 
 def collect_package_evidence(metadata, registry, package_adapter):

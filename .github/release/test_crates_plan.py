@@ -73,6 +73,10 @@ class CratesPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(plan["schema"], "tapid-crates-publication-plan-v1")
+        self.assertEqual(
+            plan["package_verification"],
+            "archives-hashed-without-registry-verification",
+        )
         self.assertEqual(plan["publication_order"], ["core", "app"])
         self.assertEqual(
             [entry["classification"] for entry in plan["packages"]],
@@ -155,6 +159,29 @@ class CratesPlanTests(unittest.TestCase):
             "required_version": "0.0.2",
         }])
         self.assertFalse(plan["preflight"]["ok"])
+
+    def test_build_dependency_is_published_before_its_dependent(self):
+        app = package("app", "0.0.2", (("build-core", "^0.0.2"),))
+        app["dependencies"][0]["kind"] = "build"
+        workspace = metadata(app, package("build-core", "0.0.2"))
+        observations = {
+            "app": evidence("app", "0.0.2", b"app"),
+            "build-core": evidence("build-core", "0.0.2", b"build-core"),
+        }
+
+        plan = crates_plan.build_publication_plan(
+            workspace,
+            observations,
+            source_commit=COMMIT,
+            cargo_lock_sha256="1" * 64,
+            integration_lock_sha256="2" * 64,
+        )
+
+        self.assertEqual(plan["publication_order"], ["build-core", "app"])
+        self.assertEqual(
+            plan["packages"][0]["internal_dependencies"],
+            [{"name": "build-core", "requirement": "^0.0.2"}],
+        )
 
     def test_accepting_requirement_propagates_changed_dependent_into_release_set(self):
         workspace = metadata(
@@ -478,6 +505,79 @@ class CratesRepositoryTests(unittest.TestCase):
                 packaged["archive_sha256"], hashlib.sha256(b"crate bytes").hexdigest()
             )
             self.assertEqual(Path(packaged["archive_path"]).parent, root / "outputs")
+
+    def test_packages_workspace_archives_without_premature_registry_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = []
+            workspace_metadata = metadata(
+                package("app", "0.0.2", (("core", "^0.0.2"),)),
+                package("core", "0.0.2"),
+            )
+
+            def run(command, **kwargs):
+                calls.append((command, kwargs))
+                if command == ["cargo", "--version"]:
+                    return subprocess.CompletedProcess(
+                        command, 0, stdout="cargo 1.97.1 (c980f4866 2026-06-30)\n", stderr=""
+                    )
+                target = Path(kwargs["env"]["CARGO_TARGET_DIR"])
+                package_dir = target / "package"
+                package_dir.mkdir(parents=True)
+                (package_dir / "app-0.0.2.crate").write_bytes(b"app archive")
+                (package_dir / "core-0.0.2.crate").write_bytes(b"core archive")
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            packaged = crates_repository.package_workspace(
+                workspace_metadata,
+                root,
+                root / "outputs",
+                run=run,
+            )
+
+        self.assertEqual(calls[0][0], ["cargo", "--version"])
+        self.assertEqual(
+            calls[1][0],
+            [
+                "cargo",
+                "package",
+                "--manifest-path",
+                str(root.resolve() / "Cargo.toml"),
+                "--workspace",
+                "--locked",
+                "--no-verify",
+            ],
+        )
+        self.assertEqual(sorted(packaged), ["app", "core"])
+        self.assertEqual(packaged["app"]["archive_size"], len(b"app archive"))
+        self.assertEqual(
+            packaged["core"]["archive_sha256"],
+            hashlib.sha256(b"core archive").hexdigest(),
+        )
+
+    def test_workspace_packaging_requires_cargo_with_package_workspace_support(self):
+        workspace_metadata = metadata(package("core", "0.0.2"))
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                command, 0, stdout="cargo 1.88.0 (6b00bc388 2025-06-23)\n", stderr=""
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(
+                crates_repository.RepositoryError, "Cargo 1.89 or newer"
+            ):
+                crates_repository.package_workspace(
+                    workspace_metadata,
+                    root,
+                    root / "outputs",
+                    run=run,
+                )
+
+        self.assertEqual(calls, [["cargo", "--version"]])
 
     def test_collects_registry_and_package_evidence_for_every_publishable_crate(self):
         workspace = metadata(
