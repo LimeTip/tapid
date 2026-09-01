@@ -787,3 +787,44 @@ fn injected_activation_failure_restores_marked_node_modules() {
     }));
     cleanup(dir);
 }
+#[test]
+fn registry_fixture_relative_artifact_is_loaded_from_fixture_directory() {
+    let root = temp_dir("relative-fixture");
+    let fixture_dir = root.join("fixture");
+    let project = root.join("project");
+    let unrelated = root.join("unrelated");
+    fs::create_dir_all(fixture_dir.join("fixture-files")).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&unrelated).unwrap();
+    let encoded = "H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    fs::write(
+        fixture_dir.join("fixture-files/artifact.tgz"),
+        STANDARD.decode(encoded).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        project.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"foo":"1.0.0"}}"#,
+    )
+    .unwrap();
+    let fixture = fixture_dir.join("registry.json");
+    fs::write(&fixture, r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"foo","version":"1.0.0","artifact":"fixture-files/artifact.tgz"}]}"#).unwrap();
+    let output = run(
+        &unrelated,
+        &[
+            "install",
+            "--allow-unverified-registry-artifacts",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--project-dir",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(project.join("node_modules/foo").is_dir());
+    cleanup(root);
+}
