@@ -1,7 +1,9 @@
 import hashlib
 import importlib.util
+import io
 import json
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -53,6 +55,26 @@ def evidence(name, version, local_bytes, published_checksum=None):
     }
 
 
+def crate_archive(source, vcs_commit, path_in_vcs=""):
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        for name, payload in (
+            ("core-0.0.1/src/lib.rs", source),
+            (
+                "core-0.0.1/.cargo_vcs_info.json",
+                json.dumps({
+                    "git": {"sha1": vcs_commit},
+                    "path_in_vcs": path_in_vcs,
+                }).encode(),
+            ),
+        ):
+            member = tarfile.TarInfo(name)
+            member.size = len(payload)
+            member.mode = 0o644
+            archive.addfile(member, io.BytesIO(payload))
+    return output.getvalue()
+
+
 class CratesPlanTests(unittest.TestCase):
     def test_unpublished_dependency_is_ordered_before_unpublished_dependent(self):
         workspace = metadata(
@@ -101,6 +123,33 @@ class CratesPlanTests(unittest.TestCase):
         self.assertEqual(plan["packages"][0]["classification"], "unchanged")
         self.assertEqual(plan["packages"][0]["action"], "skip")
         self.assertEqual(plan["publication_order"], [])
+
+    def test_classifies_published_content_as_unchanged_when_only_vcs_commit_differs(self):
+        published = crate_archive(b"pub fn value() -> u8 { 1 }", "a" * 40)
+        local = crate_archive(b"pub fn value() -> u8 { 1 }", "b" * 40)
+        observation = evidence(
+            "core", "0.0.1", local, hashlib.sha256(published).hexdigest()
+        )
+        observation.update({
+            "archive_content_sha256": crates_repository.package_content_sha256(local),
+            "published_archive_sha256": hashlib.sha256(published).hexdigest(),
+            "published_content_sha256": crates_repository.package_content_sha256(published),
+        })
+
+        plan = crates_plan.build_publication_plan(
+            metadata(package("core", "0.0.1")),
+            {"core": observation},
+            source_commit=COMMIT,
+            cargo_lock_sha256="1" * 64,
+            integration_lock_sha256="2" * 64,
+        )
+
+        self.assertEqual(plan["packages"][0]["classification"], "unchanged")
+        self.assertEqual(plan["packages"][0]["action"], "skip")
+        self.assertEqual(
+            plan["packages"][0]["observed_registry_checksum"],
+            hashlib.sha256(published).hexdigest(),
+        )
 
     def test_rejects_local_bytes_that_drift_from_an_immutable_published_version(self):
         with self.assertRaisesRegex(ValueError, "immutable published bytes"):
@@ -394,6 +443,27 @@ class CratesPlanTests(unittest.TestCase):
 
 
 class CratesRepositoryTests(unittest.TestCase):
+    def test_package_content_digest_ignores_only_cargo_vcs_commit_metadata(self):
+        first = crate_archive(b"pub fn value() -> u8 { 1 }", "a" * 40)
+        later_commit = crate_archive(b"pub fn value() -> u8 { 1 }", "b" * 40)
+        changed_source = crate_archive(b"pub fn value() -> u8 { 2 }", "b" * 40)
+        changed_vcs_path = crate_archive(
+            b"pub fn value() -> u8 { 1 }", "b" * 40, "crates/core"
+        )
+
+        self.assertEqual(
+            crates_repository.package_content_sha256(first),
+            crates_repository.package_content_sha256(later_commit),
+        )
+        self.assertNotEqual(
+            crates_repository.package_content_sha256(first),
+            crates_repository.package_content_sha256(changed_source),
+        )
+        self.assertNotEqual(
+            crates_repository.package_content_sha256(first),
+            crates_repository.package_content_sha256(changed_vcs_path),
+        )
+
     def test_reads_locked_metadata_and_rejects_malformed_output(self):
         calls = []
 
@@ -413,6 +483,42 @@ class CratesRepositoryTests(unittest.TestCase):
                 Path("/repo"),
                 run=lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="[]", stderr=""),
             )
+
+    def test_collects_verified_registry_content_for_matching_version(self):
+        local = crate_archive(b"pub fn value() -> u8 { 1 }", "b" * 40)
+        published = crate_archive(b"pub fn value() -> u8 { 1 }", "a" * 40)
+        published_checksum = hashlib.sha256(published).hexdigest()
+
+        def http_get(url, headers, timeout):
+            if url.endswith("/core"):
+                body = json.dumps({
+                    "versions": [{"num": "0.0.1", "checksum": published_checksum}]
+                }).encode()
+                return 200, body, {}
+            if url.endswith("/core/0.0.1/download"):
+                return 200, published, {}
+            self.fail(url)
+
+        with tempfile.TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "core-0.0.1.crate"
+            archive_path.write_bytes(local)
+            observations = crates_repository.collect_package_evidence(
+                metadata(package("core", "0.0.1")),
+                crates_repository.CratesIoClient(http_get=http_get, max_attempts=1),
+                lambda name, version: {
+                    "archive_path": str(archive_path),
+                    "archive_sha256": hashlib.sha256(local).hexdigest(),
+                    "archive_size": len(local),
+                },
+            )
+
+        self.assertEqual(
+            observations["core"]["archive_content_sha256"],
+            observations["core"]["published_content_sha256"],
+        )
+        self.assertEqual(
+            observations["core"]["published_archive_sha256"], published_checksum
+        )
 
     def test_registry_adapter_retries_transient_status_without_credentials(self):
         responses = [

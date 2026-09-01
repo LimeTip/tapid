@@ -1,11 +1,13 @@
 """Read-only Cargo and crates.io adapters for publication planning."""
 
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -39,6 +41,72 @@ class RegistryError(RuntimeError):
     def __init__(self, kind, message):
         super().__init__(message)
         self.kind = kind
+
+
+def package_content_sha256(archive):
+    """Hash package contents while excluding Cargo's commit-only metadata."""
+    digest = hashlib.sha256()
+    seen = set()
+    roots = set()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as package:
+            for member in sorted(package.getmembers(), key=lambda item: item.name):
+                parts = member.name.split("/")
+                if len(parts) < 2 or not parts[0] or any(part in ("", ".", "..") for part in parts):
+                    raise RepositoryError("crate archive contains an invalid member path")
+                roots.add(parts[0])
+                if member.name in seen:
+                    raise RepositoryError("crate archive contains duplicate members")
+                seen.add(member.name)
+                cargo_vcs_info = len(parts) == 2 and parts[1] == ".cargo_vcs_info.json"
+                if member.isfile():
+                    extracted = package.extractfile(member)
+                    if extracted is None:
+                        raise RepositoryError("crate archive member is unreadable")
+                    payload = extracted.read()
+                    if cargo_vcs_info:
+                        try:
+                            metadata = json.loads(payload)
+                            commit = metadata["git"]["sha1"]
+                            if (
+                                not isinstance(metadata, dict)
+                                or not isinstance(metadata["git"], dict)
+                                or not isinstance(commit, str)
+                                or not re.fullmatch(r"[0-9a-f]{40}", commit)
+                            ):
+                                raise ValueError
+                            metadata["git"]["sha1"] = "0" * 40
+                            payload = json.dumps(
+                                metadata,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                            raise RepositoryError(
+                                "crate archive contains malformed Cargo VCS metadata"
+                            ) from error
+                    kind = b"file"
+                elif member.isdir():
+                    payload = b""
+                    kind = b"directory"
+                elif member.issym():
+                    payload = member.linkname.encode("utf-8")
+                    kind = b"symlink"
+                else:
+                    raise RepositoryError("crate archive contains an unsupported member type")
+                for value in (
+                    member.name.encode("utf-8"),
+                    kind,
+                    str(member.mode & 0o777).encode("ascii"),
+                    payload,
+                ):
+                    digest.update(len(value).to_bytes(8, "big"))
+                    digest.update(value)
+    except (tarfile.TarError, UnicodeError) as error:
+        raise RepositoryError("crate archive is malformed") from error
+    if len(roots) != 1 or not seen:
+        raise RepositoryError("crate archive must contain one package root")
+    return digest.hexdigest()
 
 
 def _run_checked(command, *, run, **kwargs):
@@ -159,6 +227,51 @@ class CratesIoClient:
             "crates.io network request failed after bounded retries"
         )
         raise RegistryError(last_kind, message)
+
+    def archive(self, crate_name, version, expected_checksum):
+        """Download exact published bytes and verify them against index metadata."""
+        url = "{}/{}/{}/download".format(
+            _API_ROOT,
+            parse.quote(crate_name, safe=""),
+            parse.quote(version, safe=""),
+        )
+        headers = {
+            "Accept": "application/octet-stream",
+            "User-Agent": "tapid-release-planner/1 (https://github.com/LimeTip/tapid)",
+        }
+        last_kind = "transient-network"
+        for attempt in range(self._max_attempts):
+            try:
+                status, body, response_headers = self._http_get(url, headers, self._timeout)
+            except (OSError, error.URLError):
+                status, body, response_headers = 0, b"", {}
+            if status == 429:
+                last_kind = "rate-limit"
+            elif status == 0 or 500 <= status <= 599:
+                last_kind = "transient-network"
+            elif status in (401, 403):
+                raise RegistryError("authorization", "crates.io rejected an archive request")
+            elif status != 200:
+                raise RegistryError(
+                    "unexpected-status",
+                    f"crates.io returned unexpected archive HTTP {status}",
+                )
+            else:
+                if hashlib.sha256(body).hexdigest() != expected_checksum:
+                    raise RegistryError(
+                        "checksum-mismatch",
+                        "downloaded crate archive differs from crates.io checksum metadata",
+                    )
+                return body
+            if attempt + 1 < self._max_attempts:
+                delay = 2 ** attempt
+                if status == 429:
+                    try:
+                        delay = min(5.0, max(0.0, float(response_headers.get("Retry-After", delay))))
+                    except (TypeError, ValueError):
+                        pass
+                self._sleep(float(delay))
+        raise RegistryError(last_kind, "crates.io archive request failed after bounded retries")
 
     @staticmethod
     def _parse_versions(body):
@@ -334,12 +447,30 @@ def collect_package_evidence(metadata, registry, package_adapter):
     observations = {}
     for package in packages:
         name = package["name"]
-        packaged = package_adapter(name, package["version"])
-        observations[name] = {
+        version = package["version"]
+        packaged = package_adapter(name, version)
+        registry_versions = registry.versions(name)
+        observation = {
             "archive_sha256": packaged["archive_sha256"],
             "archive_size": packaged["archive_size"],
-            "registry_versions": registry.versions(name),
+            "registry_versions": registry_versions,
         }
+        archive_path = packaged.get("archive_path")
+        matching = [item for item in registry_versions if item["version"] == version]
+        if archive_path is not None:
+            local_archive = Path(archive_path).read_bytes()
+            if hashlib.sha256(local_archive).hexdigest() != packaged["archive_sha256"]:
+                raise RepositoryError("packaged archive checksum changed during evidence collection")
+            observation["archive_content_sha256"] = package_content_sha256(local_archive)
+        if len(matching) == 1 and hasattr(registry, "archive"):
+            published_archive = registry.archive(name, version, matching[0]["checksum"])
+            observation["published_archive_sha256"] = hashlib.sha256(
+                published_archive
+            ).hexdigest()
+            observation["published_content_sha256"] = package_content_sha256(
+                published_archive
+            )
+        observations[name] = observation
     return observations
 
 

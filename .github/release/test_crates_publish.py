@@ -432,6 +432,35 @@ class CratesPublishTests(unittest.TestCase):
             crates_publish.validate_recomputed_plan(
                 reviewed, drift, reviewed["plan_digest"]
             )
+    def test_recovers_reviewed_plan_from_exact_newly_published_prefix(self):
+        reviewed = publication_plan((
+            ("core", "0.0.2", b"core"),
+            ("app", "0.0.2", b"app"),
+        ))
+        reviewed["packages"][1]["internal_dependencies"] = [
+            {"name": "core", "requirement": "^0.0.2"}
+        ]
+        reviewed["plan_digest"] = crates_plan.digest_publication_plan(reviewed)
+        current = copy.deepcopy(reviewed)
+        core = current["packages"][0]
+        core["classification"] = "unchanged"
+        core["action"] = "skip"
+        core["observed_registry_checksum"] = core["archive_sha256"]
+        current["publication_order"] = ["app"]
+        current["plan_digest"] = crates_plan.digest_publication_plan(current)
+
+        recovered = crates_publish.recover_reviewed_plan(
+            current, reviewed["plan_digest"]
+        )
+
+        self.assertEqual(recovered, reviewed)
+        self.assertEqual(
+            crates_publish.validate_recomputed_plan(
+                recovered, current, reviewed["plan_digest"]
+            ),
+            ["core"],
+        )
+
     def test_rejects_non_dependency_order_and_nonprefix_registry_state(self):
         plan = publication_plan((
             ("core", "0.0.2", b"core"),

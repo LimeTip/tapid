@@ -1,7 +1,9 @@
 """Resumable execution for reviewed Tapid crates.io publication plans."""
 
 import argparse
+import copy
 import hashlib
+import itertools
 import json
 import os
 import shutil
@@ -178,6 +180,63 @@ def package_workspace_archives(workspace, output_directory, plan, *, run=subproc
     return archives
 
 
+def recover_reviewed_plan(current, expected_digest):
+    """Recover digest-bound intent after an exact publication-order prefix landed."""
+    if current.get("plan_digest") != crates_plan.digest_publication_plan(current):
+        raise PublicationError("recomputed plan content does not match its digest")
+    if current.get("plan_digest") == expected_digest:
+        return copy.deepcopy(current)
+
+    packages = current.get("packages", [])
+    if not isinstance(packages, list):
+        raise PublicationError("recomputed publication plan package shape is malformed")
+    entries = {item.get("name"): item for item in packages if isinstance(item, dict)}
+    if len(entries) != len(packages) or None in entries:
+        raise PublicationError("recomputed publication plan package names must be unique")
+    remaining = current.get("publication_order")
+    if not isinstance(remaining, list):
+        raise PublicationError("recomputed publication order is malformed")
+    eligible = sorted(
+        name for name, item in entries.items()
+        if item.get("action") == "skip"
+        and item.get("classification") == "unchanged"
+        and item.get("observed_registry_checksum") == item.get("archive_sha256")
+    )
+    if len(eligible) > 20:
+        raise PublicationError("too many exact registry candidates to recover safely")
+    edges = {
+        name: [dependency.get("name") for dependency in item.get("internal_dependencies", [])]
+        for name, item in entries.items()
+    }
+    for count in range(1, len(eligible) + 1):
+        for completed_tuple in itertools.combinations(eligible, count):
+            completed = set(completed_tuple)
+            proposed = completed | set(remaining)
+            candidate_order = crates_plan._topological_order(proposed, edges)
+            if set(candidate_order[:count]) != completed or candidate_order[count:] != remaining:
+                continue
+            candidate = copy.deepcopy(current)
+            candidate_entries = {item["name"]: item for item in candidate["packages"]}
+            for name in completed:
+                item = candidate_entries[name]
+                item["classification"] = (
+                    "changed" if item.get("prior_registry_versions") else "unpublished"
+                )
+                item["action"] = "publish"
+                item["expected_registry_checksum"] = item["archive_sha256"]
+                item["observed_registry_checksum"] = None
+                if "published_content_sha256" in item:
+                    item["published_content_sha256"] = None
+            candidate["publication_order"] = candidate_order
+            candidate["plan_digest"] = crates_plan.digest_publication_plan(candidate)
+            if candidate["plan_digest"] == expected_digest:
+                _validate_reviewed_shape(candidate)
+                return candidate
+    raise PublicationError(
+        "recomputed plan digest differs from reviewed digest and is not an exact published prefix"
+    )
+
+
 def validate_recomputed_plan(reviewed, current, expected_digest):
     """Allow only exact-checksum publication of a verified dependency-order prefix."""
     if reviewed.get("plan_digest") != expected_digest:
@@ -205,7 +264,8 @@ def validate_recomputed_plan(reviewed, current, expected_digest):
         raise PublicationError("recomputed package set drift")
     immutable_fields = (
         "name", "version", "internal_dependencies", "archive_sha256",
-        "archive_size", "expected_registry_checksum",
+        "archive_size", "archive_content_sha256", "prior_registry_versions",
+        "expected_registry_checksum",
     )
     for name, original in reviewed_packages.items():
         observed = current_packages[name]

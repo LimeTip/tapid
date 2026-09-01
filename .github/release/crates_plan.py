@@ -228,7 +228,17 @@ def build_publication_plan(
             raise ValueError(
                 f"{name} {local_version} has version drift behind crates.io"
             )
-        if published and published[0]["checksum"] != observation["archive_sha256"]:
+        same_archive = bool(
+            published and published[0]["checksum"] == observation["archive_sha256"]
+        )
+        same_packaged_content = bool(
+            published
+            and observation.get("published_archive_sha256") == published[0]["checksum"]
+            and _SHA256_RE.fullmatch(observation.get("archive_content_sha256", ""))
+            and observation.get("archive_content_sha256")
+            == observation.get("published_content_sha256")
+        )
+        if published and not (same_archive or same_packaged_content):
             raise ValueError(
                 f"{name} {local_version} differs from immutable published bytes"
             )
@@ -253,7 +263,18 @@ def build_publication_plan(
             ],
             "archive_sha256": observation["archive_sha256"],
             "archive_size": observation["archive_size"],
-            "expected_registry_checksum": observation["archive_sha256"],
+            "archive_content_sha256": observation.get("archive_content_sha256"),
+            "published_content_sha256": observation.get("published_content_sha256"),
+            "prior_registry_versions": sorted(
+                (
+                    version for version in observation["registry_versions"]
+                    if version["version"] != local_version
+                ),
+                key=lambda version: (version["version"], version["checksum"]),
+            ),
+            "expected_registry_checksum": (
+                published[0]["checksum"] if published else observation["archive_sha256"]
+            ),
             "observed_registry_checksum": published[0]["checksum"] if published else None,
         })
 

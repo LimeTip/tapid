@@ -34,10 +34,10 @@ jobs:
     outputs:
       has_publications: ${{ steps.plan-state.outputs.has_publications }}
     steps:
-      - name: Check out exact reviewed source
+      - name: Check out trusted current main
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit }}
+          ref: main
           fetch-depth: 0
           persist-credentials: false
       - name: Validate exact source and inputs
@@ -47,9 +47,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$REVIEWED_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$REVIEWED_DIGEST" =~ ^sha256-[0-9a-f]{64}$ ]]
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
-          git merge-base --is-ancestor "$SOURCE_COMMIT" origin/main
           test -z "$(git status --porcelain --untracked-files=no)"
       - name: Build package archives and recompute the read-only plan
         env:
@@ -59,12 +60,13 @@ jobs:
           mkdir -p "$PLAN_DIR"
           python3 scripts/crates_release.py plan \
             --commit '${{ inputs.commit }}' \
-            --output "$PLAN_DIR/crates-plan.json"
+            --output "$PLAN_DIR/recomputed-plan.json"
       - name: Bind the plan to the reviewed digest
         id: plan-state
         env:
           REVIEWED_DIGEST: ${{ inputs.plan_digest }}
-          PLAN_PATH: ${{ runner.temp }}/crates-publication-preflight/crates-plan.json
+          PLAN_PATH: ${{ runner.temp }}/crates-publication-preflight/recomputed-plan.json
+          REVIEWED_PATH: ${{ runner.temp }}/crates-publication-preflight/crates-plan.json
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -74,20 +76,23 @@ jobs:
           import sys
 
           sys.path.insert(0, ".github/release")
-          import crates_plan
+          import crates_publish
+          import release_identity
 
-          plan = json.loads(Path(os.environ["PLAN_PATH"]).read_text())
-          if plan.get("plan_digest") != os.environ["REVIEWED_DIGEST"]:
-              raise SystemExit("recomputed plan digest differs from reviewed digest")
-          if crates_plan.digest_publication_plan(plan) != os.environ["REVIEWED_DIGEST"]:
-              raise SystemExit("plan content does not match reviewed digest")
-          if plan.get("package_verification") != "archives-hashed-without-registry-verification":
+          current = json.loads(Path(os.environ["PLAN_PATH"]).read_text())
+          reviewed = crates_publish.recover_reviewed_plan(
+              current, os.environ["REVIEWED_DIGEST"]
+          )
+          if reviewed.get("package_verification") != "archives-hashed-without-registry-verification":
               raise SystemExit("plan lacks exact pre-mutation archive hash evidence")
-          if not plan.get("preflight", {}).get("ok"):
+          if not reviewed.get("preflight", {}).get("ok"):
               raise SystemExit("publication preflight did not pass")
+          Path(os.environ["REVIEWED_PATH"]).write_bytes(
+              release_identity.canonical_json(reviewed) + b"\n"
+          )
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("has_publications={}\n".format(
-                  "true" if plan.get("publication_order") else "false"
+                  "true" if reviewed.get("publication_order") else "false"
               ))
           PY
       - name: Exercise the no-mutation execution path
@@ -119,12 +124,22 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Check out exact reviewed source
+      - name: Check out trusted current main
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit }}
-          fetch-depth: 1
+          ref: main
+          fetch-depth: 0
           persist-credentials: false
+      - name: Revalidate current origin main before mutation
+        env:
+          SOURCE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test -z "$(git status --porcelain --untracked-files=no)"
       - name: Download exact reviewed plan
         uses: actions/download-artifact@v4
         with:
