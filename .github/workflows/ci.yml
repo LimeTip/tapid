@@ -76,6 +76,37 @@ jobs:
           if (Test-Path -LiteralPath $binary) { throw 'Tapid was not uninstalled' }
           Write-Host 'Windows developer install and uninstall passed.'
 
+  release-tools:
+    name: Release tooling and workflow validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install release test dependencies
+        run: python3 -m pip install --disable-pip-version-check cryptography==50.0.0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release tooling tests
+        run: python3 -m unittest discover -s .github/release -p 'test_*.py' -v
+      - name: Run installer tests
+        run: python3 tests/test_installer_scripts.py
+      - name: Set up Go for actionlint
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache: false
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Validate GitHub Actions workflows
+        run: actionlint .github/workflows/*.yml
+
   release-platform-build:
     name: Release target (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
