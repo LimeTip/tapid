@@ -58,6 +58,11 @@ def adapter_responses(release_code=1, release_stderr="release not found"):
         ("git", "status", "--porcelain"): (0, "", ""),
         ("git", "rev-parse", "HEAD^{commit}"): (0, COMMIT + "\n", ""),
         ("git", "rev-parse", "refs/remotes/origin/main^{commit}"): (0, COMMIT + "\n", ""),
+        ("git", "ls-remote", "origin", "refs/heads/main"): (
+            0,
+            COMMIT + "\trefs/heads/main\n",
+            "",
+        ),
         ("git", "cat-file", "-e", COMMIT + "^{commit}"): (0, "", ""),
         ("git", "merge-base", "--is-ancestor", COMMIT, "refs/remotes/origin/main"): (0, "", ""),
         ("cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"): (
@@ -117,6 +122,13 @@ class ReleaseRepositoryTests(unittest.TestCase):
         responses = adapter_responses()
         responses[("git", "rev-parse", "refs/remotes/origin/main^{commit}")] = (128, "", "unknown revision")
         cases.append((responses, "origin/main"))
+        responses = adapter_responses()
+        responses[("git", "ls-remote", "origin", "refs/heads/main")] = (
+            0,
+            "b" * 40 + "\trefs/heads/main\n",
+            "",
+        )
+        cases.append((responses, "remote main"))
 
         for responses, message in cases:
             with self.subTest(message=message):
@@ -180,6 +192,41 @@ class ReleaseRepositoryTests(unittest.TestCase):
             )
         self.assertEqual(result, 0)
         self.assertTrue(all(call[0:2] not in (("git", "tag"), ("git", "push")) for call in runner.calls))
+
+    def test_tag_command_resumes_an_exact_local_tag_after_push_interruption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, plan = self._write_plan_file(directory)
+            responses = adapter_responses()
+            ref = "refs/tags/v0.12.3"
+            responses[("git", "show-ref", "--verify", "--quiet", ref)] = (0, "", "")
+            responses[("git", "cat-file", "-t", ref)] = (0, "tag\n", "")
+            responses[("git", "rev-parse", ref + "^{commit}")] = (0, COMMIT + "\n", "")
+            responses[("git", "push", "origin", ref + ":" + ref)] = (0, "", "")
+            runner = FakeRunner(responses)
+
+            result = release_cli.main(
+                ["tag", "--plan", str(path), "--expect-digest", plan["plan_digest"]],
+                runner=runner,
+                clock=lambda: NOW,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertNotIn(("git", "tag"), [tuple(call[:2]) for call in runner.calls])
+        self.assertIn(("git", "push", "origin", ref + ":" + ref), map(tuple, runner.calls))
+
+    def test_tag_command_never_recreates_a_tag_observed_during_planning(self):
+        planned_tag = {"state": "present", "object_type": "tag", "peeled_commit": COMMIT}
+        with tempfile.TemporaryDirectory() as directory:
+            path, plan = self._write_plan_file(directory, tag=planned_tag)
+            responses = adapter_responses()
+            responses[("git", "show-ref", "--verify", "--quiet", "refs/tags/v0.12.3")] = (1, "", "")
+
+            with self.assertRaisesRegex(ValueError, "disappeared"):
+                release_cli.main(
+                    ["tag", "--plan", str(path), "--expect-digest", plan["plan_digest"]],
+                    runner=FakeRunner(responses),
+                    clock=lambda: NOW,
+                )
 
     def test_dispatch_passes_exactly_seven_reviewed_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -376,6 +423,41 @@ class ReleasePlanTests(unittest.TestCase):
         plan["plan_digest"] = release_identity.plan_digest(unsigned)
 
         with self.assertRaisesRegex(ValueError, "freshness"):
+            release_plan.validate_plan(plan)
+
+    def test_plan_validation_rejects_rehashed_unknown_fields(self):
+        repository, github = valid_snapshots()
+        plan = release_plan.build_release_plan(
+            {"repository": "LimeTip/tapid", "version": "0.12.3", "commit": COMMIT},
+            repository,
+            github,
+            NOW,
+        )
+        plan["unexpected"] = "ignored"
+        unsigned = dict(plan)
+        unsigned.pop("plan_digest")
+        plan["plan_digest"] = release_identity.plan_digest(unsigned)
+
+        with self.assertRaisesRegex(ValueError, "fields"):
+            release_plan.validate_plan(plan)
+
+    def test_plan_validation_rejects_rehashed_fractional_timestamps(self):
+        repository, github = valid_snapshots()
+        plan = release_plan.build_release_plan(
+            {"repository": "LimeTip/tapid", "version": "0.12.3", "commit": COMMIT},
+            repository,
+            github,
+            NOW,
+        )
+        plan["created_at"] = "2026-09-01T19:15:30.000Z"
+        plan["expires_at"] = "2026-10-01T19:15:30.000Z"
+        plan["workflow_dispatch"]["created_at"] = plan["created_at"]
+        plan["workflow_dispatch"]["expires_at"] = plan["expires_at"]
+        unsigned = dict(plan)
+        unsigned.pop("plan_digest")
+        plan["plan_digest"] = release_identity.plan_digest(unsigned)
+
+        with self.assertRaisesRegex(ValueError, "canonical"):
             release_plan.validate_plan(plan)
 
 

@@ -90,6 +90,21 @@ def gather_snapshots(repository, version, commit, now, runner=subprocess_runner)
         "origin/main lookup",
     ).stdout.strip()
     release_identity.validate_commit(origin_main)
+    remote_main_output = _run(
+        runner,
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        "remote main lookup",
+    ).stdout
+    remote_main_lines = [line for line in remote_main_output.splitlines() if line]
+    if len(remote_main_lines) != 1:
+        raise ValueError("remote main lookup returned ambiguous state")
+    remote_main_fields = remote_main_lines[0].split("\t")
+    if len(remote_main_fields) != 2 or remote_main_fields[1] != "refs/heads/main":
+        raise ValueError("remote main lookup returned malformed state")
+    remote_main = remote_main_fields[0]
+    release_identity.validate_commit(remote_main)
+    if remote_main != origin_main:
+        raise ValueError("origin/main does not match remote main")
     commit_result = runner(["git", "cat-file", "-e", commit + "^{commit}"])
     if commit_result.returncode != 0:
         raise ValueError("release commit does not exist")

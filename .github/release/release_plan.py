@@ -16,6 +16,8 @@ def _parse_timestamp(value, field):
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as error:
         raise ValueError("{} must be a canonical UTC timestamp".format(field)) from error
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise ValueError("{} must be a canonical UTC timestamp".format(field))
     return parsed
 
 
@@ -115,6 +117,24 @@ def validate_plan(plan):
     """Validate a serialized release plan and its self-contained digest."""
     if not isinstance(plan, dict) or plan.get("schema") != SCHEMA:
         raise ValueError("unsupported release plan schema")
+    expected_fields = {
+        "schema",
+        "repository",
+        "version",
+        "tag",
+        "commit",
+        "tag_state",
+        "release_state",
+        "eligible",
+        "checks",
+        "created_at",
+        "expires_at",
+        "urls",
+        "workflow_dispatch",
+        "plan_digest",
+    }
+    if set(plan) != expected_fields:
+        raise ValueError("release plan fields do not match the schema")
     expected = plan.get("plan_digest")
     unsigned = dict(plan)
     unsigned.pop("plan_digest", None)

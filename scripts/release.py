@@ -101,17 +101,31 @@ def _tag(plan, repository, runner):
         return
     if tag["state"] != "absent":
         raise ValueError("release tag state is malformed")
+    if plan["tag_state"] != "create":
+        raise ValueError("release tag disappeared after planning and will not be recreated")
     ref = "refs/tags/{}".format(plan["tag"])
     local = runner(["git", "show-ref", "--verify", "--quiet", ref])
     if local.returncode == 0:
-        raise ValueError("local release tag already exists while remote tag is absent")
-    if local.returncode != 1:
+        object_type = _checked_run(
+            runner,
+            ["git", "cat-file", "-t", ref],
+            "local tag inspection",
+        ).stdout.strip()
+        peeled_commit = _checked_run(
+            runner,
+            ["git", "rev-parse", ref + "^{commit}"],
+            "local tag peel",
+        ).stdout.strip()
+        if object_type != "tag" or peeled_commit != plan["commit"]:
+            raise ValueError("local release tag does not match the exact annotated plan identity")
+    elif local.returncode == 1:
+        _checked_run(
+            runner,
+            ["git", "tag", "-a", plan["tag"], plan["commit"], "-m", "Tapid {}".format(plan["tag"])],
+            "annotated tag creation",
+        )
+    else:
         raise ValueError("local tag lookup failed")
-    _checked_run(
-        runner,
-        ["git", "tag", "-a", plan["tag"], plan["commit"], "-m", "Tapid {}".format(plan["tag"])],
-        "annotated tag creation",
-    )
     _checked_run(
         runner,
         ["git", "push", "origin", "{}:{}".format(ref, ref)],
