@@ -131,6 +131,7 @@ impl Requirement {
 
 fn separated_operator(token: &str) -> Option<RequirementOperator> {
     match token {
+        "~" => Some(RequirementOperator::Tilde),
         ">" => Some(RequirementOperator::Greater),
         ">=" => Some(RequirementOperator::GreaterEqual),
         "<" => Some(RequirementOperator::Less),
@@ -191,6 +192,7 @@ fn parse_requirement_base(op: RequirementOperator, value: &str) -> Option<Requir
                 || (!matches!(
                     op,
                     RequirementOperator::Exact
+                        | RequirementOperator::Tilde
                         | RequirementOperator::Greater
                         | RequirementOperator::GreaterEqual
                         | RequirementOperator::Less
@@ -582,7 +584,8 @@ fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> b
                         RequirementOperator::Tilde => {
                             version >= base
                                 && version.major() == base.major()
-                                && version.minor() == base.minor()
+                                && (comparator.base.precision == RequirementPrecision::Major
+                                    || version.minor() == base.minor())
                         }
                         RequirementOperator::Greater => {
                             if comparator.base.precision == RequirementPrecision::Full {
@@ -879,6 +882,35 @@ mod tests {
         assert!(requirement.matches(&"2.1.0".parse().unwrap()));
         assert!(requirement.matches(&"2.1.9".parse().unwrap()));
         assert!(!requirement.matches(&"2.2.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn partial_tilde_ranges_follow_npm_semantics() {
+        for text in ["~2", "~ 2"] {
+            let requirement: Requirement = text.parse().unwrap();
+            assert!(
+                !requirement.matches(&"2.0.0-beta.1".parse().unwrap()),
+                "{text}"
+            );
+            assert!(requirement.matches(&"2.0.0".parse().unwrap()), "{text}");
+            assert!(requirement.matches(&"2.9.9".parse().unwrap()), "{text}");
+            assert!(!requirement.matches(&"3.0.0".parse().unwrap()), "{text}");
+        }
+
+        for text in ["~2.1", "~ 2.1"] {
+            let requirement: Requirement = text.parse().unwrap();
+            assert!(
+                !requirement.matches(&"2.1.0-beta.1".parse().unwrap()),
+                "{text}"
+            );
+            assert!(requirement.matches(&"2.1.0".parse().unwrap()), "{text}");
+            assert!(requirement.matches(&"2.1.99".parse().unwrap()), "{text}");
+            assert!(!requirement.matches(&"2.2.0".parse().unwrap()), "{text}");
+        }
+
+        let explicit_prerelease: Requirement = "~2 2.1.0-beta.1".parse().unwrap();
+        assert!(explicit_prerelease.matches(&"2.1.0-beta.1".parse().unwrap()));
+        assert!(!explicit_prerelease.matches(&"2.1.0-beta.2".parse().unwrap()));
     }
 
     #[test]
