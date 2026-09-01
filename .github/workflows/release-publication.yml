@@ -307,7 +307,7 @@ jobs:
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "Tapid $RELEASE_TAG" --generate-notes
           else
-            test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .draft)" = true || {
+            test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true || {
               echo "release $RELEASE_TAG already exists publicly; refusing to replace its assets" >&2
               exit 1
             }
@@ -315,7 +315,7 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             "${artifacts[@]}" \
             publication/release-manifest.json publication/stable.json --clobber
-          mapfile -t published_assets < <(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.assets[].name' | sort)
+          mapfile -t published_assets < <(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort)
           test "${#published_assets[@]}" -eq "${#expected_assets[@]}" || {
             echo "draft release contains ${#published_assets[@]} assets, expected ${#expected_assets[@]}" >&2
             exit 1

@@ -152,6 +152,18 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertGreater(final_verify, upload)
         self.assertLess(final_verify, publish)
 
+    def test_draft_release_inspection_uses_a_draft_aware_lookup(self):
+        workflow = (ROOT / ".github" / "workflows" / "release-publication.yml").read_text()
+        advance = workflow.split("  advance-stable:", 1)[1]
+        self.assertNotIn('releases/tags/$RELEASE_TAG', advance)
+        self.assertIn(
+            'gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft', advance
+        )
+        self.assertIn(
+            'gh release view "$RELEASE_TAG" --json assets --jq \'.assets[].name\'',
+            advance,
+        )
+
     def test_windows_installer_detects_the_os_architecture(self):
         powershell = INSTALL_PS1.read_text()
         self.assertIn("RuntimeInformation]::OSArchitecture", powershell)
