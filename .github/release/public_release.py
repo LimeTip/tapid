@@ -391,6 +391,92 @@ def _archive_member(path: Path, expected: str) -> str:
     return name
 
 
+def verify_downloaded_release_assets(directory: Path, *, version: str, tag: str,
+                                     commit: str, verifier: Optional[Callable] = None,
+                                     now=None):
+    """Verify the exact bytes downloaded from a draft release before promotion."""
+    release_identity.validate_version_tag(version, tag)
+    release_identity.validate_commit(commit)
+    root = Path(directory)
+    if not root.is_dir() or root.is_symlink():
+        raise VerificationError("downloaded draft asset directory is invalid")
+
+    expected_pairs = release_identity.release_archives(version)
+    expected_names = {name for _, name in expected_pairs} | {
+        "release-manifest.json", "stable.json",
+    }
+    entries = list(root.iterdir())
+    if (len(entries) != 8 or {entry.name for entry in entries} != expected_names or
+            any(not entry.is_file() or entry.is_symlink() for entry in entries)):
+        raise VerificationError("downloaded draft must contain the exact canonical eight-asset set")
+
+    manifest_path = root / "release-manifest.json"
+    stable_path = root / "stable.json"
+    if manifest_path.stat().st_size > METADATA_LIMIT or stable_path.stat().st_size > METADATA_LIMIT:
+        raise VerificationError("downloaded draft metadata exceeds byte limit")
+    manifest = _strict_json(manifest_path.read_bytes(), "release manifest")
+    if not isinstance(manifest, dict):
+        raise VerificationError("release manifest must be an object")
+    if (manifest.get("version") != version or manifest.get("tag") != tag or
+            manifest.get("commit") != commit):
+        raise VerificationError("downloaded manifest identity does not match approved release")
+
+    (verifier or _default_verifier)(manifest_path, version, tag, commit)
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None or clock.utcoffset() is None:
+        raise VerificationError("verification clock must be timezone-aware")
+    clock = clock.astimezone(timezone.utc)
+    created = _parse_time(manifest.get("created_at"), "created_at")
+    expires = _parse_time(manifest.get("expires_at"), "expires_at")
+    if (created > clock or expires <= clock or expires <= created or
+            expires - created != release_identity.FRESHNESS_DURATION):
+        raise VerificationError("release manifest freshness is invalid")
+
+    manifest_url = "https://github.com/{}/releases/download/{}/release-manifest.json".format(
+        REPOSITORY, tag
+    )
+    stable = _strict_json(stable_path.read_bytes(), "stable pointer")
+    if stable != {"channel": "stable", "manifests": [manifest_url]}:
+        raise VerificationError("stable pointer is not exactly bound to the release manifest")
+
+    artifacts = manifest.get("artifacts")
+    required_fields = {"name", "target", "url", "sha256", "size"}
+    if not isinstance(artifacts, list) or len(artifacts) != len(expected_pairs):
+        raise VerificationError("manifest must describe exactly six archives")
+    by_target = {}
+    for artifact in artifacts:
+        if (not isinstance(artifact, dict) or set(artifact) != required_fields or
+                artifact.get("target") in by_target):
+            raise VerificationError("manifest archive entry is invalid or duplicated")
+        by_target[artifact["target"]] = artifact
+    if set(by_target) != {target for target, _ in expected_pairs}:
+        raise VerificationError("manifest archive targets are not canonical")
+
+    archive_evidence = []
+    base = "https://github.com/{}/releases/download/{}".format(REPOSITORY, tag)
+    for target, name in expected_pairs:
+        artifact = by_target[target]
+        path = root / name
+        size = path.stat().st_size
+        if size < 1 or size > ARCHIVE_LIMIT:
+            raise VerificationError("downloaded archive exceeds size bounds")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if (artifact.get("name") != name or artifact.get("url") != base + "/" + name or
+                artifact.get("size") != size or
+                artifact.get("sha256") != digest):
+            raise VerificationError("downloaded archive does not match signed manifest")
+        member = _archive_member(path, "tapid.exe" if "windows" in target else "tapid")
+        archive_evidence.append({
+            "target": target, "name": name, "size": size,
+            "sha256": digest, "member": member,
+        })
+
+    return {
+        "asset_count": len(entries), "signature": "verified-production-rust",
+        "freshness": "valid", "stable": "verified", "archives": archive_evidence,
+    }
+
+
 def _verify_archives(report, transport, manifest):
     tag = report["release"]["tag"]
     version = report["release"]["version"]

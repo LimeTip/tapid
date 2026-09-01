@@ -123,6 +123,43 @@ def replace_archive(responses, manifest, target, body):
 
 
 class PublicReleaseTests(unittest.TestCase):
+    def test_verifies_exact_downloaded_draft_assets_before_promotion(self):
+        responses, manifest = valid_fixture()
+        verified = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for artifact in manifest["artifacts"]:
+                (root / artifact["name"]).write_bytes(responses[artifact["url"]])
+            (root / "release-manifest.json").write_bytes(
+                responses[BASE + "/release-manifest.json"]
+            )
+            (root / "stable.json").write_bytes(responses[BASE + "/stable.json"])
+
+            report = public_release.verify_downloaded_release_assets(
+                root,
+                version=VERSION,
+                tag=TAG,
+                commit=COMMIT,
+                verifier=lambda path, version, tag, commit: verified.append(
+                    (path.read_bytes(), version, tag, commit)
+                ),
+                now=NOW,
+            )
+
+        self.assertEqual(report["asset_count"], 8)
+        self.assertEqual(len(report["archives"]), 6)
+        self.assertEqual(report["signature"], "verified-production-rust")
+        self.assertEqual(report["stable"], "verified")
+        self.assertEqual(report["freshness"], "valid")
+        self.assertEqual(
+            [item["member"] for item in report["archives"]],
+            ["tapid", "tapid.exe", "tapid", "tapid", "tapid.exe", "tapid"],
+        )
+        self.assertTrue(all(item["size"] > 0 for item in report["archives"]))
+        self.assertTrue(all(len(item["sha256"]) == 64 for item in report["archives"]))
+        self.assertEqual([(v, t, c) for _, v, t, c in verified], [(VERSION, TAG, COMMIT)])
+
     def test_stable_resolves_latest_exact_eight_assets_and_signed_identity(self):
         responses, _ = valid_fixture()
         transport = FakeTransport(responses)

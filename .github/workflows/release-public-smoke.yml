@@ -80,7 +80,9 @@ jobs:
           REQUESTED_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          args=(--mode "$MODE" --skip-website --output public-release-evidence.json)
+          args=(--mode "$MODE" --output public-release-evidence.json)
+          args+=(--workflow-run-id "${{ github.run_id }}")
+          args+=(--workflow-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
           if [[ "$MODE" == tag ]]; then
             args+=(--tag "$REQUESTED_TAG")
           fi

@@ -336,6 +336,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
           mapfile -t artifacts < <(find release-artifacts -maxdepth 1 -type f -name '*.tar.gz' -print | sort)
@@ -380,7 +381,27 @@ jobs:
               exit 1
             }
           done
-          # Recheck freshness after upload and inspection, immediately before publication.
+          rm -rf downloaded-draft-assets
+          mkdir downloaded-draft-assets
+          gh release download "$RELEASE_TAG" --dir downloaded-draft-assets
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git cat-file -t "$RELEASE_TAG")" = tag
+          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+          python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, ".github/release")
+          import public_release
+
+          public_release.verify_downloaded_release_assets(
+              Path("downloaded-draft-assets"),
+              version=os.environ["RELEASE_VERSION"],
+              tag=os.environ["RELEASE_TAG"],
+              commit=os.environ["RELEASE_COMMIT"],
+          )
+          PY
           targets=(
             aarch64-apple-darwin
             aarch64-pc-windows-msvc
@@ -391,7 +412,7 @@ jobs:
           )
           for target in "${targets[@]}"; do
             python3 scripts/bootstrap_verifier.py \
-              publication/release-manifest.json "$target" "$RELEASE_TAG" >/dev/null
+              downloaded-draft-assets/release-manifest.json "$target" "$RELEASE_TAG" >/dev/null
           done
           gh release edit "$RELEASE_TAG" --draft=false --latest
 
@@ -402,5 +423,4 @@ jobs:
       contents: read
     uses: ./.github/workflows/release-public-smoke.yml
     with:
-      mode: tag
-      tag: ${{ inputs.tag }}
+      mode: stable
