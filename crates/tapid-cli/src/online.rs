@@ -792,13 +792,14 @@ pub fn resolve_and_fetch(
             if let Some(path) = record.fixture_artifact_path.as_ref() {
                 fs::read(path)
                     .map_err(|e| format!("cannot read artifact {}: {e}", path.display()))?
-            } else if let Some(encoded) = record.artifact.strip_prefix("base64:") {
+            } else {
+                let encoded = record
+                    .artifact
+                    .strip_prefix("base64:")
+                    .ok_or("fixture artifact has no resolved path or base64 payload")?;
                 STANDARD
                     .decode(encoded)
                     .map_err(|e| format!("invalid artifact encoding: {e}"))?
-            } else {
-                fs::read(&record.artifact)
-                    .map_err(|e| format!("cannot read artifact {}: {e}", record.artifact))?
             }
         } else {
             let transport = artifact_transport
