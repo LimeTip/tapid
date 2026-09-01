@@ -793,6 +793,7 @@ fn registry_fixture_relative_artifact_is_loaded_from_fixture_directory() {
     let fixture_dir = root.join("fixture");
     let project = root.join("project");
     let unrelated = root.join("unrelated");
+    let store = root.join("store");
     fs::create_dir_all(fixture_dir.join("fixture-files")).unwrap();
     fs::create_dir_all(&project).unwrap();
     fs::create_dir_all(&unrelated).unwrap();
@@ -818,6 +819,8 @@ fn registry_fixture_relative_artifact_is_loaded_from_fixture_directory() {
             fixture.to_str().unwrap(),
             "--project-dir",
             project.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
         ],
     );
     assert!(
