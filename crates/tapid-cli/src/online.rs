@@ -338,94 +338,6 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
     })
 }
 
-fn upsert_resolver_record(
-    key: &PackageRecordKey,
-    records: &BTreeMap<PackageRecordKey, PackageRecord>,
-    normalized_records: &NormalizedRecords,
-    metadata: &mut Vec<RegistryMetadata>,
-) -> Result<(), String> {
-    let Some(normalized) = normalized_records
-        .get(key)
-        .and_then(|record| record.as_ref().ok())
-    else {
-        return Ok(());
-    };
-    #[cfg(test)]
-    RESOLVER_METADATA_VERSION_VISITS.set(RESOLVER_METADATA_VERSION_VISITS.get() + 1);
-
-    let package = records.get(key).expect("record inserted before metadata");
-    let registry_text = package.registry.to_string();
-    let mut package_metadata = normalized.metadata.clone();
-    for (name, requirement) in &normalized.optional_dependencies {
-        let compatible_candidate_exists = records.iter().any(|(candidate_key, candidate)| {
-            candidate_key.0 == registry_text
-                && candidate_key.1 == name.to_string()
-                && normalized_records
-                    .get(candidate_key)
-                    .and_then(|record| record.as_ref().ok())
-                    .is_some()
-                && current_platform_matches(&candidate.platform)
-                && requirement.matches(&candidate.version)
-        });
-        if compatible_candidate_exists {
-            package_metadata
-                .dependencies
-                .insert(name.clone(), requirement.clone());
-        }
-    }
-
-    let registry_index = if let Some(index) = metadata
-        .iter()
-        .position(|entry| entry.registry == package.registry)
-    {
-        index
-    } else {
-        metadata.push(
-            RegistryMetadata::normalize(package.registry.clone(), Vec::new())
-                .map_err(|error| error.to_string())?,
-        );
-        metadata.sort_by(|left, right| left.registry.cmp(&right.registry));
-        metadata
-            .iter()
-            .position(|entry| entry.registry == package.registry)
-            .expect("inserted registry metadata")
-    };
-    let registry_metadata = &mut metadata[registry_index];
-    match registry_metadata.packages.binary_search_by(|candidate| {
-        candidate
-            .name
-            .cmp(&package_metadata.name)
-            .then(package_metadata.version.cmp(&candidate.version))
-    }) {
-        Ok(index) => registry_metadata.packages[index] = package_metadata,
-        Err(index) => registry_metadata.packages.insert(index, package_metadata),
-    }
-
-    let inserted_name = &package.name;
-    let inserted_version = &package.version;
-    for parent in &mut registry_metadata.packages {
-        let parent_key = (
-            registry_text.clone(),
-            parent.name.to_string(),
-            parent.version.to_string(),
-        );
-        let Some(parent_record) = normalized_records
-            .get(&parent_key)
-            .and_then(|record| record.as_ref().ok())
-        else {
-            continue;
-        };
-        if let Some(requirement) = parent_record.optional_dependencies.get(inserted_name)
-            && requirement.matches(inserted_version)
-        {
-            parent
-                .dependencies
-                .insert(inserted_name.clone(), requirement.clone());
-        }
-    }
-    Ok(())
-}
-
 type PackageRecordKey = (String, String, String);
 type ResolvedRecords = (Resolution, BTreeMap<PackageRecordKey, PackageRecord>);
 
@@ -433,22 +345,131 @@ type ResolvedRecords = (Resolution, BTreeMap<PackageRecordKey, PackageRecord>);
 thread_local! {
     static RESOLVER_METADATA_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RESOLVER_METADATA_VERSION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RESOLVER_METADATA_PARENT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn insert_record(
+fn insert_records(
     records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &mut NormalizedRecords,
     metadata: &mut Vec<RegistryMetadata>,
-    package: PackageRecord,
+    packages: Vec<PackageRecord>,
 ) -> Result<(), String> {
-    let key = (
-        package.registry.to_string(),
-        package.name.to_string(),
-        package.version.to_string(),
-    );
-    normalized.insert(key.clone(), normalize_record(&package));
-    records.insert(key.clone(), package);
-    upsert_resolver_record(&key, records, normalized, metadata)
+    let mut inserted_keys = BTreeSet::new();
+    let mut inserted_names = BTreeMap::<String, BTreeSet<PackageName>>::new();
+    for package in packages {
+        let registry = package.registry.to_string();
+        let key = (
+            registry.clone(),
+            package.name.to_string(),
+            package.version.to_string(),
+        );
+        inserted_names
+            .entry(registry)
+            .or_default()
+            .insert(package.name.clone());
+        normalized.insert(key.clone(), normalize_record(&package));
+        records.insert(key.clone(), package);
+        inserted_keys.insert(key);
+    }
+
+    let mut candidates = BTreeMap::<(String, String), Vec<&PackageRecordKey>>::new();
+    for key in records.keys() {
+        candidates
+            .entry((key.0.clone(), key.1.clone()))
+            .or_default()
+            .push(key);
+    }
+    let candidate_matches = |registry: &str, name: &PackageName, requirement: &Requirement| {
+        candidates
+            .get(&(registry.to_owned(), name.to_string()))
+            .into_iter()
+            .flatten()
+            .any(|key| {
+                normalized
+                    .get(*key)
+                    .and_then(|record| record.as_ref().ok())
+                    .is_some()
+                    && records.get(*key).is_some_and(|candidate| {
+                        current_platform_matches(&candidate.platform)
+                            && requirement.matches(&candidate.version)
+                    })
+            })
+    };
+
+    let mut additions = BTreeMap::<RegistryOrigin, Vec<PackageVersionMetadata>>::new();
+    for key in &inserted_keys {
+        let Some(record) = normalized.get(key).and_then(|record| record.as_ref().ok()) else {
+            continue;
+        };
+        #[cfg(test)]
+        RESOLVER_METADATA_VERSION_VISITS.set(RESOLVER_METADATA_VERSION_VISITS.get() + 1);
+        let package = records.get(key).expect("record inserted before metadata");
+        let mut package_metadata = record.metadata.clone();
+        for (name, requirement) in &record.optional_dependencies {
+            if candidate_matches(&key.0, name, requirement) {
+                package_metadata
+                    .dependencies
+                    .insert(name.clone(), requirement.clone());
+            }
+        }
+        additions
+            .entry(package.registry.clone())
+            .or_default()
+            .push(package_metadata);
+    }
+
+    for (registry, additions) in additions {
+        let registry_index =
+            if let Some(index) = metadata.iter().position(|entry| entry.registry == registry) {
+                index
+            } else {
+                metadata.push(
+                    RegistryMetadata::normalize(registry.clone(), Vec::new())
+                        .map_err(|error| error.to_string())?,
+                );
+                metadata.sort_by(|left, right| left.registry.cmp(&right.registry));
+                metadata
+                    .iter()
+                    .position(|entry| entry.registry == registry)
+                    .expect("inserted registry metadata")
+            };
+        let mut combined = std::mem::take(&mut metadata[registry_index].packages);
+        combined.extend(additions);
+        metadata[registry_index] =
+            RegistryMetadata::normalize(registry, combined).map_err(|error| error.to_string())?;
+    }
+
+    for registry_metadata in metadata {
+        let registry = registry_metadata.registry.to_string();
+        let Some(names) = inserted_names.get(&registry) else {
+            continue;
+        };
+        for parent in &mut registry_metadata.packages {
+            #[cfg(test)]
+            RESOLVER_METADATA_PARENT_VISITS.set(RESOLVER_METADATA_PARENT_VISITS.get() + 1);
+            let parent_key = (
+                registry.clone(),
+                parent.name.to_string(),
+                parent.version.to_string(),
+            );
+            let Some(parent_record) = normalized
+                .get(&parent_key)
+                .and_then(|record| record.as_ref().ok())
+            else {
+                continue;
+            };
+            for name in names {
+                if let Some(requirement) = parent_record.optional_dependencies.get(name)
+                    && candidate_matches(&registry, name, requirement)
+                {
+                    parent
+                        .dependencies
+                        .insert(name.clone(), requirement.clone());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn discarded_version_diagnostics(
@@ -530,9 +551,12 @@ where
                             .map_err(|error: tapid_core::DomainError| error.to_string())?;
                         fetched.insert((registry.to_string(), name.to_string()));
                         report_metadata_progress(fetched.len());
-                        for package in fetch(&registry, &name)? {
-                            insert_record(&mut records, &mut normalized, &mut metadata, package)?;
-                        }
+                        insert_records(
+                            &mut records,
+                            &mut normalized,
+                            &mut metadata,
+                            fetch(&registry, &name)?,
+                        )?;
                     }
                     continue;
                 }
@@ -560,9 +584,12 @@ where
                     let name: PackageName = name
                         .parse()
                         .map_err(|error: tapid_core::DomainError| error.to_string())?;
-                    for package in fetch(&registry, &name)? {
-                        insert_record(&mut records, &mut normalized, &mut metadata, package)?;
-                    }
+                    insert_records(
+                        &mut records,
+                        &mut normalized,
+                        &mut metadata,
+                        fetch(&registry, &name)?,
+                    )?;
                 }
             }
             Err(error @ ResolveError::MissingCandidate { .. })
@@ -590,10 +617,12 @@ where
                 let name: PackageName = name
                     .parse()
                     .map_err(|error: tapid_core::DomainError| error.to_string())?;
-                let packages = fetch(&registry, &name)?;
-                for package in packages {
-                    insert_record(&mut records, &mut normalized, &mut metadata, package)?;
-                }
+                insert_records(
+                    &mut records,
+                    &mut normalized,
+                    &mut metadata,
+                    fetch(&registry, &name)?,
+                )?;
             }
             Err(error) => return Err(format!("resolution failed: {error}")),
         }
@@ -788,7 +817,7 @@ pub fn resolve_and_fetch(
             &temp,
             ArchiveLimits::default(),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("cannot extract {id}: {e}"))?;
         let tree_digest: ArtifactDigest = canonical_tree_digest(&temp)
             .map_err(|e| e.to_string())?
             .parse()
@@ -1014,6 +1043,29 @@ mod tests {
     }
 
     #[test]
+    fn one_packument_updates_parent_metadata_once_per_version() {
+        RESOLVER_METADATA_PARENT_VISITS.set(0);
+        let registry: RegistryOrigin = NPM.parse().unwrap();
+        let root = Dependency::new(registry, "large".parse().unwrap(), "*".parse().unwrap());
+        let version_count = 256;
+
+        let (resolution, _) = resolve_with_fetch(&[root], |_, name| {
+            assert_eq!(name.to_string(), "large");
+            Ok((0..version_count)
+                .map(|patch| named_record("large", &format!("1.0.{patch}"), &[]))
+                .collect())
+        })
+        .unwrap();
+
+        assert_eq!(resolution.selected[0].version.to_string(), "1.0.255");
+        assert!(
+            RESOLVER_METADATA_PARENT_VISITS.get() <= version_count * 2,
+            "one packument caused {} parent metadata visits",
+            RESOLVER_METADATA_PARENT_VISITS.get()
+        );
+    }
+
+    #[test]
     fn metadata_progress_is_emitted_at_bounded_checkpoints() {
         let checkpoints = (1..=612)
             .filter(|fetches| metadata_progress_checkpoint(*fetches))
@@ -1181,6 +1233,36 @@ mod tests {
             error.contains("git+https://example.test/popmotion.git"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn selected_bare_major_dependency_range_remains_usable() {
+        let roots = vec![Dependency::new(
+            NPM.parse().unwrap(),
+            "app".parse().unwrap(),
+            "*".parse().unwrap(),
+        )];
+
+        let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+            Ok(match name.to_string().as_str() {
+                "app" => vec![named_record("app", "1.0.0", &[("inherits", "2")])],
+                "inherits" => vec![
+                    named_record("inherits", "1.0.0", &[]),
+                    named_record("inherits", "2.0.0", &[]),
+                    named_record("inherits", "2.0.4", &[]),
+                    named_record("inherits", "3.0.0", &[]),
+                ],
+                other => panic!("unexpected metadata fetch for {other}"),
+            })
+        })
+        .unwrap();
+
+        let inherits = resolution
+            .selected
+            .iter()
+            .find(|package| package.name.to_string() == "inherits")
+            .expect("inherits must be selected");
+        assert_eq!(inherits.version.to_string(), "2.0.4");
     }
 
     #[test]

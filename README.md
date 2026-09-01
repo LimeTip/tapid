@@ -142,7 +142,7 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 ## Supported subset and limitations
 
 - npm package metadata with semver versions, package dependencies, and HTTPS tarball URLs is supported.
-- Exact, caret, tilde, and selected whitespace-separated comparison requirements are supported. Full npm range syntax, aliases, tags, git, file, workspace, and peer-resolution compatibility are not complete.
+- Exact, bare major and minor, caret, tilde, and selected whitespace-separated comparison requirements are supported. Full npm range syntax, aliases, tags, git, file, workspace, and peer-resolution compatibility are not complete.
 - Lifecycle scripts from dependencies never run during install. There is no approval workflow yet.
 - `add`, `remove`, `update`, `prune`, workspaces, full npm lockfile compatibility, and private-registry authentication are not implemented.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
