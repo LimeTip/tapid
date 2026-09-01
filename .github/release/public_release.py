@@ -115,9 +115,9 @@ class PublicTransport:
     def fetch(self, url: str, *, max_bytes: int, allowed_origins: Iterable[str]) -> FetchResult:
         parsed = urlparse(url)
         origin = _origin(url)
-        if parsed.scheme != "https" or origin not in set(allowed_origins):
-            raise VerificationError("public URL has an unapproved HTTPS origin")
         origins = set(allowed_origins)
+        if parsed.scheme != "https" or origin not in origins:
+            raise VerificationError("public URL has an unapproved HTTPS origin")
         deadline = time.monotonic() + self.timeout
         request = Request(url, headers={"User-Agent": "tapid-public-release-verifier/1"})
         request._tapid_allowed_origins = origins

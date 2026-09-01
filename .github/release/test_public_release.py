@@ -472,6 +472,45 @@ class PublicReleaseTests(unittest.TestCase):
                 verifier=lambda path, version, tag, commit: None, now=NOW,
             )
 
+    def test_transport_accepts_generator_of_allowed_origins(self):
+        class Socket:
+            def fileno(self):
+                return -1
+
+        class Response:
+            def __init__(self):
+                self.fp = type("Fp", (), {"raw": type("Raw", (), {"_sock": Socket()})()})()
+                self.headers = {}
+                self.body = b"public evidence"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def geturl(self):
+                return "https://example.test/evidence.json"
+
+            def read(self, size):
+                body, self.body = self.body[:size], self.body[size:]
+                return body
+
+        class Opener:
+            def open(self, request, timeout):
+                return Response()
+
+        transport = public_release.PublicTransport()
+        transport._opener = Opener()
+        origins = (origin for origin in ["https://example.test"])
+
+        fetched = transport.fetch(
+            "https://example.test/evidence.json", max_bytes=100,
+            allowed_origins=origins,
+        )
+
+        self.assertEqual(fetched.body, b"public evidence")
+
     def test_transport_read_enforces_a_total_deadline(self):
         class Socket:
             def __init__(self):
