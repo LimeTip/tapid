@@ -9,12 +9,16 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin
 
 VERSION_RE = re.compile(r"^0\.\d+\.\d+$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
 TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+UTC_RFC3339_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
+)
 
 
 def canonical(value):
@@ -67,6 +71,15 @@ def fail(message):
     raise SystemExit(2)
 
 
+def parse_utc_rfc3339(value, field):
+    if not UTC_RFC3339_RE.fullmatch(value):
+        fail(f"{field} must be a canonical UTC RFC3339 timestamp ending in Z")
+    try:
+        return datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        fail(f"{field} must be a canonical UTC RFC3339 timestamp ending in Z")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
@@ -82,6 +95,15 @@ def main():
         fail("version and tag must match supported 0.x.y format")
     if not COMMIT_RE.fullmatch(args.commit):
         fail("commit must be an immutable lowercase hexadecimal SHA")
+    created_at = parse_utc_rfc3339(args.created_at, "created_at")
+    expires_at = parse_utc_rfc3339(args.expires_at, "expires_at")
+    if expires_at <= created_at:
+        fail("expires_at must be later than created_at")
+    now = datetime.now(timezone.utc)
+    if created_at > now:
+        fail("created_at must not be in the future")
+    if expires_at <= now:
+        fail("expires_at must be in the future")
     if not args.base_url.startswith("https://"):
         fail("base URL must use HTTPS")
     artifacts = []
