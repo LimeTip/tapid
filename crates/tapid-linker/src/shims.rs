@@ -73,9 +73,10 @@ pub fn plan_shims(
             if !managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(target_path));
             }
+            let target_key = shim_target_key(&target_path, strategy);
             if entries
                 .iter()
-                .any(|entry: &ShimEntry| entry.target == target_path)
+                .any(|entry: &ShimEntry| shim_target_key(&entry.target, strategy) == target_key)
             {
                 return Err(PlanError::ShimCollision(target_path));
             }
@@ -92,6 +93,14 @@ pub fn plan_shims(
         managed_root,
         entries,
     })
+}
+
+fn shim_target_key(path: &std::path::Path, strategy: ShimStrategy) -> String {
+    let value = path.to_string_lossy();
+    match strategy {
+        ShimStrategy::WindowsCmdAndPowerShell => value.to_lowercase(),
+        ShimStrategy::UnixSymlink => value.into_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -166,6 +175,39 @@ mod tests {
             ),
             Err(PlanError::ShimCollision(_))
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn windows_shims_reject_command_names_that_differ_only_by_case() {
+        let root = std::env::temp_dir().join(format!("tapid-shims-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let upper = shim_package(&root, "upper", r#"{"Tool":"cli.js"}"#, "upper");
+        let lower = shim_package(&root, "lower", r#"{"tool":"cli.js"}"#, "lower");
+        let managed_root = ManagedRoot::new(&root).unwrap();
+        let windows = plan_shims(
+            managed_root.clone(),
+            vec![upper.clone(), lower.clone()],
+            Platform::Windows,
+        );
+        println!("windows: {windows:?}");
+        assert!(matches!(windows, Err(PlanError::ShimCollision(_))));
+        assert_eq!(
+            plan_shims(managed_root, vec![upper, lower], Platform::Unix)
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+        assert_eq!(
+            shim_target_key(Path::new("Tool"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("tool"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        assert_eq!(
+            shim_target_key(Path::new("Ä"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("ä"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
