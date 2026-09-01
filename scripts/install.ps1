@@ -335,7 +335,7 @@ try {
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
     if ($actual -ne $expected) { Fail "checksum verification failed for $archive" }
     if ((Get-Item -LiteralPath $archivePath).Length -ne $expectedSize) { Fail "artifact size verification failed for $archive" }
-    $members = & tar.exe -tzf $archivePath
+    $members = @(& tar.exe -tzf $archivePath)
     if ($LASTEXITCODE -ne 0 -or @($members).Count -ne 1 -or $members[0] -ne "tapid.exe") {
         Fail "release archive must contain exactly one member named tapid.exe"
     }
