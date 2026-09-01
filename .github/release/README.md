@@ -22,7 +22,9 @@ Planning is the default safe mode. Tag creation and dispatch are never combined 
 
 `.github/workflows/crates-publication.yml` recomputes the reviewed crates plan and publishes only approved entries behind `crates-io-release`. It uses official crates.io Trusted Publishing through OIDC. No long-lived crates.io token is stored by default.
 
-`.github/workflows/release-public-smoke.yml` performs unauthenticated read-back of a public stable or explicit-tag release and emits `tapid-public-release-verification-v1` evidence. It verifies GitHub assets, signed metadata, native archives, public installers, consumer installation, frozen replay, and website delivery without publication permission.
+`.github/workflows/release-public-smoke.yml` performs unauthenticated read-back of a public stable or explicit-tag release. It verifies GitHub assets, signed metadata, native archives, public installers, consumer installation, and frozen replay without publication permission. The post-promotion call from `release-publication.yml` uses explicit tag mode. A separate stable-mode run is required to verify stable-channel resolution.
+
+The workflow currently invokes `public_release.py` with `--skip-website` in both modes, so its `tapid-public-release-verification-v1` artifact is not website evidence. Release completion separately requires a website-enabled stable invocation of `public_release.py` and a report with `website.status` equal to `verified`. Adding that mandatory website check to protected automation remains an acceptance requirement.
 
 ## Binary publication contract
 
@@ -49,7 +51,7 @@ The `stable-release` environment protects manifest signing and stable advancemen
 
 The crates plan records the exact source commit, root lockfile digest, publishable workspace graph, observed crates.io versions, required dependent updates, deterministic topological order, package archive digests, and preflight results. Version bumping remains an explicit source-preparation task.
 
-The protected workflow checks registry state before each mutation. An existing exact version is accepted only when package identity and checksum match. Each new publication is read back before its dependents may proceed. Progress evidence makes a partial run resumable from the first unverified crate rather than replaying the complete batch.
+The protected workflow checks registry state before each mutation. An existing exact version is accepted only when package identity and checksum match. Each new publication is read back before its dependents may proceed. The uploaded progress file records a partial run but is not restored as execution state. On rerun, registry read-back must prove that prior exact versions and checksums form a dependency-order prefix of the original reviewed plan. The executor revalidates and skips that prefix before publishing the first unverified crate.
 
 The `crates-io-release` environment is separate from `stable-release`. Only its publish job receives `id-token: write`, after approval, and obtains a short-lived registry credential with `rust-lang/crates-io-auth-action@v1`. A long-lived token is an exceptional, separately approved fallback, not the default.
 

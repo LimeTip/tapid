@@ -88,10 +88,11 @@ Dispatch `.github/workflows/crates-publication.yml` with the exact source commit
 gh workflow run crates-publication.yml \
   --ref main \
   -f commit="$COMMIT" \
-  -f plan_digest=<crates-plan-digest>
+  -f plan_digest=<crates-plan-digest> \
+  -f dry_run=false
 ```
 
-Use the workflow's no-op dry-run path for PR validation. Before approving the publish job:
+The workflow input defaults to `dry_run=true`. Omit the override for the no-op PR validation path. A protected mutation dispatch must set `dry_run=false` explicitly as shown above. Before approving the publish job:
 
 1. Compare the uploaded preflight plan and digest with the reviewed plan.
 2. Confirm the workflow checked out the exact commit.
@@ -110,26 +111,27 @@ The protected workflow publishes sequentially. For each planned package it must:
 2. If the exact version already exists, verify package identity and checksum, mark it verified, and never republish it.
 3. Publish exactly one package using the short-lived OIDC credential.
 4. Poll with bounded backoff until that exact version and checksum are visible from crates.io.
-5. Atomically update and upload progress evidence.
+5. Atomically update the local progress file. The workflow uploads the latest file as evidence when the job ends.
 6. Continue only after visibility is confirmed.
 
 After all packages are visible, require clean Cargo-home package or install verification for `tapid` against registry dependencies. Record exact package names, versions, checksums, workflow run, plan digest, and final verification outcome.
 
 A successful `cargo publish` process alone is not completion. Registry read-back and checksum equality are required.
 
-## Partial failure and safe resume
+## Partial failure and safe rerun
 
 Crates.io publication is not transactional. On any timeout, HTTP 429, rejection, indexing delay, or workflow interruption:
 
 1. Stop at the first unverified package. Do not start a dependent.
-2. Preserve the atomic progress report and workflow logs.
+2. Preserve the uploaded progress report and workflow logs as evidence. A later run does not restore or trust that artifact as execution state.
 3. Query crates.io read-only for every package reported as published or in flight.
 4. Mark a version complete only when the exact package identity and checksum match the reviewed plan.
 5. Treat HTTP 429 as not published unless read-back proves otherwise. Respect the server-provided retry time.
 6. Resolve authentication, ownership, metadata, or rate-limit causes without changing published versions.
-7. Recompute the plan immediately before resuming. If the source, lockfile, package archive, or registry state has changed beyond verified prior success, stop for a new reviewed digest.
-8. Rerun the protected workflow with the same exact commit and accepted digest when its recomputed plan can classify verified prior successes safely.
-9. Resume from the first unverified package. Never replay the whole batch.
+7. Rerun the protected workflow with `dry_run=false`, the same exact commit, and the original accepted digest. Do not replace the accepted digest with the digest of a newly generated plan merely because part of the original plan is now published.
+8. The new run recomputes package archives and registry state. It proceeds only when already-visible exact versions and checksums form a dependency-order prefix of the original reviewed publication order and every other reviewed field still matches.
+9. The executor revalidates and skips that verified prefix, then publishes the first unverified package. It does not continue from the prior progress file and it never republishes an already-visible exact match.
+10. If the source, lockfile, archive bytes, package identity, checksum, or registry state differs beyond that permitted verified prefix, the workflow must stop. Resolve the discrepancy and obtain a new reviewed plan and digest when required.
 
 Already-published versions cannot be deleted or overwritten to restore atomicity. If a source correction is required after partial publication, preserve the valid published versions, prepare new versions for affected crates and dependents, regenerate lockfiles, and create a new publication plan. Record the abandoned partial plan and its immutable results.
 

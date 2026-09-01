@@ -151,7 +151,17 @@ If a job fails while the release is still a draft, keep it draft. Diagnose the c
 
 ## Phase 6: Public smoke verification
 
-Public promotion is not completion. `.github/workflows/release-public-smoke.yml` must run after promotion in `stable` mode and remains manually rerunnable in `stable` or explicit `tag` mode.
+Public promotion is not completion. At the current exact head, `.github/workflows/release-publication.yml` invokes `.github/workflows/release-public-smoke.yml` after promotion in explicit `tag` mode. That automatic run verifies the promoted tag, assets, installers, and consumer replay, but it passes `--skip-website`; it does not prove stable-channel resolution or website delivery.
+
+Before declaring the release complete, require both the automatic tag-mode run and a separate stable-mode run to pass. Dispatch the stable-mode run after promotion:
+
+```bash
+gh workflow run release-public-smoke.yml \
+  --ref main \
+  -f mode=stable
+```
+
+The stable-mode workflow also passes `--skip-website` at the current exact head. Website verification remains the separate mandatory gate in Phase 7 rather than an inferred result of either smoke run.
 
 The smoke workflow must use unauthenticated public reads and read-only repository permission. Require its `tapid-public-release-verification-v1` evidence to prove:
 
@@ -165,18 +175,28 @@ The smoke workflow must use unauthenticated public reads and read-only repositor
 - a real public npm package installs, executes, and repeats successfully with frozen replay;
 - redacted evidence includes final URLs, byte counts, and SHA-256 values without credentials or temporary paths.
 
-A smoke failure after publication does not authorize deleting assets, moving the tag, or rolling back metadata. Open a blocking incident, stop website promotion claims, and either repair mutable website delivery or prepare a new version for immutable release defects.
+A tag-mode or stable-mode smoke failure after publication does not authorize deleting assets, moving the tag, or rolling back metadata. Open a blocking incident, stop completion claims, and prepare a new version for immutable release defects.
 
 ## Phase 7: Verify website deployment
 
-Website delivery is a separate deployment gate. The `website-installer-sync.yml` workflow synchronizes canonical `scripts/install.sh` and `scripts/install.ps1` to `LimeTip/tapid-web` after changes reach `main`. The public smoke workflow verifies deployment after its bounded propagation window.
+Website delivery is a separate mandatory deployment gate. The `website-installer-sync.yml` workflow synchronizes canonical `scripts/install.sh` and `scripts/install.ps1` to `LimeTip/tapid-web` after changes reach `main`. At the current exact head, the public smoke workflow skips website checks in both modes. Do not cite that workflow as website evidence.
+
+From a clean checkout of the reviewed release source, run the website-enabled verifier after the stable-mode smoke succeeds:
+
+```bash
+python3 .github/release/public_release.py \
+  --mode stable \
+  --output public-release-and-website-evidence.json
+```
+
+Unlike the workflow invocation, this command does not pass `--skip-website`. It applies bounded propagation retries and fails unless release and website checks pass. Preserve its `tapid-public-release-verification-v1` output and require `website.status` to equal `verified`.
 
 Require byte-for-byte equality between:
 
 - `scripts/install.sh` and `https://tapid.dev/install.sh`;
 - `scripts/install.ps1` and `https://tapid.dev/install.ps1`.
 
-Also require rendered homepage, getting-started, and release-page content to identify the intended release. A working GitHub release with stale website content is not a completed website deployment. Record website evidence separately from cryptographic release evidence.
+Also require rendered homepage, getting-started, and release-page content to identify the intended release. A working GitHub release with stale website content is not a completed website deployment. Record website evidence separately from cryptographic release evidence. Wiring the mandatory website check into a protected workflow is an acceptance requirement for future automation, not behavior provided by the current workflow.
 
 ## Recovery by publication state
 
@@ -194,7 +214,7 @@ Treat the tag, six archives, and signed manifest as immutable. Do not move the t
 
 ### After partial crates.io publication
 
-Stop at the first unverified crate. Follow the crates.io runbook. Never replay the complete batch and never assume an HTTP success or failure proves registry visibility. Resume only after verifying already-published versions and checksums and after the reviewed plan still matches the exact source and registry state.
+Stop at the first unverified crate. Follow the crates.io runbook. Never assume an HTTP success or failure proves registry visibility. A rerun uses the same commit and original reviewed digest, recomputes registry state, revalidates and skips only an exact-checksum dependency prefix, and then publishes the first unverified package. The prior progress artifact is evidence, not restored execution state. Any other drift requires the run to stop and may require a new reviewed plan.
 
 ## Credential exposure and rotation
 
