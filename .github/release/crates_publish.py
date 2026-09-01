@@ -353,6 +353,30 @@ def _validate_reviewed_shape(plan):
                 raise PublicationError("publication dependency order is invalid")
 
 
+def _packaged_archive_matches(entry, packaged, *, allow_semantic_metadata_drift):
+    """Accept exact bytes, or normalized metadata drift for a checksum-verified prefix."""
+    if not isinstance(packaged, dict):
+        return False
+    byte_exact = (
+        packaged.get("archive_sha256") == entry.get("archive_sha256")
+        and packaged.get("archive_size") == entry.get("archive_size")
+    )
+    if byte_exact:
+        return True
+    expected_content = entry.get("archive_content_sha256")
+    if (
+        not allow_semantic_metadata_drift
+        or not isinstance(expected_content, str)
+        or not crates_plan._SHA256_RE.fullmatch(expected_content)
+    ):
+        return False
+    try:
+        archive = Path(packaged["archive_path"]).read_bytes()
+        return crates_repository.package_content_sha256(archive) == expected_content
+    except (KeyError, OSError, TypeError, crates_repository.RepositoryError):
+        return False
+
+
 def execute_publication(
     plan,
     *,
@@ -406,8 +430,11 @@ def execute_publication(
                 registry.versions(name), name, version, checksum
             )
             packaged = package_adapter(name, version)
-            if (packaged["archive_sha256"] != entry["archive_sha256"]
-                    or packaged["archive_size"] != entry["archive_size"]):
+            if not _packaged_archive_matches(
+                entry,
+                packaged,
+                allow_semantic_metadata_drift=initial_registry[name],
+            ):
                 raise PublicationError(f"package archive drift for {name} {version}")
 
         saw_unpublished = False

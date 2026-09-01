@@ -1,8 +1,10 @@
 import copy
 import hashlib
+import io
 import json
 import os
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +16,23 @@ import release_identity
 
 
 COMMIT = "a" * 40
+
+
+def package_archive(source, vcs_commit, cargo_lock):
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        for name, payload in (
+            ("core-0.0.2/src/lib.rs", source),
+            (
+                "core-0.0.2/.cargo_vcs_info.json",
+                json.dumps({"git": {"sha1": vcs_commit}, "path_in_vcs": ""}).encode(),
+            ),
+            ("core-0.0.2/Cargo.lock", cargo_lock),
+        ):
+            member = tarfile.TarInfo(name)
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+    return output.getvalue()
 
 
 def publication_plan(packages, order=None):
@@ -242,6 +261,93 @@ class CratesPublishTests(unittest.TestCase):
             crates_publish.recover_reviewed_plan(
                 missing_content, reviewed["plan_digest"]
             )
+
+    def test_executor_accepts_generated_metadata_drift_for_verified_published_prefix(self):
+        source = b"pub fn value() -> u8 { 1 }"
+        reviewed_archive = package_archive(source, "a" * 40, b"old generated lock")
+        regenerated_archive = package_archive(source, "b" * 40, b"new generated lock")
+        self.assertNotEqual(
+            hashlib.sha256(reviewed_archive).hexdigest(),
+            hashlib.sha256(regenerated_archive).hexdigest(),
+        )
+        self.assertEqual(
+            crates_publish.crates_repository.package_content_sha256(reviewed_archive),
+            crates_publish.crates_repository.package_content_sha256(regenerated_archive),
+        )
+
+        plan = publication_plan((("core", "0.0.2", reviewed_archive),))
+        entry = plan["packages"][0]
+        entry["archive_content_sha256"] = (
+            crates_publish.crates_repository.package_content_sha256(reviewed_archive)
+        )
+        plan["plan_digest"] = crates_plan.digest_publication_plan(plan)
+        registry_version = {
+            "version": entry["version"],
+            "checksum": entry["archive_sha256"],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "core-0.0.2.crate"
+            archive_path.write_bytes(regenerated_archive)
+            verified = []
+            result = crates_publish.execute_publication(
+                plan,
+                expected_digest=plan["plan_digest"],
+                expected_commit=COMMIT,
+                registry=FakeRegistry({"core": [[registry_version]]}),
+                package_adapter=lambda name, version: {
+                    "archive_path": str(archive_path),
+                    "archive_sha256": hashlib.sha256(regenerated_archive).hexdigest(),
+                    "archive_size": len(regenerated_archive),
+                },
+                publish_adapter=self.fail,
+                verify_adapter=lambda name, version: verified.append((name, version)),
+                progress_path=Path(directory) / "progress.json",
+                dry_run=True,
+            )
+
+        self.assertEqual(result["verified"][0]["state"], "already-published")
+        self.assertEqual(verified, [("core", "0.0.2")])
+
+    def test_executor_rejects_changed_source_for_verified_published_prefix(self):
+        reviewed_archive = package_archive(
+            b"pub fn value() -> u8 { 1 }", "a" * 40, b"old generated lock"
+        )
+        changed_archive = package_archive(
+            b"pub fn value() -> u8 { 2 }", "b" * 40, b"new generated lock"
+        )
+        plan = publication_plan((("core", "0.0.2", reviewed_archive),))
+        entry = plan["packages"][0]
+        entry["archive_content_sha256"] = (
+            crates_publish.crates_repository.package_content_sha256(reviewed_archive)
+        )
+        plan["plan_digest"] = crates_plan.digest_publication_plan(plan)
+        registry_version = {
+            "version": entry["version"],
+            "checksum": entry["archive_sha256"],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "core-0.0.2.crate"
+            archive_path.write_bytes(changed_archive)
+            with self.assertRaisesRegex(
+                crates_publish.PublicationError, "package archive drift"
+            ):
+                crates_publish.execute_publication(
+                    plan,
+                    expected_digest=plan["plan_digest"],
+                    expected_commit=COMMIT,
+                    registry=FakeRegistry({"core": [[registry_version]]}),
+                    package_adapter=lambda name, version: {
+                        "archive_path": str(archive_path),
+                        "archive_sha256": hashlib.sha256(changed_archive).hexdigest(),
+                        "archive_size": len(changed_archive),
+                    },
+                    publish_adapter=self.fail,
+                    verify_adapter=self.fail,
+                    progress_path=Path(directory) / "progress.json",
+                    dry_run=True,
+                )
 
     def test_recovery_search_is_bounded_to_the_workspace_crate_count(self):
         packages = tuple(
