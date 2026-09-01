@@ -6,13 +6,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 CRATES_WORKFLOW = ROOT / ".github" / "workflows" / "crates-publication.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release-publication.yml"
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def release_job(self, name, next_name):
+        workflow = RELEASE_WORKFLOW.read_text()
+        return workflow.split(f"  {name}:\n", 1)[1].split(f"  {next_name}:\n", 1)[0]
+
     def test_ci_runs_release_and_installer_tests_and_actionlint(self):
         workflow = CI_WORKFLOW.read_text()
         required_commands = (
             "python3 -m unittest discover -s .github/release -p 'test_*.py' -v",
+            "python3 -m unittest tests.test_release_workflows tests.test_crates_publication_workflow -v",
             "python3 tests/test_installer_scripts.py",
             "actionlint .github/workflows/*.yml",
         )
@@ -36,6 +42,71 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for contract in required_contracts:
             with self.subTest(contract=contract):
                 self.assertIn(contract, workflow)
+
+    def test_privileged_release_jobs_execute_only_fresh_current_main_tooling(self):
+        for name, next_name in (
+            ("sign-manifest", "advance-stable"),
+            ("advance-stable", "public-smoke"),
+        ):
+            job = self.release_job(name, next_name)
+            with self.subTest(job=name):
+                self.assertIn("ref: main", job)
+                self.assertIn("fetch-depth: 0", job)
+                self.assertIn("persist-credentials: false", job)
+                self.assertIn(
+                    "git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main",
+                    job,
+                )
+                self.assertIn(
+                    'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"',
+                    job,
+                )
+                self.assertNotIn("ref: ${{ inputs.commit }}", job)
+
+    def test_privileged_jobs_keep_tagged_source_separate_from_trusted_tools(self):
+        for name, next_name in (
+            ("sign-manifest", "advance-stable"),
+            ("advance-stable", "public-smoke"),
+        ):
+            job = self.release_job(name, next_name)
+            with self.subTest(job=name):
+                self.assertIn("name: validated-release-source", job)
+                self.assertIn("tagged-release-source", job)
+                self.assertIn(
+                    "--manifest-path .github/release/verifier/Cargo.toml", job
+                )
+                self.assertIn(
+                    "tagged-release-source/crates/tapid-signatures/data/release-keyring.json",
+                    job,
+                )
+                self.assertNotIn("tagged-release-source/.github/release", job)
+                self.assertNotIn("tagged-release-source/scripts", job)
+
+    def test_signing_key_is_not_available_to_cargo_execution(self):
+        job = self.release_job("sign-manifest", "advance-stable")
+        signing_step = job.split("      - name: Generate signed manifest", 1)[1].split(
+            "      - name:", 1
+        )[0]
+        self.assertIn("RELEASE_SIGNING_KEY:", signing_step)
+        self.assertIn("generate_manifest.py", signing_step)
+        self.assertNotIn("cargo ", signing_step)
+
+        verifier_step = job.split("      - name: Verify signed manifest", 1)[1].split(
+            "      - name:", 1
+        )[0]
+        self.assertIn("cargo run", verifier_step)
+        self.assertNotIn("RELEASE_SIGNING_KEY", verifier_step)
+
+    def test_write_token_steps_never_execute_python_or_cargo(self):
+        job = self.release_job("advance-stable", "public-smoke")
+        token_steps = job.split("GH_TOKEN: ${{ github.token }}")
+        self.assertGreaterEqual(len(token_steps), 4)
+        for suffix in token_steps[1:]:
+            step = suffix.split("      - name:", 1)[0]
+            with self.subTest(step=step[:80]):
+                self.assertNotIn("python", step)
+                self.assertNotIn("cargo ", step)
+                self.assertNotIn("bootstrap_verifier", step)
 
     def test_binary_publication_verifies_downloaded_draft_bytes_immediately_before_promotion(self):
         workflow = (

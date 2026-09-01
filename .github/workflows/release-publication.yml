@@ -215,11 +215,29 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out trusted current main
+        uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit }}
-          fetch-depth: 1
+          ref: main
+          fetch-depth: 0
           persist-credentials: false
+      - name: Require the freshly fetched current main implementation
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Download immutable tagged release source
+        uses: actions/download-artifact@v4
+        with:
+          name: validated-release-source
+          path: tagged-source-input
+      - name: Extract immutable tagged release data separately
+        run: |
+          set -euo pipefail
+          mkdir tagged-release-source
+          tar -xf tagged-source-input/validated-source.tar -C tagged-release-source
+          test -s tagged-release-source/crates/tapid-signatures/data/release-keyring.json
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -268,8 +286,12 @@ jobs:
             --created-at '${{ inputs.created_at }}' --expires-at '${{ inputs.expires_at }}' \
             --base-url '${{ inputs.base_url }}' --output release-manifest.json "${args[@]}"
           test -s release-manifest.json
+      - name: Verify signed manifest without signing credentials
+        run: |
+          set -euo pipefail
           cargo run --locked --quiet --manifest-path .github/release/verifier/Cargo.toml -- \
-            release-manifest.json crates/tapid-signatures/data/release-keyring.json \
+            release-manifest.json \
+            tagged-release-source/crates/tapid-signatures/data/release-keyring.json \
             '${{ inputs.version }}' '${{ inputs.tag }}' '${{ inputs.commit }}'
       - name: Upload signed manifest for approved advancement
         uses: actions/upload-artifact@v4
@@ -285,11 +307,29 @@ jobs:
     environment:
       name: stable-release
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out trusted current main
+        uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit }}
-          fetch-depth: 1
+          ref: main
+          fetch-depth: 0
           persist-credentials: false
+      - name: Require the freshly fetched current main implementation
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Download immutable tagged release source
+        uses: actions/download-artifact@v4
+        with:
+          name: validated-release-source
+          path: tagged-source-input
+      - name: Extract immutable tagged release data separately
+        run: |
+          set -euo pipefail
+          mkdir tagged-release-source
+          tar -xf tagged-source-input/validated-source.tar -C tagged-release-source
+          test -s tagged-release-source/crates/tapid-signatures/data/release-keyring.json
       - name: Download signed manifest
         uses: actions/download-artifact@v4
         with:
@@ -306,7 +346,8 @@ jobs:
           set -euo pipefail
           test -s publication/release-manifest.json
           cargo run --locked --quiet --manifest-path .github/release/verifier/Cargo.toml -- \
-            publication/release-manifest.json crates/tapid-signatures/data/release-keyring.json \
+            publication/release-manifest.json \
+            tagged-release-source/crates/tapid-signatures/data/release-keyring.json \
             '${{ inputs.version }}' '${{ inputs.tag }}' '${{ inputs.commit }}'
           targets=(
             aarch64-apple-darwin
@@ -335,8 +376,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_VERSION: ${{ inputs.version }}
-          RELEASE_COMMIT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
           mapfile -t artifacts < <(find release-artifacts -maxdepth 1 -type f -name '*.tar.gz' -print | sort)
@@ -381,9 +420,22 @@ jobs:
               exit 1
             }
           done
+      - name: Download exact draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
           rm -rf downloaded-draft-assets
           mkdir downloaded-draft-assets
           gh release download "$RELEASE_TAG" --dir downloaded-draft-assets
+      - name: Verify downloaded draft without write credentials
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           test "$(git cat-file -t "$RELEASE_TAG")" = tag
           test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
@@ -414,6 +466,13 @@ jobs:
             python3 scripts/bootstrap_verifier.py \
               downloaded-draft-assets/release-manifest.json "$target" "$RELEASE_TAG" >/dev/null
           done
+      - name: Promote the verified draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
           gh release edit "$RELEASE_TAG" --draft=false --latest
 
   public-smoke:

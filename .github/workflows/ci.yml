@@ -95,6 +95,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Run release tooling tests
         run: python3 -m unittest discover -s .github/release -p 'test_*.py' -v
+      - name: Run release workflow contract tests
+        run: python3 -m unittest tests.test_release_workflows tests.test_crates_publication_workflow -v
       - name: Run installer tests
         run: python3 tests/test_installer_scripts.py
       - name: Set up Go for actionlint

@@ -129,7 +129,8 @@ class InstallerScriptTests(unittest.TestCase):
         for target in expected_targets:
             self.assertIn(f"target: {target}", workflow)
         self.assertIn("expected six release artifacts", workflow)
-        self.assertGreaterEqual(workflow.count("ref: ${{ inputs.commit }}"), 2)
+        self.assertNotIn("ref: ${{ inputs.commit }}", workflow)
+        self.assertIn("name: validated-release-source", workflow)
         self.assertIn('rustc -vV | sed -n \'s/^host: //p\'', workflow)
         self.assertIn('"$staging/$BINARY" --version', workflow)
         self.assertIn('gh release create "$RELEASE_TAG" --verify-tag --draft', workflow)
