@@ -232,6 +232,10 @@ mod tests {
             shim_target_key(Path::new("ΟΣ"), ShimStrategy::WindowsCmdAndPowerShell),
             shim_target_key(Path::new("οσ"), ShimStrategy::WindowsCmdAndPowerShell)
         );
+        assert_eq!(
+            shim_target_key(Path::new("ς"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("σ"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
         assert_ne!(
             shim_target_key(Path::new("ß"), ShimStrategy::WindowsCmdAndPowerShell),
             shim_target_key(Path::new("SS"), ShimStrategy::WindowsCmdAndPowerShell)
