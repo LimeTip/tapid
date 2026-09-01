@@ -1184,6 +1184,36 @@ mod tests {
     }
 
     #[test]
+    fn selected_bare_major_dependency_range_remains_usable() {
+        let roots = vec![Dependency::new(
+            NPM.parse().unwrap(),
+            "app".parse().unwrap(),
+            "*".parse().unwrap(),
+        )];
+
+        let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+            Ok(match name.to_string().as_str() {
+                "app" => vec![named_record("app", "1.0.0", &[("inherits", "2")])],
+                "inherits" => vec![
+                    named_record("inherits", "1.0.0", &[]),
+                    named_record("inherits", "2.0.0", &[]),
+                    named_record("inherits", "2.0.4", &[]),
+                    named_record("inherits", "3.0.0", &[]),
+                ],
+                other => panic!("unexpected metadata fetch for {other}"),
+            })
+        })
+        .unwrap();
+
+        let inherits = resolution
+            .selected
+            .iter()
+            .find(|package| package.name.to_string() == "inherits")
+            .expect("inherits must be selected");
+        assert_eq!(inherits.version.to_string(), "2.0.4");
+    }
+
+    #[test]
     fn selected_npm_or_and_prerelease_ranges_remain_usable() {
         let versions = usable_versions(vec![named_record(
             "eslint-plugin-react",

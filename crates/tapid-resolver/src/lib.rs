@@ -122,7 +122,14 @@ fn requirement_token(token: &str) -> (char, &str) {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RequirementBase {
     version: PackageVersion,
-    major_only: bool,
+    precision: RequirementPrecision,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RequirementPrecision {
+    Full,
+    Major,
+    Minor,
 }
 
 fn parse_requirement_base(op: char, value: &str) -> Option<RequirementBase> {
@@ -134,19 +141,31 @@ fn parse_requirement_base(op: char, value: &str) -> Option<RequirementBase> {
         .ok()
         .map(|version| RequirementBase {
             version,
-            major_only: false,
+            precision: RequirementPrecision::Full,
         })
         .or_else(|| {
-            if op != '^'
-                || value.is_empty()
-                || !value.bytes().all(|byte| byte.is_ascii_digit())
-                || (value.len() > 1 && value.starts_with('0'))
+            let components = value.split('.').collect::<Vec<_>>();
+            if !matches!(components.len(), 1 | 2)
+                || components.iter().any(|component| {
+                    component.is_empty()
+                        || !component.bytes().all(|byte| byte.is_ascii_digit())
+                        || (component.len() > 1 && component.starts_with('0'))
+                })
+                || (op != '=' && !(op == '^' && components.len() == 1))
             {
                 return None;
             }
-            value.parse().ok().map(|major| RequirementBase {
-                version: PackageVersion::stable(major, 0, 0),
-                major_only: true,
+            let major = components[0].parse().ok()?;
+            let minor = components
+                .get(1)
+                .map_or(Some(0), |value| value.parse().ok())?;
+            Some(RequirementBase {
+                version: PackageVersion::stable(major, minor, 0),
+                precision: if components.len() == 1 {
+                    RequirementPrecision::Major
+                } else {
+                    RequirementPrecision::Minor
+                },
             })
         })
 }
@@ -430,74 +449,78 @@ fn available(candidates: &[&PackageVersionMetadata]) -> Vec<String> {
 fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> bool {
     requirement.clauses.iter().any(|clause| match clause {
         RequirementClause::AnyStable => version.prerelease().is_none(),
-        RequirementClause::Comparators(comparators) => comparators.iter().all(|comparator| {
-            let base = &comparator.base.version;
-            match comparator.op {
-                '=' => version == base,
-                '^' => {
-                    if version.prerelease().is_some()
-                        && (base.prerelease().is_none()
-                            || version.major() != base.major()
-                            || version.minor() != base.minor()
-                            || version.patch() != base.patch())
-                    {
-                        return false;
-                    }
-                    if comparator.base.major_only {
-                        return base
-                            .major()
-                            .checked_add(1)
-                            .map(|major| {
-                                let upper = PackageVersion::stable(major, 0, 0);
-                                version >= base && version < &upper
-                            })
-                            .unwrap_or(version >= base);
-                    }
-                    if base.major() > 0 {
-                        return base
-                            .major()
-                            .checked_add(1)
-                            .map(|major| {
-                                let upper = PackageVersion::stable(major, 0, 0);
-                                version >= base && version < &upper
-                            })
-                            .unwrap_or(version >= base);
-                    }
-                    if base.minor() > 0 {
-                        return base
-                            .minor()
-                            .checked_add(1)
-                            .map(|minor| {
-                                let upper = PackageVersion::stable(0, minor, 0);
-                                version >= base && version < &upper
-                            })
-                            .unwrap_or(
-                                version >= base
-                                    && version.major() == 0
-                                    && version.minor() == base.minor(),
-                            );
-                    }
-                    base.patch()
-                        .checked_add(1)
-                        .map(|patch| {
-                            let upper = PackageVersion::stable(0, 0, patch);
-                            version >= base && version < &upper
-                        })
-                        .unwrap_or(version == base)
-                }
-                '~' => {
-                    (version.prerelease().is_none()
-                        || (base.prerelease().is_some()
-                            && version.major() == base.major()
-                            && version.minor() == base.minor()
-                            && version.patch() == base.patch()))
-                        && version >= base
+        RequirementClause::Comparators(comparators) => {
+            let prerelease_is_eligible = version.prerelease().is_none()
+                || comparators.iter().any(|comparator| {
+                    let base = &comparator.base.version;
+                    base.prerelease().is_some()
                         && version.major() == base.major()
                         && version.minor() == base.minor()
-                }
-                _ => false,
-            }
-        }),
+                        && version.patch() == base.patch()
+                });
+            prerelease_is_eligible
+                && comparators.iter().all(|comparator| {
+                    let base = &comparator.base.version;
+                    match comparator.op {
+                        '=' => match comparator.base.precision {
+                            RequirementPrecision::Full => version == base,
+                            RequirementPrecision::Major => version.major() == base.major(),
+                            RequirementPrecision::Minor => {
+                                version.major() == base.major() && version.minor() == base.minor()
+                            }
+                        },
+                        '^' => {
+                            if comparator.base.precision == RequirementPrecision::Major {
+                                return base
+                                    .major()
+                                    .checked_add(1)
+                                    .map(|major| {
+                                        let upper = PackageVersion::stable(major, 0, 0);
+                                        version >= base && version < &upper
+                                    })
+                                    .unwrap_or(version >= base);
+                            }
+                            if base.major() > 0 {
+                                return base
+                                    .major()
+                                    .checked_add(1)
+                                    .map(|major| {
+                                        let upper = PackageVersion::stable(major, 0, 0);
+                                        version >= base && version < &upper
+                                    })
+                                    .unwrap_or(version >= base);
+                            }
+                            if base.minor() > 0 {
+                                return base
+                                    .minor()
+                                    .checked_add(1)
+                                    .map(|minor| {
+                                        let upper = PackageVersion::stable(0, minor, 0);
+                                        version >= base && version < &upper
+                                    })
+                                    .unwrap_or(
+                                        version >= base
+                                            && version.major() == 0
+                                            && version.minor() == base.minor(),
+                                    );
+                            }
+                            base.patch()
+                                .checked_add(1)
+                                .map(|patch| {
+                                    let upper = PackageVersion::stable(0, 0, patch);
+                                    version >= base && version < &upper
+                                })
+                                .unwrap_or(version == base)
+                        }
+                        '~' => {
+                            version >= base
+                                && version.major() == base.major()
+                                && version.minor() == base.minor()
+                        }
+                        _ => false,
+                    }
+                })
+        }
     })
 }
 
@@ -701,6 +724,45 @@ mod tests {
             r.selected[0].to_string(),
             "https://registry.npmjs.org:foo@1.9.0"
         );
+    }
+
+    #[test]
+    fn partial_range_intersection_allows_explicit_matching_prerelease() {
+        let major: Requirement = "2 2.1.0-beta.1".parse().unwrap();
+        assert!(major.matches(&"2.1.0-beta.1".parse().unwrap()));
+        assert!(!major.matches(&"2.1.0-beta.2".parse().unwrap()));
+
+        let minor: Requirement = "2.1 2.1.1-beta.1".parse().unwrap();
+        assert!(minor.matches(&"2.1.1-beta.1".parse().unwrap()));
+        assert!(!minor.matches(&"2.1.2-beta.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn bare_major_range_selects_highest_matching_major() {
+        let requirement = req("2");
+        assert!(!requirement.matches(&"2.0.0-beta.1".parse().unwrap()));
+        assert!(requirement.matches(&"2.0.0".parse().unwrap()));
+        assert!(requirement.matches(&"2.9.9".parse().unwrap()));
+        assert!(!requirement.matches(&"3.0.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn bare_minor_range_selects_highest_matching_minor() {
+        let requirement = req("2.1");
+        assert!(!requirement.matches(&"2.1.0-beta.1".parse().unwrap()));
+        assert!(requirement.matches(&"2.1.0".parse().unwrap()));
+        assert!(requirement.matches(&"2.1.9".parse().unwrap()));
+        assert!(!requirement.matches(&"2.2.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn partial_ranges_reject_noncanonical_components() {
+        for requirement in ["02", "2.01", "2.", ".2", "2.1.0.0"] {
+            assert!(matches!(
+                requirement.parse::<Requirement>(),
+                Err(ResolveError::UnsupportedRange(_))
+            ));
+        }
     }
 
     #[test]
