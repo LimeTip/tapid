@@ -126,7 +126,7 @@ python3 scripts/release.py dispatch \
 
 The command recomputes repository and GitHub preconditions, checks the digest, and passes all seven derived workflow inputs explicitly. It must refuse a public release and source drift. A rerun against the same exact draft is allowed.
 
-Before approving `stable-release`, compare the workflow inputs with the reviewed plan. Confirm that no secret was available to preflight or build jobs. The workflow must build these six native archives:
+Before approving `stable-release`, compare the workflow inputs with the reviewed plan. Confirm that no secret was available to preflight or build jobs. Confirm that the reviewed website update for the intended version and tag has already been deployed and that its public pages and canonical installer copies are visible; the automatic post-promotion smoke is a fail-closed verification gate, not a website deployment trigger. The workflow must build these six native archives:
 
 - `tapid-<version>-aarch64-apple-darwin.tar.gz`
 - `tapid-<version>-aarch64-pc-windows-msvc.tar.gz`
