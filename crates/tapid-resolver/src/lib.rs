@@ -40,8 +40,19 @@ enum RequirementClause {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RequirementComparator {
-    op: char,
+    op: RequirementOperator,
     base: RequirementBase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RequirementOperator {
+    Exact,
+    Caret,
+    Tilde,
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
 }
 
 /// One registry-qualified dependency constraint.
@@ -83,15 +94,24 @@ impl FromStr for Requirement {
                 continue;
             }
             let mut comparators = Vec::new();
-            for token in clause.split_whitespace() {
-                if token.starts_with(['>', '<']) {
-                    return Err(ResolveError::UnsupportedRange(raw.into()));
-                }
-                let (op, value) = requirement_token(token);
+            let tokens = clause.split_whitespace().collect::<Vec<_>>();
+            let mut index = 0;
+            while index < tokens.len() {
+                let token = tokens[index];
+                let (op, value) = if let Some(op) = separated_operator(token) {
+                    index += 1;
+                    let Some(value) = tokens.get(index).copied() else {
+                        return Err(ResolveError::UnsupportedRange(raw.into()));
+                    };
+                    (op, value)
+                } else {
+                    requirement_token(token)
+                };
                 let Some(base) = parse_requirement_base(op, value) else {
                     return Err(ResolveError::UnsupportedRange(raw.into()));
                 };
                 comparators.push(RequirementComparator { op, base });
+                index += 1;
             }
             clauses.push(RequirementClause::Comparators(comparators));
         }
@@ -109,14 +129,31 @@ impl Requirement {
     }
 }
 
-fn requirement_token(token: &str) -> (char, &str) {
-    if let Some(value) = token.strip_prefix('^') {
-        ('^', value)
-    } else if let Some(value) = token.strip_prefix('~') {
-        ('~', value)
-    } else {
-        ('=', token.trim_start_matches('='))
+fn separated_operator(token: &str) -> Option<RequirementOperator> {
+    match token {
+        ">" => Some(RequirementOperator::Greater),
+        ">=" => Some(RequirementOperator::GreaterEqual),
+        "<" => Some(RequirementOperator::Less),
+        "<=" => Some(RequirementOperator::LessEqual),
+        _ => None,
     }
+}
+
+fn requirement_token(token: &str) -> (RequirementOperator, &str) {
+    for (prefix, op) in [
+        (">=", RequirementOperator::GreaterEqual),
+        ("<=", RequirementOperator::LessEqual),
+        (">", RequirementOperator::Greater),
+        ("<", RequirementOperator::Less),
+        ("^", RequirementOperator::Caret),
+        ("~", RequirementOperator::Tilde),
+        ("=", RequirementOperator::Exact),
+    ] {
+        if let Some(value) = token.strip_prefix(prefix) {
+            return (op, value);
+        }
+    }
+    (RequirementOperator::Exact, token)
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -132,7 +169,7 @@ enum RequirementPrecision {
     Minor,
 }
 
-fn parse_requirement_base(op: char, value: &str) -> Option<RequirementBase> {
+fn parse_requirement_base(op: RequirementOperator, value: &str) -> Option<RequirementBase> {
     #[cfg(test)]
     REQUIREMENT_BASE_PARSE_COUNT.with(|count| count.set(count.get() + 1));
 
@@ -151,7 +188,14 @@ fn parse_requirement_base(op: char, value: &str) -> Option<RequirementBase> {
                         || !component.bytes().all(|byte| byte.is_ascii_digit())
                         || (component.len() > 1 && component.starts_with('0'))
                 })
-                || (op != '=' && !(op == '^' && components.len() == 1))
+                || (!matches!(
+                    op,
+                    RequirementOperator::Exact
+                        | RequirementOperator::Greater
+                        | RequirementOperator::GreaterEqual
+                        | RequirementOperator::Less
+                        | RequirementOperator::LessEqual
+                ) && !(op == RequirementOperator::Caret && components.len() == 1))
             {
                 return None;
             }
@@ -446,6 +490,29 @@ fn available(candidates: &[&PackageVersionMetadata]) -> Vec<String> {
     versions.dedup();
     versions.into_iter().map(ToString::to_string).collect()
 }
+
+fn partial_upper_bound(
+    base: &PackageVersion,
+    precision: RequirementPrecision,
+) -> Option<PackageVersion> {
+    match precision {
+        RequirementPrecision::Full => None,
+        RequirementPrecision::Major => base
+            .major()
+            .checked_add(1)
+            .map(|major| PackageVersion::stable(major, 0, 0)),
+        RequirementPrecision::Minor => base
+            .minor()
+            .checked_add(1)
+            .map(|minor| PackageVersion::stable(base.major(), minor, 0))
+            .or_else(|| {
+                base.major()
+                    .checked_add(1)
+                    .map(|major| PackageVersion::stable(major, 0, 0))
+            }),
+    }
+}
+
 fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> bool {
     requirement.clauses.iter().any(|clause| match clause {
         RequirementClause::AnyStable => version.prerelease().is_none(),
@@ -462,14 +529,14 @@ fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> b
                 && comparators.iter().all(|comparator| {
                     let base = &comparator.base.version;
                     match comparator.op {
-                        '=' => match comparator.base.precision {
+                        RequirementOperator::Exact => match comparator.base.precision {
                             RequirementPrecision::Full => version == base,
                             RequirementPrecision::Major => version.major() == base.major(),
                             RequirementPrecision::Minor => {
                                 version.major() == base.major() && version.minor() == base.minor()
                             }
                         },
-                        '^' => {
+                        RequirementOperator::Caret => {
                             if comparator.base.precision == RequirementPrecision::Major {
                                 return base
                                     .major()
@@ -512,12 +579,34 @@ fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> b
                                 })
                                 .unwrap_or(version == base)
                         }
-                        '~' => {
+                        RequirementOperator::Tilde => {
                             version >= base
                                 && version.major() == base.major()
                                 && version.minor() == base.minor()
                         }
-                        _ => false,
+                        RequirementOperator::Greater => {
+                            if comparator.base.precision == RequirementPrecision::Full {
+                                version > base
+                            } else {
+                                partial_upper_bound(base, comparator.base.precision)
+                                    .is_some_and(|upper| version >= &upper)
+                            }
+                        }
+                        RequirementOperator::GreaterEqual => version >= base,
+                        RequirementOperator::Less => match comparator.base.precision {
+                            RequirementPrecision::Full => version < base,
+                            RequirementPrecision::Major => version.major() < base.major(),
+                            RequirementPrecision::Minor => {
+                                (version.major(), version.minor()) < (base.major(), base.minor())
+                            }
+                        },
+                        RequirementOperator::LessEqual => match comparator.base.precision {
+                            RequirementPrecision::Full => version <= base,
+                            RequirementPrecision::Major => version.major() <= base.major(),
+                            RequirementPrecision::Minor => {
+                                (version.major(), version.minor()) <= (base.major(), base.minor())
+                            }
+                        },
                     }
                 })
         }
@@ -724,6 +813,43 @@ mod tests {
             r.selected[0].to_string(),
             "https://registry.npmjs.org:foo@1.9.0"
         );
+    }
+
+    #[test]
+    fn npm_comparison_intersections_support_spaced_and_compact_operators() {
+        for text in [">= 2.1.2 < 3", ">=2.1.2 <3"] {
+            let requirement: Requirement = text.parse().unwrap();
+            assert!(!requirement.matches(&"2.1.1".parse().unwrap()), "{text}");
+            assert!(requirement.matches(&"2.1.2".parse().unwrap()), "{text}");
+            assert!(requirement.matches(&"2.9.9".parse().unwrap()), "{text}");
+            assert!(!requirement.matches(&"3.0.0".parse().unwrap()), "{text}");
+            assert!(
+                !requirement.matches(&"2.2.0-beta.1".parse().unwrap()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_comparison_bounds_follow_npm_x_range_semantics() {
+        for (text, matching, rejected) in [
+            (">2", "3.0.0", "2.9.9"),
+            ("<=2", "2.9.9", "3.0.0"),
+            (">2.1", "2.2.0", "2.1.99"),
+            ("<=2.1", "2.1.99", "2.2.0"),
+        ] {
+            let requirement: Requirement = text.parse().unwrap();
+            assert!(requirement.matches(&matching.parse().unwrap()), "{text}");
+            assert!(!requirement.matches(&rejected.parse().unwrap()), "{text}");
+        }
+
+        for text in ["<3 3.0.0-beta.1", "<=2 3.0.0-beta.1"] {
+            let requirement: Requirement = text.parse().unwrap();
+            assert!(
+                !requirement.matches(&"3.0.0-beta.1".parse().unwrap()),
+                "{text} must preserve npm's -0 partial upper bound"
+            );
+        }
     }
 
     #[test]
@@ -1077,7 +1203,7 @@ mod tests {
     #[test]
     fn unsupported_ranges_and_modes_fail_closed() {
         assert!(matches!(
-            "<1.0.0".parse::<Requirement>(),
+            "!=1.0.0".parse::<Requirement>(),
             Err(ResolveError::UnsupportedRange(_))
         ));
         assert!(matches!(
