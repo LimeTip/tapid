@@ -293,6 +293,12 @@ def _verify_release_metadata_context(*, mode: str, tag: Optional[str], transport
         raise VerificationError("manifest commit is malformed") from error
     if manifest.get("version") != version or manifest.get("tag") != resolved_tag:
         raise VerificationError("manifest identity does not match release")
+
+    with tempfile.TemporaryDirectory(prefix="tapid-public-release-") as directory:
+        path = Path(directory) / "release-manifest.json"
+        path.write_bytes(manifest_fetch.body)
+        verifier(path, version, resolved_tag, commit)
+
     created = _parse_time(manifest.get("created_at"), "created_at")
     expires = _parse_time(manifest.get("expires_at"), "expires_at")
     if created > now or expires <= now or expires <= created:
@@ -305,7 +311,12 @@ def _verify_release_metadata_context(*, mode: str, tag: Optional[str], transport
     ref_object = ref.get("object") if isinstance(ref, dict) else None
     if not isinstance(ref_object, dict) or ref_object.get("type") != "tag":
         raise VerificationError("release tag must be annotated")
-    tag_object_url = GITHUB_API + "/git/tags/" + str(ref_object.get("sha"))
+    tag_object_id = ref_object.get("sha")
+    try:
+        release_identity.validate_commit(tag_object_id)
+    except (TypeError, ValueError) as error:
+        raise VerificationError("release tag object identity is malformed") from error
+    tag_object_url = GITHUB_API + "/git/tags/" + tag_object_id
     _, tag_object = _fetch_json(transport, tag_object_url, {"https://api.github.com"}, "annotated tag")
     peeled = tag_object.get("object") if isinstance(tag_object, dict) else None
     if not isinstance(peeled, dict) or peeled.get("type") != "commit" or peeled.get("sha") != commit:
@@ -321,11 +332,6 @@ def _verify_release_metadata_context(*, mode: str, tag: Optional[str], transport
     manifest_url = base + "/release-manifest.json"
     if stable != {"channel": "stable", "manifests": [manifest_url]}:
         raise VerificationError("stable pointer is not exactly bound to the release manifest")
-
-    with tempfile.TemporaryDirectory(prefix="tapid-public-release-") as directory:
-        path = Path(directory) / "release-manifest.json"
-        path.write_bytes(manifest_fetch.body)
-        verifier(path, version, resolved_tag, commit)
 
     report = {
         "schema": "tapid-public-release-verification-v1",

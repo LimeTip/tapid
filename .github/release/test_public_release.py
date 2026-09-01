@@ -318,6 +318,39 @@ class PublicReleaseTests(unittest.TestCase):
                         verifier=verifier, now=NOW,
                     )
 
+    def test_verifies_signature_before_freshness_and_tag_network_checks(self):
+        responses, manifest = valid_fixture()
+        manifest["created_at"] = "2026-07-01T18:00:00Z"
+        manifest["expires_at"] = "2026-07-31T18:00:00Z"
+        replace_manifest(responses, manifest)
+        verified = []
+
+        with self.assertRaisesRegex(public_release.VerificationError, "stale"):
+            public_release.verify_release_metadata(
+                mode="stable",
+                tag=None,
+                transport=FakeTransport(responses),
+                verifier=lambda path, version, tag, commit: verified.append(path.read_bytes()),
+                now=NOW,
+            )
+
+        self.assertEqual(verified, [responses[BASE + "/release-manifest.json"]])
+
+    def test_rejects_malformed_tag_object_identity_before_fetching_it(self):
+        responses, _ = valid_fixture()
+        responses[API + "/git/ref/tags/" + TAG] = json.dumps(
+            {"object": {"type": "tag", "sha": "not-a-git-object"}}
+        ).encode()
+
+        with self.assertRaisesRegex(public_release.VerificationError, "tag object"):
+            public_release.verify_release_metadata(
+                mode="stable",
+                tag=None,
+                transport=FakeTransport(responses),
+                verifier=lambda path, version, tag, commit: None,
+                now=NOW,
+            )
+
     def test_rejects_digest_size_duplicate_wrong_and_unsafe_archive_members(self):
         cases = ("digest", "size", "duplicate", "wrong", "unsafe")
         target = "aarch64-apple-darwin"
