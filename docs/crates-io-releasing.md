@@ -14,7 +14,7 @@ For every existing crate that may be published, configure a crates.io trusted-pu
 
 Trusted Publishing cannot bootstrap a new crate name that the configured crates.io owner does not already own. Before planning publication, confirm every crate in the closure exists and is owned by the expected account or the restricted LimeTip maintainer team. Bootstrap of a genuinely new crate requires a separately approved one-time process before it can use Trusted Publishing.
 
-Only the protected publish job in `.github/workflows/crates-publication.yml` may have `id-token: write`. Keep repository contents read-only and grant no other write permission. After human approval, use the official `rust-lang/crates-io-auth-action@v1` to obtain a short-lived registry credential. Expose it only to the individual `cargo publish` process. Do not store or print it.
+Only the protected publish job in `.github/workflows/crates-publication.yml` may have `id-token: write`. Keep repository contents read-only and grant no other write permission. After human approval, use the official `rust-lang/crates-io-auth-action@v1` to obtain a short-lived registry credential. Expose it only to the individual `cargo publish --no-verify` process. The credentialed process must not compile package or dependency build scripts. Do not store or print the credential.
 
 No long-lived crates.io token is used by default. A token is an emergency fallback only when the official OIDC path is unavailable for a verified reason. It requires explicit user approval, least privilege, storage as a protected `crates-io-release` environment secret, a defined expiry, and immediate revocation or rotation after use. Never paste a token into chat, a command line, shell history, source, logs, plans, or artifacts.
 
@@ -109,12 +109,12 @@ The protected workflow publishes sequentially. For each planned package it must:
 
 1. Query crates.io before mutation.
 2. If the exact version already exists, verify package identity and checksum, mark it verified, and never republish it.
-3. Publish exactly one package using the short-lived OIDC credential.
+3. Publish exactly one previously planned and hashed package using `cargo publish --no-verify` and the short-lived OIDC credential. This prevents package or dependency build scripts from receiving the credential.
 4. Poll with bounded backoff until that exact version and checksum are visible from crates.io.
 5. Atomically update the local progress file. The workflow uploads the latest file as evidence when the job ends.
 6. Continue only after visibility is confirmed.
 
-After all packages are visible, require clean Cargo-home package or install verification for `tapid` against registry dependencies. Record exact package names, versions, checksums, workflow run, plan digest, and final verification outcome.
+After each package becomes registry-visible, run the existing credential-free clean Cargo-home package verification before advancing to its dependents. After all packages are visible, require clean Cargo-home package or install verification for `tapid` against registry dependencies. Record exact package names, versions, checksums, workflow run, plan digest, and final verification outcome.
 
 A successful `cargo publish` process alone is not completion. Registry read-back and checksum equality are required.
 

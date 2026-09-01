@@ -21,6 +21,7 @@ _PUBLISH_ENVIRONMENT_ALLOWLIST = {
     "HTTPS_PROXY", "HTTP_PROXY", "LANG", "NO_PROXY", "PATH", "RUSTUP_HOME",
     "RUSTUP_TOOLCHAIN", "SSL_CERT_FILE", "TMPDIR",
 }
+_MAX_RECOVERY_CANDIDATES = 18
 
 
 class PublicationError(RuntimeError):
@@ -67,7 +68,7 @@ def cargo_publish(name, version, workspace, token, *, run=subprocess.run):
     environment["CARGO_REGISTRY_TOKEN"] = token
     command = [
         "cargo", "publish", "--manifest-path", str(workspace / "Cargo.toml"),
-        "-p", name, "--locked",
+        "-p", name, "--locked", "--no-verify",
     ]
     try:
         result = run(
@@ -212,7 +213,7 @@ def recover_reviewed_plan(current, expected_digest):
         return byte_exact or content_exact
 
     eligible = sorted(name for name, item in entries.items() if recoverable(item))
-    if len(eligible) > 20:
+    if len(eligible) > _MAX_RECOVERY_CANDIDATES:
         raise PublicationError("too many exact registry candidates to recover safely")
     edges = {
         name: [dependency.get("name") for dependency in item.get("internal_dependencies", [])]
@@ -418,7 +419,8 @@ def execute_publication(
                     "verified prior publications must form an exact dependency-order prefix"
                 )
 
-        if not dry_run and verify_adapter is None:
+        verification_required = not dry_run or any(initial_registry.values())
+        if verification_required and verify_adapter is None:
             raise PublicationError("registry-resolved package verification is required")
 
         for index, name in enumerate(plan["publication_order"]):

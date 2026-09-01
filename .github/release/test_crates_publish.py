@@ -243,6 +243,32 @@ class CratesPublishTests(unittest.TestCase):
                 missing_content, reviewed["plan_digest"]
             )
 
+    def test_recovery_search_is_bounded_to_the_workspace_crate_count(self):
+        packages = tuple(
+            (f"crate-{index:02d}", "0.0.2", f"archive-{index}".encode())
+            for index in range(19)
+        )
+        current = publication_plan(packages)
+        current["publication_order"] = []
+        for item in current["packages"]:
+            item["action"] = "skip"
+            item["classification"] = "unchanged"
+            item["observed_registry_checksum"] = item["archive_sha256"]
+        current["plan_digest"] = crates_plan.digest_publication_plan(current)
+
+        with mock.patch.object(
+            crates_publish.itertools,
+            "combinations",
+            side_effect=AssertionError("unbounded search started"),
+        ):
+            with self.assertRaisesRegex(
+                crates_publish.PublicationError,
+                "too many exact registry candidates",
+            ):
+                crates_publish.recover_reviewed_plan(
+                    current, "sha256-" + "f" * 64
+                )
+
     def test_dry_run_packages_but_never_mutates_or_claims_registry_verification(self):
         plan = publication_plan((("core", "0.0.2", b"core"),))
         entry = plan["packages"][0]
@@ -263,6 +289,35 @@ class CratesPublishTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "dry-run")
         self.assertEqual(result["verified"][0]["state"], "would-publish")
+
+    def test_dry_run_requires_verifier_for_an_already_published_prefix(self):
+        plan = publication_plan((("core", "0.0.2", b"core"),))
+        entry = plan["packages"][0]
+        registry_version = {
+            "version": entry["version"],
+            "checksum": entry["archive_sha256"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                crates_publish.PublicationError,
+                "registry-resolved package verification is required",
+            ):
+                crates_publish.execute_publication(
+                    plan,
+                    expected_digest=plan["plan_digest"],
+                    expected_commit=COMMIT,
+                    registry=FakeRegistry({"core": [[registry_version]]}),
+                    package_adapter=lambda name, version: {
+                        "archive_path": str(Path(directory) / "core.crate"),
+                        "archive_sha256": entry["archive_sha256"],
+                        "archive_size": entry["archive_size"],
+                    },
+                    publish_adapter=self.fail,
+                    verify_adapter=None,
+                    progress_path=Path(directory) / "progress.json",
+                    dry_run=True,
+                )
+
     def test_timeout_and_publish_rejection_stop_before_any_dependent(self):
         packages = (("core", "0.0.2", b"core"), ("app", "0.0.2", b"app"))
         plan = publication_plan(packages)
@@ -336,7 +391,7 @@ class CratesPublishTests(unittest.TestCase):
                     progress_path=Path(directory) / "progress.json",
                 )
 
-    def test_cargo_publish_scopes_token_to_process_environment_not_argv(self):
+    def test_cargo_publish_scopes_token_and_disables_credentialed_build_scripts(self):
         calls = []
 
         def run(command, **kwargs):
@@ -351,7 +406,7 @@ class CratesPublishTests(unittest.TestCase):
         command, kwargs = calls[0]
         self.assertEqual(command, [
             "cargo", "publish", "--manifest-path", "/repo/Cargo.toml",
-            "-p", "tapid-core", "--locked",
+            "-p", "tapid-core", "--locked", "--no-verify",
         ])
         self.assertNotIn("temporary-secret", command)
         self.assertEqual(kwargs["env"]["CARGO_REGISTRY_TOKEN"], "temporary-secret")
