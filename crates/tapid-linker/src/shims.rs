@@ -73,11 +73,12 @@ pub fn plan_shims(
             if !managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(target_path));
             }
-            let target_key = shim_target_key(&target_path, strategy);
-            if entries
-                .iter()
-                .any(|entry: &ShimEntry| shim_target_key(&entry.target, strategy) == target_key)
-            {
+            let output_keys = shim_output_keys(&target_path, strategy);
+            if entries.iter().any(|entry: &ShimEntry| {
+                shim_output_keys(&entry.target, strategy)
+                    .iter()
+                    .any(|key| output_keys.iter().any(|output_key| output_key == key))
+            }) {
                 return Err(PlanError::ShimCollision(target_path));
             }
             entries.push(ShimEntry {
@@ -95,10 +96,29 @@ pub fn plan_shims(
     })
 }
 
+fn shim_output_keys(path: &std::path::Path, strategy: ShimStrategy) -> Vec<String> {
+    match strategy {
+        ShimStrategy::WindowsCmdAndPowerShell => ["cmd", "ps1"]
+            .into_iter()
+            .map(|extension| shim_target_key(&path.with_extension(extension), strategy))
+            .collect(),
+        ShimStrategy::UnixSymlink => vec![shim_target_key(path, strategy)],
+    }
+}
+
 fn shim_target_key(path: &std::path::Path, strategy: ShimStrategy) -> String {
     let value = path.to_string_lossy();
     match strategy {
-        ShimStrategy::WindowsCmdAndPowerShell => value.to_lowercase(),
+        ShimStrategy::WindowsCmdAndPowerShell => value
+            .chars()
+            .flat_map(|character| {
+                let mut uppercase = character.to_uppercase();
+                match (uppercase.next(), uppercase.next()) {
+                    (Some(mapped), None) => std::iter::once(mapped).collect::<Vec<_>>(),
+                    _ => std::iter::once(character).collect::<Vec<_>>(),
+                }
+            })
+            .collect(),
         ShimStrategy::UnixSymlink => value.into_owned(),
     }
 }
@@ -207,6 +227,41 @@ mod tests {
         assert_eq!(
             shim_target_key(Path::new("Ä"), ShimStrategy::WindowsCmdAndPowerShell),
             shim_target_key(Path::new("ä"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        assert_eq!(
+            shim_target_key(Path::new("ΟΣ"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("οσ"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        assert_ne!(
+            shim_target_key(Path::new("ß"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("SS"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn windows_shims_reject_names_that_replace_the_output_extension() {
+        let root =
+            std::env::temp_dir().join(format!("tapid-shims-extension-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let plain = shim_package(&root, "plain", r#"{"tool":"cli.js"}"#, "plain");
+        let suffixed = shim_package(&root, "suffixed", r#"{"tool.cmd":"cli.js"}"#, "suffixed");
+        let managed_root = ManagedRoot::new(&root).unwrap();
+        assert!(matches!(
+            plan_shims(
+                managed_root.clone(),
+                vec![plain.clone(), suffixed.clone()],
+                Platform::Windows,
+            ),
+            Err(PlanError::ShimCollision(_))
+        ));
+        assert_eq!(
+            plan_shims(managed_root, vec![plain, suffixed], Platform::Unix)
+                .unwrap()
+                .entries
+                .len(),
+            2
         );
         let _ = std::fs::remove_dir_all(root);
     }
