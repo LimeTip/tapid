@@ -59,6 +59,9 @@ def package_content_sha256(archive):
                     raise RepositoryError("crate archive contains duplicate members")
                 seen.add(member.name)
                 cargo_vcs_info = len(parts) == 2 and parts[1] == ".cargo_vcs_info.json"
+                generated_lock = len(parts) == 2 and parts[1] == "Cargo.lock"
+                if generated_lock:
+                    continue
                 if member.isfile():
                     extracted = package.extractfile(member)
                     if extracted is None:

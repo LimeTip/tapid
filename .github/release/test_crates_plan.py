@@ -55,10 +55,10 @@ def evidence(name, version, local_bytes, published_checksum=None):
     }
 
 
-def crate_archive(source, vcs_commit, path_in_vcs=""):
+def crate_archive(source, vcs_commit, path_in_vcs="", cargo_lock=None):
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
-        for name, payload in (
+        members = [
             ("core-0.0.1/src/lib.rs", source),
             (
                 "core-0.0.1/.cargo_vcs_info.json",
@@ -67,7 +67,10 @@ def crate_archive(source, vcs_commit, path_in_vcs=""):
                     "path_in_vcs": path_in_vcs,
                 }).encode(),
             ),
-        ):
+        ]
+        if cargo_lock is not None:
+            members.append(("core-0.0.1/Cargo.lock", cargo_lock))
+        for name, payload in members:
             member = tarfile.TarInfo(name)
             member.size = len(payload)
             member.mode = 0o644
@@ -149,6 +152,23 @@ class CratesPlanTests(unittest.TestCase):
         self.assertEqual(
             plan["packages"][0]["observed_registry_checksum"],
             hashlib.sha256(published).hexdigest(),
+        )
+
+    def test_package_content_ignores_generated_lockfile_for_an_existing_version(self):
+        published = crate_archive(
+            b"pub fn value() -> u8 { 1 }",
+            "a" * 40,
+            cargo_lock=b"version = 4\nold registry resolution\n",
+        )
+        local = crate_archive(
+            b"pub fn value() -> u8 { 1 }",
+            "b" * 40,
+            cargo_lock=b"version = 4\nnew registry resolution\n",
+        )
+
+        self.assertEqual(
+            crates_repository.package_content_sha256(published),
+            crates_repository.package_content_sha256(local),
         )
 
     def test_rejects_local_bytes_that_drift_from_an_immutable_published_version(self):
