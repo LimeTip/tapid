@@ -22,9 +22,9 @@ Planning is the default safe mode. Tag creation and dispatch are never combined 
 
 `.github/workflows/crates-publication.yml` recomputes the reviewed crates plan and publishes only approved entries behind `crates-io-release`. It uses official crates.io Trusted Publishing through OIDC. No long-lived crates.io token is stored by default.
 
-`.github/workflows/release-public-smoke.yml` performs unauthenticated read-back of a public stable or explicit-tag release. It verifies GitHub assets, signed metadata, native archives, public installers, consumer installation, and frozen replay without publication permission. The post-promotion call from `release-publication.yml` uses explicit tag mode. A separate stable-mode run is required to verify stable-channel resolution.
+`.github/workflows/release-public-smoke.yml` performs unauthenticated read-back of a public stable or explicit-tag release. It verifies GitHub assets, signed metadata, native archives, public installers, consumer installation, frozen replay, and website delivery without publication permission. The post-promotion call from `release-publication.yml` uses stable mode to verify the latest-release path and installer default stable discovery.
 
-The workflow currently invokes `public_release.py` with `--skip-website` in both modes, so its `tapid-public-release-verification-v1` artifact is not website evidence. Release completion separately requires a website-enabled stable invocation of `public_release.py` and a report with `website.status` equal to `verified`. Adding that mandatory website check to protected automation remains an acceptance requirement.
+The workflow invokes `public_release.py` with website verification enabled. Release completion requires its `tapid-public-release-verification-v1` artifact to report `website.status` equal to `verified`.
 
 ## Binary publication contract
 

@@ -151,17 +151,9 @@ If a job fails while the release is still a draft, keep it draft. Diagnose the c
 
 ## Phase 6: Public smoke verification
 
-Public promotion is not completion. At the current exact head, `.github/workflows/release-publication.yml` invokes `.github/workflows/release-public-smoke.yml` after promotion in explicit `tag` mode. That automatic run verifies the promoted tag, assets, installers, and consumer replay, but it passes `--skip-website`; it does not prove stable-channel resolution or website delivery.
+Public promotion is not completion. `.github/workflows/release-publication.yml` invokes `.github/workflows/release-public-smoke.yml` after promotion in `stable` mode. The automatic run must verify the promoted release through GitHub's latest-release path, exercise the installers' default stable discovery, verify all release assets, execute the consumer replay, and verify website delivery. It does not pass `--skip-website`.
 
-Before declaring the release complete, require both the automatic tag-mode run and a separate stable-mode run to pass. Dispatch the stable-mode run after promotion:
-
-```bash
-gh workflow run release-public-smoke.yml \
-  --ref main \
-  -f mode=stable
-```
-
-The stable-mode workflow also passes `--skip-website` at the current exact head. Website verification remains the separate mandatory gate in Phase 7 rather than an inferred result of either smoke run.
+Before declaring the release complete, require that automatic stable-mode run to pass on the exact promoted release. The same workflow may be dispatched manually in `stable` mode for a no-mutation rerun, but a manual rerun does not replace the automatic post-promotion gate.
 
 The smoke workflow must use unauthenticated public reads and read-only repository permission. Require its `tapid-public-release-verification-v1` evidence to prove:
 
@@ -179,9 +171,9 @@ A tag-mode or stable-mode smoke failure after publication does not authorize del
 
 ## Phase 7: Verify website deployment
 
-Website delivery is a separate mandatory deployment gate. The `website-installer-sync.yml` workflow synchronizes canonical `scripts/install.sh` and `scripts/install.ps1` to `LimeTip/tapid-web` after changes reach `main`. At the current exact head, the public smoke workflow skips website checks in both modes. Do not cite that workflow as website evidence.
+Website delivery is a mandatory deployment gate. The `website-installer-sync.yml` workflow synchronizes canonical `scripts/install.sh` and `scripts/install.ps1` to `LimeTip/tapid-web` after changes reach `main`. The automatic post-promotion stable smoke verifies the public website and canonical installer bytes, so its evidence is required for release completion.
 
-From a clean checkout of the reviewed release source, run the website-enabled verifier after the stable-mode smoke succeeds:
+For independent no-mutation acceptance from a clean checkout of the reviewed release source, run the same website-enabled verifier:
 
 ```bash
 python3 .github/release/public_release.py \
@@ -189,7 +181,7 @@ python3 .github/release/public_release.py \
   --output public-release-and-website-evidence.json
 ```
 
-Unlike the workflow invocation, this command does not pass `--skip-website`. It applies bounded propagation retries and fails unless release and website checks pass. Preserve its `tapid-public-release-verification-v1` output and require `website.status` to equal `verified`.
+This command applies bounded propagation retries and fails unless release and website checks pass. Preserve its `tapid-public-release-verification-v1` output and require `website.status` to equal `verified`.
 
 Require byte-for-byte equality between:
 
