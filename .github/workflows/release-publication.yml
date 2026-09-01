@@ -61,8 +61,62 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^v0\.[0-9]+\.[0-9]+$ ]]
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           git cat-file -e "$RELEASE_COMMIT^{commit}"
+          test "$(git cat-file -t "$RELEASE_TAG")" = tag
           git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
           test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+      - name: Validate canonical release identity inputs
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+          RELEASE_CREATED_AT: ${{ inputs.created_at }}
+          RELEASE_EXPIRES_AT: ${{ inputs.expires_at }}
+          RELEASE_BASE_URL: ${{ inputs.base_url }}
+          RELEASE_MANIFEST_ENDPOINTS: ${{ inputs.manifest_endpoints }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          from datetime import datetime
+
+          sys.path.insert(0, ".github/release")
+          import release_identity
+
+          version = os.environ["RELEASE_VERSION"]
+          tag = os.environ["RELEASE_TAG"]
+          commit = os.environ["RELEASE_COMMIT"]
+          created_at = os.environ["RELEASE_CREATED_AT"]
+          expires_at = os.environ["RELEASE_EXPIRES_AT"]
+          base_url = os.environ["RELEASE_BASE_URL"]
+          endpoints = [
+              line.strip()
+              for line in os.environ["RELEASE_MANIFEST_ENDPOINTS"].splitlines()
+              if line.strip()
+          ]
+
+          release_identity.validate_version_tag(version, tag)
+          release_identity.validate_commit(commit)
+          expected_urls = release_identity.github_release_urls(
+              "LimeTip/tapid", version, tag
+          )
+          if base_url != expected_urls["base_url"]:
+              raise SystemExit("release base URL is not canonical")
+          if endpoints != [expected_urls["manifest_endpoint"]]:
+              raise SystemExit("release manifest endpoints are not canonical")
+
+          if not created_at.endswith("Z"):
+              raise SystemExit("release creation timestamp is not canonical UTC")
+          try:
+              created = datetime.fromisoformat(created_at[:-1] + "+00:00")
+          except ValueError as error:
+              raise SystemExit("release creation timestamp is malformed") from error
+          expected_times = release_identity.freshness_timestamps(lambda: created)
+          if expected_times != {
+              "created_at": created_at,
+              "expires_at": expires_at,
+          }:
+              raise SystemExit("release freshness timestamps are not canonical")
+          PY
       - name: Export validated source archive
         env:
           RELEASE_COMMIT: ${{ inputs.commit }}

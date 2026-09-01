@@ -19,6 +19,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIn(command, workflow)
 
+    def test_binary_publication_requires_annotated_tag_and_canonical_inputs(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "release-publication.yml"
+        ).read_text()
+
+        required_contracts = (
+            'git cat-file -t "$RELEASE_TAG"',
+            "release_identity.validate_version_tag",
+            "release_identity.validate_commit",
+            "release_identity.github_release_urls",
+            "release_identity.freshness_timestamps",
+        )
+        for contract in required_contracts:
+            with self.subTest(contract=contract):
+                self.assertIn(contract, workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
