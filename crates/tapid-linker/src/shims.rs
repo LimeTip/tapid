@@ -73,12 +73,10 @@ pub fn plan_shims(
             if !managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(target_path));
             }
-            let output_keys = shim_output_keys(&target_path, strategy);
-            if entries.iter().any(|entry: &ShimEntry| {
-                shim_output_keys(&entry.target, strategy)
-                    .iter()
-                    .any(|key| output_keys.iter().any(|output_key| output_key == key))
-            }) {
+            let collision = entries
+                .iter()
+                .any(|entry: &ShimEntry| shim_paths_collide(&entry.target, &target_path, strategy));
+            if collision {
                 return Err(PlanError::ShimCollision(target_path));
             }
             entries.push(ShimEntry {
@@ -94,6 +92,22 @@ pub fn plan_shims(
         managed_root,
         entries,
     })
+}
+
+fn shim_paths_collide(
+    first: &std::path::Path,
+    second: &std::path::Path,
+    strategy: ShimStrategy,
+) -> bool {
+    match strategy {
+        ShimStrategy::UnixSymlink => first == second,
+        ShimStrategy::WindowsCmdAndPowerShell => {
+            let first_keys = shim_output_keys(first, strategy);
+            shim_output_keys(second, strategy)
+                .iter()
+                .any(|key| first_keys.iter().any(|first_key| first_key == key))
+        }
+    }
 }
 
 fn shim_output_keys(path: &std::path::Path, strategy: ShimStrategy) -> Vec<String> {
@@ -306,6 +320,21 @@ mod tests {
             Err(PlanError::BinTargetNotRegular(_))
         ));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_shim_collisions_preserve_non_utf8_path_identity() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let first = PathBuf::from(OsString::from_vec(b"node-\xff/.bin/tool".to_vec()));
+        let second = PathBuf::from(OsString::from_vec(b"node-\xfe/.bin/tool".to_vec()));
+        assert!(!shim_paths_collide(
+            &first,
+            &second,
+            ShimStrategy::UnixSymlink
+        ));
     }
 
     #[cfg(unix)]
