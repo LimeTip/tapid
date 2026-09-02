@@ -1261,6 +1261,7 @@ mod tests {
         for marker in [
             format!("{}\n", expected.as_str()),
             format!(" {} ", expected.as_str()),
+            format!("{}\nextra", expected.as_str()),
         ] {
             fs::write(destination.join(".tapid-tree"), marker).unwrap();
             assert!(matches!(
