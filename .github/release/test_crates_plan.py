@@ -698,7 +698,7 @@ class CratesRepositoryTests(unittest.TestCase):
                 calls.append((command, kwargs))
                 if command == ["cargo", "--version"]:
                     return subprocess.CompletedProcess(
-                        command, 0, stdout="cargo 1.97.1 (c980f4866 2026-06-30)\n", stderr=""
+                        command, 0, stdout="cargo 1.90.0 (840b83a10 2025-07-30)\n", stderr=""
                     )
                 target = Path(kwargs["env"]["CARGO_TARGET_DIR"])
                 package_dir = target / "package"
@@ -741,13 +741,13 @@ class CratesRepositoryTests(unittest.TestCase):
         def run(command, **kwargs):
             calls.append(command)
             return subprocess.CompletedProcess(
-                command, 0, stdout="cargo 1.88.0 (6b00bc388 2025-06-23)\n", stderr=""
+                command, 0, stdout="cargo 1.89.0 (c24e10642 2025-06-23)\n", stderr=""
             )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with self.assertRaisesRegex(
-                crates_repository.RepositoryError, "Cargo 1.89 or newer"
+                crates_repository.RepositoryError, "Cargo 1.90 or newer"
             ):
                 crates_repository.package_workspace(
                     workspace_metadata,

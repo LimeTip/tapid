@@ -149,9 +149,9 @@ def _require_workspace_packaging_cargo(*, run, cwd, env):
     if matched is None:
         raise RepositoryError("malformed cargo --version output")
     version = tuple(int(component) for component in matched.groups())
-    if version < (1, 89, 0):
+    if version < (1, 90, 0):
         raise RepositoryError(
-            "Cargo 1.89 or newer is required for pre-publication workspace packaging"
+            "Cargo 1.90 or newer is required for pre-publication workspace packaging"
         )
 
 

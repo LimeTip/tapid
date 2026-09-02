@@ -52,7 +52,7 @@ Before the planned dependency versions exist on crates.io, standalone packaging 
 
 ## Create the read-only plan
 
-The planner needs no publishing credential and performs no registry mutation. It requires Cargo 1.89 or newer because stabilized workspace packaging overlays selected workspace packages while their new internal dependency versions are not yet registry-visible:
+The planner needs no publishing credential and performs no registry mutation. It requires Cargo 1.90 or newer because Cargo 1.90 stabilized multi-package workspace packaging and its local registry overlay for interdependent package versions that are not yet registry-visible. Cargo 1.89 still requires the nightly-only `-Zpackage-workspace` feature and is rejected:
 
 ```bash
 COMMIT=$(git rev-parse origin/main)
