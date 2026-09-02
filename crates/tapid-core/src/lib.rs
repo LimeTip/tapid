@@ -151,18 +151,30 @@ impl FromStr for RegistryOrigin {
     type Err = DomainError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let trimmed = value.trim_end_matches('/');
-        let valid = trimmed.starts_with("https://")
-            && trimmed.len() > "https://".len()
-            && !trimmed.contains(['@', '?', '#', '|'])
-            && trimmed[8..]
-                .split('/')
-                .next()
-                .is_some_and(|host| !host.is_empty());
-        if !valid {
+        let parsed = url::Url::parse(value)
+            .map_err(|_| DomainError::InvalidRegistryOrigin(value.to_owned()))?;
+        if parsed.scheme() != "https"
+            || !parsed.username().is_empty()
+            || value.contains("@")
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || parsed.host_str().is_none()
+            || !parsed.path().chars().all(|character| character == '/')
+        {
             return Err(DomainError::InvalidRegistryOrigin(value.to_owned()));
         }
-        Ok(Self(trimmed.to_owned()))
+        let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+        let host = if host.contains(":") && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host
+        };
+        let authority = match parsed.port().filter(|port| *port != 443) {
+            Some(port) => format!("{host}:{port}"),
+            None => host,
+        };
+        Ok(Self(format!("https://{authority}")))
     }
 }
 
@@ -388,10 +400,44 @@ mod tests {
 
     #[test]
     fn registry_origin_is_typed_and_canonical_without_secrets() {
-        let origin = "https://REGISTRY.example.test/"
+        let origin = "https://REGISTRY.example.test:443/"
             .parse::<RegistryOrigin>()
             .unwrap();
-        assert_eq!(origin.as_str(), "https://REGISTRY.example.test");
+        assert_eq!(origin.as_str(), "https://registry.example.test");
+        assert_eq!(
+            "https://registry.example.test///"
+                .parse::<RegistryOrigin>()
+                .unwrap()
+                .as_str(),
+            "https://registry.example.test"
+        );
+        assert_eq!(
+            "https://REGISTRY.example.test"
+                .parse::<RegistryOrigin>()
+                .unwrap(),
+            origin
+        );
+        assert_eq!(
+            "https://registry.example.test:8443"
+                .parse::<RegistryOrigin>()
+                .unwrap()
+                .as_str(),
+            "https://registry.example.test:8443"
+        );
+        assert_eq!(
+            "https://[2001:DB8::1]:443/"
+                .parse::<RegistryOrigin>()
+                .unwrap()
+                .as_str(),
+            "https://[2001:db8::1]"
+        );
+        assert_eq!(
+            "https://[2001:db8::1]:8443"
+                .parse::<RegistryOrigin>()
+                .unwrap()
+                .as_str(),
+            "https://[2001:db8::1]:8443"
+        );
         assert!(
             "http://registry.example.test"
                 .parse::<RegistryOrigin>()
@@ -399,6 +445,21 @@ mod tests {
         );
         assert!(
             "https://user:pass@registry.example.test"
+                .parse::<RegistryOrigin>()
+                .is_err()
+        );
+        assert!(
+            "https://@registry.example.test"
+                .parse::<RegistryOrigin>()
+                .is_err()
+        );
+        assert!(
+            "https://registry.example.test?query"
+                .parse::<RegistryOrigin>()
+                .is_err()
+        );
+        assert!(
+            "https://registry.example.test#fragment"
                 .parse::<RegistryOrigin>()
                 .is_err()
         );
