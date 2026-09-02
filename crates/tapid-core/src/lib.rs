@@ -165,6 +165,11 @@ impl FromStr for RegistryOrigin {
             return Err(DomainError::InvalidRegistryOrigin(value.to_owned()));
         }
         let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+        let host = if host.contains(":") && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host
+        };
         let authority = match parsed.port().filter(|port| *port != 443) {
             Some(port) => format!("{host}:{port}"),
             None => host,
@@ -411,6 +416,20 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "https://registry.example.test:8443"
+        );
+        assert_eq!(
+            "https://[2001:DB8::1]:443/"
+                .parse::<RegistryOrigin>()
+                .unwrap()
+                .as_str(),
+            "https://[2001:db8::1]"
+        );
+        assert_eq!(
+            "https://[2001:db8::1]:8443"
+                .parse::<RegistryOrigin>()
+                .unwrap()
+                .as_str(),
+            "https://[2001:db8::1]:8443"
         );
         assert!(
             "http://registry.example.test"
