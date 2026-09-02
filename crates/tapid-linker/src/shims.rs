@@ -1,5 +1,8 @@
 use std::path::{Component, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
 use crate::{ManagedRoot, PlanError, Platform};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -110,7 +113,13 @@ fn shim_paths_collide(
     }
 }
 
-fn shim_output_keys(path: &std::path::Path, strategy: ShimStrategy) -> Vec<String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ShimKey {
+    Bytes(Vec<u8>),
+    Utf16(Vec<u16>),
+}
+
+fn shim_output_keys(path: &std::path::Path, strategy: ShimStrategy) -> Vec<ShimKey> {
     match strategy {
         ShimStrategy::WindowsCmdAndPowerShell => ["cmd", "ps1"]
             .into_iter()
@@ -120,25 +129,47 @@ fn shim_output_keys(path: &std::path::Path, strategy: ShimStrategy) -> Vec<Strin
     }
 }
 
-fn shim_target_key(path: &std::path::Path, strategy: ShimStrategy) -> String {
-    let value = path.to_string_lossy();
-    match strategy {
-        ShimStrategy::WindowsCmdAndPowerShell => value
-            .chars()
-            .flat_map(|character| {
+fn shim_target_key_from_utf16(units: Vec<u16>) -> ShimKey {
+    ShimKey::Utf16(
+        units
+            .into_iter()
+            .map(|unit| {
+                let Some(character) = char::from_u32(unit as u32) else {
+                    return unit;
+                };
                 // Windows ordinal filename matching is defined over UTF-16
-                // code units. Keep supplementary-plane letters as written.
-                if character as u32 > 0xffff {
-                    return vec![character];
-                }
+                // code units. Keep surrogate code units as written.
                 let mut uppercase = character.to_uppercase();
                 match (uppercase.next(), uppercase.next()) {
-                    (Some(mapped), None) => vec![mapped],
-                    _ => vec![character],
+                    (Some(mapped), None) if (mapped as u32) <= u16::MAX as u32 => mapped as u16,
+                    _ => unit,
                 }
             })
             .collect(),
-        ShimStrategy::UnixSymlink => value.into_owned(),
+    )
+}
+
+fn shim_target_key(path: &std::path::Path, strategy: ShimStrategy) -> ShimKey {
+    match strategy {
+        ShimStrategy::WindowsCmdAndPowerShell => {
+            #[cfg(windows)]
+            let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+            #[cfg(not(windows))]
+            let units: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
+
+            shim_target_key_from_utf16(units)
+        }
+        ShimStrategy::UnixSymlink => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                ShimKey::Bytes(path.as_os_str().as_bytes().to_vec())
+            }
+            #[cfg(not(unix))]
+            {
+                ShimKey::Bytes(path.to_string_lossy().as_bytes().to_vec())
+            }
+        }
     }
 }
 
@@ -329,6 +360,13 @@ mod tests {
             Err(PlanError::BinTargetNotRegular(_))
         ));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn windows_shim_collisions_preserve_unpaired_utf16_units() {
+        let first = shim_target_key_from_utf16(vec![110, 0xd800, 97]);
+        let second = shim_target_key_from_utf16(vec![110, 0xd801, 97]);
+        assert_ne!(first, second);
     }
 
     #[cfg(unix)]
