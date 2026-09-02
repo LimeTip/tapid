@@ -175,12 +175,16 @@ fn normalized_source_paths(source: &PackageSource) -> Result<Vec<(String, PathBu
     paths.sort();
     let mut seen = BTreeSet::new();
     for (path, _) in &paths {
-        if !seen.insert(path.clone()) {
+        if !seen.insert(path_collision_key(path)) {
             return Err(PublishError::UnsafePath(path.clone()));
         }
     }
     Ok(paths)
 }
+fn path_collision_key(path: &str) -> String {
+    path.to_lowercase()
+}
+
 fn snapshot_source(source: &PackageSource) -> Result<SourceSnapshot, PublishError> {
     let paths = normalized_source_paths(source)?;
     let mut manifest_files = Vec::with_capacity(paths.len());
@@ -439,6 +443,14 @@ mod tests {
             pack(&PackageSource::new(&p, "1.0.0")),
             Err(PublishError::UnsafePath(path)) if path == "a/b"
         ));
+    }
+
+    #[test]
+    fn case_insensitive_path_collision_keys_match() {
+        assert_eq!(
+            path_collision_key("A/config.json"),
+            path_collision_key("a/CONFIG.JSON")
+        );
     }
 
     #[test]
