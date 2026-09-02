@@ -51,22 +51,66 @@ class CratesPublicationWorkflowTests(unittest.TestCase):
         self.assertIn('import crates_publish', workflow)
         self.assertIn('crates_publish.recover_reviewed_plan(', workflow)
         self.assertIn('"crates-plan.json"', workflow)
-    def test_both_jobs_execute_only_freshly_fetched_current_main(self):
+    def test_all_jobs_execute_only_freshly_fetched_current_main(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertEqual(workflow.count("ref: main"), 2)
+        self.assertEqual(workflow.count("ref: main"), 3)
         self.assertNotIn("ref: ${{ inputs.commit }}", workflow)
         self.assertEqual(
             workflow.count(
                 "git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main"
             ),
-            2,
+            3,
         )
         self.assertEqual(
             workflow.count('test "$(git rev-parse origin/main)" = "$SOURCE_COMMIT"'),
-            2,
+            3,
         )
         self.assertNotIn("git merge-base --is-ancestor", workflow)
+
+    def test_exact_archive_bundle_is_prepared_before_oidc_and_only_uploaded_afterward(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        prepare = workflow.index("Prepare exact reviewed archive bundle")
+        auth = workflow.index("Obtain temporary crates.io credential")
+        upload = workflow.index("Upload and read back exact reviewed archives")
+
+        self.assertLess(prepare, auth)
+        self.assertLess(auth, upload)
+        self.assertIn("--prepare-bundle", workflow[prepare:auth])
+        mutation = workflow[upload:workflow.index("Verify tapid through the registry", upload)]
+        self.assertIn("--bundle", mutation)
+        self.assertNotIn("cargo publish", mutation)
+        self.assertNotIn("cargo package", mutation)
+        self.assertNotIn("CARGO_REGISTRY_TOKEN", workflow[prepare:auth])
+
+    def test_oidc_job_ends_with_a_bounded_http_only_upload(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        publish = workflow[workflow.index("  publish:"):workflow.index("  verify:")]
+        auth = publish.index("Obtain temporary crates.io credential")
+        upload = publish.index("Upload and read back exact reviewed archives")
+        privileged_tail = publish[auth:]
+
+        self.assertIn("Record credential phase start", publish[:auth])
+        self.assertIn("--http-only", publish[upload:])
+        self.assertIn("--credential-deadline", publish[upload:])
+        self.assertIn(
+            'timeout --foreground --signal=TERM --kill-after=5s "${remaining}s"',
+            publish[upload:],
+        )
+        self.assertNotIn("cargo ", privileged_tail)
+        self.assertNotIn("uses:", publish[upload:])
+
+    def test_registry_cargo_verification_is_a_separate_credential_free_job(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        verification = workflow[workflow.index("  verify:"):]
+
+        self.assertIn("needs: publish", verification)
+        self.assertIn("--require-published", verification)
+        self.assertIn("cargo install tapid", verification)
+        self.assertNotIn("id-token: write", verification)
+        self.assertNotIn("CARGO_REGISTRY_TOKEN:", verification)
+        self.assertNotIn("CARGO_REGISTRIES_CRATES_IO_TOKEN:", verification)
+        self.assertNotIn("crates-auth.outputs.token", verification)
 
 
 if __name__ == "__main__":

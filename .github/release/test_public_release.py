@@ -179,6 +179,51 @@ class PublicReleaseTests(unittest.TestCase):
         self.assertEqual([(v, t, c) for _, v, t, c in verified], [(VERSION, TAG, COMMIT)])
         self.assertNotIn("path", json.dumps(report))
 
+    def test_identity_validation_failures_use_verification_error_contract(self):
+        with self.assertRaisesRegex(public_release.VerificationError, "requested release tag"):
+            public_release.verify_release_metadata(
+                mode="tag",
+                tag="not-a-version-tag",
+                transport=FakeTransport({}),
+                verifier=lambda path, version, tag, commit: None,
+                now=NOW,
+            )
+
+        malformed_release = {
+            "tag_name": "vnot-a-version",
+            "draft": False,
+            "prerelease": False,
+            "assets": [],
+        }
+        with self.assertRaisesRegex(public_release.VerificationError, "release tag"):
+            public_release.verify_release_metadata(
+                mode="stable",
+                tag=None,
+                transport=FakeTransport(
+                    {API + "/releases/latest": json.dumps(malformed_release).encode()}
+                ),
+                verifier=lambda path, version, tag, commit: None,
+                now=NOW,
+            )
+
+        for version, tag, commit in (
+            ("not-a-version", "vnot-a-version", COMMIT),
+            (VERSION, TAG, "not-a-commit"),
+        ):
+            with self.subTest(version=version, tag=tag, commit=commit):
+                with self.assertRaisesRegex(
+                    public_release.VerificationError,
+                    "downloaded release identity",
+                ):
+                    public_release.verify_downloaded_release_assets(
+                        Path("unused"),
+                        version=version,
+                        tag=tag,
+                        commit=commit,
+                        verifier=lambda path, version, tag, commit: None,
+                        now=NOW,
+                    )
+
     def test_downloads_and_validates_all_six_archives(self):
         responses, _ = valid_fixture()
         report = public_release.verify_public_release(

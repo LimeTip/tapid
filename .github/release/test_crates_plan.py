@@ -1,4 +1,5 @@
 import hashlib
+import gzip
 import importlib.util
 import io
 import json
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib import request
 
 import crates_plan
 import crates_repository
@@ -463,6 +465,20 @@ class CratesPlanTests(unittest.TestCase):
 
 
 class CratesRepositoryTests(unittest.TestCase):
+    def test_semantic_archive_hash_rejects_bounded_decompression(self):
+        compressed_bomb = gzip.compress(b"x" * 1025)
+        with mock.patch.object(
+            crates_repository,
+            "MAX_UNPACKED_BYTES",
+            1024,
+            create=True,
+        ):
+            with self.assertRaisesRegex(
+                crates_repository.RepositoryError,
+                "unpacked size",
+            ):
+                crates_repository.package_content_sha256(compressed_bomb)
+
     def test_package_content_digest_ignores_only_cargo_vcs_commit_metadata(self):
         first = crate_archive(b"pub fn value() -> u8 { 1 }", "a" * 40)
         later_commit = crate_archive(b"pub fn value() -> u8 { 1 }", "b" * 40)
@@ -539,6 +555,43 @@ class CratesRepositoryTests(unittest.TestCase):
         self.assertEqual(
             observations["core"]["published_archive_sha256"], published_checksum
         )
+
+    def test_registry_redirects_are_restricted_to_crates_io_archive_origins(self):
+        handler = crates_repository._CratesIoRedirectHandler()
+        original = request.Request("https://crates.io/api/v1/crates/core/0.0.1/download")
+
+        allowed = handler.redirect_request(
+            original,
+            None,
+            302,
+            "Found",
+            {},
+            "https://static.crates.io/crates/core/core-0.0.1.crate",
+        )
+        self.assertEqual(allowed.full_url, "https://static.crates.io/crates/core/core-0.0.1.crate")
+
+        with self.assertRaises(crates_repository.RegistryError) as raised:
+            handler.redirect_request(
+                original,
+                None,
+                302,
+                "Found",
+                {},
+                "https://attacker.invalid/core-0.0.1.crate",
+            )
+        self.assertEqual(raised.exception.kind, "redirect-origin")
+
+    def test_registry_archive_readback_rejects_oversized_body_before_hashing(self):
+        body = b"x" * (crates_repository.MAX_ARCHIVE_BYTES + 1)
+        client = crates_repository.CratesIoClient(
+            http_get=lambda *args: (200, body, {"Content-Length": str(len(body))}),
+            max_attempts=1,
+        )
+
+        with self.assertRaises(crates_repository.RegistryError) as raised:
+            client.archive("tapid-core", "0.0.1", hashlib.sha256(body).hexdigest())
+
+        self.assertEqual(raised.exception.kind, "response-too-large")
 
     def test_registry_adapter_retries_transient_status_without_credentials(self):
         responses = [

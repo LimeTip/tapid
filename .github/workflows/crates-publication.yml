@@ -52,6 +52,10 @@ jobs:
           test "$(git rev-parse origin/main)" = "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Use supported Python for exact archive parsing
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Build package archives and recompute the read-only plan
         env:
           PLAN_DIR: ${{ runner.temp }}/crates-publication-preflight
@@ -121,7 +125,7 @@ jobs:
     needs: preflight
     if: inputs.dry_run == false && needs.preflight.outputs.has_publications == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
     environment: crates-io-release
     permissions:
       contents: read
@@ -143,6 +147,10 @@ jobs:
           test "$(git rev-parse origin/main)" = "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Use supported Python for exact archive parsing
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Download exact reviewed plan
         uses: actions/download-artifact@v4
         with:
@@ -179,26 +187,102 @@ jobs:
               json.dumps({"verified_prior_prefix": completed}, sort_keys=True) + "\n"
           )
           PY
+      - name: Prepare exact reviewed archive bundle
+        env:
+          REVIEWED_DIR: ${{ runner.temp }}/crates-publication-reviewed
+          MUTATION_DIR: ${{ runner.temp }}/crates-publication-mutation
+          REVIEWED_DIGEST: ${{ inputs.plan_digest }}
+          SOURCE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          python3 .github/release/crates_publish.py \
+            --plan "$REVIEWED_DIR/crates-plan.json" \
+            --expect-digest "$REVIEWED_DIGEST" \
+            --commit "$SOURCE_COMMIT" \
+            --progress "$MUTATION_DIR/prepare-progress.json" \
+            --prepare-bundle "$MUTATION_DIR/upload-bundle"
+      - name: Record credential phase start
+        id: auth-start
+        run: printf 'epoch=%s\n' "$(date +%s)" >> "$GITHUB_OUTPUT"
       - name: Obtain temporary crates.io credential
         id: crates-auth
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-      - name: Publish and verify exact reviewed packages
+      - name: Upload and read back exact reviewed archives
         env:
+          AUTH_STARTED_AT: ${{ steps.auth-start.outputs.epoch }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
           REVIEWED_DIR: ${{ runner.temp }}/crates-publication-reviewed
           MUTATION_DIR: ${{ runner.temp }}/crates-publication-mutation
           REVIEWED_DIGEST: ${{ inputs.plan_digest }}
           SOURCE_COMMIT: ${{ inputs.commit }}
         run: |
+          set -euo pipefail
+          credential_deadline="$((AUTH_STARTED_AT + 1200))"
+          remaining="$((credential_deadline - $(date +%s)))"
+          test "$remaining" -gt 0
+          timeout --foreground --signal=TERM --kill-after=5s "${remaining}s" \
+            python3 .github/release/crates_publish.py \
+            --plan "$REVIEWED_DIR/crates-plan.json" \
+            --expect-digest "$REVIEWED_DIGEST" \
+            --commit "$SOURCE_COMMIT" \
+            --progress "$MUTATION_DIR/progress.json" \
+            --bundle "$MUTATION_DIR/upload-bundle" \
+            --http-only \
+            --credential-deadline "$credential_deadline"
+
+  verify:
+    name: Verify registry publication without credentials
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted current main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Revalidate current origin main before verification
+        env:
+          SOURCE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Use supported Python for exact archive parsing
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download exact reviewed plan
+        uses: actions/download-artifact@v4
+        with:
+          name: crates-publication-preflight
+          path: ${{ runner.temp }}/crates-publication-reviewed
+      - name: Reconstruct and verify complete publication from crates.io
+        env:
+          REVIEWED_DIR: ${{ runner.temp }}/crates-publication-reviewed
+          VERIFICATION_DIR: ${{ runner.temp }}/crates-publication-verification
+          REVIEWED_DIGEST: ${{ inputs.plan_digest }}
+          SOURCE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$VERIFICATION_DIR"
           python3 .github/release/crates_publish.py \
             --plan "$REVIEWED_DIR/crates-plan.json" \
             --expect-digest "$REVIEWED_DIGEST" \
             --commit "$SOURCE_COMMIT" \
-            --progress "$MUTATION_DIR/progress.json"
+            --progress "$VERIFICATION_DIR/progress.json" \
+            --dry-run \
+            --require-published
       - name: Verify tapid through the registry with a clean Cargo home
         env:
           REVIEWED_DIR: ${{ runner.temp }}/crates-publication-reviewed
-          MUTATION_DIR: ${{ runner.temp }}/crates-publication-mutation
+          VERIFICATION_DIR: ${{ runner.temp }}/crates-publication-verification
         run: |
           set -euo pipefail
           verification_root="$(mktemp -d)"
@@ -211,12 +295,12 @@ jobs:
           version="$(python3 -c 'import json,os; p=json.load(open(os.path.join(os.environ["REVIEWED_DIR"], "crates-plan.json"))); print(next(x["version"] for x in p["packages"] if x["name"] == "tapid"))')"
           cargo install tapid --version "$version" --locked --root "$verification_root/install"
           test "$("$verification_root/install/bin/tapid" --version)" = "tapid $version"
-          printf '%s\n' 'registry-backed package and install verification passed' > "$MUTATION_DIR/final-verification.txt"
-      - name: Upload atomic publication progress
+          printf '%s\n' 'registry-backed package and install verification passed' > "$VERIFICATION_DIR/final-verification.txt"
+      - name: Upload credential-free verification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: crates-publication-progress
-          path: ${{ runner.temp }}/crates-publication-mutation/
+          name: crates-publication-verification
+          path: ${{ runner.temp }}/crates-publication-verification/
           if-no-files-found: warn
           retention-days: 90

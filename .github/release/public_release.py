@@ -236,7 +236,10 @@ def _verify_release_metadata_context(*, mode: str, tag: Optional[str], transport
     if mode == "tag" and tag is None:
         raise VerificationError("tag mode requires an explicit tag")
     if tag is not None:
-        release_identity.validate_version_tag(tag[1:] if tag.startswith("v") else "", tag)
+        try:
+            release_identity.validate_version_tag(tag[1:] if tag.startswith("v") else "", tag)
+        except (TypeError, ValueError) as error:
+            raise VerificationError("requested release tag is malformed") from error
 
     transport = transport or PublicTransport()
     verifier = verifier or _default_verifier
@@ -256,7 +259,10 @@ def _verify_release_metadata_context(*, mode: str, tag: Optional[str], transport
     if not isinstance(resolved_tag, str) or not resolved_tag.startswith("v"):
         raise VerificationError("release tag is malformed")
     version = resolved_tag[1:]
-    release_identity.validate_version_tag(version, resolved_tag)
+    try:
+        release_identity.validate_version_tag(version, resolved_tag)
+    except (TypeError, ValueError) as error:
+        raise VerificationError("release tag is malformed") from error
 
     expected_archives = dict(release_identity.release_archives(version))
     expected_names = set(expected_archives.values()) | {"release-manifest.json", "stable.json"}
@@ -395,8 +401,11 @@ def verify_downloaded_release_assets(directory: Path, *, version: str, tag: str,
                                      commit: str, verifier: Optional[Callable] = None,
                                      now=None):
     """Verify the exact bytes downloaded from a draft release before promotion."""
-    release_identity.validate_version_tag(version, tag)
-    release_identity.validate_commit(commit)
+    try:
+        release_identity.validate_version_tag(version, tag)
+        release_identity.validate_commit(commit)
+    except (TypeError, ValueError) as error:
+        raise VerificationError("downloaded release identity is malformed") from error
     root = Path(directory)
     if not root.is_dir() or root.is_symlink():
         raise VerificationError("downloaded draft asset directory is invalid")

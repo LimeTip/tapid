@@ -51,9 +51,9 @@ The `stable-release` environment protects manifest signing and stable advancemen
 
 The crates plan records the exact source commit, root lockfile digest, publishable workspace graph, observed crates.io versions, required dependent updates, deterministic topological order, package archive digests, and preflight results. Version bumping remains an explicit source-preparation task.
 
-The protected workflow checks registry state before each mutation. An existing exact version is accepted only when package identity and checksum match. Each new publication is read back before its dependents may proceed. The uploaded progress file records a partial run but is not restored as execution state. On rerun, registry read-back must prove that prior exact versions and checksums form a dependency-order prefix of the original reviewed plan. The executor revalidates and skips that prefix before publishing the first unverified crate.
+The protected workflow checks registry state before each mutation. Before OIDC authentication, it regenerates and validates every reviewed `.crate` archive and writes a digest-bound bundle. Publication uses Cargo's documented request framing to submit the exact reviewed archive bytes directly, without asking `cargo publish` to regenerate them. An existing exact version is accepted only when package identity, checksum, and public archive bytes match. The credentialed phase is HTTP-only, capped at seven new packages and 20 minutes, and ends immediately after the direct uploader so the official action can revoke the token. Each new publication receives exact checksum and archive read-back before a dependent may proceed. On rerun, registry read-back must prove that prior exact versions and checksums form a dependency-order prefix of the original reviewed plan. The executor revalidates and skips that prefix before publishing the first unverified crate.
 
-The `crates-io-release` environment is separate from `stable-release`. Only its publish job receives `id-token: write`, after approval, and obtains a short-lived registry credential with `rust-lang/crates-io-auth-action@v1`. A long-lived token is an exceptional, separately approved fallback, not the default.
+The `crates-io-release` environment is separate from `stable-release`. Only its publish job receives `id-token: write`, after approval, and obtains a short-lived registry credential with the pinned official `rust-lang/crates-io-auth-action`. No Cargo or artifact action runs after authentication. A separate credential-free job reconstructs the complete public state, verifies every exact archive, performs registry-resolved package checks, and installs `tapid`. A partial bounded phase requires another protected run with the same commit and reviewed digest. A long-lived token is an exceptional, separately approved fallback, not the default.
 
 ## Release sequence limitation
 
@@ -61,7 +61,7 @@ This tooling does not add `release_sequence`. The accepted schema at `schemas/ta
 
 ## Tests
 
-Run release tooling and workflow checks without repository or fixture keys:
+Run release tooling with Python 3.11 or newer and run workflow checks without repository or fixture keys:
 
 ```bash
 python3 -m unittest discover -s .github/release -p 'test_*.py' -v

@@ -1,6 +1,7 @@
 """Read-only Cargo and crates.io adapters for publication planning."""
 
 import hashlib
+import gzip
 import io
 import json
 import os
@@ -15,6 +16,10 @@ from urllib import error, parse, request
 
 
 _API_ROOT = "https://crates.io/api/v1/crates"
+MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
+MAX_UNPACKED_BYTES = 128 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 10_000
+_MAX_API_BYTES = 5 * 1024 * 1024
 _PACKAGE_ENVIRONMENT_ALLOWLIST = {
     "HTTPS_PROXY",
     "HTTP_PROXY",
@@ -49,8 +54,17 @@ def package_content_sha256(archive):
     seen = set()
     roots = set()
     try:
-        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as package:
-            for member in sorted(package.getmembers(), key=lambda item: item.name):
+        if not isinstance(archive, bytes) or len(archive) > MAX_ARCHIVE_BYTES:
+            raise RepositoryError("crate archive compressed size is oversized")
+        with gzip.GzipFile(fileobj=io.BytesIO(archive), mode="rb") as compressed:
+            unpacked = compressed.read(MAX_UNPACKED_BYTES + 1)
+        if len(unpacked) > MAX_UNPACKED_BYTES:
+            raise RepositoryError("crate archive unpacked size is oversized")
+        with tarfile.open(fileobj=io.BytesIO(unpacked), mode="r:") as package:
+            members = package.getmembers()
+            if len(members) > MAX_ARCHIVE_MEMBERS:
+                raise RepositoryError("crate archive contains too many members")
+            for member in sorted(members, key=lambda item: item.name):
                 parts = member.name.split("/")
                 if len(parts) < 2 or not parts[0] or any(part in ("", ".", "..") for part in parts):
                     raise RepositoryError("crate archive contains an invalid member path")
@@ -66,7 +80,11 @@ def package_content_sha256(archive):
                     extracted = package.extractfile(member)
                     if extracted is None:
                         raise RepositoryError("crate archive member is unreadable")
-                    payload = extracted.read()
+                    if member.size < 0 or member.size > MAX_UNPACKED_BYTES:
+                        raise RepositoryError("crate archive member size is invalid")
+                    payload = extracted.read(member.size + 1)
+                    if len(payload) != member.size:
+                        raise RepositoryError("crate archive member size is inconsistent")
                     if cargo_vcs_info:
                         try:
                             metadata = json.loads(payload)
@@ -105,7 +123,9 @@ def package_content_sha256(archive):
                 ):
                     digest.update(len(value).to_bytes(8, "big"))
                     digest.update(value)
-    except (tarfile.TarError, UnicodeError) as error:
+    except RepositoryError:
+        raise
+    except (EOFError, OSError, tarfile.TarError, UnicodeError) as error:
         raise RepositoryError("crate archive is malformed") from error
     if len(roots) != 1 or not seen:
         raise RepositoryError("crate archive must contain one package root")
@@ -155,13 +175,51 @@ def read_locked_metadata(workspace, *, run=subprocess.run):
     return metadata
 
 
+def _bounded_read(response, maximum):
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            if int(content_length) > maximum:
+                return response.read(0), True
+        except (TypeError, ValueError):
+            pass
+    body = response.read(maximum + 1)
+    return body, len(body) > maximum
+
+
+class _CratesIoRedirectHandler(request.HTTPRedirectHandler):
+    _ALLOWED_ORIGINS = {("https", "crates.io", None), ("https", "static.crates.io", None)}
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = parse.urlsplit(newurl)
+        origin = (target.scheme, target.hostname, target.port)
+        if (
+            origin not in self._ALLOWED_ORIGINS
+            or target.username is not None
+            or target.password is not None
+        ):
+            raise RegistryError(
+                "redirect-origin", "crates.io redirected to an unapproved archive origin"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _default_http_get(url, headers, timeout):
     incoming = request.Request(url, headers=headers, method="GET")
+    opener = request.build_opener(_CratesIoRedirectHandler())
     try:
-        with request.urlopen(incoming, timeout=timeout) as response:
-            return response.status, response.read(), dict(response.headers.items())
+        with opener.open(incoming, timeout=timeout) as response:
+            body, oversized = _bounded_read(response, MAX_ARCHIVE_BYTES)
+            response_headers = dict(response.headers.items())
+            if oversized:
+                response_headers["X-Tapid-Oversized"] = "1"
+            return response.status, body, response_headers
     except error.HTTPError as exc:
-        return exc.code, exc.read(), dict(exc.headers.items())
+        body, oversized = _bounded_read(exc, _MAX_API_BYTES)
+        response_headers = dict(exc.headers.items())
+        if oversized:
+            response_headers["X-Tapid-Oversized"] = "1"
+        return exc.code, body, response_headers
 
 
 class CratesIoClient:
@@ -201,6 +259,13 @@ class CratesIoClient:
                 last_error = exc
             else:
                 last_error = None
+            if (
+                response_headers.get("X-Tapid-Oversized") == "1"
+                or len(body) > _MAX_API_BYTES
+            ):
+                raise RegistryError(
+                    "response-too-large", "crates.io version response is oversized"
+                )
             if status == 404:
                 return []
             if status in (401, 403):
@@ -248,6 +313,24 @@ class CratesIoClient:
                 status, body, response_headers = self._http_get(url, headers, self._timeout)
             except (OSError, error.URLError):
                 status, body, response_headers = 0, b"", {}
+            content_length = response_headers.get("Content-Length")
+            try:
+                declared_oversized = (
+                    content_length is not None
+                    and int(content_length) > MAX_ARCHIVE_BYTES
+                )
+            except (TypeError, ValueError) as exc:
+                raise RegistryError(
+                    "malformed-response", "crates.io returned malformed Content-Length"
+                ) from exc
+            if (
+                response_headers.get("X-Tapid-Oversized") == "1"
+                or declared_oversized
+                or len(body) > MAX_ARCHIVE_BYTES
+            ):
+                raise RegistryError(
+                    "response-too-large", "crates.io archive response is oversized"
+                )
             if status == 429:
                 last_kind = "rate-limit"
             elif status == 0 or 500 <= status <= 599:

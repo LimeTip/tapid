@@ -5,6 +5,7 @@ import copy
 import hashlib
 import itertools
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -15,6 +16,8 @@ from pathlib import Path
 
 import crates_plan
 import crates_repository
+import crates_upload
+import release_identity
 
 
 _PUBLISH_ENVIRONMENT_ALLOWLIST = {
@@ -56,35 +59,6 @@ def _matching_version(versions, name, version, checksum):
     if matches[0]["checksum"] != checksum:
         raise PublicationError(f"registry checksum drift for {name} {version}")
     return True
-
-
-def cargo_publish(name, version, workspace, token, *, run=subprocess.run):
-    """Publish one package while limiting the credential to its process environment."""
-    workspace = Path(workspace).resolve()
-    environment = {
-        key: value for key, value in os.environ.items()
-        if key in _PUBLISH_ENVIRONMENT_ALLOWLIST
-    }
-    environment["CARGO_REGISTRY_TOKEN"] = token
-    command = [
-        "cargo", "publish", "--manifest-path", str(workspace / "Cargo.toml"),
-        "-p", name, "--locked", "--no-verify",
-    ]
-    try:
-        result = run(
-            command,
-            cwd=workspace,
-            env=environment,
-            text=True,
-            capture_output=True,
-            timeout=600,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise PublicationError(f"cargo publish timed out for {name} {version}") from error
-    if result.returncode != 0:
-        raise PublicationError(
-            f"cargo publish rejected {name} {version} (exit code {result.returncode})"
-        )
 
 
 def verify_registry_package(name, version, workspace, *, run=subprocess.run):
@@ -179,6 +153,197 @@ def package_workspace_archives(workspace, output_directory, plan, *, run=subproc
                 "archive_size": len(payload),
             }
     return archives
+
+
+def resolve_bundle_archives(plan, archives, registry, output_directory):
+    """Use local exact bytes, or recover exact public bytes for a verified prefix."""
+    output_directory = Path(output_directory)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    entries = {entry["name"]: entry for entry in plan.get("packages", [])}
+    resolved = dict(archives)
+    saw_unpublished = False
+    for name in plan.get("publication_order", []):
+        entry = entries[name]
+        version = entry["version"]
+        checksum = entry["expected_registry_checksum"]
+        published = _matching_version(
+            registry.versions(name), name, version, checksum
+        )
+        if not published:
+            saw_unpublished = True
+            if not _packaged_archive_matches(
+                entry,
+                archives.get(name),
+                allow_semantic_metadata_drift=False,
+            ):
+                raise PublicationError(
+                    f"prepared archive bundle differs from reviewed plan for {name} {version}"
+                )
+            continue
+        if saw_unpublished:
+            raise PublicationError(
+                "verified prior publications must form an exact dependency-order prefix"
+            )
+        if not _packaged_archive_matches(
+            entry,
+            archives.get(name),
+            allow_semantic_metadata_drift=True,
+        ):
+            raise PublicationError(
+                f"published prefix has semantic drift for {name} {version}"
+            )
+        payload = registry.archive(name, version, checksum)
+        if (
+            not isinstance(payload, bytes)
+            or len(payload) != entry["archive_size"]
+            or hashlib.sha256(payload).hexdigest() != checksum
+        ):
+            raise PublicationError(
+                f"published archive read-back drift for {name} {version}"
+            )
+        destination = output_directory / f"{name}-{version}.crate"
+        destination.write_bytes(payload)
+        resolved[name] = {
+            "archive_path": str(destination),
+            "archive_sha256": checksum,
+            "archive_size": len(payload),
+        }
+    return resolved
+
+
+def _bundle_digest(manifest):
+    unsigned = {key: value for key, value in manifest.items() if key != "bundle_digest"}
+    return "sha256-" + hashlib.sha256(release_identity.canonical_json(unsigned)).hexdigest()
+
+
+def write_prepared_bundle(
+    plan,
+    archives,
+    bundle_directory,
+    *,
+    expected_digest,
+    expected_commit,
+):
+    """Atomically write exact reviewed archive files, then their bound manifest."""
+    if plan.get("schema") != crates_plan.SCHEMA:
+        raise PublicationError("unsupported publication plan schema")
+    if plan.get("plan_digest") != expected_digest:
+        raise PublicationError("reviewed plan digest does not match workflow input")
+    if crates_plan.digest_publication_plan(plan) != expected_digest:
+        raise PublicationError("publication plan content does not match its digest")
+    if plan.get("source_commit") != expected_commit:
+        raise PublicationError("publication source commit drift")
+    if plan.get("package_verification") != "archives-hashed-without-registry-verification":
+        raise PublicationError("plan must contain pre-mutation archive hash evidence")
+    if not plan.get("preflight", {}).get("ok"):
+        raise PublicationError("publication plan preflight did not pass")
+    _validate_reviewed_shape(plan)
+    bundle_directory = Path(bundle_directory)
+    if bundle_directory.exists() and any(bundle_directory.iterdir()):
+        raise PublicationError("prepared archive bundle directory must be empty")
+    bundle_directory.mkdir(parents=True, exist_ok=True)
+    entries = {item["name"]: item for item in plan.get("packages", [])}
+    if len(plan.get("publication_order", [])) > 64:
+        raise PublicationError("prepared archive bundle contains too many packages")
+    records = []
+    for name in plan.get("publication_order", []):
+        entry = entries[name]
+        version = entry["version"]
+        filename = "{}-{}.crate".format(name, version)
+        if Path(filename).name != filename:
+            raise PublicationError("prepared archive bundle filename is unsafe")
+        packaged = archives.get(name)
+        if not _packaged_archive_matches(
+            entry, packaged, allow_semantic_metadata_drift=False
+        ):
+            raise PublicationError("prepared archive bundle differs from reviewed plan")
+        source = Path(packaged["archive_path"])
+        destination = bundle_directory / filename
+        descriptor, temporary = tempfile.mkstemp(prefix=filename + ".", dir=bundle_directory)
+        os.close(descriptor)
+        try:
+            shutil.copyfile(source, temporary)
+            prepared = crates_upload.prepare_upload(
+                temporary,
+                expected_name=name,
+                expected_version=version,
+                expected_size=entry["archive_size"],
+                expected_sha256=entry["archive_sha256"],
+            )
+            os.replace(temporary, destination)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+        records.append({
+            "name": name,
+            "version": version,
+            "file": filename,
+            "archive_size": prepared.archive_size,
+            "archive_sha256": prepared.archive_sha256,
+            "upload_body_sha256": prepared.body_sha256,
+        })
+    manifest = {
+        "schema": "tapid-crates-upload-bundle-v1",
+        "source_commit": plan.get("source_commit"),
+        "plan_digest": plan.get("plan_digest"),
+        "packages": records,
+    }
+    manifest["bundle_digest"] = _bundle_digest(manifest)
+    _atomic_write(bundle_directory / "bundle.json", manifest)
+    return manifest
+
+
+def load_prepared_bundle(plan, bundle_directory):
+    """Validate every bundle byte against the reviewed plan before token access."""
+    bundle_directory = Path(bundle_directory)
+    try:
+        manifest = json.loads((bundle_directory / "bundle.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PublicationError("prepared archive bundle manifest is unreadable") from error
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != "tapid-crates-upload-bundle-v1"
+        or manifest.get("source_commit") != plan.get("source_commit")
+        or manifest.get("plan_digest") != plan.get("plan_digest")
+        or manifest.get("bundle_digest") != _bundle_digest(manifest)
+    ):
+        raise PublicationError("prepared archive bundle manifest drift")
+    records = manifest.get("packages")
+    if not isinstance(records, list) or len(records) != len(plan.get("publication_order", [])):
+        raise PublicationError("prepared archive bundle package set drift")
+    entries = {item["name"]: item for item in plan["packages"]}
+    prepared_uploads = {}
+    for index, name in enumerate(plan["publication_order"]):
+        entry = entries[name]
+        record = records[index]
+        filename = "{}-{}.crate".format(name, entry["version"])
+        if not isinstance(record, dict) or record.get("name") != name or record.get("file") != filename:
+            raise PublicationError("prepared archive bundle order or identity drift")
+        try:
+            prepared = crates_upload.prepare_upload(
+                bundle_directory / filename,
+                expected_name=name,
+                expected_version=entry["version"],
+                expected_size=entry["archive_size"],
+                expected_sha256=entry["archive_sha256"],
+            )
+        except crates_upload.UploadError as error:
+            raise PublicationError("prepared archive bundle byte drift") from error
+        if (
+            record.get("version") != entry["version"]
+            or record.get("archive_size") != prepared.archive_size
+            or record.get("archive_sha256") != prepared.archive_sha256
+            or record.get("upload_body_sha256") != prepared.body_sha256
+        ):
+            raise PublicationError("prepared archive bundle evidence drift")
+        prepared_uploads[name] = prepared
+    expected_files = {"bundle.json"} | {item["file"] for item in records}
+    if {item.name for item in bundle_directory.iterdir()} != expected_files:
+        raise PublicationError("prepared archive bundle contains unexpected files")
+    return prepared_uploads
 
 
 def recover_reviewed_plan(current, expected_digest):
@@ -338,6 +503,8 @@ def _validate_reviewed_shape(plan):
     names = [item.get("name") for item in packages if isinstance(item, dict)]
     if len(names) != len(packages) or len(set(names)) != len(names):
         raise PublicationError("publication plan package names must be unique")
+    if any(item.get("action") not in {"publish", "skip"} for item in packages):
+        raise PublicationError("publication plan package action is invalid")
     publish_names = {
         item["name"] for item in packages if item.get("action") == "publish"
     }
@@ -387,9 +554,16 @@ def execute_publication(
     publish_adapter,
     progress_path,
     verify_adapter=None,
+    archive_readback_adapter=None,
     sleep=time.sleep,
     max_poll_attempts=5,
     dry_run=False,
+    run_registry_verification=True,
+    max_new_publications=None,
+    credential_deadline=None,
+    clock=time.time,
+    monotonic=time.monotonic,
+    require_all_published=False,
 ):
     """Package, publish, and read back a reviewed plan in dependency order."""
     if plan.get("schema") != crates_plan.SCHEMA:
@@ -406,6 +580,19 @@ def execute_publication(
         raise PublicationError("publication plan preflight did not pass")
     if not isinstance(max_poll_attempts, int) or not 1 <= max_poll_attempts <= 10:
         raise ValueError("max_poll_attempts must be between one and ten")
+    if max_new_publications is not None and (
+        not isinstance(max_new_publications, int) or max_new_publications < 1
+    ):
+        raise ValueError("max_new_publications must be a positive integer")
+    if credential_deadline is not None and (
+        not isinstance(credential_deadline, (int, float))
+        or isinstance(credential_deadline, bool)
+        or not math.isfinite(credential_deadline)
+    ):
+        raise ValueError("credential_deadline must be a finite timestamp")
+    monotonic_deadline = None
+    if credential_deadline is not None:
+        monotonic_deadline = monotonic() + max(0.0, credential_deadline - clock())
     _validate_reviewed_shape(plan)
 
     entries = {entry["name"]: entry for entry in plan["packages"]}
@@ -446,21 +633,60 @@ def execute_publication(
                     "verified prior publications must form an exact dependency-order prefix"
                 )
 
-        verification_required = not dry_run or any(initial_registry.values())
+        if require_all_published and not all(initial_registry.values()):
+            raise PublicationError(
+                "reviewed publication is incomplete; continue with the same commit and digest"
+            )
+
+        verification_required = run_registry_verification and (
+            not dry_run or any(initial_registry.values())
+        )
         if verification_required and verify_adapter is None:
             raise PublicationError("registry-resolved package verification is required")
 
+        new_publications = 0
         for index, name in enumerate(plan["publication_order"]):
             entry = entries[name]
             version = entry["version"]
             checksum = entry["expected_registry_checksum"]
+            if not initial_registry[name] and not dry_run:
+                if (
+                    max_new_publications is not None
+                    and new_publications >= max_new_publications
+                ) or (
+                    credential_deadline is not None
+                    and min(
+                        credential_deadline - clock(),
+                        monotonic_deadline - monotonic(),
+                    ) < 210
+                ):
+                    break
             if initial_registry[name]:
-                verify_adapter(name, version)
+                if not dry_run and archive_readback_adapter is None:
+                    raise PublicationError(
+                        "exact public archive read-back is required for publication"
+                    )
+                if archive_readback_adapter is not None:
+                    published_archive = archive_readback_adapter(name, version, checksum)
+                    if (
+                        not isinstance(published_archive, bytes)
+                        or len(published_archive) != entry["archive_size"]
+                        or hashlib.sha256(published_archive).hexdigest() != checksum
+                    ):
+                        raise PublicationError(
+                            f"published archive read-back drift for {name} {version}"
+                        )
+                if run_registry_verification:
+                    verify_adapter(name, version)
                 state = "already-published"
             elif dry_run:
                 state = "would-publish"
             else:
-                publish_adapter(name, version)
+                upload_state_unknown = False
+                try:
+                    publish_adapter(name, version)
+                except crates_upload.UnknownPublicationState:
+                    upload_state_unknown = True
                 for attempt in range(max_poll_attempts):
                     if _matching_version(registry.versions(name), name, version, checksum):
                         break
@@ -470,8 +696,26 @@ def execute_publication(
                     raise PublicationError(
                         f"registry visibility timeout for {name} {version}; resume with the same commit and reviewed digest"
                     )
-                verify_adapter(name, version)
-                state = "published"
+                if archive_readback_adapter is None:
+                    raise PublicationError(
+                        "exact public archive read-back is required for publication"
+                    )
+                published_archive = archive_readback_adapter(name, version, checksum)
+                if (
+                    not isinstance(published_archive, bytes)
+                    or len(published_archive) != entry["archive_size"]
+                    or hashlib.sha256(published_archive).hexdigest() != checksum
+                ):
+                    raise PublicationError(
+                        f"published archive read-back drift for {name} {version}"
+                    )
+                if run_registry_verification:
+                    verify_adapter(name, version)
+                new_publications += 1
+                state = (
+                    "published-after-unknown-response"
+                    if upload_state_unknown else "published"
+                )
             progress["verified"].append({
                 "name": name,
                 "version": version,
@@ -492,7 +736,11 @@ def execute_publication(
         _atomic_write(progress_path, progress)
         raise
 
-    progress["status"] = "dry-run" if dry_run else "complete"
+    progress["status"] = (
+        "dry-run" if dry_run
+        else "complete" if progress["first_unverified"] is None
+        else "partial"
+    )
     _atomic_write(progress_path, progress)
     return progress
 
@@ -501,13 +749,19 @@ def _sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _validate_local_source(plan, expected_commit, workspace, run):
+def _validate_local_source(plan, expected_commit, workspace, run, environment):
     commands = (
         ["git", "rev-parse", "HEAD"],
         ["git", "status", "--porcelain", "--untracked-files=no"],
     )
     results = [
-        run(command, cwd=workspace, text=True, capture_output=True)
+        run(
+            command,
+            cwd=workspace,
+            env=environment,
+            text=True,
+            capture_output=True,
+        )
         for command in commands
     ]
     if results[0].returncode != 0 or results[0].stdout.strip() != expected_commit:
@@ -526,6 +780,13 @@ def _validate_local_source(plan, expected_commit, workspace, run):
             raise PublicationError(f"{label} drift")
 
 
+def take_registry_token(environment):
+    """Remove registry credentials from the process environment before Cargo runs."""
+    token = environment.pop("CARGO_REGISTRY_TOKEN", None)
+    environment.pop("CARGO_REGISTRIES_CRATES_IO_TOKEN", None)
+    return token
+
+
 def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
@@ -533,6 +794,11 @@ def _parser():
     parser.add_argument("--commit", required=True)
     parser.add_argument("--progress", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--prepare-bundle", type=Path)
+    parser.add_argument("--bundle", type=Path)
+    parser.add_argument("--http-only", action="store_true")
+    parser.add_argument("--credential-deadline", type=float)
+    parser.add_argument("--require-published", action="store_true")
     return parser
 
 
@@ -548,6 +814,8 @@ def main(
 ):
     """Validate exact local state and execute one reviewed publication plan."""
     arguments = _parser().parse_args(argv)
+    environment = os.environ if environ is None else environ
+    registry_token = take_registry_token(environment)
     workspace = Path(workspace or Path(__file__).resolve().parents[2]).resolve()
     try:
         plan = json.loads(arguments.plan.read_text(encoding="utf-8"))
@@ -555,24 +823,64 @@ def main(
         raise PublicationError("publication plan is unreadable or malformed") from error
     if not isinstance(plan, dict):
         raise PublicationError("publication plan must be a JSON object")
-    _validate_local_source(plan, arguments.commit, workspace, run)
+    _validate_local_source(plan, arguments.commit, workspace, run, environment)
 
-    registry = registry or crates_repository.CratesIoClient()
-    environment = os.environ if environ is None else environ
-    token = environment.get("CARGO_REGISTRY_TOKEN")
-    if not arguments.dry_run and plan.get("publication_order") and not token:
-        raise PublicationError("trusted-publishing credential is unavailable")
-
+    if registry is None:
+        registry = (
+            crates_repository.CratesIoClient(max_attempts=1, timeout=20)
+            if arguments.http_only
+            else crates_repository.CratesIoClient()
+        )
     with tempfile.TemporaryDirectory(prefix="tapid-crates-publish-") as temporary:
-        if package_adapter is None:
+        if arguments.prepare_bundle is not None:
+            if arguments.dry_run or arguments.bundle is not None:
+                raise PublicationError("bundle preparation cannot be combined with upload or dry run")
+            archives = package_workspace_archives(
+                workspace, Path(temporary) / "archives", plan, run=run
+            )
+            archives = resolve_bundle_archives(
+                plan,
+                archives,
+                registry,
+                Path(temporary) / "published-prefix",
+            )
+            write_prepared_bundle(
+                plan,
+                archives,
+                arguments.prepare_bundle,
+                expected_digest=arguments.expect_digest,
+                expected_commit=arguments.commit,
+            )
+            return 0
+
+        prepared_uploads = None
+        if not arguments.dry_run:
+            if arguments.bundle is None:
+                raise PublicationError("exact prepared archive bundle is required for publication")
+            if not arguments.http_only or arguments.credential_deadline is None:
+                raise PublicationError(
+                    "publication requires a bounded HTTP-only credential phase"
+                )
+            # Validate every local byte before upload_prepared is allowed to read the token.
+            prepared_uploads = load_prepared_bundle(plan, arguments.bundle)
+            if package_adapter is None:
+                package_adapter = lambda name, version: {
+                    "archive_path": str(arguments.bundle / "{}-{}.crate".format(name, version)),
+                    "archive_sha256": prepared_uploads[name].archive_sha256,
+                    "archive_size": prepared_uploads[name].archive_size,
+                }
+            if publish_adapter is None:
+                publish_adapter = lambda name, version: crates_upload.upload_prepared(
+                    prepared_uploads[name],
+                    token_reader=lambda: registry_token,
+                )
+        elif package_adapter is None:
+            if arguments.http_only or arguments.credential_deadline is not None:
+                raise PublicationError("dry run cannot use credential-phase options")
             archives = package_workspace_archives(
                 workspace, Path(temporary) / "archives", plan, run=run
             )
             package_adapter = lambda name, version: archives[name]
-        if publish_adapter is None:
-            publish_adapter = lambda name, version: cargo_publish(
-                name, version, workspace, token, run=run
-            )
         execute_publication(
             plan,
             expected_digest=arguments.expect_digest,
@@ -583,8 +891,19 @@ def main(
             verify_adapter=lambda name, version: verify_registry_package(
                 name, version, workspace, run=run
             ),
+            archive_readback_adapter=(
+                None if arguments.dry_run and not arguments.require_published
+                else lambda name, version, checksum: registry.archive(
+                    name, version, checksum
+                )
+            ),
             progress_path=arguments.progress,
             dry_run=arguments.dry_run,
+            run_registry_verification=not arguments.http_only,
+            max_new_publications=7 if arguments.http_only else None,
+            credential_deadline=arguments.credential_deadline,
+            require_all_published=arguments.require_published,
+            max_poll_attempts=4 if arguments.http_only else 5,
         )
     return 0
 
@@ -595,6 +914,7 @@ if __name__ == "__main__":
     except (
         OSError,
         PublicationError,
+        crates_upload.UploadError,
         crates_repository.RegistryError,
         crates_repository.RepositoryError,
     ) as error:

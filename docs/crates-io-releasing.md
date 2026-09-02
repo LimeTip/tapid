@@ -4,7 +4,7 @@ This runbook covers only crates.io packages. It does not create a Git tag, GitHu
 
 ## Authentication and approval boundary
 
-Tapid uses crates.io Trusted Publishing through the official OIDC flow. The protected GitHub environment is `crates-io-release`, separate from `stable-release`.
+Tapid uses crates.io Trusted Publishing through the official OIDC flow. The protected GitHub environment is `crates-io-release`, separate from `stable-release`. The protected publication tooling requires Python 3.11 or newer so it can parse the packaged `Cargo.toml` from the reviewed archive with the standard-library TOML parser. Hosted jobs select that runtime explicitly.
 
 For every existing crate that may be published, configure a crates.io trusted-publisher record for:
 
@@ -14,7 +14,7 @@ For every existing crate that may be published, configure a crates.io trusted-pu
 
 Trusted Publishing cannot bootstrap a new crate name that the configured crates.io owner does not already own. Before planning publication, confirm every crate in the closure exists and is owned by the expected account or the restricted LimeTip maintainer team. Bootstrap of a genuinely new crate requires a separately approved one-time process before it can use Trusted Publishing.
 
-Only the protected publish job in `.github/workflows/crates-publication.yml` may have `id-token: write`. Keep repository contents read-only and grant no other write permission. After human approval, use the official `rust-lang/crates-io-auth-action@v1` to obtain a short-lived registry credential. Expose it only to the individual `cargo publish --no-verify` process. The credentialed process must not compile package or dependency build scripts. Do not store or print the credential.
+Only the protected publish job in `.github/workflows/crates-publication.yml` may have `id-token: write`. Keep repository contents read-only and grant no other write permission. Before requesting OIDC, the job regenerates every reviewed archive, validates exact size and SHA-256, derives the crates.io request metadata from the archive itself, and writes an atomic digest-bound upload bundle. After human approval, the pinned official `rust-lang/crates-io-auth-action` provides a short-lived registry credential to the direct publication executor. The credential phase has a 20-minute hard deadline, reserves enough time for a final bounded upload and cleanup, and admits no more than seven new packages. The direct uploader is the last regular step in that job. It performs only local bundle revalidation and bounded crates.io HTTP operations, then job teardown invokes the action's revocation hook. No Cargo, build script, proc macro, artifact action, or unrelated subprocess runs while the credential is active. Do not store or print the credential.
 
 No long-lived crates.io token is used by default. A token is an emergency fallback only when the official OIDC path is unavailable for a verified reason. It requires explicit user approval, least privilege, storage as a protected `crates-io-release` environment secret, a defined expiry, and immediate revocation or rotation after use. Never paste a token into chat, a command line, shell history, source, logs, plans, or artifacts.
 
@@ -100,6 +100,7 @@ The workflow input defaults to `dry_run=true`. Omit the override for the no-op P
 4. Confirm only the publish job requests `id-token: write` and `environment: crates-io-release`.
 5. Confirm repository contents remain read-only and no long-lived token is configured.
 6. Confirm the first package is a dependency root and the whole order matches the plan.
+7. Confirm the exact archive bundle was completed before the OIDC action and the credentialed step contains no Cargo invocation.
 
 Do not approve if any precondition differs.
 
@@ -109,21 +110,23 @@ The protected workflow publishes sequentially. For each planned package it must:
 
 1. Query crates.io before mutation.
 2. If the exact version already exists, verify package identity and checksum, mark it verified, and never republish it.
-3. Publish exactly one previously planned and hashed package using `cargo publish --no-verify` and the short-lived OIDC credential. This prevents package or dependency build scripts from receiving the credential.
-4. Poll with bounded backoff until that exact version and checksum are visible from crates.io.
-5. Atomically update the local progress file. The workflow uploads the latest file as evidence when the job ends.
-6. Continue only after visibility is confirmed.
+3. Revalidate the prepared bundle before token access. The uploader opens each archive as a regular non-symlink file, verifies reviewed size and SHA-256, parses the in-memory gzip/tar and packaged `Cargo.toml`, and derives Cargo-compatible package, dependency, feature, badge, README, license, repository, links, and Rust-version metadata from those reviewed bytes.
+4. Frame Cargo's documented request as little-endian metadata length, compact JSON, little-endian archive length, and the exact reviewed archive bytes. Strictly reparse the complete body locally before reading the short-lived OIDC token.
+5. Send one bounded, non-redirecting HTTPS `PUT` to the exact crates.io upload endpoint. The uploader does not use `cargo publish`, an alternate registry, a relay, or automatic retries after possible transmission.
+6. Poll with bounded backoff until that exact version and checksum are visible, then download the public archive and require exact size and SHA-256 equality. A lost connection after transmission is an unknown state resolved only by this public read-back.
+7. Atomically update the local progress file and continue to a dependent only after exact checksum and archive read-back succeed.
+8. Stop cleanly at the exact verified dependency-order prefix when seven new packages have been published or the remaining credential budget is insufficient for another bounded upload and read-back.
 
-After each package becomes registry-visible, run the existing credential-free clean Cargo-home package verification before advancing to its dependents. After all packages are visible, require clean Cargo-home package or install verification for `tapid` against registry dependencies. Record exact package names, versions, checksums, workflow run, plan digest, and final verification outcome.
+After the credentialed job ends and token revocation runs, a separate job with no `id-token: write` or registry-token input reconstructs state from the reviewed plan and public crates.io. It requires the complete exact prefix, downloads and hashes every public archive, performs clean Cargo-home package verification for every package, and then packages and installs `tapid` against registry dependencies. If the bounded credential phase ended with a partial prefix, this job fails closed and the operator reruns the protected workflow with the same commit and reviewed digest. Record exact package names, versions, checksums, workflow run, upload-bundle digest, and final verification outcome.
 
-A successful `cargo publish` process alone is not completion. Registry read-back and checksum equality are required.
+An HTTP success alone is not completion. Public checksum and downloaded archive equality are required.
 
 ## Partial failure and safe rerun
 
 Crates.io publication is not transactional. On any timeout, HTTP 429, rejection, indexing delay, or workflow interruption:
 
 1. Stop at the first unverified package. Do not start a dependent.
-2. Preserve the uploaded progress report and workflow logs as evidence. A later run does not restore or trust that artifact as execution state.
+2. Preserve the workflow logs and any credential-free verification evidence. The credentialed job deliberately does not upload a progress artifact after authentication, and a later run does not restore or trust prior artifacts as execution state.
 3. Query crates.io read-only for every package reported as published or in flight.
 4. Mark a version complete only when the exact package identity and checksum match the reviewed plan.
 5. Treat HTTP 429 as not published unless read-back proves otherwise. Respect the server-provided retry time.
