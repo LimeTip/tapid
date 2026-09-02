@@ -447,6 +447,30 @@ class CratesPublishTests(unittest.TestCase):
                             require_all_published=True,
                         )
 
+    def test_recovery_rejects_malformed_internal_dependencies_structurally(self):
+        malformed_values = (None, [None])
+        for value in malformed_values:
+            with self.subTest(value=value):
+                plan = publication_plan((("core", "0.0.2", b"core"),))
+                plan["packages"][0]["internal_dependencies"] = value
+                plan["plan_digest"] = crates_plan.digest_publication_plan(plan)
+                with self.assertRaisesRegex(
+                    crates_publish.PublicationError,
+                    "internal dependencies",
+                ):
+                    crates_publish.recover_reviewed_plan(plan, "f" * 64)
+
+    def test_validator_accepts_repeated_target_specific_dependency_records(self):
+        plan = publication_plan((
+            ("core", "0.0.2", b"core"),
+            ("app", "0.0.2", b"app"),
+        ))
+        plan["packages"][1]["internal_dependencies"] = [
+            {"name": "core", "requirement": "^0.0.2"},
+            {"name": "core", "requirement": "=0.0.2"},
+        ]
+        crates_publish._validate_reviewed_shape(plan)
+
     def test_rejects_digest_source_and_registry_drift_before_mutation(self):
         archive = b"reviewed archive"
         plan = publication_plan((("tapid-core", "0.0.2", archive),))

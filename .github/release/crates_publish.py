@@ -350,6 +350,7 @@ def recover_reviewed_plan(current, expected_digest):
     """Recover digest-bound intent after an exact publication-order prefix landed."""
     if current.get("plan_digest") != crates_plan.digest_publication_plan(current):
         raise PublicationError("recomputed plan content does not match its digest")
+    _validate_reviewed_shape(current)
     if current.get("plan_digest") == expected_digest:
         return copy.deepcopy(current)
 
@@ -530,8 +531,6 @@ def _validate_reviewed_shape(plan):
             ):
                 raise PublicationError("publication plan internal dependencies are malformed")
             dependency_names.append(dependency["name"])
-        if len(set(dependency_names)) != len(dependency_names):
-            raise PublicationError("publication plan internal dependencies are malformed")
         if item["name"] not in positions:
             continue
         for dependency_name in dependency_names:
