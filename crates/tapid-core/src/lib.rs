@@ -160,7 +160,7 @@ impl FromStr for RegistryOrigin {
             || parsed.query().is_some()
             || parsed.fragment().is_some()
             || parsed.host_str().is_none()
-            || (parsed.path() != "" && parsed.path() != "/")
+            || !parsed.path().chars().all(|character| character == '/')
         {
             return Err(DomainError::InvalidRegistryOrigin(value.to_owned()));
         }
@@ -404,6 +404,13 @@ mod tests {
             .parse::<RegistryOrigin>()
             .unwrap();
         assert_eq!(origin.as_str(), "https://registry.example.test");
+        assert_eq!(
+            "https://registry.example.test///"
+                .parse::<RegistryOrigin>()
+                .unwrap()
+                .as_str(),
+            "https://registry.example.test"
+        );
         assert_eq!(
             "https://REGISTRY.example.test"
                 .parse::<RegistryOrigin>()
