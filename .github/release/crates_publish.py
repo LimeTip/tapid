@@ -511,11 +511,30 @@ def _validate_reviewed_shape(plan):
     if len(set(order)) != len(order) or set(order) != publish_names:
         raise PublicationError("publication order must contain every publish action exactly once")
     positions = {name: index for index, name in enumerate(order)}
+    package_names = set(names)
     for item in packages:
+        dependencies = item.get("internal_dependencies")
+        if not isinstance(dependencies, list):
+            raise PublicationError("publication plan internal dependencies are malformed")
+        dependency_names = []
+        for dependency in dependencies:
+            if (
+                not isinstance(dependency, dict)
+                or set(dependency) != {"name", "requirement"}
+                or not isinstance(dependency.get("name"), str)
+                or not dependency["name"]
+                or dependency["name"] not in package_names
+                or dependency["name"] == item["name"]
+                or not isinstance(dependency.get("requirement"), str)
+                or not dependency["requirement"]
+            ):
+                raise PublicationError("publication plan internal dependencies are malformed")
+            dependency_names.append(dependency["name"])
+        if len(set(dependency_names)) != len(dependency_names):
+            raise PublicationError("publication plan internal dependencies are malformed")
         if item["name"] not in positions:
             continue
-        for dependency in item.get("internal_dependencies", []):
-            dependency_name = dependency.get("name")
+        for dependency_name in dependency_names:
             if dependency_name in positions and positions[dependency_name] >= positions[item["name"]]:
                 raise PublicationError("publication dependency order is invalid")
 

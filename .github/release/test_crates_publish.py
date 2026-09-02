@@ -423,6 +423,30 @@ class CratesPublishTests(unittest.TestCase):
                     require_all_published=True,
                 )
 
+    def test_rejects_malformed_internal_dependencies_before_adapters(self):
+        malformed_values = (None, {}, [None], [{}], [{"name": None}])
+        for value in malformed_values:
+            with self.subTest(value=value):
+                plan = publication_plan((("core", "0.0.2", b"core"),))
+                plan["packages"][0]["internal_dependencies"] = value
+                plan["plan_digest"] = crates_plan.digest_publication_plan(plan)
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaisesRegex(
+                        crates_publish.PublicationError,
+                        "internal dependencies",
+                    ):
+                        crates_publish.execute_publication(
+                            plan,
+                            expected_digest=plan["plan_digest"],
+                            expected_commit=COMMIT,
+                            registry=FakeRegistry({}),
+                            package_adapter=self.fail,
+                            publish_adapter=self.fail,
+                            progress_path=Path(directory) / "progress.json",
+                            dry_run=True,
+                            require_all_published=True,
+                        )
+
     def test_rejects_digest_source_and_registry_drift_before_mutation(self):
         archive = b"reviewed archive"
         plan = publication_plan((("tapid-core", "0.0.2", archive),))
