@@ -442,6 +442,21 @@ mod tests {
                 .is_err()
         );
         assert!(
+            "https://@registry.example.test"
+                .parse::<RegistryOrigin>()
+                .is_err()
+        );
+        assert!(
+            "https://registry.example.test?query"
+                .parse::<RegistryOrigin>()
+                .is_err()
+        );
+        assert!(
+            "https://registry.example.test#fragment"
+                .parse::<RegistryOrigin>()
+                .is_err()
+        );
+        assert!(
             "https://registry.example.test/path|ambiguous"
                 .parse::<RegistryOrigin>()
                 .is_err()
