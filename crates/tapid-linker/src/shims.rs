@@ -126,10 +126,15 @@ fn shim_target_key(path: &std::path::Path, strategy: ShimStrategy) -> String {
         ShimStrategy::WindowsCmdAndPowerShell => value
             .chars()
             .flat_map(|character| {
+                // Windows ordinal filename matching is defined over UTF-16
+                // code units. Keep supplementary-plane letters as written.
+                if character as u32 > 0xffff {
+                    return vec![character];
+                }
                 let mut uppercase = character.to_uppercase();
                 match (uppercase.next(), uppercase.next()) {
-                    (Some(mapped), None) => std::iter::once(mapped).collect::<Vec<_>>(),
-                    _ => std::iter::once(character).collect::<Vec<_>>(),
+                    (Some(mapped), None) => vec![mapped],
+                    _ => vec![character],
                 }
             })
             .collect(),
@@ -260,6 +265,10 @@ mod tests {
         assert_eq!(
             shim_target_key(Path::new("ς"), ShimStrategy::WindowsCmdAndPowerShell),
             shim_target_key(Path::new("σ"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        assert_ne!(
+            shim_target_key(Path::new("𐐀"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("𐐨"), ShimStrategy::WindowsCmdAndPowerShell)
         );
         assert_ne!(
             shim_target_key(Path::new("ß"), ShimStrategy::WindowsCmdAndPowerShell),
