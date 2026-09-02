@@ -232,7 +232,8 @@ jobs:
 
   verify:
     name: Verify registry publication without credentials
-    needs: publish
+    needs: [preflight, publish]
+    if: ${{ always() && inputs.dry_run == false && needs.preflight.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:

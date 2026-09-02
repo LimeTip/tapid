@@ -78,7 +78,10 @@ def _revalidate(plan, now, runner):
         raise ValueError("release commit is no longer on origin/main")
     if repository["workspace_versions"].get("tapid") != plan["version"]:
         raise ValueError("tapid Cargo version changed after planning")
-    if not repository["release_note_present"] or "Cargo.lock" not in repository["lockfiles_present"]:
+    if (
+        not repository["release_note_present"]
+        or not release_plan.REQUIRED_LOCKFILES.issubset(repository["lockfiles_present"])
+    ):
         raise ValueError("release source checks changed after planning")
     if github["release"]["state"] == "public":
         raise ValueError("public releases are immutable")
@@ -188,4 +191,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except (OSError, ValueError) as error:
         print("release: {}".format(error), file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from error

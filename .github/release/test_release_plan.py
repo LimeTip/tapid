@@ -149,6 +149,24 @@ class ReleaseRepositoryTests(unittest.TestCase):
                         "LimeTip/tapid", "0.12.3", COMMIT, NOW, FakeRunner(responses)
                     )
 
+    def test_revalidation_requires_the_nested_integration_lockfile(self):
+        repository, github = valid_snapshots()
+        plan = release_plan.build_release_plan(
+            {"repository": "LimeTip/tapid", "version": "0.12.3", "commit": COMMIT},
+            repository,
+            github,
+            NOW,
+        )
+        responses = adapter_responses()
+        responses[("git", "show", COMMIT + ":tests/integration/Cargo.lock")] = (
+            128,
+            "",
+            "path does not exist",
+        )
+
+        with self.assertRaisesRegex(ValueError, "source checks changed"):
+            release_cli._revalidate(plan, NOW, FakeRunner(responses))
+
 
     def _write_plan_file(self, directory, tag=None, release=None):
         repository, github = valid_snapshots(tag=tag, release=release)
@@ -331,6 +349,20 @@ class ReleasePlanTests(unittest.TestCase):
         )
         self.assertTrue(plan["plan_digest"].startswith("sha256-"))
         self.assertEqual(release_plan.validate_plan(plan), plan)
+
+    def test_missing_nested_integration_lockfile_is_not_release_eligible(self):
+        repository, github = valid_snapshots()
+        repository["lockfiles_present"] = ["Cargo.lock"]
+
+        plan = release_plan.build_release_plan(
+            {"repository": "LimeTip/tapid", "version": "0.12.3", "commit": COMMIT},
+            repository,
+            github,
+            NOW,
+        )
+
+        self.assertFalse(plan["checks"]["locked_source"])
+        self.assertFalse(plan["eligible"])
 
     def test_reuses_only_an_exact_annotated_tag_for_a_draft_rerun(self):
         repository, github = valid_snapshots(

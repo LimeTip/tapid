@@ -661,6 +661,10 @@ def execute_publication(
         )
         if verification_required and verify_adapter is None:
             raise PublicationError("registry-resolved package verification is required")
+        if not dry_run and archive_readback_adapter is None:
+            raise PublicationError(
+                "exact public archive read-back is required for publication"
+            )
 
         new_publications = 0
         for index, name in enumerate(plan["publication_order"]):
@@ -882,23 +886,40 @@ def main(
             # Validate every local byte before upload_prepared is allowed to read the token.
             prepared_uploads = load_prepared_bundle(plan, arguments.bundle)
             if package_adapter is None:
-                package_adapter = lambda name, version: {
-                    "archive_path": str(arguments.bundle / "{}-{}.crate".format(name, version)),
-                    "archive_sha256": prepared_uploads[name].archive_sha256,
-                    "archive_size": prepared_uploads[name].archive_size,
-                }
+                def package_adapter(name, version):
+                    return {
+                        "archive_path": str(
+                            arguments.bundle / "{}-{}.crate".format(name, version)
+                        ),
+                        "archive_sha256": prepared_uploads[name].archive_sha256,
+                        "archive_size": prepared_uploads[name].archive_size,
+                    }
             if publish_adapter is None:
-                publish_adapter = lambda name, version: crates_upload.upload_prepared(
-                    prepared_uploads[name],
-                    token_reader=lambda: registry_token,
-                )
+                def read_registry_token():
+                    return registry_token
+
+                def publish_adapter(name, version):
+                    return crates_upload.upload_prepared(
+                        prepared_uploads[name],
+                        token_reader=read_registry_token,
+                    )
         elif package_adapter is None:
             if arguments.http_only or arguments.credential_deadline is not None:
                 raise PublicationError("dry run cannot use credential-phase options")
             archives = package_workspace_archives(
                 workspace, Path(temporary) / "archives", plan, run=run
             )
-            package_adapter = lambda name, version: archives[name]
+            def package_adapter(name, version):
+                return archives[name]
+
+        def verify_adapter(name, version):
+            return verify_registry_package(name, version, workspace, run=run)
+
+        archive_readback_adapter = None
+        if not arguments.dry_run or arguments.require_published:
+            def archive_readback_adapter(name, version, checksum):
+                return registry.archive(name, version, checksum)
+
         execute_publication(
             plan,
             expected_digest=arguments.expect_digest,
@@ -906,15 +927,8 @@ def main(
             registry=registry,
             package_adapter=package_adapter,
             publish_adapter=publish_adapter,
-            verify_adapter=lambda name, version: verify_registry_package(
-                name, version, workspace, run=run
-            ),
-            archive_readback_adapter=(
-                None if arguments.dry_run and not arguments.require_published
-                else lambda name, version, checksum: registry.archive(
-                    name, version, checksum
-                )
-            ),
+            verify_adapter=verify_adapter,
+            archive_readback_adapter=archive_readback_adapter,
             progress_path=arguments.progress,
             dry_run=arguments.dry_run,
             run_registry_verification=not arguments.http_only,
@@ -937,4 +951,4 @@ if __name__ == "__main__":
         crates_repository.RepositoryError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from error

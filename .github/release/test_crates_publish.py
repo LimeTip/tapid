@@ -295,6 +295,7 @@ class CratesPublishTests(unittest.TestCase):
                 },
                 publish_adapter=self.fail,
                 verify_adapter=self.fail,
+                archive_readback_adapter=self.fail,
                 progress_path=Path(directory) / "progress.json",
                 run_registry_verification=False,
                 credential_deadline=1200.0,
@@ -339,6 +340,7 @@ class CratesPublishTests(unittest.TestCase):
                 },
                 publish_adapter=self.fail,
                 verify_adapter=self.fail,
+                archive_readback_adapter=self.fail,
                 progress_path=Path(directory) / "progress.json",
                 run_registry_verification=False,
                 credential_deadline=1300.0,
@@ -371,6 +373,33 @@ class CratesPublishTests(unittest.TestCase):
                     verify_adapter=lambda name, version: None,
                     progress_path=Path(directory) / "progress.json",
                 )
+
+    def test_missing_archive_readback_fails_before_first_publication(self):
+        archive = b"reviewed archive"
+        plan = publication_plan((("core", "0.0.2", archive),))
+        checksum = hashlib.sha256(archive).hexdigest()
+        published = []
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                crates_publish.PublicationError,
+                "archive read-back",
+            ):
+                crates_publish.execute_publication(
+                    plan,
+                    expected_digest=plan["plan_digest"],
+                    expected_commit=COMMIT,
+                    registry=FakeRegistry({"core": [[]]}),
+                    package_adapter=lambda name, version: {
+                        "archive_path": str(Path(directory) / "core.crate"),
+                        "archive_sha256": checksum,
+                        "archive_size": len(archive),
+                    },
+                    publish_adapter=lambda name, version: published.append(name),
+                    verify_adapter=lambda name, version: None,
+                    progress_path=Path(directory) / "progress.json",
+                )
+
+        self.assertEqual(published, [])
 
     def test_publishes_one_reviewed_archive_then_verifies_registry_checksum(self):
         archive = b"reviewed archive"
@@ -819,6 +848,7 @@ class CratesPublishTests(unittest.TestCase):
                     package_adapter=package_adapter,
                     publish_adapter=lambda name, version: published.append(name),
                     verify_adapter=lambda name, version: None,
+                    archive_readback_adapter=self.fail,
                     progress_path=progress,
                     sleep=lambda _: None,
                     max_poll_attempts=2,
@@ -841,6 +871,7 @@ class CratesPublishTests(unittest.TestCase):
                     package_adapter=package_adapter,
                     publish_adapter=reject,
                     verify_adapter=lambda name, version: None,
+                    archive_readback_adapter=self.fail,
                     progress_path=progress,
                 )
             self.assertEqual(json.loads(progress.read_text())["status"], "failed")

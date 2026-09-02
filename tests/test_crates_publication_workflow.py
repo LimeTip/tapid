@@ -104,7 +104,11 @@ class CratesPublicationWorkflowTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         verification = workflow[workflow.index("  verify:"):]
 
-        self.assertIn("needs: publish", verification)
+        self.assertIn("needs: [preflight, publish]", verification)
+        self.assertIn(
+            "if: ${{ always() && inputs.dry_run == false && needs.preflight.result == 'success' }}",
+            verification,
+        )
         self.assertIn("--require-published", verification)
         self.assertIn("cargo install tapid", verification)
         self.assertNotIn("id-token: write", verification)

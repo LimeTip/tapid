@@ -6,6 +6,7 @@ import release_identity
 
 
 SCHEMA = "tapid-release-plan-v1"
+REQUIRED_LOCKFILES = frozenset(("Cargo.lock", "tests/integration/Cargo.lock"))
 MAX_SNAPSHOT_AGE_SECONDS = 300
 
 
@@ -77,7 +78,7 @@ def build_release_plan(inputs, repository_snapshot, github_snapshot, now):
             repository_snapshot.get("release_note_path") == expected_note
             and repository_snapshot.get("release_note_present") is True
         ),
-        "locked_source": "Cargo.lock" in lockfiles,
+        "locked_source": REQUIRED_LOCKFILES.issubset(lockfiles),
     }
 
     tag_state = _classify_tag(repository_snapshot.get("tag", {}), commit)

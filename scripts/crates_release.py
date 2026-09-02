@@ -116,4 +116,4 @@ if __name__ == "__main__":
     except (OSError, ValueError, crates_repository.RepositoryError,
             crates_repository.RegistryError) as error:
         print("error: {}".format(error), file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from error
