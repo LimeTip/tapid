@@ -123,16 +123,26 @@ impl PackedArtifact {
 }
 
 pub fn pack(source: &PackageSource) -> Result<PackedArtifact, PublishError> {
-    let snapshot = snapshot_source(source)?;
-    let manifest = snapshot.manifest.clone();
+    let paths = normalized_source_paths(source)?;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"TAPID-PACK-1\n");
-    append_field(&mut bytes, manifest.version.as_bytes());
-    for file in &snapshot.files {
-        append_field(&mut bytes, file.path.as_bytes());
-        bytes.extend_from_slice(&(file.bytes.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&file.bytes);
+    append_field(&mut bytes, source.version.as_bytes());
+    let mut manifest_files = Vec::with_capacity(paths.len());
+    for (path, full) in paths {
+        let file_bytes = read_source_file(&full)?;
+        append_field(&mut bytes, path.as_bytes());
+        bytes.extend_from_slice(&(file_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&file_bytes);
+        manifest_files.push(ManifestFile {
+            path,
+            size: file_bytes.len() as u64,
+            digest: digest_bytes(&file_bytes),
+        });
     }
+    let manifest = NormalizedFileManifest {
+        version: source.version.clone(),
+        files: manifest_files,
+    };
     let digest = digest_bytes(&bytes);
     Ok(PackedArtifact {
         version: manifest.version.clone(),
@@ -153,13 +163,8 @@ fn digest_bytes(bytes: &[u8]) -> ArtifactDigest {
 }
 struct SourceSnapshot {
     manifest: NormalizedFileManifest,
-    files: Vec<SnapshotFile>,
 }
-struct SnapshotFile {
-    path: String,
-    bytes: Vec<u8>,
-}
-fn snapshot_source(source: &PackageSource) -> Result<SourceSnapshot, PublishError> {
+fn normalized_source_paths(source: &PackageSource) -> Result<Vec<(String, PathBuf)>, PublishError> {
     if !source.root.is_dir() {
         return Err(PublishError::InvalidSource(
             "package root must be a directory".into(),
@@ -168,27 +173,30 @@ fn snapshot_source(source: &PackageSource) -> Result<SourceSnapshot, PublishErro
     let mut paths = Vec::new();
     collect_files(&source.root, &source.root, &source.exclusions, &mut paths)?;
     paths.sort();
-    let mut files = Vec::with_capacity(paths.len());
-    let mut manifest_files = Vec::with_capacity(paths.len());
     let mut seen = BTreeSet::new();
-    for (path, full) in paths {
+    for (path, _) in &paths {
         if !seen.insert(path.clone()) {
-            return Err(PublishError::UnsafePath(path));
+            return Err(PublishError::UnsafePath(path.clone()));
         }
+    }
+    Ok(paths)
+}
+fn snapshot_source(source: &PackageSource) -> Result<SourceSnapshot, PublishError> {
+    let paths = normalized_source_paths(source)?;
+    let mut manifest_files = Vec::with_capacity(paths.len());
+    for (path, full) in paths {
         let bytes = read_source_file(&full)?;
         manifest_files.push(ManifestFile {
-            path: path.clone(),
+            path,
             size: bytes.len() as u64,
             digest: digest_bytes(&bytes),
         });
-        files.push(SnapshotFile { path, bytes });
     }
     Ok(SourceSnapshot {
         manifest: NormalizedFileManifest {
             version: source.version.clone(),
             files: manifest_files,
         },
-        files,
     })
 }
 
