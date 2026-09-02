@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -25,6 +26,33 @@ COMMIT = "a" * 40
 API = "https://api.github.com/repos/LimeTip/tapid"
 BASE = "https://github.com/LimeTip/tapid/releases/download/v0.0.8"
 NOW = datetime(2026, 9, 1, 18, 0, tzinfo=timezone.utc)
+
+
+class PublicReleaseHelperTests(unittest.TestCase):
+    def test_default_verifier_reports_a_bounded_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "release-manifest.json"
+            manifest.write_bytes(b"{}")
+            with mock.patch.object(
+                public_release.subprocess,
+                "run",
+                side_effect=public_release.subprocess.TimeoutExpired(
+                    "cargo",
+                    public_release.VERIFIER_TIMEOUT,
+                ),
+            ) as run:
+                with self.assertRaisesRegex(
+                    public_release.VerificationError,
+                    "verifier timed out",
+                ):
+                    public_release._default_verifier(manifest, VERSION, TAG, COMMIT)
+            self.assertEqual(
+                run.call_args.kwargs["timeout"],
+                public_release.VERIFIER_TIMEOUT,
+            )
+
+    def test_rendered_text_flushes_trailing_parser_data(self):
+        self.assertEqual(public_release._rendered_text(b"Tapid<"), "Tapid<")
 
 
 def archive_bytes(member):

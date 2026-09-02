@@ -105,8 +105,8 @@ class ReleaseRepositoryTests(unittest.TestCase):
         self.assertEqual(github["release"], {"state": "absent"})
         self.assertEqual(repository["workspace_versions"], {"tapid": "0.12.3"})
         self.assertEqual(repository["head"], COMMIT)
-        self.assertTrue(all(call[0:2] not in (("git", "tag"), ("git", "push")) for call in runner.calls))
-        self.assertTrue(all(call[0:3] != ("gh", "workflow", "run") for call in runner.calls))
+        self.assertTrue(all(tuple(call[0:2]) not in (("git", "tag"), ("git", "push")) for call in runner.calls))
+        self.assertTrue(all(tuple(call[0:3]) != ("gh", "workflow", "run") for call in runner.calls))
 
     def test_plan_command_writes_reviewable_plan_and_never_mutates(self):
         runner = FakeRunner(adapter_responses())
@@ -121,8 +121,8 @@ class ReleaseRepositoryTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(written["schema"], "tapid-release-plan-v1")
-        self.assertTrue(all(call[0:2] not in (("git", "tag"), ("git", "push")) for call in runner.calls))
-        self.assertTrue(all(call[0:3] != ("gh", "workflow", "run") for call in runner.calls))
+        self.assertTrue(all(tuple(call[0:2]) not in (("git", "tag"), ("git", "push")) for call in runner.calls))
+        self.assertTrue(all(tuple(call[0:3]) != ("gh", "workflow", "run") for call in runner.calls))
 
     def test_adapters_fail_closed_on_malformed_or_unauthorized_output(self):
         cases = []
@@ -203,7 +203,7 @@ class ReleaseRepositoryTests(unittest.TestCase):
                 clock=lambda: NOW,
             )
         self.assertEqual(result, 0)
-        self.assertTrue(all(call[0:2] not in (("git", "tag"), ("git", "push")) for call in runner.calls))
+        self.assertTrue(all(tuple(call[0:2]) not in (("git", "tag"), ("git", "push")) for call in runner.calls))
 
     def test_tag_command_resumes_an_exact_local_tag_after_push_interruption(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -261,7 +261,7 @@ class ReleaseRepositoryTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(runner.calls[-1], command)
         self.assertEqual(sum(1 for value in command if value == "-f"), 7)
-        self.assertTrue(all(call[0:2] not in (("git", "tag"), ("git", "push")) for call in runner.calls))
+        self.assertTrue(all(tuple(call[0:2]) not in (("git", "tag"), ("git", "push")) for call in runner.calls))
 
     def test_mutations_reject_digest_mismatch_public_release_and_lightweight_tag(self):
         with tempfile.TemporaryDirectory() as directory:

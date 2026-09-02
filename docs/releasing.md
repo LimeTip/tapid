@@ -206,7 +206,7 @@ Treat the tag, six archives, and signed manifest as immutable. Do not move the t
 
 ### After partial crates.io publication
 
-Stop at the first unverified crate. Follow the crates.io runbook. Never assume an HTTP success or failure proves registry visibility. A rerun uses the same commit and original reviewed digest, recomputes registry state, revalidates and skips only an exact-checksum dependency prefix, and then publishes the first unverified package. The prior progress artifact is evidence, not restored execution state. Any other drift requires the run to stop and may require a new reviewed plan.
+Stop at the first unverified crate. Follow the crates.io runbook. Never assume an HTTP success or failure proves registry visibility. A rerun uses the same commit and original reviewed digest, recomputes registry state, revalidates and skips only an exact-checksum dependency prefix, and then publishes the first unverified package. Prior workflow logs and credential-free verification evidence are evidence only, not restored execution state; the credentialed job does not upload a post-authentication progress artifact. Any other drift requires the run to stop and may require a new reviewed plan.
 
 ## Credential exposure and rotation
 

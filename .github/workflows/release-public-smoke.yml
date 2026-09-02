@@ -239,6 +239,7 @@ jobs:
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid-public-bin'
           Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 'https://tapid.dev/install.ps1' -OutFile $installer
 
+          $LASTEXITCODE = 0
           if ($env:MODE -eq 'stable') {
             & $installer -InstallDir $installDir
           } else {

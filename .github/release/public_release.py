@@ -28,6 +28,7 @@ METADATA_LIMIT = 1024 * 1024
 ARCHIVE_LIMIT = 100 * 1024 * 1024
 ARCHIVE_UNPACKED_LIMIT = 256 * 1024 * 1024
 HTTP_TIMEOUT = 30
+VERIFIER_TIMEOUT = 600
 GITHUB_DOWNLOAD_ORIGINS = {
     "https://github.com",
     "https://release-assets.githubusercontent.com",
@@ -207,7 +208,16 @@ def _default_verifier(manifest_path: Path, version: str, tag: str, commit: str):
         str(manifest_path), str(root / "crates/tapid-signatures/data/release-keyring.json"),
         version, tag, commit,
     ]
-    result = subprocess.run(command, cwd=root, text=True, capture_output=True)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            timeout=VERIFIER_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise VerificationError("production Rust verifier timed out") from error
     if result.returncode:
         detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "unknown error"
         raise VerificationError("production Rust verifier rejected manifest: " + detail)
@@ -576,6 +586,7 @@ def _rendered_text(body: bytes) -> str:
         raise WebsiteVerificationError("website page is not UTF-8") from error
     parser = TextParser()
     parser.feed(source)
+    parser.close()
     return " ".join("".join(parser.parts).split())
 
 

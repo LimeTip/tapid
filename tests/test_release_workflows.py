@@ -177,6 +177,23 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('"https://tapid.dev/docs/getting-started/"', verifier)
         self.assertIn('"https://tapid.dev/docs/releases/" + version + "/"', verifier)
 
+    def test_windows_public_smoke_initializes_installer_exit_status(self):
+        smoke = (
+            ROOT / ".github" / "workflows" / "release-public-smoke.yml"
+        ).read_text()
+        windows_install = smoke.split(
+            "      - name: Install and verify the public binary", 1
+        )[1]
+        before_exit_check = windows_install.split(
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", 1
+        )[0]
+
+        self.assertIn("$LASTEXITCODE = 0", before_exit_check)
+        self.assertLess(
+            before_exit_check.index("$LASTEXITCODE = 0"),
+            before_exit_check.index("& $installer"),
+        )
+
     def test_crates_publication_is_digest_bound_protected_and_resumable(self):
         workflow = CRATES_WORKFLOW.read_text()
         required_contracts = (
