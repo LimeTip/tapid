@@ -453,6 +453,16 @@ mod tests {
         );
     }
 
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn case_insensitive_path_collisions_are_rejected_by_pack() {
+        let p = tree(&[("A/config.json", b"upper"), ("a/CONFIG.JSON", b"lower")]);
+        assert!(matches!(
+            pack(&PackageSource::new(&p, "1.0.0")),
+            Err(PublishError::UnsafePath(_))
+        ));
+    }
+
     #[test]
     fn packing_uses_the_snapshot_when_source_changes_after_a_read() {
         let p = tree(&[("x", b"before")]);
