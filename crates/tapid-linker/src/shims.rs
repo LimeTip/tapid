@@ -126,7 +126,18 @@ fn shim_target_key(path: &std::path::Path, strategy: ShimStrategy) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    fn test_root(label: &str) -> PathBuf {
+        let sequence = NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "tapid-shims-{label}-{}-{sequence}",
+            std::process::id()
+        ))
+    }
 
     fn shim_package(root: &Path, name: &str, bin: &str, dir: &str) -> ShimPackage {
         let tree = root.join(dir);
@@ -141,7 +152,7 @@ mod tests {
 
     #[test]
     fn shims_are_deterministic_and_platform_strategy_is_intent_only() {
-        let root = std::env::temp_dir().join(format!("tapid-shims-{}", std::process::id()));
+        let root = test_root("basic");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let a = shim_package(
@@ -173,7 +184,7 @@ mod tests {
 
     #[test]
     fn nested_package_bin_directories_are_distinct_and_collisions_rejected() {
-        let root = std::env::temp_dir().join(format!("tapid-shims-nested-{}", std::process::id()));
+        let root = test_root("nested");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let mut a = shim_package(&root, "a", r#"{"cli":"cli.js"}"#, "a");
@@ -200,7 +211,7 @@ mod tests {
 
     #[test]
     fn windows_shims_reject_command_names_that_differ_only_by_case() {
-        let root = std::env::temp_dir().join(format!("tapid-shims-case-{}", std::process::id()));
+        let root = test_root("case");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let upper = shim_package(&root, "upper", r#"{"Tool":"cli.js"}"#, "upper");
@@ -245,8 +256,7 @@ mod tests {
 
     #[test]
     fn windows_shims_reject_names_that_replace_the_output_extension() {
-        let root =
-            std::env::temp_dir().join(format!("tapid-shims-extension-{}", std::process::id()));
+        let root = test_root("extension");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let plain = shim_package(&root, "plain", r#"{"tool":"cli.js"}"#, "plain");
@@ -272,7 +282,7 @@ mod tests {
 
     #[test]
     fn missing_bin_targets_are_skipped_and_non_regular_targets_are_rejected() {
-        let root = std::env::temp_dir().join(format!("tapid-shims-files-{}", std::process::id()));
+        let root = test_root("files");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let missing = shim_package(&root, "missing", r#""missing.js""#, "missing");
@@ -302,7 +312,7 @@ mod tests {
     #[test]
     fn symlink_bin_targets_are_rejected_without_following_them() {
         use std::os::unix::fs::symlink;
-        let root = std::env::temp_dir().join(format!("tapid-shims-link-{}", std::process::id()));
+        let root = test_root("link");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let package = shim_package(&root, "linked", r#""cli.js""#, "linked");
