@@ -111,6 +111,13 @@ class CratesPublicationWorkflowTests(unittest.TestCase):
         )
         self.assertIn("--require-published", verification)
         self.assertIn("cargo install tapid", verification)
+        self.assertIn('runner_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"', verification)
+        self.assertIn('mkdir -p "$verification_root/home"', verification)
+        self.assertIn('export RUSTUP_HOME="$runner_rustup_home"', verification)
+        self.assertLess(
+            verification.index('runner_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"'),
+            verification.index('export HOME="$verification_root/home"'),
+        )
         self.assertNotIn("id-token: write", verification)
         self.assertNotIn("CARGO_REGISTRY_TOKEN:", verification)
         self.assertNotIn("CARGO_REGISTRIES_CRATES_IO_TOKEN:", verification)

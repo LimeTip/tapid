@@ -29,6 +29,28 @@ NOW = datetime(2026, 9, 1, 18, 0, tzinfo=timezone.utc)
 
 
 class PublicReleaseHelperTests(unittest.TestCase):
+    def test_production_verifier_uses_an_explicit_keyring(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "release-manifest.json"
+            keyring = root / "tagged-release-keyring.json"
+            manifest.write_bytes(b"{}")
+            keyring.write_bytes(b"{}")
+            verifier = public_release.production_rust_verifier(keyring)
+
+            with mock.patch.object(
+                public_release.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=0, stderr=""),
+            ) as run:
+                verifier(manifest, VERSION, TAG, COMMIT)
+
+            self.assertIn(str(keyring), run.call_args.args[0])
+            self.assertEqual(
+                run.call_args.kwargs["timeout"],
+                public_release.VERIFIER_TIMEOUT,
+            )
+
     def test_default_verifier_reports_a_bounded_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
             manifest = Path(directory) / "release-manifest.json"

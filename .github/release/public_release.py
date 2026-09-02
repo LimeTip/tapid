@@ -200,12 +200,13 @@ def _parse_time(value, field):
     return parsed.astimezone(timezone.utc)
 
 
-def _default_verifier(manifest_path: Path, version: str, tag: str, commit: str):
+def _run_production_rust_verifier(manifest_path: Path, keyring_path: Path,
+                                  version: str, tag: str, commit: str):
     root = Path(__file__).resolve().parents[2]
     command = [
         "cargo", "run", "--locked", "--quiet", "--manifest-path",
         str(root / ".github/release/verifier/Cargo.toml"), "--",
-        str(manifest_path), str(root / "crates/tapid-signatures/data/release-keyring.json"),
+        str(manifest_path), str(keyring_path),
         version, tag, commit,
     ]
     try:
@@ -221,6 +222,29 @@ def _default_verifier(manifest_path: Path, version: str, tag: str, commit: str):
     if result.returncode:
         detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "unknown error"
         raise VerificationError("production Rust verifier rejected manifest: " + detail)
+
+
+def production_rust_verifier(keyring_path: Path):
+    """Build the bounded production verifier for an explicit trusted keyring."""
+    keyring_path = Path(keyring_path)
+
+    def verify(manifest_path: Path, version: str, tag: str, commit: str):
+        return _run_production_rust_verifier(
+            manifest_path, keyring_path, version, tag, commit,
+        )
+
+    return verify
+
+
+def _default_verifier(manifest_path: Path, version: str, tag: str, commit: str):
+    root = Path(__file__).resolve().parents[2]
+    return _run_production_rust_verifier(
+        manifest_path,
+        root / "crates/tapid-signatures/data/release-keyring.json",
+        version,
+        tag,
+        commit,
+    )
 
 
 def _redacted_url(url: str) -> str:
@@ -725,4 +749,4 @@ if __name__ == "__main__":
         print(json.dumps({"schema": "tapid-public-release-verification-error-v1",
                           "error": str(error)}, sort_keys=True, separators=(",", ":")),
               file=sys.stderr)
-        raise SystemExit(2)
+        raise SystemExit(2) from error

@@ -447,11 +447,15 @@ jobs:
           sys.path.insert(0, ".github/release")
           import public_release
 
+          tagged_release_verifier = public_release.production_rust_verifier(
+              Path("tagged-release-source/crates/tapid-signatures/data/release-keyring.json")
+          )
           public_release.verify_downloaded_release_assets(
               Path("downloaded-draft-assets"),
               version=os.environ["RELEASE_VERSION"],
               tag=os.environ["RELEASE_TAG"],
               commit=os.environ["RELEASE_COMMIT"],
+              verifier=tagged_release_verifier,
           )
           PY
           targets=(

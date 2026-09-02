@@ -288,7 +288,11 @@ jobs:
           set -euo pipefail
           verification_root="$(mktemp -d)"
           trap 'rm -rf "$verification_root"' EXIT
+          runner_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+          test -d "$runner_rustup_home"
+          mkdir -p "$verification_root/home"
           export HOME="$verification_root/home"
+          export RUSTUP_HOME="$runner_rustup_home"
           export CARGO_HOME="$verification_root/cargo-home"
           export CARGO_TARGET_DIR="$verification_root/target"
           unset CARGO_REGISTRY_TOKEN CARGO_REGISTRIES_CRATES_IO_TOKEN
