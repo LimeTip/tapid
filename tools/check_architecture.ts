@@ -39,8 +39,14 @@ function isProductionRust(path: string): boolean {
     !parts.some((part) => EXCLUDED_TEST_PARTS.has(part));
 }
 
+async function readRegularFile(path: string): Promise<Buffer> {
+  const stats = await lstat(path);
+  if (!stats.isFile()) throw new Error(`architecture input must be a regular file: ${path}`);
+  return await readFile(path);
+}
+
 async function physicalLineCount(path: string): Promise<number> {
-  const bytes = await readFile(path);
+  const bytes = await readRegularFile(path);
   if (bytes.length === 0) return 0;
   let lines = bytes[bytes.length - 1] === 10 ? 0 : 1;
   for (const byte of bytes) if (byte === 10) lines++;
@@ -52,7 +58,7 @@ async function readExceptions(root: string, tracked: Set<string>) {
   const errors: string[] = [];
   if (!tracked.has(EXCEPTIONS_PATH)) return { exceptions, errors };
 
-  const text = await readFile(join(root, EXCEPTIONS_PATH), "utf8");
+  const text = (await readRegularFile(join(root, EXCEPTIONS_PATH))).toString("utf8");
   for (const [index, rawLine] of text.split(/\r?\n/).entries()) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;

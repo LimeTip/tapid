@@ -55,7 +55,7 @@ Rejected because speculative traits create shallow interfaces and indirection. P
 
 ## Enforcement
 
-Run:
+Node.js 22.6.0 or later is required. Run:
 
 ```text
 node --experimental-strip-types --test tools/check_architecture_test.ts

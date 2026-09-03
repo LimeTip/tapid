@@ -15,15 +15,37 @@ function Fail([string]$Message) { throw "tapid installer: $Message" }
 function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
     Add-Type -AssemblyName System.Net.Http
     $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
     $client = [Net.Http.HttpClient]::new($handler)
     $response = $null
     $source = $null
     $destinationStream = $null
+    $downloadError = $null
+    $cleanupError = $null
     try {
         $client.DefaultRequestHeaders.UserAgent.ParseAdd("tapid-installer")
-        $response = $client.GetAsync($Uri, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
-        $response.EnsureSuccessStatusCode()
-        if ($response.RequestMessage.RequestUri.Scheme -ne "https") { Fail "download redirected outside HTTPS" }
+        $currentUri = [Uri]$Uri
+        if ($currentUri.Scheme -ne "https") { Fail "download URL must use HTTPS" }
+        [int]$redirectCount = 0
+        while ($true) {
+            $response = $client.GetAsync($currentUri, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            $statusCode = [int]$response.StatusCode
+            if ($statusCode -in 301, 302, 303, 307, 308) {
+                if ($redirectCount -ge 10) { Fail "download encountered too many redirects" }
+                $nextUri = $response.Headers.Location
+                if (-not $nextUri) { Fail "download redirect did not include a target" }
+                if (-not $nextUri.IsAbsoluteUri) { $nextUri = [Uri]::new($currentUri, $nextUri) }
+                if ($nextUri.Scheme -ne "https") { Fail "download redirect target must use HTTPS" }
+                $response.Dispose()
+                $response = $null
+                $currentUri = $nextUri
+                $redirectCount += 1
+                continue
+            }
+            $null = $response.EnsureSuccessStatusCode()
+            if ($response.RequestMessage.RequestUri.Scheme -ne "https") { Fail "download redirected outside HTTPS" }
+            break
+        }
         if ($response.Content.Headers.ContentLength -gt $MaxBytes) { Fail "download exceeds the size limit" }
         $source = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
         $destinationStream = [IO.File]::Create($Path)
@@ -35,15 +57,17 @@ function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
             $destinationStream.Write($buffer, 0, $read)
         }
     } catch {
-        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-        throw
+        $downloadError = $_
     } finally {
-        if ($destinationStream) { $destinationStream.Dispose() }
-        if ($source) { $source.Dispose() }
-        if ($response) { $response.Dispose() }
-        $client.Dispose()
-        $handler.Dispose()
+        try { if ($destinationStream) { $destinationStream.Dispose() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
+        try { if ($source) { $source.Dispose() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
+        try { if ($response) { $response.Dispose() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
+        try { $client.Dispose() } catch { if (-not $cleanupError) { $cleanupError = $_ } }
+        try { $handler.Dispose() } catch { if (-not $cleanupError) { $cleanupError = $_ } }
+        if ($downloadError -or $cleanupError) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
     }
+    if ($downloadError) { throw $downloadError }
+    if ($cleanupError) { throw $cleanupError }
 }
 
 function Test-AbsolutePath([string]$Path) {

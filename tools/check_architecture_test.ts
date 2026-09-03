@@ -1,6 +1,6 @@
 import { ok as assert, strictEqual as assertEquals } from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -115,6 +115,17 @@ test("architecture checker ignores deleted tracked files", () => withFixture(asy
   const result = await check(root);
   assertEquals(result.code, 0, result.stdout + result.stderr);
   assert(result.stdout.includes("Architecture check passed: 0 production Rust files scanned"));
+}));
+
+test("architecture checker rejects a tracked Rust symbolic link", { skip: process.platform === "win32" }, () => withFixture(async (root) => {
+  const path = "crates/example/src/lib.rs";
+  await write(root, "outside.rs", "pub fn outside() {}\n");
+  await mkdir(dirname(join(root, path)), { recursive: true });
+  await symlink(join(root, "outside.rs"), join(root, path));
+  await track(root, [path]);
+  const result = await check(root);
+  assertEquals(result.code, 2);
+  assert(result.stderr.includes("architecture input must be a regular file"));
 }));
 
 test("architecture checker accepts the advisory threshold", () => withFixture(async (root) => {

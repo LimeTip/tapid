@@ -108,29 +108,20 @@ jobs:
           node-version: 22
       - name: Create checksums
         run: node --experimental-strip-types tools/release/release.ts checksums release "${{ needs.prepare.outputs.version }}"
-      - name: Refuse to modify a published release
+      - name: Create draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          lookup_error="$(mktemp)"
-          if gh api --silent "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" 2>"$lookup_error"; then
-            echo "refusing to replace existing release $GITHUB_REF_NAME" >&2
-            exit 1
-          fi
-          grep -Fq '(HTTP 404)' "$lookup_error" || {
-            cat "$lookup_error" >&2
-            echo "release lookup failed; refusing to continue" >&2
-            exit 1
-          }
-      - name: Create draft GitHub release
-        uses: softprops/action-gh-release@v3
-        with:
-          draft: true
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            release/*.tar.gz
-            release/SHA256SUMS
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$GITHUB_REF_NAME" \
+            -f name="$GITHUB_REF_NAME" \
+            -F draft=true \
+            -F prerelease=false \
+            -F generate_release_notes=true >/dev/null
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" release/*.tar.gz release/SHA256SUMS
       - name: Verify draft release assets
         env:
           GH_TOKEN: ${{ github.token }}

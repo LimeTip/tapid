@@ -71,16 +71,15 @@ test("binary release follows the small draft release flow", async () => {
   ]) assert(workflow.includes(`target: ${target}`));
   assert(workflow.includes("tags:"));
   assert(workflow.includes('"v*.*.*"'));
-  assert(workflow.includes("softprops/action-gh-release@v3"));
-  assert(workflow.includes("draft: true"));
+  assert(!workflow.includes("softprops/action-gh-release"));
+  assert(workflow.includes('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"'));
+  assert(workflow.includes("-F draft=true"));
+  assert(workflow.includes('gh release upload "$GITHUB_REF_NAME"'));
+  assert(!workflow.includes("--clobber"));
   const fetchMain = workflow.indexOf("refs/heads/main:refs/remotes/origin/main");
   const ancestry = workflow.indexOf("merge-base --is-ancestor");
   assert(fetchMain >= 0 && fetchMain < ancestry);
   assert(workflow.includes('version="$(node --experimental-strip-types tools/release/release.ts check-tag "$GITHUB_REF_NAME")"'));
-  assert(workflow.includes("refusing to replace existing release"));
-  assert(workflow.includes('releases/tags/$GITHUB_REF_NAME'));
-  assert(workflow.includes("(HTTP 404)"));
-  assert(workflow.includes("release lookup failed"));
   assert(workflow.includes("unexpected draft release assets"));
   assert(workflow.includes("actions/download-artifact@v4"));
   assert(!workflow.includes("workflow_dispatch"));
@@ -157,6 +156,13 @@ test("installers use checksums without embedded release signing", async () => {
   assert(powershell.includes("$MAX_BINARY_BYTES"));
   assert(powershell.includes("Save-BoundedHttpsFile"));
   assert(powershell.includes("Add-Type -AssemblyName System.Net.Http"));
+  assert(powershell.includes("$handler.AllowAutoRedirect = $false"));
+  assert(powershell.includes("redirect target must use HTTPS"));
+  assert(powershell.includes("too many redirects"));
+  const destinationDispose = powershell.indexOf("$destinationStream.Dispose()");
+  const failedDownloadCleanup = powershell.indexOf("if ($downloadError -or $cleanupError) { Remove-Item -LiteralPath $Path");
+  const primaryRethrow = powershell.indexOf("if ($downloadError) { throw $downloadError }");
+  assert(destinationDispose >= 0 && failedDownloadCleanup > destinationDispose && primaryRethrow > failedDownloadCleanup);
   assert(powershell.includes("uncompressed size"));
   assert(powershell.includes("tar.exe -tvzf"));
   assert(!powershell.includes("TAPID_TEST_FIXTURE"));
@@ -169,6 +175,9 @@ test("installers use checksums without embedded release signing", async () => {
   const resolvedUri = powershell.indexOf("$resolvedUri = $discovery.BaseResponse.ResponseUri");
   assert(discoveryCatch >= 0 && discoveryCatch < resolvedUri);
   assert(powershell.includes("$discovery.BaseResponse.RequestMessage.RequestUri"));
+  const powershellUninstaller = await text("scripts/uninstall.ps1");
+  assert(powershellUninstaller.includes("Test-AbsolutePath"));
+  assert(!powershellUninstaller.includes("IsPathRooted"));
 });
 
 test("Unix installer rejects multiline repository and version values", async () => {
