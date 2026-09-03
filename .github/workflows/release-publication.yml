@@ -34,7 +34,8 @@ jobs:
             echo "release tag must point to a commit on main" >&2
             exit 1
           }
-          echo "version=$(node --experimental-strip-types tools/release/release.ts check-tag "$GITHUB_REF_NAME")" >> "$GITHUB_OUTPUT"
+          version="$(node --experimental-strip-types tools/release/release.ts check-tag "$GITHUB_REF_NAME")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare

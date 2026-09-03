@@ -1,6 +1,6 @@
-import { deepStrictEqual as assertEquals } from "node:assert/strict";
+import { deepStrictEqual as assertEquals, rejects as assertRejects, strictEqual } from "node:assert/strict";
 import { test } from "node:test";
-import { publicationPlan } from "./publish.ts";
+import { isPublished, publicationPlan } from "./publish.ts";
 
 const metadata = {
   packages: [
@@ -54,4 +54,20 @@ test("publication plan rejects internal dependency cycles", () => {
     error = caught;
   }
   assertEquals((error as Error).message, "workspace dependency cycle includes tapid");
+});
+
+test("crates.io lookup retries transient responses with bounded requests", async () => {
+  const statuses = [429, 503, 200];
+  let attempts = 0;
+  const fakeFetch = async (_url: string | URL | Request, options?: RequestInit) => {
+    attempts++;
+    strictEqual(options?.signal instanceof AbortSignal, true);
+    return new Response(null, { status: statuses.shift() });
+  };
+  strictEqual(await isPublished({ name: "tapid", version: "1.2.3" }, fakeFetch as typeof fetch, async () => {}), true);
+  strictEqual(attempts, 3);
+  await assertRejects(
+    () => isPublished({ name: "tapid", version: "1.2.3" }, async () => new Response(null, { status: 403 }), async () => {}),
+    /HTTP 403/,
+  );
 });

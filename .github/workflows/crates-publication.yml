@@ -62,7 +62,7 @@ jobs:
             exit 1
           }
           gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-public-smoke.yml/runs?event=release&status=success&per_page=100" \
-            --jq '.workflow_runs[] | select(.head_branch == env.TAG and .head_sha == env.TAG_COMMIT) | .id' | grep -Eq '^[0-9]+$' || {
+            --jq '.workflow_runs[] | select(.display_title == ("Public installer smoke " + env.TAG) and .head_sha == env.TAG_COMMIT) | .id' | grep -Eq '^[0-9]+$' || {
               echo "a successful public installer smoke run for $TAG is required" >&2
               exit 1
             }

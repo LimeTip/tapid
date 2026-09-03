@@ -130,10 +130,10 @@ if ($ReleaseDiscoveryUrl -notmatch '^https://') { Fail "stable release discovery
 if ($Version -eq "latest") {
     try {
         $discovery = Invoke-WebRequest -Method Head -UseBasicParsing -MaximumRedirection 10 $ReleaseDiscoveryUrl
-        $resolvedPath = $discovery.BaseResponse.ResponseUri.AbsolutePath
-        if ($resolvedPath -notmatch '/releases/tag/(v?[0-9]+\.[0-9]+\.[0-9]+)\z') { Fail "stable release discovery endpoint did not resolve a release tag" }
-        $Version = $Matches[1]
     } catch { Fail "could not contact the stable release discovery endpoint" }
+    $resolvedPath = $discovery.BaseResponse.ResponseUri.AbsolutePath
+    if ($resolvedPath -notmatch '/releases/tag/(v?[0-9]+\.[0-9]+\.[0-9]+)\z') { Fail "stable release discovery endpoint did not resolve a release tag" }
+    $Version = $Matches[1]
 }
 if ($Version -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+\z') { Fail "version must be a stable release such as v0.1.0" }
 if (-not $Version.StartsWith("v")) { $Version = "v$Version" }

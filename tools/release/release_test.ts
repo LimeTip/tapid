@@ -76,6 +76,7 @@ test("binary release follows the small draft release flow", async () => {
   const fetchMain = workflow.indexOf("refs/heads/main:refs/remotes/origin/main");
   const ancestry = workflow.indexOf("merge-base --is-ancestor");
   assert(fetchMain >= 0 && fetchMain < ancestry);
+  assert(workflow.includes('version="$(node --experimental-strip-types tools/release/release.ts check-tag "$GITHUB_REF_NAME")"'));
   assert(workflow.includes("refusing to replace existing release"));
   assert(workflow.includes("unexpected draft release assets"));
   assert(workflow.includes("actions/download-artifact@v4"));
@@ -105,6 +106,8 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(workflow.includes(".head_sha == env.TAG_COMMIT"));
   assert(workflow.includes("isDraft,isPrerelease"));
   assert(workflow.includes("release-public-smoke.yml"));
+  assert(workflow.includes('.display_title == ("Public installer smoke " + env.TAG)'));
+  assert(!workflow.includes(".head_branch == env.TAG"));
   assert(!workflow.includes("python"));
   assert(!workflow.includes("CARGO_REGISTRY_TOKEN: ${{ secrets."));
 });
@@ -147,6 +150,9 @@ test("installers use checksums without embedded release signing", async () => {
   assert(powershell.includes("Save-BoundedHttpsFile"));
   assert(powershell.includes("uncompressed size"));
   assert(powershell.includes("tar.exe -tvzf"));
+  const discoveryCatch = powershell.indexOf('catch { Fail "could not contact the stable release discovery endpoint" }');
+  const resolvedPath = powershell.indexOf("$resolvedPath = $discovery.BaseResponse.ResponseUri.AbsolutePath");
+  assert(discoveryCatch >= 0 && discoveryCatch < resolvedPath);
 });
 
 test("Unix installer rejects multiline repository and version values", async () => {

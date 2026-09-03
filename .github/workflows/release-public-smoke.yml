@@ -1,5 +1,7 @@
 name: Public installer smoke
 
+run-name: Public installer smoke ${{ github.event.release.tag_name }}
+
 on:
   release:
     types: [published]

@@ -50,14 +50,33 @@ async function cargoMetadata(): Promise<CargoMetadata> {
   return JSON.parse(stdout);
 }
 
-async function isPublished(pkg: Package): Promise<boolean> {
+export async function isPublished(
+  pkg: Package,
+  fetchFn: typeof fetch = fetch,
+  sleepFn: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+): Promise<boolean> {
   const url = `https://crates.io/api/v1/crates/${encodeURIComponent(pkg.name)}/${encodeURIComponent(pkg.version)}`;
-  const response = await fetch(url, {
-    headers: { "User-Agent": "tapid-release-workflow (https://github.com/LimeTip/tapid)" },
-  });
-  if (response.status === 200) return true;
-  if (response.status === 404) return false;
-  throw new Error(`crates.io returned HTTP ${response.status} for ${pkg.name} ${pkg.version}`);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let response: Response;
+    try {
+      response = await fetchFn(url, {
+        headers: { "User-Agent": "tapid-release-workflow (https://github.com/LimeTip/tapid)" },
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (error) {
+      if (attempt === 3) throw error;
+      await sleepFn(attempt * 1_000);
+      continue;
+    }
+    if (response.status === 200) return true;
+    if (response.status === 404) return false;
+    const transient = response.status === 429 || response.status >= 500;
+    if (!transient || attempt === 3) {
+      throw new Error(`crates.io returned HTTP ${response.status} for ${pkg.name} ${pkg.version}`);
+    }
+    await sleepFn(attempt * 1_000);
+  }
+  throw new Error(`crates.io lookup retries exhausted for ${pkg.name} ${pkg.version}`);
 }
 
 async function waitUntilPublished(pkg: Package): Promise<void> {
