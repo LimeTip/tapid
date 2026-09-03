@@ -151,9 +151,11 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 
 ## Development
 
+Node.js 22.6.0 or later is required for the TypeScript commands.
+
 ```text
 node --experimental-strip-types tools/check_architecture.ts
-node --experimental-strip-types --test tools/check_architecture_test.ts
+node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
