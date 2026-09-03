@@ -29,6 +29,7 @@ jobs:
         name: Validate annotated tag and Cargo version
         shell: bash
         run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" origin/main || {
             echo "release tag must point to a commit on main" >&2
             exit 1

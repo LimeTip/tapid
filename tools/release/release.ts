@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { readdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -27,7 +28,9 @@ export function releaseVersion(tag: string, cargoVersion: string): string {
 }
 
 async function sha256(path: string): Promise<string> {
-  return createHash("sha256").update(await readFile(path)).digest("hex");
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
 }
 
 export async function checksumLines(directory: string, version: string): Promise<string> {
@@ -39,9 +42,8 @@ export async function checksumLines(directory: string, version: string): Promise
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error(`expected exactly these archives:\n${expected.join("\n")}\nfound:\n${actual.join("\n")}`);
   }
-  const lines = await Promise.all(
-    expected.map(async (name) => `${await sha256(join(directory, name))}  ${name}`),
-  );
+  const lines: string[] = [];
+  for (const name of expected) lines.push(`${await sha256(join(directory, name))}  ${name}`);
   return `${lines.join("\n")}\n`;
 }
 

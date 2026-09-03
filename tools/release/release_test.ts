@@ -52,6 +52,13 @@ test("checksum output requires exactly six release archives", async () => {
   }
 });
 
+test("checksum generation streams archives sequentially", async () => {
+  const helper = await text("tools/release/release.ts");
+  assert(helper.includes("createReadStream"));
+  assert(!helper.includes("Promise.all("));
+  assert(!helper.includes("update(await readFile(path))"));
+});
+
 test("binary release follows the small draft release flow", async () => {
   const workflow = await text(".github/workflows/release-publication.yml");
   for (const target of [
@@ -66,7 +73,9 @@ test("binary release follows the small draft release flow", async () => {
   assert(workflow.includes('"v*.*.*"'));
   assert(workflow.includes("softprops/action-gh-release@v3"));
   assert(workflow.includes("draft: true"));
-  assert(workflow.includes("merge-base --is-ancestor"));
+  const fetchMain = workflow.indexOf("refs/heads/main:refs/remotes/origin/main");
+  const ancestry = workflow.indexOf("merge-base --is-ancestor");
+  assert(fetchMain >= 0 && fetchMain < ancestry);
   assert(workflow.includes("refusing to replace existing release"));
   assert(workflow.includes("unexpected draft release assets"));
   assert(workflow.includes("actions/download-artifact@v4"));
@@ -146,6 +155,10 @@ test("Unix installer rejects multiline repository and version values", async () 
   try {
     await assertRejects(
       () => execFileAsync("sh", [installer, "--repo", "LimeTip/tapid\nother", "--version", "invalid", "--install-dir", installDir]),
+      (error: any) => error.stderr.includes("repository must be OWNER/REPO"),
+    );
+    await assertRejects(
+      () => execFileAsync("sh", [installer, "--repo", "not-a-repository", "--version", "invalid", "--install-dir", installDir]),
       (error: any) => error.stderr.includes("repository must be OWNER/REPO"),
     );
     await assertRejects(

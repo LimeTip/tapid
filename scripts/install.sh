@@ -83,6 +83,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$REPO" in ''|*[!A-Za-z0-9_./-]*|/*|*/|*/*/*) fail "repository must be OWNER/REPO" ;; esac
+case "$REPO" in */*) ;; *) fail "repository must be OWNER/REPO" ;; esac
 [ "$VERSION_SET" -eq 0 ] || [ "$SOURCE_REF_SET" -eq 0 ] || fail "use either --version or --source-ref, not both"
 case "$INSTALL_DIR" in /*) ;; *) fail "install directory must be an absolute path" ;; esac
 mkdir -p "$INSTALL_DIR"
