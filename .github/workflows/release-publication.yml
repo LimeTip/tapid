@@ -112,10 +112,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          lookup_error="$(mktemp)"
+          if gh api --silent "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" 2>"$lookup_error"; then
             echo "refusing to replace existing release $GITHUB_REF_NAME" >&2
             exit 1
           fi
+          grep -Fq '(HTTP 404)' "$lookup_error" || {
+            cat "$lookup_error" >&2
+            echo "release lookup failed; refusing to continue" >&2
+            exit 1
+          }
       - name: Create draft GitHub release
         uses: softprops/action-gh-release@v3
         with:

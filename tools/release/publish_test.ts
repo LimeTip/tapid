@@ -56,6 +56,28 @@ test("publication plan rejects internal dependency cycles", () => {
   assertEquals((error as Error).message, "workspace dependency cycle includes tapid");
 });
 
+test("publication plan includes local build dependencies and excludes dev and registry dependencies", () => {
+  const objectMetadata = {
+    packages: [
+      {
+        name: "tapid",
+        version: "1.0.0",
+        dependencies: [
+          { name: "tapid-build", source: null, kind: "build" },
+          { name: "tapid-dev", source: null, kind: "dev" },
+          { name: "serde", source: "registry+https://github.com/rust-lang/crates.io-index", kind: null },
+        ],
+      },
+      { name: "tapid-build", version: "1.0.0", dependencies: [] },
+      { name: "tapid-dev", version: "1.0.0", dependencies: [] },
+    ],
+  };
+  assertEquals(publicationPlan(objectMetadata, new Set()), [
+    { name: "tapid-build", version: "1.0.0" },
+    { name: "tapid", version: "1.0.0" },
+  ]);
+});
+
 test("crates.io lookup retries transient responses with bounded requests", async () => {
   const statuses = [429, 503, 200];
   let attempts = 0;

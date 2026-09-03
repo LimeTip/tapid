@@ -253,8 +253,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           Set-Content -NoNewline -Path (Join-Path $fixture 'SHA256SUMS') -Value "$digest  $archiveName`n"
-          $env:TAPID_TEST_FIXTURE = $fixture
-          & scripts/install.ps1 -Version 1.2.3 -InstallDir $installDir
+          $installerUnderTest = Join-Path $fixture 'install.ps1'
+          $installerText = Get-Content -Raw scripts/install.ps1
+          $fixtureDownloader = @'
+          function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
+              Copy-Item -LiteralPath (Join-Path $env:TAPID_FIXTURE_ROOT ([IO.Path]::GetFileName($Uri))) -Destination $Path
+              if ((Get-Item -LiteralPath $Path).Length -gt $MaxBytes) { Fail "download exceeds the size limit" }
+          }
+          '@
+          $downloaderPattern = [regex]::new(
+            '^function Save-BoundedHttpsFile\([^\r\n]+\) \{.*?^\}',
+            ([Text.RegularExpressions.RegexOptions]::Multiline -bor [Text.RegularExpressions.RegexOptions]::Singleline)
+          )
+          $fixtureInstallerText = $downloaderPattern.Replace($installerText, $fixtureDownloader, 1)
+          if ($fixtureInstallerText -eq $installerText) { throw 'failed to create isolated installer fixture' }
+          Set-Content -NoNewline -Path $installerUnderTest -Value $fixtureInstallerText
+          $env:TAPID_FIXTURE_ROOT = $fixture
+          & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $installed = Join-Path $installDir 'tapid.exe'
           if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw 'valid fixture was not installed' }
@@ -264,14 +279,14 @@ jobs:
           $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           Set-Content -NoNewline -Path (Join-Path $fixture 'SHA256SUMS') -Value "$digest  $archiveName`n"
           try {
-            & scripts/install.ps1 -Version 1.2.3 -InstallDir $installDir
+            & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
             throw 'unsafe fixture was accepted'
           } catch {
             if ($_.Exception.Message -notlike '*exactly one member named tapid.exe*') { throw }
           }
           if ((Get-FileHash -Algorithm SHA256 $installed).Hash -ne $before) { throw 'rejected fixture changed the installed binary' }
           } finally {
-            Remove-Item Env:TAPID_TEST_FIXTURE -ErrorAction SilentlyContinue
+            Remove-Item Env:TAPID_FIXTURE_ROOT -ErrorAction SilentlyContinue
             [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')
           }
 

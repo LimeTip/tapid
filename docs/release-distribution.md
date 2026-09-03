@@ -18,7 +18,7 @@ The installers accept only stable `vX.Y.Z` versions and HTTPS release endpoints.
 2. Merge only after the ordinary CI and package checks pass.
 3. Create and push an annotated `vX.Y.Z` tag at the reviewed commit. Never move a release tag.
 4. The tag-triggered workflow validates that the tag is annotated, matches the Cargo version, and points to a commit on `main`, then builds six native archives.
-5. The aggregation job requires the exact six archive names, writes `SHA256SUMS`, refuses to replace an existing release, creates a draft GitHub release, and reads back the exact seven-asset set.
+5. The aggregation job requires the exact six archive names, writes `SHA256SUMS`, refuses to modify a published release, creates or refreshes a draft GitHub release, and reads back the exact seven-asset set.
 6. Inspect the draft assets and generated notes manually.
 7. Publish the draft through GitHub's release interface.
 8. Publication triggers public installer smoke tests on Ubuntu, macOS, and Windows.

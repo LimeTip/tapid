@@ -61,11 +61,18 @@ jobs:
             echo "the matching public non-prerelease GitHub release is required" >&2
             exit 1
           }
-          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-public-smoke.yml/runs?event=release&status=success&per_page=100" \
-            --jq '.workflow_runs[] | select(.display_title == ("Public installer smoke " + env.TAG) and .head_sha == env.TAG_COMMIT) | .id' | grep -Eq '^[0-9]+$' || {
-              echo "a successful public installer smoke run for $TAG is required" >&2
-              exit 1
-            }
+          run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-public-smoke.yml/runs?event=release&status=success&per_page=100" \
+            --jq '[.workflow_runs[] | select(.display_title == ("Public installer smoke " + env.TAG) and .head_sha == env.TAG_COMMIT)] | first | .id // empty')"
+          [[ "$run_id" =~ ^[0-9]+$ ]] || {
+            echo "a successful public installer smoke run for $TAG is required" >&2
+            exit 1
+          }
+          successful_jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
+            --jq '[.jobs[] | select((.name == "Unix installer (ubuntu-latest)" or .name == "Unix installer (macos-latest)" or .name == "Windows installer") and .conclusion == "success")] | length')"
+          test "$successful_jobs" -eq 3 || {
+            echo "all public installer smoke jobs must succeed for $TAG" >&2
+            exit 1
+          }
       - uses: dtolnay/rust-toolchain@stable
       - name: Package the workspace
         run: cargo package --workspace --locked

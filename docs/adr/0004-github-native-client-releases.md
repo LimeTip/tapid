@@ -6,7 +6,7 @@ Supersedes: ADR 0001 for current client releases
 
 ## Context
 
-Tapid is maintained primarily by one person, with occasional review from Doug. The previous signed-manifest design introduced a custom trust protocol, embedded keyring, release state machine, and substantial release-specific code. Its operational and review cost was disproportionate to the current project and team.
+Tapid is maintained primarily by one person, with occasional secondary review. The previous signed-manifest design introduced a custom trust protocol, embedded keyring, release state machine, and substantial release-specific code. Its operational and review cost was disproportionate to the current project and team.
 
 Tapid uses a small, conventional GitHub and Cargo release workflow suited to its current team size.
 

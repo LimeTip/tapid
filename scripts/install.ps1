@@ -13,11 +13,7 @@ $MAX_BINARY_BYTES = 512MB
 function Fail([string]$Message) { throw "tapid installer: $Message" }
 
 function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
-    if ($env:TAPID_TEST_FIXTURE) {
-        Copy-Item -LiteralPath (Join-Path $env:TAPID_TEST_FIXTURE ([IO.Path]::GetFileName($Uri))) -Destination $Path
-        if ((Get-Item -LiteralPath $Path).Length -gt $MaxBytes) { Fail "download exceeds the size limit" }
-        return
-    }
+    Add-Type -AssemblyName System.Net.Http
     $handler = [Net.Http.HttpClientHandler]::new()
     $client = [Net.Http.HttpClient]::new($handler)
     $response = $null
@@ -50,6 +46,14 @@ function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
     }
 }
 
+function Test-AbsolutePath([string]$Path) {
+    if ([string]::IsNullOrEmpty($Path) -or $Path -match '[\r\n]') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\') {
+        return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/].*)?\z)'
+    }
+    return $Path.StartsWith('/')
+}
+
 $PathUpdated = $false
 function Configure-UserPath([string]$Directory) {
     $normalized = ([IO.Path]::GetFullPath($Directory)).TrimEnd('\\')
@@ -79,7 +83,7 @@ function Test-RegularDestination([string]$Path) {
 }
 
 if ($Repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z') { Fail "repository must be OWNER/REPO" }
-if (-not [IO.Path]::IsPathFullyQualified($InstallDir)) { Fail "install directory must be an absolute path" }
+if (-not (Test-AbsolutePath $InstallDir)) { Fail "install directory must be an absolute path" }
 if ($PSBoundParameters.ContainsKey("Version") -and $PSBoundParameters.ContainsKey("SourceRef")) { Fail "use either -Version or -SourceRef, not both" }
 if ($PSBoundParameters.ContainsKey("SourceRef") -and [string]::IsNullOrWhiteSpace($SourceRef)) { Fail "-SourceRef requires a non-empty value" }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -110,9 +114,13 @@ if (-not [string]::IsNullOrEmpty($SourceRef)) {
         if ($LASTEXITCODE -ne 0) { Fail "cargo build failed" }
         Copy-Item -LiteralPath (Join-Path $cargoRoot "bin\tapid.exe") -Destination $staged -Force
         [IO.File]::WriteAllBytes($stagedMarker, [Text.Encoding]::ASCII.GetBytes("tapid-managed-v1`n"))
-        Move-Item -LiteralPath $staged -Destination $destination -Force
         Move-Item -LiteralPath $stagedMarker -Destination (Join-Path $InstallDir ".tapid-managed") -Force
-        Configure-UserPath $InstallDir
+        Move-Item -LiteralPath $staged -Destination $destination -Force
+        try {
+            Configure-UserPath $InstallDir
+        } catch {
+            Write-Warning "Tapid was installed, but the user PATH could not be updated: $($_.Exception.Message)"
+        }
         Write-Output "Installed Tapid from $SourceRef into $destination"
         Print-PathGuidance
         exit 0
@@ -131,7 +139,12 @@ if ($Version -eq "latest") {
     try {
         $discovery = Invoke-WebRequest -Method Head -UseBasicParsing -MaximumRedirection 10 $ReleaseDiscoveryUrl
     } catch { Fail "could not contact the stable release discovery endpoint" }
-    $resolvedPath = $discovery.BaseResponse.ResponseUri.AbsolutePath
+    $resolvedUri = $discovery.BaseResponse.ResponseUri
+    if (-not $resolvedUri -and $discovery.BaseResponse.RequestMessage) {
+        $resolvedUri = $discovery.BaseResponse.RequestMessage.RequestUri
+    }
+    if (-not $resolvedUri) { Fail "stable release discovery endpoint did not expose its final URL" }
+    $resolvedPath = $resolvedUri.AbsolutePath
     if ($resolvedPath -notmatch '/releases/tag/(v?[0-9]+\.[0-9]+\.[0-9]+)\z') { Fail "stable release discovery endpoint did not resolve a release tag" }
     $Version = $Matches[1]
 }
@@ -181,9 +194,13 @@ try {
     if ((Get-Item -LiteralPath $extracted).Length -gt $MAX_BINARY_BYTES) { Fail "release binary exceeds the size limit" }
     Copy-Item -LiteralPath $extracted -Destination $staged -Force
     [IO.File]::WriteAllBytes($stagedMarker, [Text.Encoding]::ASCII.GetBytes("tapid-managed-v1`n"))
-    Move-Item -LiteralPath $staged -Destination $destination -Force
     Move-Item -LiteralPath $stagedMarker -Destination (Join-Path $InstallDir ".tapid-managed") -Force
-    Configure-UserPath $InstallDir
+    Move-Item -LiteralPath $staged -Destination $destination -Force
+    try {
+        Configure-UserPath $InstallDir
+    } catch {
+        Write-Warning "Tapid was installed, but the user PATH could not be updated: $($_.Exception.Message)"
+    }
     Write-Output "Installed Tapid $Version into $destination"
     Print-PathGuidance
 } finally {

@@ -4,7 +4,12 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 const execFileAsync = promisify(execFile);
-type Dependency = string | { name: string; path?: string | null };
+type Dependency = string | {
+  name: string;
+  source?: string | null;
+  kind?: string | null;
+  path?: string | null;
+};
 type MetadataPackage = { name: string; version: string; dependencies?: Dependency[] };
 type CargoMetadata = { packages: MetadataPackage[] };
 type Package = { name: string; version: string };
@@ -12,7 +17,7 @@ type Package = { name: string; version: string };
 function internalDependencies(pkg: MetadataPackage): string[] {
   return (pkg.dependencies ?? []).flatMap((dependency) => {
     if (typeof dependency === "string") return [dependency];
-    return dependency.path === null || dependency.path === undefined ? [] : [dependency.name];
+    return dependency.source === null && dependency.kind !== "dev" ? [dependency.name] : [];
   });
 }
 

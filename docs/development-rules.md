@@ -39,6 +39,8 @@ Tests use runtime-derived temporary paths. Preserve existing user files. Malform
 
 ## Source size review
 
+The TypeScript architecture commands require Node.js 22.6.0 or later.
+
 Run:
 
 ```text

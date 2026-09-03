@@ -52,12 +52,12 @@ configure_path() {
       ;;
     fish)
       PATH_RC="$HOME/.config/fish/config.fish"; PATH_COMMAND="source \"$PATH_RC\""
-      path_line='set -gx PATH $HOME/.local/bin $PATH'; mkdir -p "$(dirname "$PATH_RC")"
+      path_line='set -gx PATH $HOME/.local/bin $PATH'; mkdir -p "$(dirname "$PATH_RC")" || return 1
       ;;
     *) PATH_RC="$HOME/.profile"; PATH_COMMAND=". \"$PATH_RC\""; path_line='export PATH="$HOME/.local/bin:$PATH"' ;;
   esac
   if [ ! -f "$PATH_RC" ] || ! grep -Fqx "$path_line" "$PATH_RC"; then
-    printf '\n# Tapid\n%s\n' "$path_line" >> "$PATH_RC"
+    printf '\n# Tapid\n%s\n' "$path_line" >> "$PATH_RC" || return 1
   fi
   PATH="$INSTALL_DIR${PATH:+:$PATH}"; export PATH; PATH_UPDATED=1
 }
@@ -109,9 +109,9 @@ if [ "$SOURCE_REF_SET" -eq 1 ]; then
   STAGED_MARKER="$(mktemp "$INSTALL_DIR/.tapid-marker.tmp.XXXXXX")"
   install -m 0755 "$tmp_dir/root/bin/tapid" "$STAGED_BINARY"
   printf 'tapid-managed-v1\n' > "$STAGED_MARKER"
-  mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""
   mv -f "$STAGED_MARKER" "$INSTALL_DIR/.tapid-managed"; STAGED_MARKER=""
-  configure_path
+  mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""
+  configure_path || printf 'Tapid was installed, but PATH could not be updated.\n' >&2
   printf 'Installed Tapid from %s into %s/tapid\n' "$SOURCE_REF" "$INSTALL_DIR"
   print_path_guidance
   exit 0
@@ -176,8 +176,8 @@ STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
 STAGED_MARKER="$(mktemp "$INSTALL_DIR/.tapid-marker.tmp.XXXXXX")"
 install -m 0755 "$tmp_dir/extracted/tapid" "$STAGED_BINARY"
 printf 'tapid-managed-v1\n' > "$STAGED_MARKER"
-mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""
 mv -f "$STAGED_MARKER" "$INSTALL_DIR/.tapid-managed"; STAGED_MARKER=""
-configure_path
+mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""
+configure_path || printf 'Tapid was installed, but PATH could not be updated.\n' >&2
 printf 'Installed Tapid %s into %s/tapid\n' "$VERSION" "$INSTALL_DIR"
 print_path_guidance

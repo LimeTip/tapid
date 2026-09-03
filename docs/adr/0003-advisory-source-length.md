@@ -44,6 +44,8 @@ Rejected because mandatory exceptions turn a recommendation into a hard gate and
 
 ## Verification
 
+These TypeScript commands require Node.js 22.6.0 or later.
+
 Run:
 
 ```text

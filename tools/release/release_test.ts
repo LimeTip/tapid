@@ -78,6 +78,9 @@ test("binary release follows the small draft release flow", async () => {
   assert(fetchMain >= 0 && fetchMain < ancestry);
   assert(workflow.includes('version="$(node --experimental-strip-types tools/release/release.ts check-tag "$GITHUB_REF_NAME")"'));
   assert(workflow.includes("refusing to replace existing release"));
+  assert(workflow.includes('releases/tags/$GITHUB_REF_NAME'));
+  assert(workflow.includes("(HTTP 404)"));
+  assert(workflow.includes("release lookup failed"));
   assert(workflow.includes("unexpected draft release assets"));
   assert(workflow.includes("actions/download-artifact@v4"));
   assert(!workflow.includes("workflow_dispatch"));
@@ -108,6 +111,8 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(workflow.includes("release-public-smoke.yml"));
   assert(workflow.includes('.display_title == ("Public installer smoke " + env.TAG)'));
   assert(!workflow.includes(".head_branch == env.TAG"));
+  assert(workflow.includes('actions/runs/$run_id/jobs'));
+  assert(workflow.includes('test "$successful_jobs" -eq 3'));
   assert(!workflow.includes("python"));
   assert(!workflow.includes("CARGO_REGISTRY_TOKEN: ${{ secrets."));
 });
@@ -120,6 +125,7 @@ test("public smoke tests use the published installer and released version", asyn
   assert(workflow.includes("github.event.release.tag_name"));
   assert(workflow.includes("--version"));
   assert(workflow.includes("Install latest release through discovery"));
+  assert(workflow.includes("shell: powershell"));
   assert(workflow.includes('test "$actual" = "tapid ${RELEASE_TAG#v}"'));
 });
 
@@ -141,18 +147,28 @@ test("installers use checksums without embedded release signing", async () => {
   assert(shell.includes("MAX_BINARY_BYTES="));
   assert(shell.includes("tar -xOzf"));
   assert(shell.includes('[ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0'));
+  assert(shell.includes("configure_path || printf 'Tapid was installed, but PATH could not be updated."));
+  assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\n  mv -f "$STAGED_MARKER"'));
+  assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\nmv -f "$STAGED_MARKER"'));
   const powershell = await text("scripts/install.ps1");
   assert(powershell.includes("RuntimeInformation]::OSArchitecture"));
   assert(powershell.includes("$members.Count -ne 1"));
   assert(powershell.includes("$MAX_ARCHIVE_BYTES"));
   assert(powershell.includes("$MAX_BINARY_BYTES"));
-  assert(powershell.includes("IsPathFullyQualified"));
   assert(powershell.includes("Save-BoundedHttpsFile"));
+  assert(powershell.includes("Add-Type -AssemblyName System.Net.Http"));
   assert(powershell.includes("uncompressed size"));
   assert(powershell.includes("tar.exe -tvzf"));
+  assert(!powershell.includes("TAPID_TEST_FIXTURE"));
+  assert(!powershell.includes("IsPathFullyQualified"));
+  assert(powershell.includes("Test-AbsolutePath"));
+  assert(powershell.includes('Write-Warning "Tapid was installed, but the user PATH could not be updated'));
+  assert(!powershell.includes('Move-Item -LiteralPath $staged -Destination $destination -Force\n        Move-Item -LiteralPath $stagedMarker'));
+  assert(!powershell.includes('Move-Item -LiteralPath $staged -Destination $destination -Force\n    Move-Item -LiteralPath $stagedMarker'));
   const discoveryCatch = powershell.indexOf('catch { Fail "could not contact the stable release discovery endpoint" }');
-  const resolvedPath = powershell.indexOf("$resolvedPath = $discovery.BaseResponse.ResponseUri.AbsolutePath");
-  assert(discoveryCatch >= 0 && discoveryCatch < resolvedPath);
+  const resolvedUri = powershell.indexOf("$resolvedUri = $discovery.BaseResponse.ResponseUri");
+  assert(discoveryCatch >= 0 && discoveryCatch < resolvedUri);
+  assert(powershell.includes("$discovery.BaseResponse.RequestMessage.RequestUri"));
 });
 
 test("Unix installer rejects multiline repository and version values", async () => {
@@ -193,6 +209,10 @@ test("PowerShell installer rejects multiline repository and version values", asy
     await assertRejects(
       () => execFileAsync("pwsh", ["-NoProfile", "-File", installer, "-Version", "v1.2.3\n", "-InstallDir", installDir]),
       (error: any) => error.stderr.includes("version must be a stable release"),
+    );
+    await assertRejects(
+      () => execFileAsync("pwsh", ["-NoProfile", "-File", installer, "-Version", "v1.2.3", "-InstallDir", "relative-path"]),
+      (error: any) => error.stderr.includes("install directory must be an absolute path"),
     );
   } finally {
     await rm(installDir, { recursive: true, force: true });
