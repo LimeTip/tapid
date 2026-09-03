@@ -73,7 +73,7 @@ fn application_modules_do_not_render_or_choose_process_status() {
 #[test]
 fn commands_are_split_by_user_facing_capability() {
     let command_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
-    for capability in ["init", "install", "lock", "manifest", "run", "upgrade"] {
+    for capability in ["init", "install", "lock", "manifest", "run"] {
         assert!(
             command_root.join(format!("{capability}.rs")).is_file(),
             "missing command capability module: {capability}"

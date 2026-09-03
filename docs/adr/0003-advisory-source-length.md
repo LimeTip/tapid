@@ -14,7 +14,7 @@ The CLI entrypoint is different. Its responsibility is intentionally narrow and 
 
 ## Decision
 
-Eight hundred physical lines remains a general review recommendation for tracked production Rust files. Crossing it causes `scripts/check_architecture.py` to report an advisory while returning success when no hard rule is violated.
+Eight hundred physical lines remains a general review recommendation for tracked production Rust files. Crossing it causes `tools/check_architecture.ts` to report an advisory while returning success when no hard rule is violated.
 
 Reviewers evaluate cohesion, interface depth, change locality, navigability, and whether a real seam exists. A file is split only when the change creates clearer responsibility or a deeper module. A cohesive file may remain larger than 800 lines without an exception.
 
@@ -47,8 +47,8 @@ Rejected because mandatory exceptions turn a recommendation into a hard gate and
 Run:
 
 ```text
-python3 -m unittest tests.test_check_architecture -v
-python3 scripts/check_architecture.py
+node --experimental-strip-types --test tools/check_architecture_test.ts
+node --experimental-strip-types tools/check_architecture.ts
 cargo test -p tapid --test architecture --locked
 ```
 

@@ -6,7 +6,6 @@ pub(crate) mod install;
 pub(crate) mod lock;
 pub(crate) mod manifest;
 pub(crate) mod run;
-pub(crate) mod upgrade;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -27,8 +26,7 @@ pub(crate) enum Command {
     Lock(lock::Args),
     /// Run a root package script.
     Run(run::Args),
-    /// Upgrade Tapid from a verified stable release.
-    Upgrade(upgrade::Args),
+
     /// Install dependencies, optionally adding one package first.
     #[command(alias = "i")]
     Install(install::Args),
@@ -44,7 +42,7 @@ pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
         Some(Command::Manifest(args)) => manifest::run(args),
         Some(Command::Lock(args)) => lock::run(args),
         Some(Command::Run(args)) => run::run(args),
-        Some(Command::Upgrade(args)) => upgrade::run(args),
+
         Some(Command::Install(args)) => install::run(args),
     }
 }

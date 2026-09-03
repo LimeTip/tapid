@@ -1,0 +1,78 @@
+name: Publish tapid to crates.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Annotated release tag to publish, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: crates-io-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify annotated tag belongs to main
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "tag must be a stable vX.Y.Z release" >&2
+            exit 1
+          }
+          test "$(git cat-file -t "refs/tags/$TAG")" = tag || {
+            echo "release tag must be annotated" >&2
+            exit 1
+          }
+          TAG_COMMIT="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main || {
+            echo "release tag commit must belong to main" >&2
+            exit 1
+          }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate annotated tag and Cargo version
+        env:
+          TAG: ${{ inputs.tag }}
+        run: node --experimental-strip-types tools/release/release.ts check-tag "$TAG"
+      - name: Verify the public binary release and installer smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          TAG_COMMIT="$(git rev-parse "$TAG^{commit}")"
+          export TAG_COMMIT
+          release="$(gh release view "$TAG" --json isDraft,isPrerelease,tagName --jq 'select(.tagName == env.TAG and (.isDraft | not) and (.isPrerelease | not)) | .tagName')"
+          test "$release" = "$TAG" || {
+            echo "the matching public non-prerelease GitHub release is required" >&2
+            exit 1
+          }
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-public-smoke.yml/runs?event=release&status=success&per_page=100" \
+            --jq '.workflow_runs[] | select(.head_branch == env.TAG and .head_sha == env.TAG_COMMIT) | .id' | grep -Eq '^[0-9]+$' || {
+              echo "a successful public installer smoke run for $TAG is required" >&2
+              exit 1
+            }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Package the workspace
+        run: cargo package --workspace --locked
+      - name: Authenticate to crates.io with OIDC
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish missing crates in dependency order
+        run: node --experimental-strip-types tools/release/publish.ts
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

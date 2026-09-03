@@ -42,4 +42,4 @@ A tracked production Rust file above eight hundred physical lines prompts archit
 
 The CLI entrypoint has a stricter 100 physical line threshold because entrypoint-only code should dispatch arguments and convert process exits. Existing exceptions expose migration debt. They do not justify adding unrelated behavior.
 
-Run `python3 scripts/check_architecture.py` locally and in relevant validation. It reports the 800-line recommendation as an advisory and enforces only explicit hard contracts such as the thin CLI entrypoint threshold.
+Run `node --experimental-strip-types tools/check_architecture.ts` locally and in relevant validation. It reports the 800-line recommendation as an advisory and enforces only explicit hard contracts such as the thin CLI entrypoint threshold.
