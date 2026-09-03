@@ -72,9 +72,14 @@ test("binary release follows the small draft release flow", async () => {
   assert(workflow.includes("tags:"));
   assert(workflow.includes('"v*.*.*"'));
   assert(!workflow.includes("softprops/action-gh-release"));
+  assert(workflow.includes('gh api --paginate "repos/$GITHUB_REPOSITORY/releases"'));
   assert(workflow.includes('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"'));
+  assert(workflow.includes("release_id="));
+  assert(workflow.includes("upload_url="));
+  assert(workflow.includes('"$UPLOAD_URL?name=$name"'));
+  assert(workflow.includes('releases/$release_id"'));
   assert(workflow.includes("-F draft=true"));
-  assert(workflow.includes('gh release upload "$GITHUB_REF_NAME"'));
+  assert(!workflow.includes('gh release upload "$GITHUB_REF_NAME"'));
   assert(!workflow.includes("--clobber"));
   const fetchMain = workflow.indexOf("refs/heads/main:refs/remotes/origin/main");
   const ancestry = workflow.indexOf("merge-base --is-ancestor");

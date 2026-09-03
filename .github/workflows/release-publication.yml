@@ -109,26 +109,65 @@ jobs:
       - name: Create checksums
         run: node --experimental-strip-types tools/release/release.ts checksums release "${{ needs.prepare.outputs.version }}"
       - name: Create draft GitHub release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+          existing_releases="$(mktemp)"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$existing_releases"
+          if grep -Fxq "$GITHUB_REF_NAME" "$existing_releases"; then
+            echo "refusing to replace existing release $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+          release_fields="$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
             -f tag_name="$GITHUB_REF_NAME" \
             -f name="$GITHUB_REF_NAME" \
             -F draft=true \
             -F prerelease=false \
-            -F generate_release_notes=true >/dev/null
+            -F generate_release_notes=true --jq '[.id, .upload_url] | @tsv')"
+          IFS=$'\t' read -r release_id upload_url <<< "$release_fields"
+          case "$release_id" in
+            ''|*[!0-9]*) echo "release creation returned an invalid ID" >&2; exit 1 ;;
+          esac
+          expected_upload_url="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets{?name,label}"
+          test "$upload_url" = "$expected_upload_url"
+
+          matching_ids="$(mktemp)"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" > "$matching_ids"
+          test "$(wc -l < "$matching_ids" | tr -d ' ')" = 1
+          test "$(tr -d '\r\n' < "$matching_ids")" = "$release_id"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "upload_url=${upload_url%%\{*}" >> "$GITHUB_OUTPUT"
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" release/*.tar.gz release/SHA256SUMS
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          UPLOAD_URL: ${{ steps.release.outputs.upload_url }}
+        run: |
+          release_id="$RELEASE_ID"
+          case "$release_id" in
+            ''|*[!0-9]*) echo "invalid release ID" >&2; exit 1 ;;
+          esac
+          for asset in release/*.tar.gz release/SHA256SUMS; do
+            name="${asset##*/}"
+            curl --fail --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@$asset" \
+              "$UPLOAD_URL?name=$name" >/dev/null
+          done
       - name: Verify draft release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
         run: |
-          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+          release_id="$RELEASE_ID"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft)" = true
           find release -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort > expected-assets.txt
-          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | LC_ALL=C sort > actual-assets.txt
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --jq '.[].name' | LC_ALL=C sort > actual-assets.txt
           diff -u expected-assets.txt actual-assets.txt || {
             echo "unexpected draft release assets" >&2
             exit 1
