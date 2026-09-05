@@ -148,7 +148,7 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - Lifecycle scripts from dependencies never run during install. There is no approval workflow yet.
 - `add`, `remove`, `update`, `prune`, workspaces, full npm lockfile compatibility, and private-registry authentication are not implemented.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
-- CI runs tests and consumer validation on Ubuntu, macOS, and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
+- CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
 - Tapid does not yet provide package-level malware scanning, package provenance verification, an OS sandbox, process capability enforcement, or independently authenticated client release metadata.
 
 ## Development

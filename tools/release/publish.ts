@@ -35,7 +35,7 @@ function publishableToCratesIo(pkg: MetadataPackage): boolean {
 /**
  * Builds a deterministic, dependency-first plan for missing crates.io versions.
  * Packages restricted to other registries are excluded, and `tapid` is ordered last.
- * Throws when metadata is incomplete, cyclic, or requires an unpublishable local dependency.
+ * Throws when metadata is incomplete, cyclic, or requires an unpublished local dependency that cannot be published.
  */
 export function publicationPlan(metadata: CargoMetadata, published: Set<string>): Package[] {
   const packages = new Map(metadata.packages.map((pkg) => [pkg.name, pkg]));
@@ -46,10 +46,14 @@ export function publicationPlan(metadata: CargoMetadata, published: Set<string>)
 
   /** Visits one package, adding local dependencies first and rejecting cycles. */
   function visit(name: string): void {
-    if (visiting.has(name)) throw new Error(`workspace dependency cycle includes ${name}`);
     if (visited.has(name)) return;
     const pkg = packages.get(name);
     if (!pkg) throw new Error(`cargo metadata is missing publishable package ${name}`);
+    if (published.has(`${pkg.name}@${pkg.version}`)) {
+      visited.add(name);
+      return;
+    }
+    if (visiting.has(name)) throw new Error(`workspace dependency cycle includes ${name}`);
     if (!publishableToCratesIo(pkg)) {
       throw new Error(`workspace dependency ${name} is not publishable to crates.io`);
     }
@@ -57,9 +61,7 @@ export function publicationPlan(metadata: CargoMetadata, published: Set<string>)
     for (const dependency of internalDependencies(pkg)) visit(dependency);
     visiting.delete(name);
     visited.add(name);
-    if (!published.has(`${pkg.name}@${pkg.version}`)) {
-      ordered.push({ name: pkg.name, version: pkg.version });
-    }
+    ordered.push({ name: pkg.name, version: pkg.version });
   }
 
   const roots = [...packages.values()]
@@ -122,8 +124,8 @@ async function waitUntilPublished(pkg: Package): Promise<void> {
 async function main(): Promise<void> {
   const metadata = await cargoMetadata();
   const published = new Set<string>();
-  const candidates = publicationPlan(metadata, published);
-  for (const pkg of candidates) {
+  for (const { name, version } of metadata.packages) {
+    const pkg = { name, version };
     if (await isPublished(pkg)) published.add(`${pkg.name}@${pkg.version}`);
   }
 

@@ -75,6 +75,18 @@ test("publication plan rejects an unpublishable workspace runtime dependency", (
   );
 });
 
+test("publication plan accepts a published version of a locally unpublishable dependency", () => {
+  const publishedDependency = {
+    packages: [
+      { name: "tapid", version: "1.0.0", dependencies: ["itoa"] },
+      { name: "itoa", version: "1.0.15", dependencies: [], publish: [] },
+    ],
+  };
+  assertEquals(publicationPlan(publishedDependency, new Set(["itoa@1.0.15"])), [
+    { name: "tapid", version: "1.0.0" },
+  ]);
+});
+
 test("publication plan excludes packages restricted to another registry", () => {
   const restricted = {
     packages: [
