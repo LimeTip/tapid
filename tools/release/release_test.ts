@@ -76,7 +76,10 @@ test("binary release follows the small draft release flow", async () => {
   assert(workflow.includes('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"'));
   const createRelease = workflow.indexOf('release_fields="$(gh api --method POST');
   const boundedReleaseReadback = workflow.indexOf("for attempt in 1 2 3 4 5; do", createRelease);
+  const exactReleaseCount = workflow.indexOf(')" = 1 &&', boundedReleaseReadback);
+  const exactReleaseId = workflow.indexOf(')" = "$release_id"; then', exactReleaseCount);
   assert(createRelease >= 0 && boundedReleaseReadback > createRelease);
+  assert(boundedReleaseReadback < exactReleaseCount && exactReleaseCount < exactReleaseId);
   assert(workflow.includes('[ "$attempt" = 5 ] || sleep 2'));
   assert(workflow.includes("release read-back did not converge"));
   assert(workflow.includes('expected_upload_url="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets{?name,label}"'));
