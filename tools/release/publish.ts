@@ -10,7 +10,12 @@ type Dependency = string | {
   kind?: string | null;
   path?: string | null;
 };
-type MetadataPackage = { name: string; version: string; dependencies?: Dependency[] };
+type MetadataPackage = {
+  name: string;
+  version: string;
+  dependencies?: Dependency[];
+  publish?: string[] | null;
+};
 type CargoMetadata = { packages: MetadataPackage[] };
 type Package = { name: string; version: string };
 
@@ -19,6 +24,10 @@ function internalDependencies(pkg: MetadataPackage): string[] {
     if (typeof dependency === "string") return [dependency];
     return dependency.source === null && dependency.kind !== "dev" ? [dependency.name] : [];
   });
+}
+
+function publishableToCratesIo(pkg: MetadataPackage): boolean {
+  return pkg.publish === undefined || pkg.publish === null || pkg.publish.includes("crates-io");
 }
 
 export function publicationPlan(metadata: CargoMetadata, published: Set<string>): Package[] {
@@ -33,6 +42,9 @@ export function publicationPlan(metadata: CargoMetadata, published: Set<string>)
     if (visited.has(name)) return;
     const pkg = packages.get(name);
     if (!pkg) throw new Error(`cargo metadata is missing publishable package ${name}`);
+    if (!publishableToCratesIo(pkg)) {
+      throw new Error(`workspace dependency ${name} is not publishable to crates.io`);
+    }
     visiting.add(name);
     for (const dependency of internalDependencies(pkg)) visit(dependency);
     visiting.delete(name);
@@ -42,6 +54,12 @@ export function publicationPlan(metadata: CargoMetadata, published: Set<string>)
     }
   }
 
+  const roots = [...packages.values()]
+    .filter(publishableToCratesIo)
+    .map((pkg) => pkg.name)
+    .filter((name) => name !== "tapid")
+    .sort();
+  for (const name of roots) visit(name);
   visit("tapid");
   return ordered;
 }

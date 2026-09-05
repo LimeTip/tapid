@@ -32,7 +32,7 @@ The Git tag, GitHub release, `tapid` Cargo package, and `tapid --version` output
 
 Supporting crates are versioned independently. Publish a supporting crate only when its packaged contents or dependency requirements changed. Do not republish unrelated or unchanged workspace crates merely to align their numbers with the product release.
 
-When an internal `0.0.x` crate changes, update its version and every affected dependent requirement deliberately. Cargo treats `0.0.x` requirements narrowly, so a changed dependency may require a dependent package version bump. The crates.io workflow publishes only the missing dependency closure reachable from `tapid`.
+When an internal `0.0.x` crate changes, update its version and every affected dependent requirement deliberately. Cargo treats `0.0.x` requirements narrowly, so a changed dependency may require a dependent package version bump. The crates.io workflow considers every publishable workspace package, skips exact versions already present on crates.io, and publishes the missing versions in dependency order with `tapid` last.
 
 Reconsider a coordinated runtime-crate release group at `0.1.0` only if release evidence shows that nearly every runtime crate changes together. Do not retroactively normalize existing versions.
 

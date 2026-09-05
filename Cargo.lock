@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "tapid"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -1307,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-archive"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "flate2",
  "hex",
@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-attestations"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1327,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-core"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "base64 0.22.1",
  "semver",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-linker"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "tapid-core",
  "tapid-manifest",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-lockfile"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-manifest"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1362,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-policy"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-registry-client"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "httpdate",
  "reqwest",
@@ -1398,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-release-client"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "ed25519-dalek",
  "serde",
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-resolver"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "tapid-core",
  "tapid-registry-client",
@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-runner"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "sha2",
  "tapid-policy",
@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-signatures"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-store"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "fs4",
  "hex",
@@ -1453,11 +1453,11 @@ dependencies = [
 
 [[package]]
 name = "tapid-test-support"
-version = "0.0.1"
+version = "0.0.2"
 
 [[package]]
 name = "tapid-transparency"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
  "serde_json",
