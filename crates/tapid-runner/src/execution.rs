@@ -13,12 +13,15 @@ pub const MAX_PROGRAM_UNITS: usize = 4_096;
 pub const MAX_ARGUMENT_COUNT: usize = 4_096;
 /// Maximum argument length in bytes on Unix or UTF-16 code units on Windows.
 pub const MAX_ARGUMENT_UNITS: usize = 16_384;
-/// Maximum cumulative program and argv payload, including terminators.
+/// Maximum cumulative argv payload. On Windows this bounds a conservative upper estimate of the
+/// serialized `CreateProcessW` command line, including quoting, separators, and its terminating NUL.
 pub const MAX_ARGV_UNITS: usize = 32_767;
 /// Maximum environment value length in bytes on Unix or UTF-16 code units on Windows.
 pub const MAX_ENVIRONMENT_VALUE_UNITS: usize = 32_767;
 /// Maximum cumulative child environment block, including separators and terminators.
 pub const MAX_ENVIRONMENT_BLOCK_UNITS: usize = 32_767;
+/// Maximum project-root length in bytes on Unix or UTF-16 code units on Windows.
+pub const MAX_PROJECT_ROOT_UNITS: usize = 32_767;
 
 /// Identity and lifecycle status of a containment backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -729,6 +732,10 @@ pub enum Termination {
 
 /// Captured execution result paired with an enforcement receipt.
 ///
+/// Post-spawn validation checked-adds the byte lengths of stdout and stderr; their combined size
+/// may not exceed the exact preflight `max_output_bytes`. Resource-limit termination variants are
+/// accepted only when the corresponding limit was present in that exact preflight.
+///
 /// ```compile_fail
 /// use tapid_runner::{EnforcementReceipt, ExecutionOutcome, Termination};
 /// fn forge(enforcement: EnforcementReceipt) {
@@ -783,6 +790,52 @@ impl ExecutionOutcome {
                 "execution outcome does not match the exact validated preflight",
             ));
         }
+        let captured_bytes = checked_captured_output_bytes(self.stdout.len(), self.stderr.len())?;
+        if preflight
+            .policy
+            .limits
+            .max_output_bytes()
+            .is_some_and(|limit| {
+                u64::try_from(captured_bytes).map_or(true, |captured| captured > limit)
+            })
+        {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "captured stdout and stderr exceed the exact preflight output limit",
+            ));
+        }
+        if matches!(self.termination, Termination::TimedOut)
+            && preflight.policy.limits.timeout_seconds().is_none()
+        {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "timeout termination requires an exact preflight timeout limit",
+            ));
+        }
+        if matches!(self.termination, Termination::OutputLimitExceeded)
+            && preflight.policy.limits.max_output_bytes().is_none()
+        {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "output-limit termination requires an exact preflight output limit",
+            ));
+        }
+        if matches!(self.termination, Termination::ProcessLimitExceeded)
+            && preflight.policy.limits.max_processes().is_none()
+        {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "process-limit termination requires an exact preflight process limit",
+            ));
+        }
+        if matches!(self.termination, Termination::MemoryLimitExceeded)
+            && preflight.policy.limits.max_memory_bytes().is_none()
+        {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "memory-limit termination requires an exact preflight memory limit",
+            ));
+        }
         Ok(())
     }
 
@@ -798,6 +851,15 @@ impl ExecutionOutcome {
     pub fn enforcement(&self) -> &EnforcementReceipt {
         &self.enforcement
     }
+}
+
+fn checked_captured_output_bytes(stdout: usize, stderr: usize) -> Result<usize, ExecutionError> {
+    stdout.checked_add(stderr).ok_or_else(|| {
+        ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            "captured stdout and stderr byte count overflowed",
+        )
+    })
 }
 
 /// Stable high-level execution failure categories for callers and machine output.
@@ -892,16 +954,32 @@ impl ExecutionRequest {
                 "execution request exceeds {MAX_ARGUMENT_COUNT} arguments"
             )));
         }
+        #[cfg(windows)]
+        let mut argument_units = Vec::with_capacity(self.arguments.len());
+        #[cfg(not(windows))]
         let mut argv_units = program_units.saturating_add(1);
         for argument in &self.arguments {
             let units = validate_os_value("execution argument", argument, MAX_ARGUMENT_UNITS)?;
-            argv_units = argv_units.saturating_add(units).saturating_add(1);
+            #[cfg(windows)]
+            argument_units.push(units);
+            #[cfg(not(windows))]
+            {
+                argv_units = argv_units.saturating_add(units).saturating_add(1);
+            }
         }
+        #[cfg(windows)]
+        validate_windows_command_line_units(program_units, argument_units.iter().copied())?;
+        #[cfg(not(windows))]
         if argv_units > MAX_ARGV_UNITS {
             return Err(invalid_request(format!(
                 "execution argv exceeds {MAX_ARGV_UNITS} bytes/code units"
             )));
         }
+        validate_os_value(
+            "project root",
+            self.project_root.as_os_str(),
+            MAX_PROJECT_ROOT_UNITS,
+        )?;
         if self.project_root.as_os_str().is_empty() {
             return Err(invalid_request("project root must not be empty"));
         }
@@ -1023,6 +1101,42 @@ impl ExecutionRequestBuilder {
 
 fn invalid_request(message: impl Into<String>) -> ExecutionError {
     ExecutionError::new(ExecutionErrorCategory::InvalidRequest, message)
+}
+
+/// Returns a conservative upper bound rather than the exact Windows command-line serialization.
+/// The program and every argument are assumed to need surrounding quotes, and every input code
+/// unit is budgeted to double under worst-case quote/backslash escaping. Separators and the
+/// mandatory terminating NUL are counted separately.
+#[cfg(any(windows, test))]
+fn windows_command_line_units_upper_bound(
+    program_units: usize,
+    argument_units: impl IntoIterator<Item = usize>,
+) -> Option<usize> {
+    let mut units = program_units
+        .checked_mul(2)?
+        .checked_add(2)?
+        .checked_add(1)?;
+    for argument_units in argument_units {
+        units = units
+            .checked_add(1)?
+            .checked_add(argument_units.checked_mul(2)?.checked_add(2)?)?;
+    }
+    Some(units)
+}
+
+#[cfg(any(windows, test))]
+fn validate_windows_command_line_units(
+    program_units: usize,
+    argument_units: impl IntoIterator<Item = usize>,
+) -> Result<(), ExecutionError> {
+    if windows_command_line_units_upper_bound(program_units, argument_units)
+        .is_none_or(|units| units > MAX_ARGV_UNITS)
+    {
+        return Err(invalid_request(format!(
+            "execution argv may exceed {MAX_ARGV_UNITS} UTF-16 code units after Windows command-line serialization"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_os_value(kind: &str, value: &OsStr, maximum: usize) -> Result<usize, ExecutionError> {
@@ -1747,6 +1861,179 @@ mod tests {
         }
     }
 
+    struct OutcomeBackend {
+        termination: Termination,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        spawns: std::cell::Cell<usize>,
+    }
+
+    impl ExecutionBackend for OutcomeBackend {
+        fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+            let requested = EnforcementDimensions::requested_by(request.policy());
+            support_with_evidence(requested.clone(), requested.clone(), requested)
+        }
+
+        fn spawn(
+            &self,
+            _request: &ExecutionRequest,
+            preflight: &ValidatedPreflight,
+        ) -> Result<ExecutionOutcome, ExecutionError> {
+            self.spawns.set(self.spawns.get() + 1);
+            let receipt =
+                EnforcementReceipt::checked(preflight, preflight.support.requested().clone())?;
+            ExecutionOutcome::checked(
+                self.termination.clone(),
+                self.stdout.clone(),
+                self.stderr.clone(),
+                receipt,
+            )
+        }
+    }
+
+    fn policy_with_limits(limits: ExecutionLimits) -> SandboxPolicy {
+        SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            limits,
+        )
+        .unwrap()
+    }
+
+    fn assert_outcome_rejected_after_spawn(policy: SandboxPolicy, backend: OutcomeBackend) {
+        let request = ExecutionRequest::builder("node")
+            .policy(policy)
+            .build()
+            .unwrap();
+        assert_eq!(
+            execute_with_backend(&request, &backend)
+                .unwrap_err()
+                .category(),
+            ExecutionErrorCategory::PolicyViolation
+        );
+        assert_eq!(backend.spawns.get(), 1);
+    }
+
+    #[test]
+    fn backend_output_over_exact_preflight_limit_is_rejected_after_spawn() {
+        assert_outcome_rejected_after_spawn(
+            policy_with_limits(ExecutionLimits::new(None, Some(3), None, None).unwrap()),
+            OutcomeBackend {
+                termination: Termination::Exited(0),
+                stdout: vec![1, 2],
+                stderr: vec![3, 4],
+                spawns: std::cell::Cell::new(0),
+            },
+        );
+    }
+
+    #[test]
+    fn backend_timeout_without_exact_preflight_limit_is_rejected_after_spawn() {
+        assert_outcome_rejected_after_spawn(
+            policy_with_limits(ExecutionLimits::default()),
+            OutcomeBackend {
+                termination: Termination::TimedOut,
+                stdout: vec![],
+                stderr: vec![],
+                spawns: std::cell::Cell::new(0),
+            },
+        );
+    }
+
+    #[test]
+    fn backend_output_termination_without_exact_preflight_limit_is_rejected_after_spawn() {
+        assert_outcome_rejected_after_spawn(
+            policy_with_limits(ExecutionLimits::default()),
+            OutcomeBackend {
+                termination: Termination::OutputLimitExceeded,
+                stdout: vec![],
+                stderr: vec![],
+                spawns: std::cell::Cell::new(0),
+            },
+        );
+    }
+
+    #[test]
+    fn backend_process_termination_without_exact_preflight_limit_is_rejected_after_spawn() {
+        assert_outcome_rejected_after_spawn(
+            policy_with_limits(ExecutionLimits::default()),
+            OutcomeBackend {
+                termination: Termination::ProcessLimitExceeded,
+                stdout: vec![],
+                stderr: vec![],
+                spawns: std::cell::Cell::new(0),
+            },
+        );
+    }
+
+    #[test]
+    fn backend_memory_termination_without_exact_preflight_limit_is_rejected_after_spawn() {
+        assert_outcome_rejected_after_spawn(
+            policy_with_limits(ExecutionLimits::default()),
+            OutcomeBackend {
+                termination: Termination::MemoryLimitExceeded,
+                stdout: vec![],
+                stderr: vec![],
+                spawns: std::cell::Cell::new(0),
+            },
+        );
+    }
+
+    #[test]
+    fn backend_terminations_coherent_with_exact_preflight_limits_are_accepted() {
+        let cases = [
+            (
+                Termination::Exited(0),
+                ExecutionLimits::new(None, Some(3), None, None).unwrap(),
+                vec![1, 2],
+                vec![3],
+            ),
+            (
+                Termination::TimedOut,
+                ExecutionLimits::new(Some(1), None, None, None).unwrap(),
+                vec![],
+                vec![],
+            ),
+            (
+                Termination::OutputLimitExceeded,
+                ExecutionLimits::new(None, Some(1), None, None).unwrap(),
+                vec![1],
+                vec![],
+            ),
+            (
+                Termination::ProcessLimitExceeded,
+                ExecutionLimits::new(None, None, Some(1), None).unwrap(),
+                vec![],
+                vec![],
+            ),
+            (
+                Termination::MemoryLimitExceeded,
+                ExecutionLimits::new(None, None, None, Some(1)).unwrap(),
+                vec![],
+                vec![],
+            ),
+        ];
+
+        for (termination, limits, stdout, stderr) in cases {
+            let backend = OutcomeBackend {
+                termination: termination.clone(),
+                stdout,
+                stderr,
+                spawns: std::cell::Cell::new(0),
+            };
+            let request = ExecutionRequest::builder("node")
+                .policy(policy_with_limits(limits))
+                .build()
+                .unwrap();
+            let outcome = execute_with_backend(&request, &backend).unwrap();
+            assert_eq!(outcome.termination(), &termination);
+            assert_eq!(backend.spawns.get(), 1);
+        }
+    }
+
     fn preflight_for(policy: SandboxPolicy, support: ContainmentSupport) -> ValidatedPreflight {
         let request = ExecutionRequest::builder("node")
             .policy(policy)
@@ -2140,31 +2427,34 @@ mod tests {
                 .build()
                 .is_err()
         );
-        let exact_argv = [
-            "x".repeat(MAX_ARGUMENT_UNITS),
-            "y".repeat(MAX_ARGV_UNITS - MAX_ARGUMENT_UNITS - 4),
-        ];
-        assert!(
-            ExecutionRequest::builder("p")
-                .args(exact_argv.clone())
-                .build()
-                .is_ok()
-        );
-        let mut oversized_argv = exact_argv;
-        oversized_argv[1].push('y');
-        assert!(
-            ExecutionRequest::builder("p")
-                .args(oversized_argv)
-                .build()
-                .is_err()
-        );
-        let cumulative = std::iter::repeat_n("x".repeat(MAX_ARGUMENT_UNITS), 2);
-        assert!(
-            ExecutionRequest::builder("node")
-                .args(cumulative)
-                .build()
-                .is_err()
-        );
+        #[cfg(not(windows))]
+        {
+            let exact_argv = [
+                "x".repeat(MAX_ARGUMENT_UNITS),
+                "y".repeat(MAX_ARGV_UNITS - MAX_ARGUMENT_UNITS - 4),
+            ];
+            assert!(
+                ExecutionRequest::builder("p")
+                    .args(exact_argv.clone())
+                    .build()
+                    .is_ok()
+            );
+            let mut oversized_argv = exact_argv;
+            oversized_argv[1].push('y');
+            assert!(
+                ExecutionRequest::builder("p")
+                    .args(oversized_argv)
+                    .build()
+                    .is_err()
+            );
+            let cumulative = std::iter::repeat_n("x".repeat(MAX_ARGUMENT_UNITS), 2);
+            assert!(
+                ExecutionRequest::builder("node")
+                    .args(cumulative)
+                    .build()
+                    .is_err()
+            );
+        }
 
         let policy = required_policy();
         assert!(
@@ -2190,18 +2480,124 @@ mod tests {
         );
     }
 
+    #[test]
+    fn project_root_limit_and_nul_are_rejected_before_support_probing() {
+        struct Backend {
+            probes: std::cell::Cell<usize>,
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                self.probes.set(self.probes.get() + 1);
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                unreachable!()
+            }
+        }
+
+        assert!(
+            ExecutionRequest::builder("node")
+                .project_root("x".repeat(MAX_PROJECT_ROOT_UNITS))
+                .build()
+                .is_ok()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .project_root("x".repeat(MAX_PROJECT_ROOT_UNITS + 1))
+                .build()
+                .is_err()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .project_root("bad\0root")
+                .build()
+                .is_err()
+        );
+
+        for invalid_root in [
+            OsString::from("x".repeat(MAX_PROJECT_ROOT_UNITS + 1)),
+            OsString::from("bad\0root"),
+        ] {
+            let backend = Backend {
+                probes: std::cell::Cell::new(0),
+            };
+            let mut request = ExecutionRequest::builder("node").build().unwrap();
+            request.project_root = PathBuf::from(invalid_root);
+            assert_eq!(
+                execute_with_backend(&request, &backend)
+                    .unwrap_err()
+                    .category(),
+                ExecutionErrorCategory::InvalidRequest
+            );
+            assert_eq!(backend.probes.get(), 0);
+        }
+    }
+
+    #[test]
+    fn windows_command_line_bound_rejects_the_prior_raw_unit_limit() {
+        let prior_raw_limit = 1 + 1 + 16_382 + 1 + 16_381 + 1;
+        assert_eq!(prior_raw_limit, MAX_ARGV_UNITS);
+        assert!(validate_windows_command_line_units(1, [16_382, 16_381]).is_err());
+    }
+
+    #[test]
+    fn windows_command_line_bound_accepts_at_limit_conservative_cases() {
+        assert_eq!(
+            windows_command_line_units_upper_bound(4_096, [12_284]),
+            Some(MAX_ARGV_UNITS - 1)
+        );
+        assert!(validate_windows_command_line_units(4_096, [12_284]).is_ok());
+        assert_eq!(
+            windows_command_line_units_upper_bound(1, [8_190, 8_188]),
+            Some(MAX_ARGV_UNITS)
+        );
+        assert!(validate_windows_command_line_units(1, [8_190, 8_188]).is_ok());
+        assert!(validate_windows_command_line_units(1, [8_190, 8_189]).is_err());
+    }
+
+    #[test]
+    fn windows_command_line_bound_counts_full_worst_case_serialization() {
+        // Quoted program + separator-delimited quoted arguments + terminating NUL, with every
+        // input unit budgeted for worst-case quote/backslash expansion.
+        assert_eq!(
+            windows_command_line_units_upper_bound(3, [4, 5]),
+            Some((2 * 3 + 2) + 1 + (2 * 4 + 2) + 1 + (2 * 5 + 2) + 1)
+        );
+    }
+
+    #[test]
+    fn captured_output_accounting_rejects_length_overflow() {
+        assert!(checked_captured_output_bytes(usize::MAX, 1).is_err());
+        assert_eq!(checked_captured_output_bytes(2, 3).unwrap(), 5);
+    }
+
     #[cfg(unix)]
     #[test]
-    fn unix_request_preserves_non_utf8_arguments_but_rejects_nul() {
+    fn unix_request_preserves_non_utf8_values_but_rejects_nul() {
         use std::os::unix::ffi::OsStringExt;
         let opaque_program = OsString::from_vec(vec![b'.', b'/', 0xff]);
         let opaque_argument = OsString::from_vec(vec![0xfe, b'x']);
+        let opaque_root = OsString::from_vec(vec![b'.', b'/', 0xfd]);
+        let opaque_environment = OsString::from_vec(vec![0xfc, b'x']);
         let request = ExecutionRequest::builder(opaque_program.clone())
             .arg(opaque_argument.clone())
+            .project_root(PathBuf::from(opaque_root.clone()))
+            .policy(required_policy())
+            .env("NODE_ENV", opaque_environment.clone())
             .build()
             .unwrap();
         assert_eq!(request.program(), opaque_program);
         assert_eq!(request.arguments(), &[opaque_argument]);
+        assert_eq!(request.project_root(), Path::new(&opaque_root));
+        assert_eq!(
+            request.environment().get(OsStr::new("NODE_ENV")),
+            Some(&opaque_environment)
+        );
         assert!(
             ExecutionRequest::builder("node")
                 .arg(OsString::from_vec(vec![b'x', 0, b'y']))
