@@ -52,13 +52,17 @@ async function output(command: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-async function checkTag(tag: string): Promise<void> {
-  const type = await output("git", ["cat-file", "-t", `refs/tags/${tag}`]);
-  if (type !== "tag") throw new Error(`release tag must be annotated: ${tag}`);
+async function tapidVersion(): Promise<string> {
   const metadata = JSON.parse(await output("cargo", ["metadata", "--no-deps", "--format-version", "1", "--locked"]));
   const tapid = metadata.packages.find((pkg: { name: string }) => pkg.name === "tapid");
   if (!tapid) throw new Error("cargo metadata does not contain the tapid package");
-  console.log(releaseVersion(tag, tapid.version));
+  return tapid.version;
+}
+
+async function checkTag(tag: string): Promise<void> {
+  const type = await output("git", ["cat-file", "-t", `refs/tags/${tag}`]);
+  if (type !== "tag") throw new Error(`release tag must be annotated: ${tag}`);
+  console.log(releaseVersion(tag, await tapidVersion()));
 }
 
 const isMain = process.argv[1] !== undefined &&
@@ -68,11 +72,13 @@ if (isMain) {
   const [command, ...args] = process.argv.slice(2);
   if (command === "check-tag" && args.length === 1) {
     await checkTag(args[0]);
+  } else if (command === "current-version" && args.length === 0) {
+    console.log(await tapidVersion());
   } else if (command === "checksums" && args.length === 2) {
     const content = await checksumLines(args[0], args[1]);
     await writeFile(join(args[0], "SHA256SUMS"), content);
   } else {
-    console.error("usage: release.ts check-tag TAG | checksums DIRECTORY VERSION");
+    console.error("usage: release.ts check-tag TAG | current-version | checksums DIRECTORY VERSION");
     process.exitCode = 2;
   }
 }

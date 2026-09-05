@@ -5,17 +5,12 @@ on:
     tags:
       - "v*.*.*"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing annotated release tag to build
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  group: release-publication
   cancel-in-progress: false
 
 jobs:
@@ -37,8 +32,13 @@ jobs:
         name: Validate annotated tag and Cargo version
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            RELEASE_TAG="v$(node --experimental-strip-types tools/release/release.ts current-version)"
+          else
+            RELEASE_TAG="$GITHUB_REF_NAME"
+          fi
           [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
             echo "release tag must be a stable vX.Y.Z release" >&2
             exit 1

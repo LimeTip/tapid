@@ -81,13 +81,15 @@ test("binary release follows the small draft release flow", async () => {
   assert(workflow.includes("-F draft=true"));
   assert(!workflow.includes('gh release upload "$GITHUB_REF_NAME"'));
   assert(!workflow.includes("--clobber"));
+  const deriveTag = workflow.indexOf('RELEASE_TAG="v$(node --experimental-strip-types tools/release/release.ts current-version)"');
   const validateTagInput = workflow.indexOf('[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)');
   const deleteCheckoutTag = workflow.indexOf('git tag -d "$RELEASE_TAG"');
   const fetchAnnotatedTag = workflow.indexOf('refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG');
   const validateAnnotatedTag = workflow.indexOf('git cat-file -t "refs/tags/$RELEASE_TAG"');
   const fetchMain = workflow.indexOf("refs/heads/main:refs/remotes/origin/main");
   const ancestry = workflow.indexOf("merge-base --is-ancestor");
-  assert(validateTagInput >= 0 && validateTagInput < deleteCheckoutTag);
+  assert(deriveTag >= 0 && deriveTag < validateTagInput);
+  assert(validateTagInput < deleteCheckoutTag);
   assert(deleteCheckoutTag < fetchAnnotatedTag && fetchAnnotatedTag < validateAnnotatedTag);
   assert(validateAnnotatedTag < fetchMain && fetchMain < ancestry);
   assert(workflow.includes('tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"'));
@@ -96,7 +98,9 @@ test("binary release follows the small draft release flow", async () => {
   assert(workflow.includes("unexpected draft release assets"));
   assert(workflow.includes("actions/download-artifact@v4"));
   assert(workflow.includes("workflow_dispatch:"));
-  assert(workflow.includes("tag:"));
+  assert(!workflow.includes("inputs:"));
+  assert(!workflow.includes("${{ inputs."));
+  assert(workflow.includes("group: release-publication"));
   assert(!workflow.includes("release-manifest"));
   assert(!workflow.includes("python"));
   assert(!workflow.includes("gh release edit"));
