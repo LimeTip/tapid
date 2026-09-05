@@ -82,14 +82,26 @@ Set the intended values explicitly:
 ```sh
 VERSION=X.Y.Z
 TAG="v$VERSION"
-COMMIT=<verified-release-merge-commit>
+COMMIT="REPLACE_WITH_VERIFIED_RELEASE_MERGE_COMMIT"
 ```
 
 Verify the source before creating the tag:
 
 ```sh
+set -euo pipefail
+git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
 test "$(git rev-parse "origin/main^{commit}")" = "$COMMIT"
 test "$(git show "$COMMIT:crates/tapid-cli/Cargo.toml" | sed -n 's/^version = "\([^"]*\)"/\1/p' | head -1)" = "$VERSION"
+
+test -z "$(git tag --list "$TAG")" || {
+  echo "local tag already exists: $TAG" >&2
+  exit 1
+}
+remote_tag_refs="$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+test -z "$remote_tag_refs" || {
+  echo "remote tag already exists: $TAG" >&2
+  exit 1
+}
 ```
 
 Create and push the annotated tag exactly once:
@@ -165,9 +177,11 @@ An HTTP 200 response does not prove installation or asset correctness.
 
 ### 5. Edit draft metadata safely
 
-Treat draft metadata as a complete record. Do not send a body-only raw REST PATCH. The GitHub release schema requires `tag_name`, and incomplete updates can replace the draft tag field with an internal `untagged-*` slug.
+The create-release API requires `tag_name`; the update-release API does not. During `v0.0.8`, however, an incomplete metadata update through the client and payload shape used at the time exposed the draft under an internal `untagged-*` slug. Treat that observed failure as a reason to make draft edits explicit and immediately verifiable, not as a claim that every PATCH requires a complete record.
 
-When changing release notes or other draft metadata, explicitly preserve:
+Avoid editing metadata after final draft approval. If notes or other metadata must change before approval, identify the release by numeric ID, snapshot its current state, and send a minimal update containing only the fields that are intentionally changing. Avoid a client or payload shape that injects defaults for omitted fields.
+
+Before and after the update, compare:
 
 - `tag_name`;
 - `target_commitish`;
@@ -181,24 +195,24 @@ For an existing annotated tag, `target_commitish` does not determine source iden
 
 Changing `target_commitish` to an older commit that modifies `.github/workflows` relative to the default branch can require additional OAuth `workflow` scope. GitHub may deliberately return 404 when that scope is absent. Do not broaden token scope merely to make an unnecessary metadata edit work.
 
-After every draft edit, read back the release by numeric ID and through the draft-aware `gh release view` surface. Require the original release ID, exact tag, expected seven assets, reviewed body, `draft=true`, and unchanged remote tag object and peeled commit.
+After every draft edit, read back the release by numeric ID and through the draft-aware `gh release view` surface. Require the original release ID, exact tag, expected seven assets, reviewed body, `draft=true`, and unchanged remote tag object and peeled commit. Require every field outside the intended change set to remain byte-for-byte or value-for-value unchanged. The edit invalidates any prior approval; repeat the final draft review before publication.
 
 ### 6. Publish the reviewed draft
 
-Publication requires explicit human approval after the final draft read-back. Use a command that preserves every important field:
+Publication requires explicit human approval after the final draft read-back. Promote the already-reviewed numeric release record without resupplying its notes, title, tag, target, or prerelease state:
 
 ```sh
-gh release edit "$TAG" \
-  --repo LimeTip/tapid \
-  --tag "$TAG" \
-  --verify-tag \
-  --target main \
-  --title "$TAG" \
-  --notes-file "docs/releases/$VERSION.md" \
-  --draft=false \
-  --prerelease=false \
-  --latest
+RELEASE_ID="REPLACE_WITH_VERIFIED_NUMERIC_RELEASE_ID"
+case "$RELEASE_ID" in
+  ''|*[!0-9]*) echo "invalid numeric release ID" >&2; exit 1 ;;
+esac
+gh api --method PATCH \
+  "repos/LimeTip/tapid/releases/$RELEASE_ID" \
+  -F draft=false \
+  -f make_latest=true
 ```
+
+This minimizes the irreversible promotion mutation and prevents a dirty, stale, or later-modified local notes file from replacing the approved body at publication time.
 
 Immediately verify through an unauthenticated API request that:
 
@@ -297,7 +311,7 @@ Recovery must preserve the original annotated tag and exact tagged commit.
 
 Never recreate or push the tag again merely to retrigger the workflow. Do not rerun a historical workflow revision if it would build mutable `main` instead of the exact tag commit.
 
-### Draft exists but workflow failed before asset upload
+### Draft exists but workflow failed before or during asset upload
 
 Do not dispatch the create-only workflow again and do not create a duplicate release.
 
@@ -307,9 +321,11 @@ Do not dispatch the create-only workflow again and do not create a duplicate rel
 4. Require all six expected archives and reject extra files.
 5. Generate and verify `SHA256SUMS` from those exact bytes.
 6. Inspect archive layout and correlate native version checks with the build logs.
-7. Upload to the existing draft by numeric release ID.
-8. Download every uploaded asset back by numeric asset ID.
-9. Recheck names, sizes, checksums, archive layout, draft state, tag object, and peeled commit.
+7. List assets already attached to the draft by numeric release ID. Require their names to be a unique subset of the expected seven names and reject unexpected or duplicate names.
+8. Download every existing asset by numeric asset ID. Require its size and SHA-256 to match the corresponding locally recovered file exactly. Stop on any mismatch; never overwrite or delete an ambiguous asset.
+9. Upload only expected names that are not already present, using the existing numeric release ID.
+10. Download all seven resulting assets back by numeric asset ID.
+11. Recheck names, sizes, checksums, archive layout, draft state, tag object, and peeled commit.
 
 Manual recovery is an evidence-preserving exception, not the normal release path.
 
