@@ -388,7 +388,7 @@ fn validate_project_path(value: &str) -> Result<(), ConfigError> {
                 .as_bytes()
                 .first()
                 .is_some_and(u8::is_ascii_alphabetic);
-    let components: Vec<_> = value.split(['/', '\\']).collect();
+    let components: Vec<_> = value.split('/').collect();
     let invalid_component = components.iter().any(|component| {
         component.is_empty()
             || (*component == "." && value != ".")
@@ -396,7 +396,7 @@ fn validate_project_path(value: &str) -> Result<(), ConfigError> {
             || (*component != "." && component.ends_with(['.', ' ']))
             || component.chars().any(|character| {
                 character.is_control()
-                    || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+                    || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\')
             })
             || is_windows_reserved_component(component)
     });
@@ -591,8 +591,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_absolute_and_traversing_grants_on_every_platform() {
-        for path in ["/etc", "../secrets", "safe/../../secrets", r"C:\Windows"] {
+    fn rejects_absolute_traversing_and_backslash_grants_on_every_platform() {
+        for path in [
+            "/etc",
+            "../secrets",
+            "safe/../../secrets",
+            r"C:\Windows",
+            r"dir\file",
+            r"plain\name",
+        ] {
             let source = format!("[run.defaults]\nread = [{path:?}]");
             let error = RunConfig::parse_toml(&source).unwrap_err();
             assert_eq!(error.category(), ConfigErrorCategory::InvalidPath, "{path}");

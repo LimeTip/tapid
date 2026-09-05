@@ -2,6 +2,7 @@ use crate::config::{ExecutionLimits, SandboxMode, SandboxPolicy, validate_enviro
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Identity and lifecycle status of a containment backend.
@@ -126,7 +127,8 @@ impl EnforcementDimensions {
     }
 }
 
-/// Canonical filesystem paths actually granted by a backend.
+/// Absolute filesystem paths granted by a backend after canonical preflight. Existing targets are
+/// canonical; missing targets are bound to a canonical existing ancestor and validated suffix.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedFilesystemGrants {
     read: Vec<PathBuf>,
@@ -141,6 +143,128 @@ impl ResolvedFilesystemGrants {
     pub fn write(&self) -> &[PathBuf] {
         &self.write
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum GrantResolution {
+    ExistingCanonical,
+    MissingTarget {
+        canonical_ancestor: PathBuf,
+        relative_target: PathBuf,
+    },
+    RuntimeCanonical,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedGrant {
+    path: PathBuf,
+    resolution: GrantResolution,
+}
+
+/// Explicit backend runtime paths added to the declarative project policy.
+/// Construction is private so additions are canonical before preflight succeeds.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct RuntimeFilesystemAdditions {
+    read: Vec<ResolvedGrant>,
+    write: Vec<ResolvedGrant>,
+}
+
+impl RuntimeFilesystemAdditions {
+    #[allow(dead_code)] // Used by platform backends when runtime grants are required.
+    fn checked(read: Vec<PathBuf>, write: Vec<PathBuf>) -> Result<Self, ExecutionError> {
+        Ok(Self {
+            read: read
+                .into_iter()
+                .map(resolve_runtime_grant)
+                .collect::<Result<_, _>>()?,
+            write: write
+                .into_iter()
+                .map(resolve_runtime_grant)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedSandboxPolicy {
+    mode: SandboxMode,
+    project_root: PathBuf,
+    read: Vec<ResolvedGrant>,
+    write: Vec<ResolvedGrant>,
+    grants: ResolvedFilesystemGrants,
+    limits: ExecutionLimits,
+}
+
+/// Private proof that support and the exact resolved policy passed pre-spawn checks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ValidatedPreflight {
+    support: ContainmentSupport,
+    policy: ResolvedSandboxPolicy,
+}
+
+impl ResolvedSandboxPolicy {
+    fn validate(&self) -> Result<(), ExecutionError> {
+        let projected = ResolvedFilesystemGrants {
+            read: self.read.iter().map(|grant| grant.path.clone()).collect(),
+            write: self.write.iter().map(|grant| grant.path.clone()).collect(),
+        };
+        if projected != self.grants {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "resolved filesystem receipt grants omit or add preflight paths",
+            ));
+        }
+        for grant in self.read.iter().chain(&self.write) {
+            match &grant.resolution {
+                GrantResolution::ExistingCanonical => {
+                    validate_canonical_path(&grant.path)?;
+                    if !grant.path.starts_with(&self.project_root) {
+                        return Err(grant_confinement_error(&grant.path));
+                    }
+                }
+                GrantResolution::MissingTarget {
+                    canonical_ancestor,
+                    relative_target,
+                } => {
+                    validate_canonical_path(canonical_ancestor)?;
+                    if !canonical_ancestor.starts_with(&self.project_root)
+                        || relative_target.is_absolute()
+                        || relative_target
+                            .components()
+                            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                        || canonical_ancestor.join(relative_target) != grant.path
+                    {
+                        return Err(grant_confinement_error(&grant.path));
+                    }
+                }
+                GrantResolution::RuntimeCanonical => validate_canonical_path(&grant.path)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_canonical_path(path: &Path) -> Result<(), ExecutionError> {
+    if !path.is_absolute() || canonical_path(path, "filesystem grant")? != path {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            format!(
+                "filesystem grant is not absolute and canonical: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn grant_confinement_error(path: &Path) -> ExecutionError {
+    ExecutionError::new(
+        ExecutionErrorCategory::PolicyViolation,
+        format!(
+            "filesystem grant is neither project-confined nor an approved runtime addition: {}",
+            path.display()
+        ),
+    )
 }
 
 /// The platform backend's ability to enforce the requested containment policy.
@@ -225,12 +349,11 @@ pub struct EnforcementReceipt {
 
 impl EnforcementReceipt {
     #[allow(dead_code)] // The no-backend scaffold cannot produce receipts yet.
-    pub(crate) fn checked(
-        support: ContainmentSupport,
+    fn checked(
+        preflight: &ValidatedPreflight,
         enforced: EnforcementDimensions,
-        resolved_filesystem: ResolvedFilesystemGrants,
-        configured_limits: ExecutionLimits,
     ) -> Result<Self, ExecutionError> {
+        let support = &preflight.support;
         if !matches!(support, ContainmentSupport::Supported { .. }) {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::UnsupportedContainment,
@@ -238,6 +361,12 @@ impl EnforcementReceipt {
             ));
         }
         let requested = support.requested();
+        if preflight.policy.mode == SandboxMode::Disabled {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "disabled sandbox execution cannot issue an enforcement receipt",
+            ));
+        }
         if enforced != *requested {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
@@ -250,6 +379,7 @@ impl EnforcementReceipt {
                 "requested restrictions lack declared or observed backend support",
             ));
         }
+        let configured_limits = &preflight.policy.limits;
         if requested.timeout != configured_limits.timeout_seconds().is_some()
             || requested.output != configured_limits.max_output_bytes().is_some()
             || requested.process_count != configured_limits.max_processes().is_some()
@@ -261,10 +391,10 @@ impl EnforcementReceipt {
             ));
         }
         Ok(Self {
-            support,
+            support: support.clone(),
             enforced,
-            resolved_filesystem,
-            configured_limits,
+            resolved_filesystem: preflight.policy.grants.clone(),
+            configured_limits: configured_limits.clone(),
         })
     }
 
@@ -332,7 +462,7 @@ pub struct ExecutionOutcome {
 
 impl ExecutionOutcome {
     #[allow(dead_code)] // The no-backend scaffold cannot produce outcomes yet.
-    pub(crate) fn checked(
+    fn checked(
         termination: Termination,
         stdout: Vec<u8>,
         stderr: Vec<u8>,
@@ -352,18 +482,20 @@ impl ExecutionOutcome {
         })
     }
 
-    fn validate_for_request(&self, request: &ExecutionRequest) -> Result<(), ExecutionError> {
-        let required = EnforcementDimensions::requested_by(request.policy());
+    fn validate_for_preflight(&self, preflight: &ValidatedPreflight) -> Result<(), ExecutionError> {
+        let required = preflight.support.requested();
         let receipt = self.enforcement();
-        if receipt.requested() != &required
-            || receipt.enforced() != &required
-            || !receipt.declared().contains(&required)
-            || !receipt.observed().contains(&required)
-            || receipt.configured_limits() != request.policy().limits()
+        if receipt.support() != &preflight.support
+            || receipt.requested() != required
+            || receipt.enforced() != required
+            || !receipt.declared().contains(required)
+            || !receipt.observed().contains(required)
+            || receipt.configured_limits() != &preflight.policy.limits
+            || receipt.resolved_filesystem() != &preflight.policy.grants
         {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
-                "execution outcome does not prove every restriction required by the request",
+                "execution outcome does not match the exact validated preflight",
             ));
         }
         Ok(())
@@ -579,10 +711,18 @@ pub fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, Execution
 
 trait ExecutionBackend {
     fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport;
+
+    fn runtime_filesystem_additions(
+        &self,
+        _request: &ExecutionRequest,
+    ) -> Result<RuntimeFilesystemAdditions, ExecutionError> {
+        Ok(RuntimeFilesystemAdditions::default())
+    }
+
     fn spawn(
         &self,
         request: &ExecutionRequest,
-        support: ContainmentSupport,
+        preflight: &ValidatedPreflight,
     ) -> Result<ExecutionOutcome, ExecutionError>;
 }
 
@@ -590,26 +730,192 @@ fn execute_with_backend(
     request: &ExecutionRequest,
     backend: &impl ExecutionBackend,
 ) -> Result<ExecutionOutcome, ExecutionError> {
+    if request.policy().mode() == SandboxMode::Disabled {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            "sandboxed execution does not accept disabled sandbox policies",
+        ));
+    }
+
     let support = backend.containment_support(request);
-    match &support {
+    validate_supported_evidence(request, &support)?;
+    let additions = backend.runtime_filesystem_additions(request)?;
+    let policy = resolve_policy(request, additions)?;
+    policy.validate()?;
+    let preflight = ValidatedPreflight { support, policy };
+    let outcome = backend.spawn(request, &preflight)?;
+    outcome.validate_for_preflight(&preflight)?;
+    Ok(outcome)
+}
+
+fn validate_supported_evidence(
+    request: &ExecutionRequest,
+    support: &ContainmentSupport,
+) -> Result<(), ExecutionError> {
+    let required = EnforcementDimensions::requested_by(request.policy());
+    match support {
         ContainmentSupport::Unsupported {
             platform, reason, ..
         } => Err(ExecutionError::new(
             ExecutionErrorCategory::UnsupportedContainment,
             format!("sandbox containment is unavailable on {platform}: {reason}"),
         )),
-        ContainmentSupport::Supported { .. } => {
-            let outcome = backend.spawn(request, support)?;
-            outcome.validate_for_request(request)?;
-            Ok(outcome)
+        ContainmentSupport::Supported {
+            requested,
+            declared,
+            observed,
+            ..
+        } => {
+            if requested != &required {
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::PolicyViolation,
+                    "backend requested evidence does not match the execution policy",
+                ));
+            }
+            if !declared.contains(&required) || !observed.contains(&required) {
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::UnsupportedContainment,
+                    "requested restrictions lack declared or observed backend support",
+                ));
+            }
+            Ok(())
         }
     }
+}
+
+fn resolve_policy(
+    request: &ExecutionRequest,
+    additions: RuntimeFilesystemAdditions,
+) -> Result<ResolvedSandboxPolicy, ExecutionError> {
+    let project_root = canonical_path(request.project_root(), "project root")?;
+    let filesystem = request.policy().filesystem();
+    let mut read = filesystem
+        .read()
+        .iter()
+        .map(|grant| resolve_project_grant(&project_root, grant))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut write = filesystem
+        .write()
+        .iter()
+        .map(|grant| resolve_project_grant(&project_root, grant))
+        .collect::<Result<Vec<_>, _>>()?;
+    read.extend(additions.read);
+    write.extend(additions.write);
+
+    let grants = ResolvedFilesystemGrants {
+        read: read.iter().map(|grant| grant.path.clone()).collect(),
+        write: write.iter().map(|grant| grant.path.clone()).collect(),
+    };
+    Ok(ResolvedSandboxPolicy {
+        mode: request.policy().mode(),
+        project_root,
+        read,
+        write,
+        grants,
+        limits: request.policy().limits().clone(),
+    })
+}
+
+fn resolve_project_grant(
+    project_root: &Path,
+    configured: &str,
+) -> Result<ResolvedGrant, ExecutionError> {
+    let target = project_root.join(configured);
+    let mut ancestor = target.as_path();
+    let mut missing = Vec::new();
+
+    loop {
+        match fs::symlink_metadata(ancestor) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = ancestor.file_name().ok_or_else(|| {
+                    ExecutionError::new(
+                        ExecutionErrorCategory::PolicyViolation,
+                        format!("filesystem grant has no existing ancestor: {configured:?}"),
+                    )
+                })?;
+                missing.push(component.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    ExecutionError::new(
+                        ExecutionErrorCategory::PolicyViolation,
+                        format!("filesystem grant has no existing ancestor: {configured:?}"),
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(path_error("inspect filesystem grant", &target, error));
+            }
+        }
+    }
+
+    let canonical_ancestor = canonical_path(ancestor, "filesystem grant ancestor")?;
+    if !canonical_ancestor.starts_with(project_root) {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            format!("filesystem grant escapes the canonical project root: {configured:?}"),
+        ));
+    }
+    if missing.is_empty() {
+        return Ok(ResolvedGrant {
+            path: canonical_ancestor,
+            resolution: GrantResolution::ExistingCanonical,
+        });
+    }
+
+    missing.reverse();
+    let relative_target = missing.iter().collect::<PathBuf>();
+    let path = canonical_ancestor.join(&relative_target);
+    Ok(ResolvedGrant {
+        path,
+        resolution: GrantResolution::MissingTarget {
+            canonical_ancestor,
+            relative_target,
+        },
+    })
+}
+
+fn resolve_runtime_grant(path: PathBuf) -> Result<ResolvedGrant, ExecutionError> {
+    if !path.is_absolute() {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            format!(
+                "runtime filesystem grant must be absolute: {}",
+                path.display()
+            ),
+        ));
+    }
+    let canonical = canonical_path(&path, "runtime filesystem grant")?;
+    if canonical != path {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            format!(
+                "runtime filesystem grant must already be canonical: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(ResolvedGrant {
+        path: canonical,
+        resolution: GrantResolution::RuntimeCanonical,
+    })
+}
+
+fn canonical_path(path: &Path, kind: &str) -> Result<PathBuf, ExecutionError> {
+    fs::canonicalize(path).map_err(|error| path_error(kind, path, error))
+}
+
+fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError {
+    ExecutionError::new(
+        ExecutionErrorCategory::PolicyViolation,
+        format!("cannot resolve {kind} {}: {error}", path.display()),
+    )
 }
 
 mod platform_backend {
     use super::{
         BackendIdentity, ContainmentSupport, EnforcementDimensions, ExecutionBackend,
         ExecutionError, ExecutionErrorCategory, ExecutionOutcome, ExecutionRequest,
+        ValidatedPreflight,
     };
 
     pub(super) struct PlatformBackend;
@@ -622,7 +928,7 @@ mod platform_backend {
         fn spawn(
             &self,
             _request: &ExecutionRequest,
-            _support: ContainmentSupport,
+            _preflight: &ValidatedPreflight,
         ) -> Result<ExecutionOutcome, ExecutionError> {
             Err(ExecutionError::new(
                 ExecutionErrorCategory::Internal,
@@ -748,7 +1054,7 @@ mod tests {
             fn spawn(
                 &self,
                 _request: &ExecutionRequest,
-                _support: ContainmentSupport,
+                _preflight: &ValidatedPreflight,
             ) -> Result<ExecutionOutcome, ExecutionError> {
                 self.spawn_attempts.set(self.spawn_attempts.get() + 1);
                 Err(ExecutionError::new(
@@ -774,39 +1080,27 @@ mod tests {
     }
 
     #[test]
-    fn backend_cannot_return_success_for_less_than_the_request_requires() {
-        struct IncompleteBackend;
+    fn malformed_supported_preflight_makes_zero_spawn_attempts() {
+        struct CountingBackend {
+            support: ContainmentSupport,
+            spawn_attempts: std::cell::Cell<usize>,
+        }
 
-        impl ExecutionBackend for IncompleteBackend {
+        impl ExecutionBackend for CountingBackend {
             fn containment_support(&self, _request: &ExecutionRequest) -> ContainmentSupport {
-                ContainmentSupport::Supported {
-                    backend: BackendIdentity {
-                        name: "test/incomplete".into(),
-                        version: "1".into(),
-                        deprecation: None,
-                    },
-                    requested: EnforcementDimensions::none(),
-                    declared: EnforcementDimensions::none(),
-                    observed: EnforcementDimensions::none(),
-                }
+                self.support.clone()
             }
 
             fn spawn(
                 &self,
                 _request: &ExecutionRequest,
-                support: ContainmentSupport,
+                _preflight: &ValidatedPreflight,
             ) -> Result<ExecutionOutcome, ExecutionError> {
-                Ok(ExecutionOutcome {
-                    termination: Termination::Exited(0),
-                    stdout: vec![],
-                    stderr: vec![],
-                    enforcement: EnforcementReceipt {
-                        support,
-                        enforced: EnforcementDimensions::none(),
-                        resolved_filesystem: resolved_grants(),
-                        configured_limits: ExecutionLimits::default(),
-                    },
-                })
+                self.spawn_attempts.set(self.spawn_attempts.get() + 1);
+                Err(ExecutionError::new(
+                    ExecutionErrorCategory::Spawn,
+                    "must not be reached",
+                ))
             }
         }
 
@@ -814,8 +1108,81 @@ mod tests {
             .policy(required_policy())
             .build()
             .unwrap();
-        let error = execute_with_backend(&request, &IncompleteBackend).unwrap_err();
+        let required = EnforcementDimensions::requested_by(request.policy());
+        let mut requested_mismatch = required.clone();
+        requested_mismatch.network = false;
+        let mut missing_declared = required.clone();
+        missing_declared.filesystem_write = false;
+        let mut missing_observed = required.clone();
+        missing_observed.descendant_lifecycle = false;
+
+        for support in [
+            support_with_evidence(requested_mismatch, required.clone(), required.clone()),
+            support_with_evidence(required.clone(), missing_declared, required.clone()),
+            support_with_evidence(required.clone(), required.clone(), missing_observed),
+        ] {
+            let backend = CountingBackend {
+                support,
+                spawn_attempts: std::cell::Cell::new(0),
+            };
+            let error = execute_with_backend(&request, &backend).unwrap_err();
+            assert!(
+                matches!(
+                    error.category(),
+                    ExecutionErrorCategory::PolicyViolation
+                        | ExecutionErrorCategory::UnsupportedContainment
+                ),
+                "{error}"
+            );
+            assert_eq!(backend.spawn_attempts.get(), 0);
+        }
+    }
+
+    #[test]
+    fn disabled_mode_makes_zero_spawn_attempts() {
+        struct CountingBackend {
+            spawn_attempts: std::cell::Cell<usize>,
+        }
+
+        impl ExecutionBackend for CountingBackend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                self.spawn_attempts.set(self.spawn_attempts.get() + 1);
+                Err(ExecutionError::new(
+                    ExecutionErrorCategory::Spawn,
+                    "must not be reached",
+                ))
+            }
+        }
+
+        let disabled = SandboxPolicy::new(
+            SandboxMode::Disabled,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder("node")
+            .policy(disabled)
+            .build()
+            .unwrap();
+        let backend = CountingBackend {
+            spawn_attempts: std::cell::Cell::new(0),
+        };
+
+        let error = execute_with_backend(&request, &backend).unwrap_err();
         assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+        assert_eq!(backend.spawn_attempts.get(), 0);
     }
 
     #[test]
@@ -922,11 +1289,189 @@ mod tests {
         }
     }
 
-    fn resolved_grants() -> ResolvedFilesystemGrants {
-        ResolvedFilesystemGrants {
-            read: vec![PathBuf::from("/project")],
-            write: vec![],
+    fn preflight_for(policy: SandboxPolicy, support: ContainmentSupport) -> ValidatedPreflight {
+        let request = ExecutionRequest::builder("node")
+            .policy(policy)
+            .build()
+            .unwrap();
+        ValidatedPreflight {
+            support,
+            policy: resolve_policy(&request, RuntimeFilesystemAdditions::default()).unwrap(),
         }
+    }
+
+    fn temporary_directory(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "tapid-runner-{prefix}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn resolved_preflight_is_the_only_source_of_receipt_filesystem_grants() {
+        struct Backend {
+            runtime: PathBuf,
+        }
+
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+
+            fn runtime_filesystem_additions(
+                &self,
+                _request: &ExecutionRequest,
+            ) -> Result<RuntimeFilesystemAdditions, ExecutionError> {
+                RuntimeFilesystemAdditions::checked(vec![self.runtime.clone()], vec![])
+            }
+
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                assert_eq!(preflight.policy.read.len(), 2);
+                assert_eq!(preflight.policy.write.len(), 1);
+                assert!(matches!(
+                    preflight.policy.write[0].resolution,
+                    GrantResolution::MissingTarget { .. }
+                ));
+                let enforced = preflight.support.requested().clone();
+                let receipt = EnforcementReceipt::checked(preflight, enforced)?;
+                ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt)
+            }
+        }
+
+        let root = temporary_directory("resolved-root");
+        let runtime = temporary_directory("resolved-runtime");
+        fs::create_dir(root.join("existing")).unwrap();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let canonical_runtime = fs::canonicalize(&runtime).unwrap();
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(
+                vec!["existing".into()],
+                vec!["generated/nested/output.txt".into()],
+            )
+            .unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder("node")
+            .project_root(&root)
+            .policy(policy)
+            .build()
+            .unwrap();
+
+        let outcome = execute_with_backend(
+            &request,
+            &Backend {
+                runtime: canonical_runtime.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.enforcement().resolved_filesystem().read(),
+            &[canonical_root.join("existing"), canonical_runtime]
+        );
+        assert_eq!(
+            outcome.enforcement().resolved_filesystem().write(),
+            &[canonical_root.join("generated/nested/output.txt")]
+        );
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(runtime).unwrap();
+    }
+
+    #[test]
+    fn resolved_policy_rejects_omitted_or_extra_receipt_grants() {
+        let policy = required_policy();
+        let requested = EnforcementDimensions::requested_by(&policy);
+        let support =
+            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+        let mut preflight = preflight_for(policy, support);
+
+        preflight.policy.grants.read.clear();
+        assert!(preflight.policy.validate().is_err());
+        preflight.policy.grants.read.push(PathBuf::from("/extra"));
+        assert!(preflight.policy.validate().is_err());
+    }
+
+    #[test]
+    fn noncanonical_runtime_additions_fail_before_spawn() {
+        assert!(
+            RuntimeFilesystemAdditions::checked(vec![PathBuf::from("relative")], vec![]).is_err()
+        );
+
+        let root = temporary_directory("runtime-canonical");
+        let canonical = fs::canonicalize(&root).unwrap();
+        let noncanonical = canonical.join("..").join(canonical.file_name().unwrap());
+        assert!(RuntimeFilesystemAdditions::checked(vec![noncanonical], vec![]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_in_project_grant_fails_before_spawn() {
+        use std::os::unix::fs::symlink;
+
+        struct Backend {
+            spawn_attempts: std::cell::Cell<usize>,
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                self.spawn_attempts.set(self.spawn_attempts.get() + 1);
+                Err(ExecutionError::new(
+                    ExecutionErrorCategory::Spawn,
+                    "must not be reached",
+                ))
+            }
+        }
+
+        let root = temporary_directory("symlink-root");
+        let outside = temporary_directory("symlink-outside");
+        symlink(&outside, root.join("escape")).unwrap();
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec!["escape".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder("node")
+            .project_root(&root)
+            .policy(policy)
+            .build()
+            .unwrap();
+        let backend = Backend {
+            spawn_attempts: std::cell::Cell::new(0),
+        };
+
+        let error = execute_with_backend(&request, &backend).unwrap_err();
+        assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+        assert_eq!(backend.spawn_attempts.get(), 0);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
@@ -944,37 +1489,23 @@ mod tests {
 
     #[test]
     fn checked_receipt_rejects_extra_or_missing_enforcement_dimensions() {
-        let requested = EnforcementDimensions::requested_by(&required_policy());
+        let policy = required_policy();
+        let requested = EnforcementDimensions::requested_by(&policy);
         let support =
             support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+        let preflight = preflight_for(policy, support);
 
         let mut extra = requested.clone();
         extra.timeout = true;
-        assert!(
-            EnforcementReceipt::checked(
-                support.clone(),
-                extra,
-                resolved_grants(),
-                ExecutionLimits::default(),
-            )
-            .is_err()
-        );
+        assert!(EnforcementReceipt::checked(&preflight, extra).is_err());
 
         let mut missing = requested.clone();
         missing.network = false;
-        assert!(
-            EnforcementReceipt::checked(
-                support,
-                missing,
-                resolved_grants(),
-                ExecutionLimits::default(),
-            )
-            .is_err()
-        );
+        assert!(EnforcementReceipt::checked(&preflight, missing).is_err());
     }
 
     #[test]
-    fn checked_receipt_requires_declared_observed_and_configured_limit_evidence() {
+    fn checked_receipt_requires_declared_and_observed_evidence() {
         let limits = ExecutionLimits::new(Some(1), Some(2), Some(3), Some(4)).unwrap();
         let policy = SandboxPolicy::new(
             SandboxMode::Required,
@@ -990,41 +1521,36 @@ mod tests {
         let mut not_observed = requested.clone();
         not_observed.memory = false;
         let support = support_with_evidence(requested.clone(), requested.clone(), not_observed);
-        assert!(
-            EnforcementReceipt::checked(
-                support,
-                requested.clone(),
-                resolved_grants(),
-                limits.clone(),
-            )
-            .is_err()
-        );
+        let preflight = preflight_for(policy, support);
+        assert!(EnforcementReceipt::checked(&preflight, requested).is_err());
+    }
 
-        let support =
-            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
-        assert!(
-            EnforcementReceipt::checked(
-                support,
-                requested,
-                resolved_grants(),
-                ExecutionLimits::default(),
-            )
-            .is_err()
-        );
+    #[test]
+    fn checked_receipt_rejects_disabled_sandbox_policy() {
+        let policy = SandboxPolicy::new(
+            SandboxMode::Disabled,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let none = EnforcementDimensions::none();
+        let support = support_with_evidence(none.clone(), none.clone(), none.clone());
+        let preflight = preflight_for(policy, support);
+
+        assert!(EnforcementReceipt::checked(&preflight, none).is_err());
     }
 
     #[test]
     fn checked_outcome_accepts_success_only_with_a_complete_receipt() {
-        let requested = EnforcementDimensions::requested_by(&required_policy());
+        let policy = required_policy();
+        let requested = EnforcementDimensions::requested_by(&policy);
         let support =
             support_with_evidence(requested.clone(), requested.clone(), requested.clone());
-        let receipt = EnforcementReceipt::checked(
-            support,
-            requested,
-            resolved_grants(),
-            ExecutionLimits::default(),
-        )
-        .unwrap();
+        let preflight = preflight_for(policy, support);
+        let receipt = EnforcementReceipt::checked(&preflight, requested).unwrap();
         let outcome =
             ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt).unwrap();
         assert_eq!(outcome.termination(), &Termination::Exited(0));
