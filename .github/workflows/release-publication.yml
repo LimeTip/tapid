@@ -22,7 +22,14 @@ jobs:
       tag_commit: ${{ steps.version.outputs.tag_commit }}
     steps:
       - uses: actions/checkout@v4
+        if: github.event_name != 'workflow_dispatch'
         with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: main
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4

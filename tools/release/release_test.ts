@@ -101,6 +101,8 @@ test("binary release follows the small draft release flow", async () => {
   assert(workflow.includes("unexpected draft release assets"));
   assert(workflow.includes("actions/download-artifact@v4"));
   assert(workflow.includes("workflow_dispatch:"));
+  assert(workflow.includes("if: github.event_name == 'workflow_dispatch'"));
+  assert(workflow.includes("ref: main"));
   assert(!workflow.includes("inputs:"));
   assert(!workflow.includes("${{ inputs."));
   assert(workflow.includes("group: release-publication"));
