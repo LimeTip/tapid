@@ -3,6 +3,17 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path};
 
+/// Maximum accepted size of a checked-in TOML configuration document.
+pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+/// Maximum number of per-script profiles in one configuration.
+pub const MAX_PROFILE_COUNT: usize = 256;
+/// Maximum combined read and write grants in one profile.
+pub const MAX_GRANT_COUNT: usize = 256;
+/// Maximum environment variable names allowlisted by one profile.
+pub const MAX_ENVIRONMENT_COUNT: usize = 256;
+/// Maximum UTF-8 byte length of a profile name, grant, or environment name.
+pub const MAX_STRING_BYTES: usize = 255;
+
 /// Whether execution must use containment or was explicitly overridden by a caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SandboxMode {
@@ -21,7 +32,14 @@ pub struct FilesystemPolicy {
 
 impl FilesystemPolicy {
     pub fn new(read: Vec<String>, write: Vec<String>) -> Result<Self, ConfigError> {
+        if read.len().saturating_add(write.len()) > MAX_GRANT_COUNT {
+            return Err(ConfigError::new(
+                ConfigErrorCategory::CapacityExceeded,
+                format!("filesystem policy exceeds {MAX_GRANT_COUNT} grants"),
+            ));
+        }
         for path in read.iter().chain(&write) {
+            validate_string_length("filesystem grant", path)?;
             validate_project_path(path)?;
         }
         Ok(Self { read, write })
@@ -94,7 +112,14 @@ impl SandboxPolicy {
         subprocess: bool,
         limits: ExecutionLimits,
     ) -> Result<Self, ConfigError> {
+        if environment.len() > MAX_ENVIRONMENT_COUNT {
+            return Err(ConfigError::new(
+                ConfigErrorCategory::CapacityExceeded,
+                format!("sandbox policy exceeds {MAX_ENVIRONMENT_COUNT} environment names"),
+            ));
+        }
         for name in &environment {
+            validate_string_length("environment variable name", name)?;
             validate_environment_name(name)?;
         }
         Ok(Self {
@@ -152,6 +177,7 @@ pub enum ConfigErrorCategory {
     InvalidPath,
     InvalidEnvironment,
     InvalidLimit,
+    CapacityExceeded,
 }
 
 /// A validation or syntax error in checked-in run configuration.
@@ -190,7 +216,33 @@ pub struct RunConfig {
 
 impl RunConfig {
     pub fn parse_toml(input: &str) -> Result<Self, ConfigError> {
+        Self::parse_toml_bytes(input.as_bytes())
+    }
+
+    /// Parses UTF-8 TOML after enforcing the input byte ceiling before deserialization.
+    pub fn parse_toml_bytes(input: &[u8]) -> Result<Self, ConfigError> {
+        if input.len() > MAX_CONFIG_BYTES {
+            return Err(ConfigError::new(
+                ConfigErrorCategory::CapacityExceeded,
+                format!("run configuration exceeds {MAX_CONFIG_BYTES} bytes"),
+            ));
+        }
+        let input = std::str::from_utf8(input).map_err(|error| {
+            ConfigError::new(
+                ConfigErrorCategory::Malformed,
+                format!("run configuration is not valid UTF-8: {error}"),
+            )
+        })?;
         let root: ConfigDocument = toml::from_str(input).map_err(deserialize_error)?;
+        if root.run.scripts.len() > MAX_PROFILE_COUNT {
+            return Err(ConfigError::new(
+                ConfigErrorCategory::CapacityExceeded,
+                format!("run configuration exceeds {MAX_PROFILE_COUNT} script profiles"),
+            ));
+        }
+        for name in root.run.scripts.keys() {
+            validate_string_length("script profile name", name)?;
+        }
         let defaults = apply_profile(SandboxPolicy::default(), root.run.defaults)?;
         let scripts = root
             .run
@@ -273,7 +325,14 @@ fn apply_profile(mut policy: SandboxPolicy, raw: RawProfile) -> Result<SandboxPo
     )?;
     policy.network = raw.network.unwrap_or(policy.network);
     if let Some(environment) = raw.environment {
+        if environment.len() > MAX_ENVIRONMENT_COUNT {
+            return Err(ConfigError::new(
+                ConfigErrorCategory::CapacityExceeded,
+                format!("sandbox policy exceeds {MAX_ENVIRONMENT_COUNT} environment names"),
+            ));
+        }
         for name in &environment {
+            validate_string_length("environment variable name", name)?;
             validate_environment_name(name)?;
         }
         policy.environment = environment;
@@ -311,6 +370,16 @@ fn invalid_limit(name: &str, reason: &str) -> ConfigError {
     )
 }
 
+fn validate_string_length(kind: &str, value: &str) -> Result<(), ConfigError> {
+    if value.len() > MAX_STRING_BYTES {
+        return Err(ConfigError::new(
+            ConfigErrorCategory::CapacityExceeded,
+            format!("{kind} exceeds {MAX_STRING_BYTES} UTF-8 bytes"),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_project_path(value: &str) -> Result<(), ConfigError> {
     let path = Path::new(value);
     let windows_absolute = value.starts_with(['\\', '/'])
@@ -319,11 +388,22 @@ fn validate_project_path(value: &str) -> Result<(), ConfigError> {
                 .as_bytes()
                 .first()
                 .is_some_and(u8::is_ascii_alphabetic);
-    let traverses = value.split(['/', '\\']).any(|component| component == "..");
+    let components: Vec<_> = value.split(['/', '\\']).collect();
+    let invalid_component = components.iter().any(|component| {
+        component.is_empty()
+            || (*component == "." && value != ".")
+            || *component == ".."
+            || (*component != "." && component.ends_with(['.', ' ']))
+            || component.chars().any(|character| {
+                character.is_control()
+                    || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+            })
+            || is_windows_reserved_component(component)
+    });
     if value.is_empty()
         || path.is_absolute()
         || windows_absolute
-        || traverses
+        || invalid_component
         || path.components().any(|component| {
             matches!(
                 component,
@@ -333,10 +413,31 @@ fn validate_project_path(value: &str) -> Result<(), ConfigError> {
     {
         return Err(ConfigError::new(
             ConfigErrorCategory::InvalidPath,
-            format!("filesystem grant must be project-relative: {value:?}"),
+            format!("filesystem grant is not a portable project-relative path: {value:?}"),
         ));
     }
     Ok(())
+}
+
+fn is_windows_reserved_component(component: &str) -> bool {
+    let stem = component.split('.').next().unwrap_or(component);
+    let upper = stem.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || upper
+        .strip_prefix("COM")
+        .is_some_and(is_windows_reserved_port)
+        || upper
+            .strip_prefix("LPT")
+            .is_some_and(is_windows_reserved_port)
+}
+
+fn is_windows_reserved_port(suffix: &str) -> bool {
+    matches!(
+        suffix,
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+    )
 }
 
 pub(crate) fn validate_environment_name(name: &str) -> Result<(), ConfigError> {
@@ -495,6 +596,181 @@ mod tests {
             let source = format!("[run.defaults]\nread = [{path:?}]");
             let error = RunConfig::parse_toml(&source).unwrap_err();
             assert_eq!(error.category(), ConfigErrorCategory::InvalidPath, "{path}");
+        }
+    }
+
+    #[test]
+    fn rejects_nonportable_and_ambiguous_grant_components_on_every_platform() {
+        for path in [
+            "has\0nul",
+            "file:stream",
+            "dir/file:stream",
+            "CON",
+            "con.txt",
+            "NUL.json",
+            "aux.data/more",
+            "COM1.log",
+            "com¹.log",
+            "LPT².txt",
+            "CONIN$",
+            "conout$.txt",
+            "lpt9",
+            "name.",
+            "name ",
+            "dir//file",
+            "dir/./file",
+            "dir/<file>",
+            "dir/file?",
+            "dir/file*",
+            "dir/file|name",
+            "dir/file\u{1f}",
+        ] {
+            let error = FilesystemPolicy::new(vec![path.to_owned()], vec![]).unwrap_err();
+            assert_eq!(
+                error.category(),
+                ConfigErrorCategory::InvalidPath,
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_portable_names_that_only_contain_reserved_name_substrings() {
+        let policy = FilesystemPolicy::new(
+            vec![
+                "console".into(),
+                "connection.txt".into(),
+                "com10.log".into(),
+            ],
+            vec!["auxiliary/output".into()],
+        )
+        .unwrap();
+        assert_eq!(policy.read().len(), 3);
+        assert_eq!(policy.write().len(), 1);
+    }
+
+    #[test]
+    fn parsing_rejects_config_bytes_above_the_published_limit() {
+        let at_limit = vec![b' '; MAX_CONFIG_BYTES];
+        assert!(RunConfig::parse_toml_bytes(&at_limit).is_ok());
+
+        let above_limit = vec![b' '; MAX_CONFIG_BYTES + 1];
+        let error = RunConfig::parse_toml_bytes(&above_limit).unwrap_err();
+        assert_eq!(error.category(), ConfigErrorCategory::CapacityExceeded);
+    }
+
+    #[test]
+    fn parsing_bounds_script_profile_count_at_the_published_limit() {
+        let source = (0..MAX_PROFILE_COUNT)
+            .map(|index| format!("[run.scripts.p{index}]\nnetwork = false\n"))
+            .collect::<String>();
+        assert!(RunConfig::parse_toml(&source).is_ok());
+
+        let above_limit = format!("{source}[run.scripts.overflow]\nnetwork = false\n");
+        let error = RunConfig::parse_toml(&above_limit).unwrap_err();
+        assert_eq!(error.category(), ConfigErrorCategory::CapacityExceeded);
+    }
+
+    #[test]
+    fn filesystem_policy_bounds_total_grant_count_at_the_published_limit() {
+        let at_limit = vec!["portable".to_owned(); MAX_GRANT_COUNT];
+        assert!(FilesystemPolicy::new(at_limit, vec![]).is_ok());
+
+        let above_limit = vec!["portable".to_owned(); MAX_GRANT_COUNT + 1];
+        let error = FilesystemPolicy::new(above_limit, vec![]).unwrap_err();
+        assert_eq!(error.category(), ConfigErrorCategory::CapacityExceeded);
+    }
+
+    #[test]
+    fn sandbox_policy_bounds_environment_count_at_the_published_limit() {
+        let filesystem = FilesystemPolicy::new(vec![".".into()], vec![]).unwrap();
+        let at_limit = vec!["VALID_NAME".to_owned(); MAX_ENVIRONMENT_COUNT];
+        assert!(
+            SandboxPolicy::new(
+                SandboxMode::Required,
+                filesystem.clone(),
+                false,
+                at_limit,
+                true,
+                ExecutionLimits::default(),
+            )
+            .is_ok()
+        );
+
+        let above_limit = vec!["VALID_NAME".to_owned(); MAX_ENVIRONMENT_COUNT + 1];
+        let error = SandboxPolicy::new(
+            SandboxMode::Required,
+            filesystem,
+            false,
+            above_limit,
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.category(), ConfigErrorCategory::CapacityExceeded);
+    }
+
+    #[test]
+    fn filesystem_policy_bounds_grant_string_bytes_at_the_published_limit() {
+        let at_limit = "a".repeat(MAX_STRING_BYTES);
+        assert!(FilesystemPolicy::new(vec![at_limit], vec![]).is_ok());
+
+        let above_limit = "a".repeat(MAX_STRING_BYTES + 1);
+        let error = FilesystemPolicy::new(vec![above_limit], vec![]).unwrap_err();
+        assert_eq!(error.category(), ConfigErrorCategory::CapacityExceeded);
+    }
+
+    #[test]
+    fn sandbox_policy_bounds_environment_name_bytes_at_the_published_limit() {
+        let filesystem = FilesystemPolicy::new(vec![".".into()], vec![]).unwrap();
+        let at_limit = format!("E{}", "A".repeat(MAX_STRING_BYTES - 1));
+        assert!(
+            SandboxPolicy::new(
+                SandboxMode::Required,
+                filesystem.clone(),
+                false,
+                vec![at_limit],
+                true,
+                ExecutionLimits::default(),
+            )
+            .is_ok()
+        );
+
+        let above_limit = format!("E{}", "A".repeat(MAX_STRING_BYTES));
+        let error = SandboxPolicy::new(
+            SandboxMode::Required,
+            filesystem,
+            false,
+            vec![above_limit],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.category(), ConfigErrorCategory::CapacityExceeded);
+    }
+
+    #[test]
+    fn parsing_bounds_profile_name_bytes_at_the_published_limit() {
+        let at_limit = "a".repeat(MAX_STRING_BYTES);
+        let source = format!("[run.scripts.{at_limit:?}]\nnetwork = false\n");
+        assert!(RunConfig::parse_toml(&source).is_ok());
+
+        let above_limit = "a".repeat(MAX_STRING_BYTES + 1);
+        let source = format!("[run.scripts.{above_limit:?}]\nnetwork = false\n");
+        let error = RunConfig::parse_toml(&source).unwrap_err();
+        assert_eq!(error.category(), ConfigErrorCategory::CapacityExceeded);
+    }
+
+    #[test]
+    fn parsing_applies_environment_count_limit_to_every_profile() {
+        let names = (0..=MAX_ENVIRONMENT_COUNT)
+            .map(|index| format!("\"E{index}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        for table in ["run.defaults", "run.scripts.build"] {
+            let source = format!("[{table}]\nenvironment = [{names}]\n");
+            let error = RunConfig::parse_toml(&source).unwrap_err();
+            assert_eq!(error.category(), ConfigErrorCategory::CapacityExceeded);
         }
     }
 

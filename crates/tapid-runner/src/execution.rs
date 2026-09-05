@@ -33,8 +33,12 @@ pub struct EnforcementDimensions {
     filesystem_write: bool,
     network: bool,
     environment_sanitization: bool,
+    subprocess_restriction: bool,
     descendant_lifecycle: bool,
-    resource_limits: bool,
+    timeout: bool,
+    output: bool,
+    process_count: bool,
+    memory: bool,
 }
 
 impl EnforcementDimensions {
@@ -44,8 +48,12 @@ impl EnforcementDimensions {
             filesystem_write: false,
             network: false,
             environment_sanitization: false,
+            subprocess_restriction: false,
             descendant_lifecycle: false,
-            resource_limits: false,
+            timeout: false,
+            output: false,
+            process_count: false,
+            memory: false,
         }
     }
 
@@ -61,11 +69,27 @@ impl EnforcementDimensions {
     pub fn environment_sanitization(&self) -> bool {
         self.environment_sanitization
     }
+    pub fn subprocess_restriction(&self) -> bool {
+        self.subprocess_restriction
+    }
     pub fn descendant_lifecycle(&self) -> bool {
         self.descendant_lifecycle
     }
+    pub fn timeout(&self) -> bool {
+        self.timeout
+    }
+    pub fn output(&self) -> bool {
+        self.output
+    }
+    pub fn process_count(&self) -> bool {
+        self.process_count
+    }
+    pub fn memory(&self) -> bool {
+        self.memory
+    }
+    /// Compatibility summary; prefer the individual resource accessors.
     pub fn resource_limits(&self) -> bool {
-        self.resource_limits
+        self.timeout || self.output || self.process_count || self.memory
     }
 
     fn requested_by(policy: &SandboxPolicy) -> Self {
@@ -78,12 +102,27 @@ impl EnforcementDimensions {
             filesystem_write: true,
             network: true,
             environment_sanitization: true,
+            subprocess_restriction: !policy.subprocess(),
             descendant_lifecycle: true,
-            resource_limits: limits.timeout_seconds().is_some()
-                || limits.max_output_bytes().is_some()
-                || limits.max_processes().is_some()
-                || limits.max_memory_bytes().is_some(),
+            timeout: limits.timeout_seconds().is_some(),
+            output: limits.max_output_bytes().is_some(),
+            process_count: limits.max_processes().is_some(),
+            memory: limits.max_memory_bytes().is_some(),
         }
+    }
+
+    #[allow(dead_code)] // Used by checked construction when a platform backend lands.
+    fn contains(&self, required: &Self) -> bool {
+        (!required.filesystem_read || self.filesystem_read)
+            && (!required.filesystem_write || self.filesystem_write)
+            && (!required.network || self.network)
+            && (!required.environment_sanitization || self.environment_sanitization)
+            && (!required.subprocess_restriction || self.subprocess_restriction)
+            && (!required.descendant_lifecycle || self.descendant_lifecycle)
+            && (!required.timeout || self.timeout)
+            && (!required.output || self.output)
+            && (!required.process_count || self.process_count)
+            && (!required.memory || self.memory)
     }
 }
 
@@ -110,14 +149,16 @@ pub enum ContainmentSupport {
     Supported {
         backend: BackendIdentity,
         requested: EnforcementDimensions,
-        enforceable: EnforcementDimensions,
+        declared: EnforcementDimensions,
+        observed: EnforcementDimensions,
     },
     Unsupported {
         backend: BackendIdentity,
         platform: String,
         reason: String,
         requested: EnforcementDimensions,
-        enforceable: EnforcementDimensions,
+        declared: EnforcementDimensions,
+        observed: EnforcementDimensions,
     },
 }
 
@@ -134,12 +175,23 @@ impl ContainmentSupport {
         }
     }
 
-    pub fn enforceable(&self) -> &EnforcementDimensions {
+    /// Backend capabilities declared by its implementation.
+    pub fn declared(&self) -> &EnforcementDimensions {
         match self {
-            Self::Supported { enforceable, .. } | Self::Unsupported { enforceable, .. } => {
-                enforceable
-            }
+            Self::Supported { declared, .. } | Self::Unsupported { declared, .. } => declared,
         }
+    }
+
+    /// Capabilities confirmed by runtime probes for this backend.
+    pub fn observed(&self) -> &EnforcementDimensions {
+        match self {
+            Self::Supported { observed, .. } | Self::Unsupported { observed, .. } => observed,
+        }
+    }
+
+    /// Compatibility alias for [`Self::declared`].
+    pub fn enforceable(&self) -> &EnforcementDimensions {
+        self.declared()
     }
 
     pub fn unsupported_reason(&self) -> Option<&str> {
@@ -154,6 +206,15 @@ impl ContainmentSupport {
 ///
 /// Its private fields prevent callers from manufacturing enforcement claims. No receipt is
 /// produced until a backend has performed execution.
+///
+/// ```compile_fail
+/// use tapid_runner::{ContainmentSupport, EnforcementDimensions, EnforcementReceipt,
+///     ExecutionLimits, ResolvedFilesystemGrants};
+/// fn forge(support: ContainmentSupport, enforced: EnforcementDimensions,
+///     resolved_filesystem: ResolvedFilesystemGrants, configured_limits: ExecutionLimits) {
+///     let _ = EnforcementReceipt { support, enforced, resolved_filesystem, configured_limits };
+/// }
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnforcementReceipt {
     support: ContainmentSupport,
@@ -163,6 +224,50 @@ pub struct EnforcementReceipt {
 }
 
 impl EnforcementReceipt {
+    #[allow(dead_code)] // The no-backend scaffold cannot produce receipts yet.
+    pub(crate) fn checked(
+        support: ContainmentSupport,
+        enforced: EnforcementDimensions,
+        resolved_filesystem: ResolvedFilesystemGrants,
+        configured_limits: ExecutionLimits,
+    ) -> Result<Self, ExecutionError> {
+        if !matches!(support, ContainmentSupport::Supported { .. }) {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::UnsupportedContainment,
+                "cannot issue an enforcement receipt for unsupported containment",
+            ));
+        }
+        let requested = support.requested();
+        if enforced != *requested {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "enforced dimensions must exactly match requested restrictions",
+            ));
+        }
+        if !support.declared().contains(requested) || !support.observed().contains(requested) {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::UnsupportedContainment,
+                "requested restrictions lack declared or observed backend support",
+            ));
+        }
+        if requested.timeout != configured_limits.timeout_seconds().is_some()
+            || requested.output != configured_limits.max_output_bytes().is_some()
+            || requested.process_count != configured_limits.max_processes().is_some()
+            || requested.memory != configured_limits.max_memory_bytes().is_some()
+        {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "configured limits do not match requested resource restrictions",
+            ));
+        }
+        Ok(Self {
+            support,
+            enforced,
+            resolved_filesystem,
+            configured_limits,
+        })
+    }
+
     pub fn support(&self) -> &ContainmentSupport {
         &self.support
     }
@@ -173,6 +278,14 @@ impl EnforcementReceipt {
 
     pub fn requested(&self) -> &EnforcementDimensions {
         self.support.requested()
+    }
+
+    pub fn declared(&self) -> &EnforcementDimensions {
+        self.support.declared()
+    }
+
+    pub fn observed(&self) -> &EnforcementDimensions {
+        self.support.observed()
     }
 
     pub fn enforced(&self) -> &EnforcementDimensions {
@@ -200,6 +313,15 @@ pub enum Termination {
 }
 
 /// Captured execution result paired with an enforcement receipt.
+///
+/// ```compile_fail
+/// use tapid_runner::{EnforcementReceipt, ExecutionOutcome, Termination};
+/// fn forge(enforcement: EnforcementReceipt) {
+///     let _ = ExecutionOutcome {
+///         termination: Termination::Exited(0), stdout: vec![], stderr: vec![], enforcement
+///     };
+/// }
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionOutcome {
     termination: Termination,
@@ -209,6 +331,44 @@ pub struct ExecutionOutcome {
 }
 
 impl ExecutionOutcome {
+    #[allow(dead_code)] // The no-backend scaffold cannot produce outcomes yet.
+    pub(crate) fn checked(
+        termination: Termination,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        enforcement: EnforcementReceipt,
+    ) -> Result<Self, ExecutionError> {
+        if enforcement.enforced() != enforcement.requested() {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "execution outcome lacks complete enforcement evidence",
+            ));
+        }
+        Ok(Self {
+            termination,
+            stdout,
+            stderr,
+            enforcement,
+        })
+    }
+
+    fn validate_for_request(&self, request: &ExecutionRequest) -> Result<(), ExecutionError> {
+        let required = EnforcementDimensions::requested_by(request.policy());
+        let receipt = self.enforcement();
+        if receipt.requested() != &required
+            || receipt.enforced() != &required
+            || !receipt.declared().contains(&required)
+            || !receipt.observed().contains(&required)
+            || receipt.configured_limits() != request.policy().limits()
+        {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "execution outcome does not prove every restriction required by the request",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn termination(&self) -> &Termination {
         &self.termination
     }
@@ -414,22 +574,62 @@ impl ExecutionRequestBuilder {
 /// Platform backends are intentionally not implemented yet. This function performs
 /// containment preflight and fails before spawning any child process.
 pub fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
-    match platform_backend::containment_support(request) {
+    execute_with_backend(request, &platform_backend::PlatformBackend)
+}
+
+trait ExecutionBackend {
+    fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport;
+    fn spawn(
+        &self,
+        request: &ExecutionRequest,
+        support: ContainmentSupport,
+    ) -> Result<ExecutionOutcome, ExecutionError>;
+}
+
+fn execute_with_backend(
+    request: &ExecutionRequest,
+    backend: &impl ExecutionBackend,
+) -> Result<ExecutionOutcome, ExecutionError> {
+    let support = backend.containment_support(request);
+    match &support {
         ContainmentSupport::Unsupported {
             platform, reason, ..
         } => Err(ExecutionError::new(
             ExecutionErrorCategory::UnsupportedContainment,
             format!("sandbox containment is unavailable on {platform}: {reason}"),
         )),
-        ContainmentSupport::Supported { .. } => Err(ExecutionError::new(
-            ExecutionErrorCategory::Internal,
-            "containment backend reported support but execution is not implemented",
-        )),
+        ContainmentSupport::Supported { .. } => {
+            let outcome = backend.spawn(request, support)?;
+            outcome.validate_for_request(request)?;
+            Ok(outcome)
+        }
     }
 }
 
 mod platform_backend {
-    use super::{BackendIdentity, ContainmentSupport, EnforcementDimensions, ExecutionRequest};
+    use super::{
+        BackendIdentity, ContainmentSupport, EnforcementDimensions, ExecutionBackend,
+        ExecutionError, ExecutionErrorCategory, ExecutionOutcome, ExecutionRequest,
+    };
+
+    pub(super) struct PlatformBackend;
+
+    impl ExecutionBackend for PlatformBackend {
+        fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+            containment_support(request)
+        }
+
+        fn spawn(
+            &self,
+            _request: &ExecutionRequest,
+            _support: ContainmentSupport,
+        ) -> Result<ExecutionOutcome, ExecutionError> {
+            Err(ExecutionError::new(
+                ExecutionErrorCategory::Internal,
+                "containment backend reported support but execution is not implemented",
+            ))
+        }
+    }
 
     pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupport {
         ContainmentSupport::Unsupported {
@@ -441,7 +641,8 @@ mod platform_backend {
             platform: std::env::consts::OS.to_owned(),
             reason: "no platform execution backend is implemented".to_owned(),
             requested: EnforcementDimensions::requested_by(request.policy()),
-            enforceable: EnforcementDimensions::none(),
+            declared: EnforcementDimensions::none(),
+            observed: EnforcementDimensions::none(),
         }
     }
 }
@@ -523,6 +724,101 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_preflight_makes_zero_spawn_attempts() {
+        struct CountingBackend {
+            spawn_attempts: std::cell::Cell<usize>,
+        }
+
+        impl ExecutionBackend for CountingBackend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                ContainmentSupport::Unsupported {
+                    backend: BackendIdentity {
+                        name: "test/unsupported".into(),
+                        version: "1".into(),
+                        deprecation: None,
+                    },
+                    platform: "test".into(),
+                    reason: "deliberately unavailable".into(),
+                    requested: EnforcementDimensions::requested_by(request.policy()),
+                    declared: EnforcementDimensions::none(),
+                    observed: EnforcementDimensions::none(),
+                }
+            }
+
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _support: ContainmentSupport,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                self.spawn_attempts.set(self.spawn_attempts.get() + 1);
+                Err(ExecutionError::new(
+                    ExecutionErrorCategory::Spawn,
+                    "must not be reached",
+                ))
+            }
+        }
+
+        let backend = CountingBackend {
+            spawn_attempts: std::cell::Cell::new(0),
+        };
+        let request = ExecutionRequest::builder("node")
+            .policy(required_policy())
+            .build()
+            .unwrap();
+        let error = execute_with_backend(&request, &backend).unwrap_err();
+        assert_eq!(
+            error.category(),
+            ExecutionErrorCategory::UnsupportedContainment
+        );
+        assert_eq!(backend.spawn_attempts.get(), 0);
+    }
+
+    #[test]
+    fn backend_cannot_return_success_for_less_than_the_request_requires() {
+        struct IncompleteBackend;
+
+        impl ExecutionBackend for IncompleteBackend {
+            fn containment_support(&self, _request: &ExecutionRequest) -> ContainmentSupport {
+                ContainmentSupport::Supported {
+                    backend: BackendIdentity {
+                        name: "test/incomplete".into(),
+                        version: "1".into(),
+                        deprecation: None,
+                    },
+                    requested: EnforcementDimensions::none(),
+                    declared: EnforcementDimensions::none(),
+                    observed: EnforcementDimensions::none(),
+                }
+            }
+
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                support: ContainmentSupport,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                Ok(ExecutionOutcome {
+                    termination: Termination::Exited(0),
+                    stdout: vec![],
+                    stderr: vec![],
+                    enforcement: EnforcementReceipt {
+                        support,
+                        enforced: EnforcementDimensions::none(),
+                        resolved_filesystem: resolved_grants(),
+                        configured_limits: ExecutionLimits::default(),
+                    },
+                })
+            }
+        }
+
+        let request = ExecutionRequest::builder("node")
+            .policy(required_policy())
+            .build()
+            .unwrap();
+        let error = execute_with_backend(&request, &IncompleteBackend).unwrap_err();
+        assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+    }
+
+    #[test]
     fn public_outcome_contract_distinguishes_termination_and_enforcement() {
         fn inspect(outcome: &ExecutionOutcome) {
             let _: &Termination = outcome.termination();
@@ -532,6 +828,8 @@ mod tests {
             let _: &ContainmentSupport = receipt.support();
             let _: &BackendIdentity = receipt.backend();
             let _: &EnforcementDimensions = receipt.requested();
+            let _: &EnforcementDimensions = receipt.declared();
+            let _: &EnforcementDimensions = receipt.observed();
             let _: &EnforcementDimensions = receipt.enforced();
             let _: &ResolvedFilesystemGrants = receipt.resolved_filesystem();
             let _: &ExecutionLimits = receipt.configured_limits();
@@ -558,6 +856,178 @@ mod tests {
         assert!(support.requested().descendant_lifecycle());
         assert!(!support.requested().resource_limits());
         assert!(support.unsupported_reason().is_some());
+    }
+
+    #[test]
+    fn requested_evidence_distinguishes_subprocess_denial_from_descendant_lifecycle() {
+        let denied = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            false,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let allowed = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+
+        let denied = EnforcementDimensions::requested_by(&denied);
+        let allowed = EnforcementDimensions::requested_by(&allowed);
+        assert!(denied.subprocess_restriction());
+        assert!(!allowed.subprocess_restriction());
+        assert!(denied.descendant_lifecycle());
+        assert!(allowed.descendant_lifecycle());
+    }
+
+    #[test]
+    fn requested_resource_evidence_reports_each_configured_limit_independently() {
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(Some(1), None, Some(2), None).unwrap(),
+        )
+        .unwrap();
+        let requested = EnforcementDimensions::requested_by(&policy);
+        assert!(requested.timeout());
+        assert!(!requested.output());
+        assert!(requested.process_count());
+        assert!(!requested.memory());
+    }
+
+    fn support_with_evidence(
+        requested: EnforcementDimensions,
+        declared: EnforcementDimensions,
+        observed: EnforcementDimensions,
+    ) -> ContainmentSupport {
+        ContainmentSupport::Supported {
+            backend: BackendIdentity {
+                name: "test".into(),
+                version: "1".into(),
+                deprecation: None,
+            },
+            requested,
+            declared,
+            observed,
+        }
+    }
+
+    fn resolved_grants() -> ResolvedFilesystemGrants {
+        ResolvedFilesystemGrants {
+            read: vec![PathBuf::from("/project")],
+            write: vec![],
+        }
+    }
+
+    #[test]
+    fn support_models_declared_and_observed_evidence_separately() {
+        let requested = EnforcementDimensions::requested_by(&required_policy());
+        let mut declared = requested.clone();
+        declared.timeout = true;
+        let observed = requested.clone();
+        let support = support_with_evidence(requested, declared.clone(), observed.clone());
+
+        assert_eq!(support.declared(), &declared);
+        assert_eq!(support.observed(), &observed);
+        assert_eq!(support.enforceable(), &declared);
+    }
+
+    #[test]
+    fn checked_receipt_rejects_extra_or_missing_enforcement_dimensions() {
+        let requested = EnforcementDimensions::requested_by(&required_policy());
+        let support =
+            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+
+        let mut extra = requested.clone();
+        extra.timeout = true;
+        assert!(
+            EnforcementReceipt::checked(
+                support.clone(),
+                extra,
+                resolved_grants(),
+                ExecutionLimits::default(),
+            )
+            .is_err()
+        );
+
+        let mut missing = requested.clone();
+        missing.network = false;
+        assert!(
+            EnforcementReceipt::checked(
+                support,
+                missing,
+                resolved_grants(),
+                ExecutionLimits::default(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn checked_receipt_requires_declared_observed_and_configured_limit_evidence() {
+        let limits = ExecutionLimits::new(Some(1), Some(2), Some(3), Some(4)).unwrap();
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            limits.clone(),
+        )
+        .unwrap();
+        let requested = EnforcementDimensions::requested_by(&policy);
+
+        let mut not_observed = requested.clone();
+        not_observed.memory = false;
+        let support = support_with_evidence(requested.clone(), requested.clone(), not_observed);
+        assert!(
+            EnforcementReceipt::checked(
+                support,
+                requested.clone(),
+                resolved_grants(),
+                limits.clone(),
+            )
+            .is_err()
+        );
+
+        let support =
+            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+        assert!(
+            EnforcementReceipt::checked(
+                support,
+                requested,
+                resolved_grants(),
+                ExecutionLimits::default(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn checked_outcome_accepts_success_only_with_a_complete_receipt() {
+        let requested = EnforcementDimensions::requested_by(&required_policy());
+        let support =
+            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+        let receipt = EnforcementReceipt::checked(
+            support,
+            requested,
+            resolved_grants(),
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let outcome =
+            ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt).unwrap();
+        assert_eq!(outcome.termination(), &Termination::Exited(0));
     }
 
     #[test]

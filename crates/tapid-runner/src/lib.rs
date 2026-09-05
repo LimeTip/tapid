@@ -2,8 +2,9 @@ pub mod config;
 pub mod execution;
 
 pub use config::{
-    ConfigError, ConfigErrorCategory, ExecutionLimits, FilesystemPolicy, RunConfig, SandboxMode,
-    SandboxPolicy,
+    ConfigError, ConfigErrorCategory, ExecutionLimits, FilesystemPolicy, MAX_CONFIG_BYTES,
+    MAX_ENVIRONMENT_COUNT, MAX_GRANT_COUNT, MAX_PROFILE_COUNT, MAX_STRING_BYTES, RunConfig,
+    SandboxMode, SandboxPolicy,
 };
 pub use execution::{
     BackendIdentity, ContainmentSupport, EnforcementDimensions, EnforcementReceipt, ExecutionError,
