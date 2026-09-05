@@ -82,6 +82,7 @@ test("binary release follows the small draft release flow", async () => {
   assert(!workflow.includes('gh release upload "$GITHUB_REF_NAME"'));
   assert(!workflow.includes("--clobber"));
   const deriveTag = workflow.indexOf('RELEASE_TAG="v$(node --experimental-strip-types tools/release/release.ts current-version)"');
+  assert(workflow.includes("set -euo pipefail"));
   const validateTagInput = workflow.indexOf('[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)');
   const deleteCheckoutTag = workflow.indexOf('git tag -d "$RELEASE_TAG"');
   const fetchAnnotatedTag = workflow.indexOf('refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG');

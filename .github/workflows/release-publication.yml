@@ -34,6 +34,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
+          set -euo pipefail
           if [ "$EVENT_NAME" = workflow_dispatch ]; then
             RELEASE_TAG="v$(node --experimental-strip-types tools/release/release.ts current-version)"
           else
