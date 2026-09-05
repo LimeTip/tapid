@@ -5,6 +5,21 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Maximum UTF-8 byte length of each backend identity field.
+pub const MAX_BACKEND_IDENTITY_BYTES: usize = 255;
+/// Maximum program length in bytes on Unix or UTF-16 code units on Windows.
+pub const MAX_PROGRAM_UNITS: usize = 4_096;
+/// Maximum number of arguments, excluding the program.
+pub const MAX_ARGUMENT_COUNT: usize = 4_096;
+/// Maximum argument length in bytes on Unix or UTF-16 code units on Windows.
+pub const MAX_ARGUMENT_UNITS: usize = 16_384;
+/// Maximum cumulative program and argv payload, including terminators.
+pub const MAX_ARGV_UNITS: usize = 32_767;
+/// Maximum environment value length in bytes on Unix or UTF-16 code units on Windows.
+pub const MAX_ENVIRONMENT_VALUE_UNITS: usize = 32_767;
+/// Maximum cumulative child environment block, including separators and terminators.
+pub const MAX_ENVIRONMENT_BLOCK_UNITS: usize = 32_767;
+
 /// Identity and lifecycle status of a containment backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackendIdentity {
@@ -14,6 +29,25 @@ pub struct BackendIdentity {
 }
 
 impl BackendIdentity {
+    pub fn new(
+        name: impl Into<String>,
+        version: impl Into<String>,
+        deprecation: Option<String>,
+    ) -> Result<Self, ExecutionError> {
+        let name = name.into();
+        let version = version.into();
+        validate_identity_field("backend name", &name)?;
+        validate_identity_field("backend version", &version)?;
+        if let Some(message) = &deprecation {
+            validate_identity_field("backend deprecation", message)?;
+        }
+        Ok(Self {
+            name,
+            version,
+            deprecation,
+        })
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -25,6 +59,21 @@ impl BackendIdentity {
     pub fn deprecation(&self) -> Option<&str> {
         self.deprecation.as_deref()
     }
+}
+
+fn validate_identity_field(kind: &str, value: &str) -> Result<(), ExecutionError> {
+    if value.is_empty()
+        || value.len() > MAX_BACKEND_IDENTITY_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::InvalidRequest,
+            format!(
+                "{kind} must be non-empty, at most {MAX_BACKEND_IDENTITY_BYTES} UTF-8 bytes, and contain no control characters"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Independently reportable containment dimensions.
@@ -127,28 +176,91 @@ impl EnforcementDimensions {
     }
 }
 
-/// Absolute filesystem paths granted by a backend after canonical preflight. Existing targets are
-/// canonical; missing targets are bound to a canonical existing ancestor and validated suffix.
+/// Access associated with one effective filesystem grant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilesystemAccess {
+    Read,
+    Write,
+}
+
+/// The policy semantics declared for a target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilesystemGrantKind {
+    ExactFile,
+    DirectorySubtree,
+}
+
+/// Where an effective grant originated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilesystemGrantSource {
+    ProjectPolicy,
+    BackendRuntime,
+}
+
+/// Evidence used to bind a grant immediately before native setup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilesystemBindingMode {
+    /// A held native handle and stable object identity back this grant.
+    NativeObject,
+    /// A freshly re-resolved canonical path backs this grant. This mode assumes a trusted host
+    /// does not concurrently replace path components before native sandbox installation.
+    CanonicalPath,
+}
+
+/// One typed, effective filesystem grant reported by a receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedFilesystemGrant {
+    path: PathBuf,
+    access: FilesystemAccess,
+    kind: FilesystemGrantKind,
+    source: FilesystemGrantSource,
+    binding: FilesystemBindingMode,
+}
+
+impl ResolvedFilesystemGrant {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn access(&self) -> FilesystemAccess {
+        self.access
+    }
+    pub fn kind(&self) -> FilesystemGrantKind {
+        self.kind
+    }
+    pub fn source(&self) -> FilesystemGrantSource {
+        self.source
+    }
+    pub fn binding(&self) -> FilesystemBindingMode {
+        self.binding
+    }
+}
+
+/// Every effective project and backend runtime grant, without collapsing origins or kinds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedFilesystemGrants {
-    read: Vec<PathBuf>,
-    write: Vec<PathBuf>,
+    grants: Vec<ResolvedFilesystemGrant>,
 }
 
 impl ResolvedFilesystemGrants {
-    pub fn read(&self) -> &[PathBuf] {
-        &self.read
+    pub fn grants(&self) -> &[ResolvedFilesystemGrant] {
+        &self.grants
     }
-
-    pub fn write(&self) -> &[PathBuf] {
-        &self.write
+    pub fn read(&self) -> impl Iterator<Item = &ResolvedFilesystemGrant> {
+        self.grants
+            .iter()
+            .filter(|grant| grant.access == FilesystemAccess::Read)
+    }
+    pub fn write(&self) -> impl Iterator<Item = &ResolvedFilesystemGrant> {
+        self.grants
+            .iter()
+            .filter(|grant| grant.access == FilesystemAccess::Write)
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum GrantResolution {
     ExistingCanonical,
-    MissingTarget {
+    MissingWriteDirectory {
         canonical_ancestor: PathBuf,
         relative_target: PathBuf,
     },
@@ -158,11 +270,13 @@ enum GrantResolution {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ResolvedGrant {
     path: PathBuf,
+    access: FilesystemAccess,
+    kind: FilesystemGrantKind,
+    source: FilesystemGrantSource,
     resolution: GrantResolution,
 }
 
-/// Explicit backend runtime paths added to the declarative project policy.
-/// Construction is private so additions are canonical before preflight succeeds.
+/// Explicit, typed backend baseline/runtime paths added to project policy.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct RuntimeFilesystemAdditions {
     read: Vec<ResolvedGrant>,
@@ -170,16 +284,16 @@ struct RuntimeFilesystemAdditions {
 }
 
 impl RuntimeFilesystemAdditions {
-    #[allow(dead_code)] // Used by platform backends when runtime grants are required.
+    #[allow(dead_code)]
     fn checked(read: Vec<PathBuf>, write: Vec<PathBuf>) -> Result<Self, ExecutionError> {
         Ok(Self {
             read: read
                 .into_iter()
-                .map(resolve_runtime_grant)
+                .map(|path| resolve_runtime_grant(path, FilesystemAccess::Read))
                 .collect::<Result<_, _>>()?,
             write: write
                 .into_iter()
-                .map(resolve_runtime_grant)
+                .map(|path| resolve_runtime_grant(path, FilesystemAccess::Write))
                 .collect::<Result<_, _>>()?,
         })
     }
@@ -191,29 +305,198 @@ struct ResolvedSandboxPolicy {
     project_root: PathBuf,
     read: Vec<ResolvedGrant>,
     write: Vec<ResolvedGrant>,
-    grants: ResolvedFilesystemGrants,
     limits: ExecutionLimits,
 }
 
-/// Private proof that support and the exact resolved policy passed pre-spawn checks.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeIdentity {
+    device: u64,
+    inode: u64,
+}
+
+struct BoundFilesystemGrant {
+    receipt: ResolvedFilesystemGrant,
+    held: Option<fs::File>,
+    #[cfg(unix)]
+    native_identity: Option<NativeIdentity>,
+}
+
+struct FilesystemBindings {
+    grants: Vec<BoundFilesystemGrant>,
+}
+
+impl FilesystemBindings {
+    fn canonical_path(policy: &ResolvedSandboxPolicy) -> Result<Self, ExecutionError> {
+        let grants = policy
+            .read
+            .iter()
+            .chain(&policy.write)
+            .map(bind_canonical)
+            .collect::<Result<_, _>>()?;
+        Ok(Self { grants })
+    }
+
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    fn native_objects(policy: &ResolvedSandboxPolicy) -> Result<Self, ExecutionError> {
+        use std::os::unix::fs::MetadataExt;
+        let grants = policy
+            .read
+            .iter()
+            .chain(&policy.write)
+            .map(|grant| {
+                let canonical = canonical_path(&grant.path, "native filesystem binding")?;
+                if canonical != grant.path || filesystem_kind(&canonical)? != grant.kind {
+                    return Err(binding_mismatch());
+                }
+                let held = fs::File::open(&canonical).map_err(|error| {
+                    path_error("open native filesystem binding", &canonical, error)
+                })?;
+                let metadata = held.metadata().map_err(|error| {
+                    path_error("inspect native filesystem binding", &canonical, error)
+                })?;
+                Ok(BoundFilesystemGrant {
+                    receipt: grant_receipt(grant, FilesystemBindingMode::NativeObject),
+                    held: Some(held),
+                    native_identity: Some(NativeIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    }),
+                })
+            })
+            .collect::<Result<_, ExecutionError>>()?;
+        Ok(Self { grants })
+    }
+
+    fn validate(&self, policy: &ResolvedSandboxPolicy) -> Result<(), ExecutionError> {
+        let expected: Vec<_> = policy.read.iter().chain(&policy.write).collect();
+        if expected.len() != self.grants.len() {
+            return Err(binding_mismatch());
+        }
+        for (expected, bound) in expected.into_iter().zip(&self.grants) {
+            if bound.receipt.path != expected.path
+                || bound.receipt.access != expected.access
+                || bound.receipt.kind != expected.kind
+                || bound.receipt.source != expected.source
+            {
+                return Err(binding_mismatch());
+            }
+            let canonical = canonical_path(&expected.path, "filesystem binding revalidation")?;
+            if canonical != expected.path || filesystem_kind(&canonical)? != expected.kind {
+                return Err(binding_mismatch());
+            }
+            match bound.receipt.binding {
+                FilesystemBindingMode::CanonicalPath => {
+                    if bound.held.is_some() {
+                        return Err(binding_mismatch());
+                    }
+                }
+                FilesystemBindingMode::NativeObject => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        let held = bound.held.as_ref().ok_or_else(binding_mismatch)?;
+                        let held_metadata = held.metadata().map_err(|error| {
+                            path_error(
+                                "inspect held native filesystem binding",
+                                &expected.path,
+                                error,
+                            )
+                        })?;
+                        let current = fs::metadata(&canonical).map_err(|error| {
+                            path_error(
+                                "inspect current native filesystem binding",
+                                &canonical,
+                                error,
+                            )
+                        })?;
+                        let identity = NativeIdentity {
+                            device: held_metadata.dev(),
+                            inode: held_metadata.ino(),
+                        };
+                        let current_identity = NativeIdentity {
+                            device: current.dev(),
+                            inode: current.ino(),
+                        };
+                        if Some(identity) != bound.native_identity || identity != current_identity {
+                            return Err(binding_mismatch());
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    return Err(ExecutionError::new(
+                        ExecutionErrorCategory::UnsupportedContainment,
+                        "native object identity is unavailable on this adapter scaffold",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn receipt(&self) -> ResolvedFilesystemGrants {
+        ResolvedFilesystemGrants {
+            grants: self
+                .grants
+                .iter()
+                .map(|grant| grant.receipt.clone())
+                .collect(),
+        }
+    }
+}
+
+fn bind_canonical(grant: &ResolvedGrant) -> Result<BoundFilesystemGrant, ExecutionError> {
+    let canonical =
+        canonical_path(&grant.path, "canonical filesystem binding").map_err(|error| {
+            if matches!(
+                grant.resolution,
+                GrantResolution::MissingWriteDirectory { .. }
+            ) {
+                ExecutionError::new(
+                    ExecutionErrorCategory::UnsupportedContainment,
+                    format!("backend did not securely materialize missing write subtree: {error}"),
+                )
+            } else {
+                error
+            }
+        })?;
+    if canonical != grant.path || filesystem_kind(&canonical)? != grant.kind {
+        return Err(binding_mismatch());
+    }
+    Ok(BoundFilesystemGrant {
+        receipt: grant_receipt(grant, FilesystemBindingMode::CanonicalPath),
+        held: None,
+        #[cfg(unix)]
+        native_identity: None,
+    })
+}
+
+fn grant_receipt(grant: &ResolvedGrant, binding: FilesystemBindingMode) -> ResolvedFilesystemGrant {
+    ResolvedFilesystemGrant {
+        path: grant.path.clone(),
+        access: grant.access,
+        kind: grant.kind,
+        source: grant.source,
+        binding,
+    }
+}
+
+fn binding_mismatch() -> ExecutionError {
+    ExecutionError::new(
+        ExecutionErrorCategory::PolicyViolation,
+        "backend filesystem bindings do not match the exact validated preflight",
+    )
+}
+
+/// Private proof that support, policy, bindings, and limits passed pre-spawn checks.
 struct ValidatedPreflight {
     support: ContainmentSupport,
     policy: ResolvedSandboxPolicy,
+    bindings: FilesystemBindings,
 }
 
 impl ResolvedSandboxPolicy {
     fn validate(&self) -> Result<(), ExecutionError> {
-        let projected = ResolvedFilesystemGrants {
-            read: self.read.iter().map(|grant| grant.path.clone()).collect(),
-            write: self.write.iter().map(|grant| grant.path.clone()).collect(),
-        };
-        if projected != self.grants {
-            return Err(ExecutionError::new(
-                ExecutionErrorCategory::PolicyViolation,
-                "resolved filesystem receipt grants omit or add preflight paths",
-            ));
-        }
         for grant in self.read.iter().chain(&self.write) {
             match &grant.resolution {
                 GrantResolution::ExistingCanonical => {
@@ -222,12 +505,14 @@ impl ResolvedSandboxPolicy {
                         return Err(grant_confinement_error(&grant.path));
                     }
                 }
-                GrantResolution::MissingTarget {
+                GrantResolution::MissingWriteDirectory {
                     canonical_ancestor,
                     relative_target,
                 } => {
                     validate_canonical_path(canonical_ancestor)?;
-                    if !canonical_ancestor.starts_with(&self.project_root)
+                    if grant.access != FilesystemAccess::Write
+                        || grant.kind != FilesystemGrantKind::DirectorySubtree
+                        || !canonical_ancestor.starts_with(&self.project_root)
                         || relative_target.is_absolute()
                         || relative_target
                             .components()
@@ -393,7 +678,7 @@ impl EnforcementReceipt {
         Ok(Self {
             support: support.clone(),
             enforced,
-            resolved_filesystem: preflight.policy.grants.clone(),
+            resolved_filesystem: preflight.bindings.receipt(),
             configured_limits: configured_limits.clone(),
         })
     }
@@ -491,7 +776,7 @@ impl ExecutionOutcome {
             || !receipt.declared().contains(required)
             || !receipt.observed().contains(required)
             || receipt.configured_limits() != &preflight.policy.limits
-            || receipt.resolved_filesystem() != &preflight.policy.grants
+            || receipt.resolved_filesystem() != &preflight.bindings.receipt()
         {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
@@ -595,6 +880,76 @@ impl ExecutionRequest {
     pub fn environment(&self) -> &BTreeMap<OsString, OsString> {
         &self.environment
     }
+
+    fn validate(&self) -> Result<(), ExecutionError> {
+        let program_units =
+            validate_os_value("execution program", &self.program, MAX_PROGRAM_UNITS)?;
+        if self.program.is_empty() {
+            return Err(invalid_request("execution program must not be empty"));
+        }
+        if self.arguments.len() > MAX_ARGUMENT_COUNT {
+            return Err(invalid_request(format!(
+                "execution request exceeds {MAX_ARGUMENT_COUNT} arguments"
+            )));
+        }
+        let mut argv_units = program_units.saturating_add(1);
+        for argument in &self.arguments {
+            let units = validate_os_value("execution argument", argument, MAX_ARGUMENT_UNITS)?;
+            argv_units = argv_units.saturating_add(units).saturating_add(1);
+        }
+        if argv_units > MAX_ARGV_UNITS {
+            return Err(invalid_request(format!(
+                "execution argv exceeds {MAX_ARGV_UNITS} bytes/code units"
+            )));
+        }
+        if self.project_root.as_os_str().is_empty() {
+            return Err(invalid_request("project root must not be empty"));
+        }
+        let mut environment_units = 1usize;
+        for (name, value) in &self.environment {
+            let Some(name) = name.to_str() else {
+                return Err(invalid_request(
+                    "environment variable names must be valid UTF-8",
+                ));
+            };
+            if name.eq_ignore_ascii_case("PATH") {
+                return Err(invalid_request(
+                    "caller-controlled PATH is forbidden; containment backends own executable search paths",
+                ));
+            }
+            if validate_environment_name(name).is_err() {
+                return Err(invalid_request(format!(
+                    "invalid environment variable name: {name:?}"
+                )));
+            }
+            let name_units = os_units(name.as_ref());
+            let value_units = validate_os_value(
+                "environment variable value",
+                value,
+                MAX_ENVIRONMENT_VALUE_UNITS,
+            )?;
+            environment_units = environment_units
+                .saturating_add(name_units)
+                .saturating_add(value_units)
+                .saturating_add(2);
+            if environment_units > MAX_ENVIRONMENT_BLOCK_UNITS {
+                return Err(invalid_request(format!(
+                    "execution environment exceeds {MAX_ENVIRONMENT_BLOCK_UNITS} bytes/code units"
+                )));
+            }
+            if !self
+                .policy
+                .environment()
+                .iter()
+                .any(|allowed| allowed == name)
+            {
+                return Err(invalid_request(format!(
+                    "environment variable is not allowlisted by policy: {name}"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Builder for an [`ExecutionRequest`].
@@ -654,51 +1009,83 @@ impl ExecutionRequestBuilder {
     }
 
     pub fn build(self) -> Result<ExecutionRequest, ExecutionError> {
-        if self.program.is_empty() {
-            return Err(ExecutionError::new(
-                ExecutionErrorCategory::InvalidRequest,
-                "execution program must not be empty",
-            ));
-        }
-        if self.project_root.as_os_str().is_empty() {
-            return Err(ExecutionError::new(
-                ExecutionErrorCategory::InvalidRequest,
-                "project root must not be empty",
-            ));
-        }
-        for name in self.environment.keys() {
-            let Some(name) = name.to_str() else {
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::InvalidRequest,
-                    "environment variable names must be valid UTF-8",
-                ));
-            };
-            if validate_environment_name(name).is_err() {
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::InvalidRequest,
-                    format!("invalid environment variable name: {name:?}"),
-                ));
-            }
-            if !self
-                .policy
-                .environment()
-                .iter()
-                .any(|allowed| allowed == name)
-            {
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::InvalidRequest,
-                    format!("environment variable is not allowlisted by policy: {name}"),
-                ));
-            }
-        }
-        Ok(ExecutionRequest {
+        let request = ExecutionRequest {
             program: self.program,
             arguments: self.arguments,
             project_root: self.project_root,
             policy: self.policy,
             environment: self.environment,
-        })
+        };
+        request.validate()?;
+        Ok(request)
     }
+}
+
+fn invalid_request(message: impl Into<String>) -> ExecutionError {
+    ExecutionError::new(ExecutionErrorCategory::InvalidRequest, message)
+}
+
+fn validate_os_value(kind: &str, value: &OsStr, maximum: usize) -> Result<usize, ExecutionError> {
+    validate_platform_representation(kind, value)?;
+    let units = os_units(value);
+    if os_contains_nul(value) {
+        return Err(invalid_request(format!("{kind} contains an embedded NUL")));
+    }
+    if units > maximum {
+        return Err(invalid_request(format!(
+            "{kind} exceeds {maximum} bytes/code units"
+        )));
+    }
+    Ok(units)
+}
+
+#[cfg(any(unix, windows))]
+fn validate_platform_representation(_kind: &str, _value: &OsStr) -> Result<(), ExecutionError> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn validate_platform_representation(kind: &str, value: &OsStr) -> Result<(), ExecutionError> {
+    if value.to_str().is_none() {
+        return Err(invalid_request(format!(
+            "{kind} cannot be represented on this platform"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn os_units(value: &OsStr) -> usize {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes().len()
+}
+
+#[cfg(unix)]
+fn os_contains_nul(value: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes().contains(&0)
+}
+
+#[cfg(windows)]
+fn os_units(value: &OsStr) -> usize {
+    use std::os::windows::ffi::OsStrExt;
+    value.encode_wide().count()
+}
+
+#[cfg(windows)]
+fn os_contains_nul(value: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    value.encode_wide().any(|unit| unit == 0)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn os_units(value: &OsStr) -> usize {
+    value.to_string_lossy().len()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn os_contains_nul(value: &OsStr) -> bool {
+    value.to_string_lossy().contains('\0')
 }
 
 /// Attempts execution through a private platform backend.
@@ -719,6 +1106,17 @@ trait ExecutionBackend {
         Ok(RuntimeFilesystemAdditions::default())
     }
 
+    /// Materialize missing write subtrees, re-resolve every path, and bind native identity
+    /// immediately before native sandbox setup. The default path-only implementation fails
+    /// closed when a missing write subtree was not materialized.
+    fn bind_filesystem(
+        &self,
+        _request: &ExecutionRequest,
+        policy: &ResolvedSandboxPolicy,
+    ) -> Result<FilesystemBindings, ExecutionError> {
+        FilesystemBindings::canonical_path(policy)
+    }
+
     fn spawn(
         &self,
         request: &ExecutionRequest,
@@ -730,6 +1128,7 @@ fn execute_with_backend(
     request: &ExecutionRequest,
     backend: &impl ExecutionBackend,
 ) -> Result<ExecutionOutcome, ExecutionError> {
+    request.validate()?;
     if request.policy().mode() == SandboxMode::Disabled {
         return Err(ExecutionError::new(
             ExecutionErrorCategory::PolicyViolation,
@@ -742,7 +1141,15 @@ fn execute_with_backend(
     let additions = backend.runtime_filesystem_additions(request)?;
     let policy = resolve_policy(request, additions)?;
     policy.validate()?;
-    let preflight = ValidatedPreflight { support, policy };
+    let bindings = backend.bind_filesystem(request, &policy)?;
+    bindings.validate(&policy)?;
+    let preflight = ValidatedPreflight {
+        support,
+        policy,
+        bindings,
+    };
+    // This is deliberately the final generic operation before the adapter's native setup/spawn.
+    preflight.bindings.validate(&preflight.policy)?;
     let outcome = backend.spawn(request, &preflight)?;
     outcome.validate_for_preflight(&preflight)?;
     Ok(outcome)
@@ -753,6 +1160,26 @@ fn validate_supported_evidence(
     support: &ContainmentSupport,
 ) -> Result<(), ExecutionError> {
     let required = EnforcementDimensions::requested_by(request.policy());
+    let backend = support.backend();
+    for (kind, value) in [
+        ("backend name", backend.name()),
+        ("backend version", backend.version()),
+    ] {
+        validate_identity_field(kind, value).map_err(|_| {
+            ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "backend returned an invalid identity",
+            )
+        })?;
+    }
+    if let Some(deprecation) = backend.deprecation() {
+        validate_identity_field("backend deprecation", deprecation).map_err(|_| {
+            ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "backend returned an invalid identity",
+            )
+        })?;
+    }
     match support {
         ContainmentSupport::Unsupported {
             platform, reason, ..
@@ -792,26 +1219,21 @@ fn resolve_policy(
     let mut read = filesystem
         .read()
         .iter()
-        .map(|grant| resolve_project_grant(&project_root, grant))
+        .map(|grant| resolve_project_grant(&project_root, grant, FilesystemAccess::Read))
         .collect::<Result<Vec<_>, _>>()?;
     let mut write = filesystem
         .write()
         .iter()
-        .map(|grant| resolve_project_grant(&project_root, grant))
+        .map(|grant| resolve_project_grant(&project_root, grant, FilesystemAccess::Write))
         .collect::<Result<Vec<_>, _>>()?;
     read.extend(additions.read);
     write.extend(additions.write);
 
-    let grants = ResolvedFilesystemGrants {
-        read: read.iter().map(|grant| grant.path.clone()).collect(),
-        write: write.iter().map(|grant| grant.path.clone()).collect(),
-    };
     Ok(ResolvedSandboxPolicy {
         mode: request.policy().mode(),
         project_root,
         read,
         write,
-        grants,
         limits: request.policy().limits().clone(),
     })
 }
@@ -819,6 +1241,7 @@ fn resolve_policy(
 fn resolve_project_grant(
     project_root: &Path,
     configured: &str,
+    access: FilesystemAccess,
 ) -> Result<ResolvedGrant, ExecutionError> {
     let target = project_root.join(configured);
     let mut ancestor = target.as_path();
@@ -828,6 +1251,12 @@ fn resolve_project_grant(
         match fs::symlink_metadata(ancestor) {
             Ok(_) => break,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if access == FilesystemAccess::Read {
+                    return Err(ExecutionError::new(
+                        ExecutionErrorCategory::PolicyViolation,
+                        format!("read grant target does not exist: {configured:?}"),
+                    ));
+                }
                 let component = ancestor.file_name().ok_or_else(|| {
                     ExecutionError::new(
                         ExecutionErrorCategory::PolicyViolation,
@@ -842,9 +1271,7 @@ fn resolve_project_grant(
                     )
                 })?;
             }
-            Err(error) => {
-                return Err(path_error("inspect filesystem grant", &target, error));
-            }
+            Err(error) => return Err(path_error("inspect filesystem grant", &target, error)),
         }
     }
 
@@ -857,7 +1284,10 @@ fn resolve_project_grant(
     }
     if missing.is_empty() {
         return Ok(ResolvedGrant {
+            kind: filesystem_kind(&canonical_ancestor)?,
             path: canonical_ancestor,
+            access,
+            source: FilesystemGrantSource::ProjectPolicy,
             resolution: GrantResolution::ExistingCanonical,
         });
     }
@@ -867,14 +1297,20 @@ fn resolve_project_grant(
     let path = canonical_ancestor.join(&relative_target);
     Ok(ResolvedGrant {
         path,
-        resolution: GrantResolution::MissingTarget {
+        access,
+        kind: FilesystemGrantKind::DirectorySubtree,
+        source: FilesystemGrantSource::ProjectPolicy,
+        resolution: GrantResolution::MissingWriteDirectory {
             canonical_ancestor,
             relative_target,
         },
     })
 }
 
-fn resolve_runtime_grant(path: PathBuf) -> Result<ResolvedGrant, ExecutionError> {
+fn resolve_runtime_grant(
+    path: PathBuf,
+    access: FilesystemAccess,
+) -> Result<ResolvedGrant, ExecutionError> {
     if !path.is_absolute() {
         return Err(ExecutionError::new(
             ExecutionErrorCategory::PolicyViolation,
@@ -895,9 +1331,30 @@ fn resolve_runtime_grant(path: PathBuf) -> Result<ResolvedGrant, ExecutionError>
         ));
     }
     Ok(ResolvedGrant {
+        kind: filesystem_kind(&canonical)?,
         path: canonical,
+        access,
+        source: FilesystemGrantSource::BackendRuntime,
         resolution: GrantResolution::RuntimeCanonical,
     })
+}
+
+fn filesystem_kind(path: &Path) -> Result<FilesystemGrantKind, ExecutionError> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| path_error("inspect filesystem grant kind", path, error))?;
+    if metadata.is_file() {
+        Ok(FilesystemGrantKind::ExactFile)
+    } else if metadata.is_dir() {
+        Ok(FilesystemGrantKind::DirectorySubtree)
+    } else {
+        Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            format!(
+                "filesystem grant is neither a regular file nor directory: {}",
+                path.display()
+            ),
+        ))
+    }
 }
 
 fn canonical_path(path: &Path, kind: &str) -> Result<PathBuf, ExecutionError> {
@@ -939,11 +1396,12 @@ mod platform_backend {
 
     pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupport {
         ContainmentSupport::Unsupported {
-            backend: BackendIdentity {
-                name: "tapid-runner/no-backend".to_owned(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-                deprecation: None,
-            },
+            backend: BackendIdentity::new(
+                "tapid-runner/no-backend",
+                env!("CARGO_PKG_VERSION"),
+                None,
+            )
+            .expect("static backend identity must satisfy the checked contract"),
             platform: std::env::consts::OS.to_owned(),
             reason: "no platform execution backend is implemented".to_owned(),
             requested: EnforcementDimensions::requested_by(request.policy()),
@@ -1294,9 +1752,12 @@ mod tests {
             .policy(policy)
             .build()
             .unwrap();
+        let policy = resolve_policy(&request, RuntimeFilesystemAdditions::default()).unwrap();
+        let bindings = FilesystemBindings::canonical_path(&policy).unwrap();
         ValidatedPreflight {
             support,
-            policy: resolve_policy(&request, RuntimeFilesystemAdditions::default()).unwrap(),
+            policy,
+            bindings,
         }
     }
 
@@ -1332,6 +1793,24 @@ mod tests {
                 RuntimeFilesystemAdditions::checked(vec![self.runtime.clone()], vec![])
             }
 
+            fn bind_filesystem(
+                &self,
+                _request: &ExecutionRequest,
+                policy: &ResolvedSandboxPolicy,
+            ) -> Result<FilesystemBindings, ExecutionError> {
+                for grant in &policy.write {
+                    if matches!(
+                        grant.resolution,
+                        GrantResolution::MissingWriteDirectory { .. }
+                    ) {
+                        fs::create_dir_all(&grant.path).map_err(|error| {
+                            path_error("materialize missing write subtree", &grant.path, error)
+                        })?;
+                    }
+                }
+                FilesystemBindings::canonical_path(policy)
+            }
+
             fn spawn(
                 &self,
                 _request: &ExecutionRequest,
@@ -1341,7 +1820,7 @@ mod tests {
                 assert_eq!(preflight.policy.write.len(), 1);
                 assert!(matches!(
                     preflight.policy.write[0].resolution,
-                    GrantResolution::MissingTarget { .. }
+                    GrantResolution::MissingWriteDirectory { .. }
                 ));
                 let enforced = preflight.support.requested().clone();
                 let receipt = EnforcementReceipt::checked(preflight, enforced)?;
@@ -1350,7 +1829,9 @@ mod tests {
         }
 
         let root = temporary_directory("resolved-root");
-        let runtime = temporary_directory("resolved-runtime");
+        let runtime_root = temporary_directory("resolved-runtime");
+        let runtime = runtime_root.join("node");
+        fs::write(&runtime, b"runtime executable").unwrap();
         fs::create_dir(root.join("existing")).unwrap();
         let canonical_root = fs::canonicalize(&root).unwrap();
         let canonical_runtime = fs::canonicalize(&runtime).unwrap();
@@ -1380,17 +1861,28 @@ mod tests {
             },
         )
         .unwrap();
+        let grants = outcome.enforcement().resolved_filesystem().grants();
+        assert_eq!(grants.len(), 3);
+        assert_eq!(grants[0].path(), canonical_root.join("existing"));
+        assert_eq!(grants[0].kind(), FilesystemGrantKind::DirectorySubtree);
+        assert_eq!(grants[0].source(), FilesystemGrantSource::ProjectPolicy);
+        assert_eq!(grants[1].path(), canonical_runtime);
+        assert_eq!(grants[1].source(), FilesystemGrantSource::BackendRuntime);
+        assert_eq!(grants[1].kind(), FilesystemGrantKind::ExactFile);
         assert_eq!(
-            outcome.enforcement().resolved_filesystem().read(),
-            &[canonical_root.join("existing"), canonical_runtime]
+            grants[2].path(),
+            canonical_root.join("generated/nested/output.txt")
         );
-        assert_eq!(
-            outcome.enforcement().resolved_filesystem().write(),
-            &[canonical_root.join("generated/nested/output.txt")]
+        assert_eq!(grants[2].access(), FilesystemAccess::Write);
+        assert_eq!(grants[2].kind(), FilesystemGrantKind::DirectorySubtree);
+        assert!(
+            grants
+                .iter()
+                .all(|grant| grant.binding() == FilesystemBindingMode::CanonicalPath)
         );
 
         fs::remove_dir_all(root).unwrap();
-        fs::remove_dir_all(runtime).unwrap();
+        fs::remove_dir_all(runtime_root).unwrap();
     }
 
     #[test]
@@ -1401,10 +1893,23 @@ mod tests {
             support_with_evidence(requested.clone(), requested.clone(), requested.clone());
         let mut preflight = preflight_for(policy, support);
 
-        preflight.policy.grants.read.clear();
-        assert!(preflight.policy.validate().is_err());
-        preflight.policy.grants.read.push(PathBuf::from("/extra"));
-        assert!(preflight.policy.validate().is_err());
+        let original = preflight.bindings.grants.pop().unwrap();
+        assert!(preflight.bindings.validate(&preflight.policy).is_err());
+        preflight.bindings.grants.push(BoundFilesystemGrant {
+            receipt: ResolvedFilesystemGrant {
+                path: PathBuf::from("/extra"),
+                access: FilesystemAccess::Read,
+                kind: FilesystemGrantKind::DirectorySubtree,
+                source: FilesystemGrantSource::ProjectPolicy,
+                binding: FilesystemBindingMode::CanonicalPath,
+            },
+            held: None,
+            #[cfg(unix)]
+            native_identity: None,
+        });
+        assert!(preflight.bindings.validate(&preflight.policy).is_err());
+        preflight.bindings.grants.clear();
+        preflight.bindings.grants.push(original);
     }
 
     #[test]
@@ -1576,5 +2081,402 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(request.environment().len(), 1);
+    }
+
+    #[test]
+    fn backend_identity_is_checked_and_bounded() {
+        let at_limit = "x".repeat(MAX_BACKEND_IDENTITY_BYTES);
+        assert!(BackendIdentity::new(at_limit.clone(), at_limit.clone(), Some(at_limit)).is_ok());
+        for invalid in ["", "bad\0value", "bad\nvalue"] {
+            assert_eq!(
+                BackendIdentity::new(invalid, "1", None)
+                    .unwrap_err()
+                    .category(),
+                ExecutionErrorCategory::InvalidRequest
+            );
+            assert!(BackendIdentity::new("backend", invalid, None).is_err());
+            assert!(BackendIdentity::new("backend", "1", Some(invalid.into())).is_err());
+        }
+        let oversized = "x".repeat(MAX_BACKEND_IDENTITY_BYTES + 1);
+        assert!(BackendIdentity::new(&oversized, "1", None).is_err());
+        assert!(BackendIdentity::new("backend", &oversized, None).is_err());
+        assert!(BackendIdentity::new("backend", "1", Some(oversized)).is_err());
+    }
+
+    #[test]
+    fn request_payload_limits_and_nul_are_enforced() {
+        assert!(
+            ExecutionRequest::builder("x".repeat(MAX_PROGRAM_UNITS))
+                .build()
+                .is_ok()
+        );
+        assert!(
+            ExecutionRequest::builder("x".repeat(MAX_PROGRAM_UNITS + 1))
+                .build()
+                .is_err()
+        );
+        assert!(ExecutionRequest::builder("bad\0program").build().is_err());
+        assert!(
+            ExecutionRequest::builder("node")
+                .args(std::iter::repeat_n("x", MAX_ARGUMENT_COUNT))
+                .build()
+                .is_ok()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .args(std::iter::repeat_n("x", MAX_ARGUMENT_COUNT + 1))
+                .build()
+                .is_err()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .arg("x".repeat(MAX_ARGUMENT_UNITS + 1))
+                .build()
+                .is_err()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .arg("bad\0arg")
+                .build()
+                .is_err()
+        );
+        let exact_argv = [
+            "x".repeat(MAX_ARGUMENT_UNITS),
+            "y".repeat(MAX_ARGV_UNITS - MAX_ARGUMENT_UNITS - 4),
+        ];
+        assert!(
+            ExecutionRequest::builder("p")
+                .args(exact_argv.clone())
+                .build()
+                .is_ok()
+        );
+        let mut oversized_argv = exact_argv;
+        oversized_argv[1].push('y');
+        assert!(
+            ExecutionRequest::builder("p")
+                .args(oversized_argv)
+                .build()
+                .is_err()
+        );
+        let cumulative = std::iter::repeat_n("x".repeat(MAX_ARGUMENT_UNITS), 2);
+        assert!(
+            ExecutionRequest::builder("node")
+                .args(cumulative)
+                .build()
+                .is_err()
+        );
+
+        let policy = required_policy();
+        assert!(
+            ExecutionRequest::builder("node")
+                .policy(policy.clone())
+                .env("NODE_ENV", "x".repeat(MAX_ENVIRONMENT_VALUE_UNITS + 1))
+                .build()
+                .is_err()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .policy(policy.clone())
+                .env("NODE_ENV", "bad\0value")
+                .build()
+                .is_err()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .policy(policy)
+                .env("PATH", "/untrusted")
+                .build()
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_request_preserves_non_utf8_arguments_but_rejects_nul() {
+        use std::os::unix::ffi::OsStringExt;
+        let opaque_program = OsString::from_vec(vec![b'.', b'/', 0xff]);
+        let opaque_argument = OsString::from_vec(vec![0xfe, b'x']);
+        let request = ExecutionRequest::builder(opaque_program.clone())
+            .arg(opaque_argument.clone())
+            .build()
+            .unwrap();
+        assert_eq!(request.program(), opaque_program);
+        assert_eq!(request.arguments(), &[opaque_argument]);
+        assert!(
+            ExecutionRequest::builder("node")
+                .arg(OsString::from_vec(vec![b'x', 0, b'y']))
+                .build()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn receipt_grants_expose_declared_kind_source_access_and_binding() {
+        fn inspect(grant: &ResolvedFilesystemGrant) {
+            let _: &Path = grant.path();
+            let _: FilesystemAccess = grant.access();
+            let _: FilesystemGrantKind = grant.kind();
+            let _: FilesystemGrantSource = grant.source();
+            let _: FilesystemBindingMode = grant.binding();
+        }
+        let _ = inspect;
+    }
+
+    #[test]
+    fn missing_read_grant_fails_before_backend_binding_or_spawn() {
+        struct Backend {
+            bind_attempts: std::cell::Cell<usize>,
+            spawn_attempts: std::cell::Cell<usize>,
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn bind_filesystem(
+                &self,
+                _request: &ExecutionRequest,
+                _policy: &ResolvedSandboxPolicy,
+            ) -> Result<FilesystemBindings, ExecutionError> {
+                self.bind_attempts.set(self.bind_attempts.get() + 1);
+                Err(ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
+                    "must not bind",
+                ))
+            }
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                self.spawn_attempts.set(self.spawn_attempts.get() + 1);
+                Err(ExecutionError::new(
+                    ExecutionErrorCategory::Spawn,
+                    "must not spawn",
+                ))
+            }
+        }
+        let root = temporary_directory("missing-read");
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec!["absent".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder("node")
+            .project_root(&root)
+            .policy(policy)
+            .build()
+            .unwrap();
+        let backend = Backend {
+            bind_attempts: std::cell::Cell::new(0),
+            spawn_attempts: std::cell::Cell::new(0),
+        };
+        assert_eq!(
+            execute_with_backend(&request, &backend)
+                .unwrap_err()
+                .category(),
+            ExecutionErrorCategory::PolicyViolation
+        );
+        assert_eq!(backend.bind_attempts.get(), 0);
+        assert_eq!(backend.spawn_attempts.get(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_request_is_rejected_before_support_probing() {
+        struct Backend {
+            probes: std::cell::Cell<usize>,
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                self.probes.set(self.probes.get() + 1);
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                unreachable!()
+            }
+        }
+
+        let backend = Backend {
+            probes: std::cell::Cell::new(0),
+        };
+        let mut request = ExecutionRequest::builder("node").build().unwrap();
+        request.arguments.push(OsString::from("bad\0argument"));
+
+        assert_eq!(
+            execute_with_backend(&request, &backend)
+                .unwrap_err()
+                .category(),
+            ExecutionErrorCategory::InvalidRequest
+        );
+        assert_eq!(backend.probes.get(), 0);
+    }
+
+    #[test]
+    fn invalid_backend_identity_prevents_runtime_additions_and_spawn() {
+        struct Backend {
+            additions: std::cell::Cell<usize>,
+            spawns: std::cell::Cell<usize>,
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                let mut support =
+                    support_with_evidence(requested.clone(), requested.clone(), requested);
+                match &mut support {
+                    ContainmentSupport::Supported { backend, .. } => backend.name.clear(),
+                    ContainmentSupport::Unsupported { .. } => unreachable!(),
+                }
+                support
+            }
+            fn runtime_filesystem_additions(
+                &self,
+                _request: &ExecutionRequest,
+            ) -> Result<RuntimeFilesystemAdditions, ExecutionError> {
+                self.additions.set(self.additions.get() + 1);
+                Ok(RuntimeFilesystemAdditions::default())
+            }
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                self.spawns.set(self.spawns.get() + 1);
+                unreachable!()
+            }
+        }
+        let backend = Backend {
+            additions: std::cell::Cell::new(0),
+            spawns: std::cell::Cell::new(0),
+        };
+        let request = ExecutionRequest::builder("node").build().unwrap();
+        assert_eq!(
+            execute_with_backend(&request, &backend)
+                .unwrap_err()
+                .category(),
+            ExecutionErrorCategory::PolicyViolation
+        );
+        assert_eq!(backend.additions.get(), 0);
+        assert_eq!(backend.spawns.get(), 0);
+    }
+
+    #[test]
+    fn missing_write_requires_adapter_materialization_and_never_spawns_by_default() {
+        struct Backend {
+            spawns: std::cell::Cell<usize>,
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                self.spawns.set(self.spawns.get() + 1);
+                unreachable!()
+            }
+        }
+        let root = temporary_directory("missing-write-unsupported");
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec!["generated/output.txt".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder("node")
+            .project_root(&root)
+            .policy(policy)
+            .build()
+            .unwrap();
+        let backend = Backend {
+            spawns: std::cell::Cell::new(0),
+        };
+        assert_eq!(
+            execute_with_backend(&request, &backend)
+                .unwrap_err()
+                .category(),
+            ExecutionErrorCategory::UnsupportedContainment
+        );
+        assert_eq!(backend.spawns.get(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_object_binding_holds_identity_and_receipt_reports_it() {
+        let root = temporary_directory("native-binding");
+        let request = ExecutionRequest::builder("node")
+            .project_root(&root)
+            .build()
+            .unwrap();
+        let policy = resolve_policy(&request, RuntimeFilesystemAdditions::default()).unwrap();
+        let bindings = FilesystemBindings::native_objects(&policy).unwrap();
+        bindings.validate(&policy).unwrap();
+        let receipt = bindings.receipt();
+        assert_eq!(receipt.grants().len(), 1);
+        assert_eq!(
+            receipt.grants()[0].binding(),
+            FilesystemBindingMode::NativeObject
+        );
+        assert!(bindings.grants[0].held.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn environment_block_limit_is_enforced() {
+        let exact_policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec!["ONE".into()],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let exact_value_units = MAX_ENVIRONMENT_BLOCK_UNITS - 1 - "ONE".len() - 2;
+        assert!(
+            ExecutionRequest::builder("node")
+                .policy(exact_policy.clone())
+                .env("ONE", "x".repeat(exact_value_units))
+                .build()
+                .is_ok()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .policy(exact_policy)
+                .env("ONE", "x".repeat(exact_value_units + 1))
+                .build()
+                .is_err()
+        );
+
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec!["ONE".into(), "TWO".into()],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder("node")
+            .policy(policy)
+            .env("ONE", "x".repeat(MAX_ENVIRONMENT_VALUE_UNITS / 2))
+            .env("TWO", "y".repeat(MAX_ENVIRONMENT_VALUE_UNITS / 2));
+        assert!(request.build().is_err());
     }
 }

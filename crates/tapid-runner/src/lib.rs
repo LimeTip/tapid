@@ -9,7 +9,10 @@ pub use config::{
 pub use execution::{
     BackendIdentity, ContainmentSupport, EnforcementDimensions, EnforcementReceipt, ExecutionError,
     ExecutionErrorCategory, ExecutionOutcome, ExecutionRequest, ExecutionRequestBuilder,
-    ResolvedFilesystemGrants, Termination, execute,
+    FilesystemAccess, FilesystemBindingMode, FilesystemGrantKind, FilesystemGrantSource,
+    MAX_ARGUMENT_COUNT, MAX_ARGUMENT_UNITS, MAX_ARGV_UNITS, MAX_BACKEND_IDENTITY_BYTES,
+    MAX_ENVIRONMENT_BLOCK_UNITS, MAX_ENVIRONMENT_VALUE_UNITS, MAX_PROGRAM_UNITS,
+    ResolvedFilesystemGrant, ResolvedFilesystemGrants, Termination, execute,
 };
 
 use sha2::{Digest, Sha256};
