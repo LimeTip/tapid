@@ -94,7 +94,7 @@ test "$(git rev-parse "origin/main^{commit}")" = "$COMMIT"
 test "$(git show "$COMMIT:crates/tapid-cli/Cargo.toml" | sed -n 's/^version = "\([^"]*\)"/\1/p' | head -1)" = "$VERSION"
 
 test -z "$(git tag --list "$TAG")" || {
-  echo "local tag already exists: $TAG" >&2
+  echo "local tag already exists; use the failed tag-push recovery procedure: $TAG" >&2
   exit 1
 }
 remote_tag_refs="$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
@@ -300,6 +300,56 @@ A release is complete only after verifying:
 ## Recovery procedures
 
 Recovery must preserve the original annotated tag and exact tagged commit.
+
+### Local annotated tag exists after a failed push
+
+If local tag creation succeeded but `git push` failed or returned an uncertain result, do not delete or recreate the local tag and do not rerun the tag-creation block.
+
+Set `TAG` and `COMMIT` to the intended release values, then validate and safely resume:
+
+```sh
+set -euo pipefail
+tag_ref="refs/tags/$TAG"
+
+test "$(git cat-file -t "$tag_ref")" = tag
+local_tag_object="$(git rev-parse "$tag_ref")"
+local_tag_commit="$(git rev-parse "$tag_ref^{commit}")"
+test "$local_tag_commit" = "$COMMIT"
+
+git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+git merge-base --is-ancestor "$COMMIT" origin/main
+
+remote_refs="$(git ls-remote origin "$tag_ref" "$tag_ref^{}")"
+if test -z "$remote_refs"; then
+  git push origin "$tag_ref:$tag_ref"
+else
+  remote_tag_object=
+  remote_tag_commit=
+  while IFS=$'\t' read -r object_id ref_name; do
+    case "$ref_name" in
+      "$tag_ref") remote_tag_object="$object_id" ;;
+      "$tag_ref^{}") remote_tag_commit="$object_id" ;;
+    esac
+  done <<< "$remote_refs"
+
+  test "$remote_tag_object" = "$local_tag_object"
+  test "$remote_tag_commit" = "$local_tag_commit"
+fi
+
+verified_refs="$(git ls-remote origin "$tag_ref" "$tag_ref^{}")"
+verified_tag_object=
+verified_tag_commit=
+while IFS=$'\t' read -r object_id ref_name; do
+  case "$ref_name" in
+    "$tag_ref") verified_tag_object="$object_id" ;;
+    "$tag_ref^{}") verified_tag_commit="$object_id" ;;
+  esac
+done <<< "$verified_refs"
+test "$verified_tag_object" = "$local_tag_object"
+test "$verified_tag_commit" = "$local_tag_commit"
+```
+
+An exact remote match means the original push succeeded despite the uncertain local result. An absent remote ref permits retrying the same local tag push. A lightweight remote tag, different tag object, or different peeled commit is a hard stop requiring investigation; never replace it.
 
 ### Tag-triggered workflow fails before draft creation
 
