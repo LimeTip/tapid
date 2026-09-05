@@ -44,6 +44,7 @@ export function publicationPlan(metadata: CargoMetadata, published: Set<string>)
   const visited = new Set<string>();
   const ordered: Package[] = [];
 
+  /** Visits one package, adding local dependencies first and rejecting cycles. */
   function visit(name: string): void {
     if (visiting.has(name)) throw new Error(`workspace dependency cycle includes ${name}`);
     if (visited.has(name)) return;
