@@ -4,12 +4,13 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-publication
   cancel-in-progress: false
 
 jobs:
@@ -17,9 +18,18 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      tag_commit: ${{ steps.version.outputs.tag_commit }}
     steps:
       - uses: actions/checkout@v4
+        if: github.event_name != 'workflow_dispatch'
         with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: main
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -28,14 +38,38 @@ jobs:
       - id: version
         name: Validate annotated tag and Cargo version
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            RELEASE_TAG="v$(node --experimental-strip-types tools/release/release.ts current-version)"
+          else
+            RELEASE_TAG="$GITHUB_REF_NAME"
+          fi
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "release tag must be a stable vX.Y.Z release" >&2
+            exit 1
+          }
+          git tag -d "$RELEASE_TAG" >/dev/null 2>&1 || true
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag || {
+            echo "release tag must be annotated" >&2
+            exit 1
+          }
+          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" origin/main || {
+          git merge-base --is-ancestor "$tag_commit" origin/main || {
             echo "release tag must point to a commit on main" >&2
             exit 1
           }
-          version="$(node --experimental-strip-types tools/release/release.ts check-tag "$GITHUB_REF_NAME")"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          git checkout --detach "$tag_commit"
+          version="$(node --experimental-strip-types tools/release/release.ts check-tag "$RELEASE_TAG")"
+          {
+            echo "version=$version"
+            echo "release_tag=$RELEASE_TAG"
+            echo "tag_commit=$tag_commit"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
@@ -66,7 +100,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Check out verified release commit
+        shell: bash
+        env:
+          TAG_COMMIT: ${{ needs.prepare.outputs.tag_commit }}
+        run: |
+          git checkout --detach "$TAG_COMMIT"
+          test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -97,7 +139,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Check out verified release commit
+        shell: bash
+        env:
+          TAG_COMMIT: ${{ needs.prepare.outputs.tag_commit }}
+        run: |
+          git checkout --detach "$TAG_COMMIT"
+          test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
       - uses: actions/download-artifact@v4
         with:
           pattern: tapid-*
@@ -112,17 +162,18 @@ jobs:
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
         run: |
           existing_releases="$(mktemp)"
           gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$existing_releases"
-          if grep -Fxq "$GITHUB_REF_NAME" "$existing_releases"; then
-            echo "refusing to replace existing release $GITHUB_REF_NAME" >&2
+          if grep -Fxq "$RELEASE_TAG" "$existing_releases"; then
+            echo "refusing to replace existing release $RELEASE_TAG" >&2
             exit 1
           fi
 
           release_fields="$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
-            -f tag_name="$GITHUB_REF_NAME" \
-            -f name="$GITHUB_REF_NAME" \
+            -f tag_name="$RELEASE_TAG" \
+            -f name="$RELEASE_TAG" \
             -F draft=true \
             -F prerelease=false \
             -F generate_release_notes=true --jq '[.id, .upload_url] | @tsv')"
@@ -135,7 +186,7 @@ jobs:
 
           matching_ids="$(mktemp)"
           gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
-            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" > "$matching_ids"
+            --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id" > "$matching_ids"
           test "$(wc -l < "$matching_ids" | tr -d ' ')" = 1
           test "$(tr -d '\r\n' < "$matching_ids")" = "$release_id"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
