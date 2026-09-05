@@ -185,10 +185,21 @@ jobs:
           test "$upload_url" = "$expected_upload_url"
 
           matching_ids="$(mktemp)"
-          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
-            --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id" > "$matching_ids"
-          test "$(wc -l < "$matching_ids" | tr -d ' ')" = 1
-          test "$(tr -d '\r\n' < "$matching_ids")" = "$release_id"
+          release_visible=false
+          for _ in 1 2 3 4 5; do
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+              --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id" > "$matching_ids"
+            if test "$(wc -l < "$matching_ids" | tr -d ' ')" = 1 && \
+              test "$(tr -d '\r\n' < "$matching_ids")" = "$release_id"; then
+              release_visible=true
+              break
+            fi
+            sleep 2
+          done
+          test "$release_visible" = true || {
+            echo "release read-back did not converge on exact ID $release_id" >&2
+            exit 1
+          }
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
           echo "upload_url=${upload_url%%\{*}" >> "$GITHUB_OUTPUT"
       - name: Upload release assets
