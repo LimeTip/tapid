@@ -94,7 +94,9 @@ test("binary release follows the small draft release flow", async () => {
   assert(validateAnnotatedTag < fetchMain && fetchMain < ancestry);
   assert(workflow.includes('tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"'));
   assert(workflow.includes('version="$(node --experimental-strip-types tools/release/release.ts check-tag "$RELEASE_TAG")"'));
-  assert(workflow.includes('ref: ${{ needs.prepare.outputs.tag_commit }}'));
+  assert(!workflow.includes('ref: ${{ needs.prepare.outputs.tag_commit }}'));
+  assertEquals(workflow.match(/git checkout --detach "\$TAG_COMMIT"/g)?.length, 2);
+  assertEquals(workflow.match(/test "\$\(git rev-parse HEAD\)" = "\$TAG_COMMIT"/g)?.length, 2);
   assert(workflow.includes("unexpected draft release assets"));
   assert(workflow.includes("actions/download-artifact@v4"));
   assert(workflow.includes("workflow_dispatch:"));

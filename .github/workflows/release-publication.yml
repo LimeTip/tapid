@@ -91,8 +91,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.tag_commit }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Check out verified release commit
+        shell: bash
+        env:
+          TAG_COMMIT: ${{ needs.prepare.outputs.tag_commit }}
+        run: |
+          git checkout --detach "$TAG_COMMIT"
+          test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -123,8 +130,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.tag_commit }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Check out verified release commit
+        shell: bash
+        env:
+          TAG_COMMIT: ${{ needs.prepare.outputs.tag_commit }}
+        run: |
+          git checkout --detach "$TAG_COMMIT"
+          test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
       - uses: actions/download-artifact@v4
         with:
           pattern: tapid-*
