@@ -36,7 +36,7 @@ tapid init
 tapid i is-char
 ```
 
-To run a development script, add a `dev` entry to `package.json`, then run:
+To run a development script, add a `dev` entry to `package.json`, check in its permissions in `tapid.toml`, then run:
 
 ```bash
 tapid run dev
@@ -44,11 +44,41 @@ tapid run dev
 
 `tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`.
 
-`tapid run dev` runs the root `dev` script from `package.json`. It is a compatibility-oriented process runner, not a sandbox.
+ADR 0005 makes containment default-on and fail-closed for root scripts. The configuration parser, platform backends, and CLI wiring are still pending integrated verification; this describes the accepted target contract, not a guarantee provided by the current binary.
+
+For example, a Next.js development server needs project writes and network access but does not need ambient credentials:
+
+```toml
+[run.defaults]
+read = ["."]
+write = []
+network = false
+environment = []
+subprocess = true
+timeout_seconds = 300
+max_output_bytes = 8388608
+max_processes = 32
+max_memory_bytes = 1073741824
+
+[run.scripts.dev]
+write = ["."]
+network = true
+environment = ["NODE_ENV"]
+timeout_seconds = 28800
+max_output_bytes = 67108864
+max_processes = 64
+max_memory_bytes = 2147483648
+```
+
+`write = ["."]` permits Next.js to create `.next`, `next-env.d.ts`, and any other project-local generated files; narrow it after observing the project's actual writes. `network = true` is the selected schema's portable boolean grant: it lets the server bind locally but also permits outbound connections, so it is not a loopback-only rule. `environment` names variables that may be copied from the caller when present; it does not import the rest of the caller's environment. Pass the bind address explicitly without exposing `HOST`, cloud credentials, proxy settings, or agent sockets:
+
+```bash
+tapid run dev -- --hostname 127.0.0.1 --port 3000
+```
 
 ## Current consumer workflow
 
-The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, root-script execution, argument forwarding, and lifecycle suppression.
+The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, the pre-ADR root-script path, argument forwarding, and lifecycle suppression. It does not verify ADR 0005 containment.
 
 For a clean checkout, build Tapid and create the readable consumer fixture through the same helper used by CI:
 
@@ -70,7 +100,7 @@ target/debug/tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 
 
 The non-fixture online path requests abbreviated npm install metadata and requires registry-declared SHA-512 integrity by default. Unsupported npm range syntax and malformed historical metadata are filtered or rejected fail-closed according to their scope. Live JSR installation remains unverified. Do not treat fixture replay or one successful npm project as evidence of complete npm compatibility.
 
-`tapid run <script>` reads a root `package.json` script, runs it in the project directory, prepends the managed `node_modules/.bin` directory to `PATH`, forwards arguments after `--`, and returns the child exit status. Root scripts execute arbitrary project code. This is compatibility-oriented process execution, not a sandbox.
+The accepted invocation remains `tapid run <SCRIPT> -- <ARGS...>`. Values after the first `--` are forwarded in order to the selected script; the separator itself is not forwarded, and Tapid must not reinterpret forwarded values as Tapid options. Under ADR 0005 the future wired path reads the script's merged `[run.defaults]` and `[run.scripts.<name>]` policy, constructs a minimal environment with a controlled `PATH`, and starts only after the selected backend establishes every requested restriction. Until that wiring and platform runtime probes are integrated, no containment claim is made for the executable in this checkout.
 
 Use a project directory explicitly when running outside the project directory:
 
@@ -149,7 +179,7 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - `add`, `remove`, `update`, `prune`, workspaces, full npm lockfile compatibility, and private-registry authentication are not implemented.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
-- Tapid does not yet provide package-level malware scanning, package provenance verification, an OS sandbox, process capability enforcement, or independently authenticated client release metadata.
+- ADR 0005 accepts an OS-backed, default-on root-script containment contract, but the configuration parser, platform backends, CLI wiring, and integrated runtime evidence are pending. Tapid does not yet claim a verified sandbox on macOS, Linux, or Windows. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
 
 ## Development
 

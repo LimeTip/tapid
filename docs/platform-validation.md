@@ -1,37 +1,87 @@
-# Linux and Windows platform validation
+# Root-script platform validation
 
-The repository configures a `platform-consumer-validation` GitHub Actions job for `ubuntu-latest` and `windows-latest`. Each job builds the `tapid` binary, creates a Node fixture under the runner's temporary directory, and invokes the binary with the native runner shell. The workflow is configuration, not execution evidence. No CI run was available to this documentation change, so Linux and Windows remain configured but unverified here. A local macOS result cannot substitute for either platform.
+ADR 0005 platform backends and CLI wiring are pending. Existing Ubuntu and Windows consumer jobs exercise the pre-ADR runner path; local macOS tests exercise only the current checkout. None is evidence that default-on containment, minimal environment construction, descendant control, or resource limits are enforced.
 
-## Configured validation
+No macOS, Linux, or Windows backend may be marked supported until the complete probe set below passes through `tapid run <SCRIPT> -- <ARGS...>` at the exact integrated commit. A unit test of policy declarations, backend availability check, compilation result, or successful allowed operation is insufficient by itself.
 
-The workflow is intended to run these exact checks on both platforms:
+## Evidence record
 
-```text
-cargo build --bin tapid --locked
-tapid install --project-dir "$TAPID_FIXTURE_PROJECT" --offline --frozen
-tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 0
-tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- wrong 0
-```
+For each operating system and architecture, retain:
 
-The fixture checks that:
+- the full 40-character commit from `git rev-parse HEAD`, with a clean tracked tree and the commit containing the runner backend, configuration parser, CLI wiring, probes, and documentation;
+- the workflow URL and immutable run/job identifiers, attempt number, runner image/version, OS build or kernel version, architecture, shell/runtime versions, and Rust toolchain;
+- the built `tapid` artifact digest and logs that identify the same commit;
+- the exact checked-in `tapid.toml`, fixture scripts, commands, exit codes, stdout/stderr, enforcement receipt, and pass/fail result for every probe;
+- evidence that the human and machine-readable receipts agree about requested, declared, observed, and enforced dimensions.
 
-- install creates managed `node_modules`;
-- the dependency lifecycle marker remains absent;
-- the root script runs in the project directory;
-- arguments after `--` are forwarded;
-- the child exit code is propagated;
-- package executable behavior is not exercised by the current consumer fixture; linker unit tests cover shim planning and materialization separately.
+Do not update platform status from a run against a merge commit, rebuilt artifact, or fixture revision different from the recorded commit unless that exact revision is named as the evidence target. Re-run the matrix after any change to the backend, policy compiler, process supervision, CLI wiring, fixture, or probe assertion.
 
-Linux uses Bash and Unix shell behavior. Windows uses PowerShell to invoke the binary and `cmd.exe` for the child script backend, with `.cmd` and PowerShell shim formats selected by the linker.
+## Required runtime probes
 
-## Local evidence
+Every category needs a positive control proving the fixture can perform the operation when granted and a negative control proving the same operation is denied when not granted. Negative probes must also confirm a nonzero result and an enforcement receipt; a crash, missing dependency, malformed command, or skipped test is not a containment pass.
 
-Local macOS unit and integration tests can exercise resolver, archive, store, lockfile, linker planning, install replay, root-script execution, and Unix shim behavior. They do not verify Windows wrappers, Windows path handling, Windows junction activation, or Linux runtime behavior. Do not report those as passed based on macOS output.
+### Filesystem
 
-## JSR status
+- **Positive:** read a declared project file and create, modify, and remove files in each declared `write` path.
+- **Negative:** deny writes to an undeclared project path, a sibling/parent path, the user home, and an operating-system temporary path. Deny reads outside declared project/runtime paths. Repeat escape attempts through `..`, absolute paths, symlinks, and descendants.
+- Confirm the minimal shell/runtime files are available without turning their parent trees into broad writable grants.
 
-No live JSR integrity result is claimed. Local fixtures cover the parser and fail-closed behavior only. Live JSR installation is unsupported until the service supplies an explicit HTTPS npm tarball URL and valid SHA-512 SRI that can be verified by a read-only smoke test.
+### Network
 
-## Required evidence for updating this document
+- **Positive:** with `network = true`, bind a loopback server and connect to it from an allowed descendant.
+- **Negative:** with `network = false`, deny loopback bind, loopback connect, external connect, and name resolution while a local control endpoint proves the test network is otherwise reachable.
+- The current portable setting is boolean. A successful loopback use with `network = true` must not be reported as loopback-only enforcement; outbound access is granted too.
 
-After a successful workflow run, record the workflow URL or run identifier and platform-specific output before changing the status above. Until then, describe the checks as configured, not verified. The configured job must not be weakened to make unsupported behavior pass.
+### Environment and inherited state
+
+- **Positive:** list one benign variable in `environment` and verify its exact caller value reaches the script when present; verify the controlled `PATH` resolves the managed project executable and required shell/runtime.
+- **Negative:** inject unique sentinel values into unlisted variables representing cloud credentials, package tokens, proxy variables, `HOME`, SSH/GPG/agent sockets, and arbitrary secrets; verify neither the script nor descendants can observe them. Verify absent allowlisted variables are not invented.
+- Check inherited descriptors or handles separately so removing a variable does not leave its referenced credential channel open.
+
+### Forwarded arguments
+
+- Pass empty strings, spaces, quotes, Unicode, leading dashes, shell metacharacters, and multiple ordered values after `--`; verify the fixture receives the exact argument vector in order and that Tapid does not parse them as its own options.
+- Run an equivalent invocation without `--` that should be rejected by CLI parsing, proving the probe is testing the documented separator contract rather than accidental shell behavior.
+
+### Descendants and subprocess policy
+
+- **Positive:** with `subprocess = true`, start the required platform shell and a child Node process; verify the child retains the same filesystem, network, environment, and resource boundary.
+- **Negative:** with `subprocess = false`, verify an attempted child does not start. Attempt detached, double-forked, re-parented, or Windows breakaway descendants and verify they cannot escape restrictions or survive normal completion, cancellation, timeout, or Tapid termination.
+- Confirm cleanup by PID/Job membership and by the absence of a delayed descendant marker after the supervisor exits.
+
+### Limits
+
+- **Timeout:** a command finishing below `timeout_seconds` succeeds; one exceeding it is terminated with all descendants and a stable limit reason.
+- **Output:** output below `max_output_bytes` succeeds; output crossing the limit through stdout, stderr, and descendants is bounded, terminated according to contract, and reported without unbounded buffering.
+- **Processes:** a tree at or below `max_processes` succeeds; an attempt to create the next process is denied or terminates according to the backend contract, without a race that permits escape.
+- **Memory:** a process tree below `max_memory_bytes` succeeds; a controlled allocation crossing it is stopped and reported. Record whether the backend accounts for the whole tree and do not claim more than the receipt proves.
+
+### Fail-closed startup and receipts
+
+- Corrupt or remove the required backend primitive, request an unsupported combination, and use invalid or unknown `tapid.toml` fields. Verify no script or descendant marker is created.
+- Verify failure to establish filesystem, network, process, environment/handle, or resource controls aborts before untrusted code starts; partial setup must be torn down.
+- Compare human and machine-readable output for the same run and reject any receipt that labels a requested, declared, or merely observed capability as enforced.
+
+## Platform-specific gates
+
+### macOS
+
+The initial design uses a generated Seatbelt profile through Apple's deprecated `sandbox-exec`, plus explicit environment/descriptor construction, process-group supervision, and representable resource limits. The job must run a behavioral startup probe before untrusted code. Record the backend as deprecated. If `sandbox-exec` is absent or behavior differs from the probe, required containment is unavailable and execution must fail closed; there is no uncontained fallback.
+
+### Linux
+
+The proposed design combines Landlock filesystem rules, `no_new_privs`, seccomp or a network namespace, explicit environment/descriptor construction, process supervision, and resource controls. Record kernel and feature availability and exercise the actual selected combination. Containers or hosted runners that cannot establish every requested dimension must fail closed. This backend remains pending until the complete exact-commit matrix passes.
+
+### Windows
+
+The proposed design uses AppContainer for filesystem/network isolation, a non-breakaway Job Object for descendants and resources, explicit token/environment/handle construction, and assignment before untrusted execution. Probes must detect breakaway children, inherited handles, path variants, and assignment races. Incomplete AppContainer or Job setup must fail closed. This backend remains pending until the complete exact-commit matrix passes.
+
+## Current status
+
+| Backend | ADR 0005 status | Evidence |
+|---|---|---|
+| macOS Seatbelt (`sandbox-exec`, deprecated) | Pending implementation and integrated verification | None recorded |
+| Linux Landlock plus network/process controls | Pending implementation and integrated verification | None recorded |
+| Windows AppContainer plus Job Object | Pending implementation and integrated verification | None recorded |
+
+Keep package-manager, installer, and pre-ADR consumer evidence separate from this table. A local result on one platform is never evidence for another.

@@ -88,6 +88,14 @@ of CLI and local filesystem presentation
 
 Avoid circular dependencies. If two crates need a type, decide whether it is a genuine core primitive, a protocol contract, or a test fixture before moving it into a shared crate. Shared use alone is not sufficient reason to put a type in `tapid-core`.
 
+## Root-script containment boundary
+
+[ADR 0005](adr/0005-default-on-root-script-sandbox.md) defines the accepted target contract for `tapid run`: containment is default-on and startup fails closed if the selected platform backend cannot enforce every requested guarantee. A checked-in `tapid.toml` contains platform-neutral `[run.defaults]` and `[run.scripts.<name>]` profiles with `read`, `write`, `network`, `environment`, `subprocess`, `timeout_seconds`, `max_output_bytes`, `max_processes`, and `max_memory_bytes`. The named script profile overrides only its specified default fields; paths are project-relative, environment entries are names to copy when present rather than values to store, and project configuration cannot disable containment.
+
+The CLI owns `tapid.toml` discovery, `tapid run <SCRIPT> -- <ARGS...>` parsing, interaction, and human or machine rendering. Arguments after the separator remain ordered opaque script arguments and are not parsed as Tapid options. `tapid-runner` owns strict configuration validation, policy resolution, backend selection, minimal environment construction, process-tree supervision, limits, and the enforcement receipt. It must construct a controlled `PATH` containing the managed `node_modules/.bin` entry and only the runtime locations required to start the selected shell and executable; it must not clone the caller environment. Listed environment variables are copied only if present.
+
+The macOS design initially uses the deprecated `sandbox-exec` Seatbelt facility. Its backend and deprecation must be visible, behaviorally probed, and unavailable rather than silently weakened if Apple removes or changes it. The proposed Linux Landlock/seccomp-or-network-namespace backend and Windows AppContainer/Job Object backend are designs, not supported-platform claims. The configuration parser, all platform backends, and CLI-to-runner wiring remain pending until integrated positive and negative runtime probes pass at the exact commit. Declarations and backend availability are not enforcement evidence.
+
 ## Security state transitions
 
 Security-sensitive behavior is modeled as explicit, validated state transitions. Examples include unverified to verified artifact, staged to active layout, candidate to accepted policy decision, and staged to active or quarantined release. Each transition identifies evidence, authorization, failure state, and allowed recovery. Invalid, stale, interrupted, or unauthorized transitions fail closed. State must not be inferred from a filename, mutable URL, or partially completed side effect.
