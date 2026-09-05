@@ -39,11 +39,11 @@ fn cleanup(path: PathBuf) {
 }
 
 #[test]
-fn upgrade_is_not_exposed_without_an_authenticated_update_design() {
-    let dir = temp_dir("upgrade-disabled");
-    let output = run(&dir, &["upgrade"]);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand 'upgrade'"));
+fn upgrade_is_exposed_as_a_cli_command() {
+    let dir = temp_dir("upgrade-exposed");
+    let output = run(&dir, &["--help"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("upgrade"));
     cleanup(dir);
 }
 
