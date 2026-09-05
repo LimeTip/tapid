@@ -125,7 +125,7 @@ jobs:
           cp "target/$TARGET/release/$BINARY" "staging/$BINARY"
           "staging/$BINARY" --version | grep -Fx "tapid $VERSION"
           tar -czf "release/tapid-$VERSION-$TARGET.tar.gz" -C staging "$BINARY"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: tapid-${{ matrix.target }}
           path: release/*.tar.gz
@@ -148,7 +148,7 @@ jobs:
         run: |
           git checkout --detach "$TAG_COMMIT"
           test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: tapid-*
           path: release

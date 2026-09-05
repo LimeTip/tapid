@@ -110,7 +110,7 @@ test("binary release follows the small draft release flow", async () => {
   assertEquals(workflow.match(/git checkout --detach "\$TAG_COMMIT"/g)?.length, 2);
   assertEquals(workflow.match(/test "\$\(git rev-parse HEAD\)" = "\$TAG_COMMIT"/g)?.length, 2);
   assert(workflow.includes("unexpected draft release assets"));
-  assert(workflow.includes("actions/download-artifact@v7"));
+  assert(workflow.includes("actions/download-artifact@v8"));
   assert(workflow.includes("workflow_dispatch:"));
   assert(workflow.includes("if: github.event_name == 'workflow_dispatch'"));
   assert(workflow.includes("ref: main"));
@@ -127,8 +127,8 @@ test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM ru
   for (const action of [
     "actions/checkout@v6",
     "actions/setup-node@v7",
-    "actions/upload-artifact@v6",
-    "actions/download-artifact@v7",
+    "actions/upload-artifact@v7",
+    "actions/download-artifact@v8",
   ]) assert(workflow.includes(action));
   for (const legacyAction of [
     "actions/checkout@v4",
@@ -158,6 +158,10 @@ test("repository workflows avoid the deprecated Node.js 20 action majors", async
   const ci = await text(".github/workflows/ci.yml");
   assert(ci.includes("runner: windows-11-vs2026-arm"));
   assert(!ci.includes("runner: windows-11-arm"));
+  assertEquals(
+    ci.match(/persist-credentials: false/g)?.length,
+    ci.match(/uses: actions\/checkout@v6/g)?.length,
+  );
 });
 
 test("crates publication uses trusted publishing and native Cargo", async () => {
