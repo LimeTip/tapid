@@ -2,7 +2,7 @@
 name = "tapid-runner"
 readme = "README.md"
 description = "Policy-aware package execution foundations for Tapid"
-version = "0.0.2"
+version = "0.0.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,7 +11,7 @@ authors.workspace = true
 
 [dependencies]
 sha2 = "0.10"
-tapid-policy = { version = "0.0.2", path = "../tapid-policy" }
+tapid-policy = { version = "0.0.3", path = "../tapid-policy" }
 
 [lib]
 path = "src/lib.rs"

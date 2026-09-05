@@ -1,8 +1,29 @@
 # tapid
 
-[Crates.io](https://crates.io/crates/tapid) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-cli)
+[![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/tapid)](https://crates.io/crates/tapid)
+[![Crates.io downloads](https://img.shields.io/crates/d/tapid)](https://crates.io/crates/tapid)
+[![Docs.rs](https://docs.rs/tapid/badge.svg)](https://docs.rs/tapid)
+[![License](https://img.shields.io/crates/l/tapid)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 The `tapid` command-line client for the Tapid JavaScript and TypeScript package manager, written in Rust. It provides deterministic installation and lockfile replay, verified package storage, Node-compatible linking, and explicit root-script execution.
+
+## Install Tapid
+
+**macOS and Linux**
+
+```bash
+curl -fsSL https://tapid.dev/install.sh | bash
+```
+
+**Windows PowerShell**
+
+```powershell
+iwr -useb https://tapid.dev/install.ps1 | iex
+```
+
+The installers select the latest published release from the immutable GitHub release assets published by `LimeTip/tapid`, verify the platform archive against its `SHA256SUMS` entry, and install Tapid without administrator privileges. Alternate repositories must provide their own equivalent release controls. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
 
 ## Commands
 
@@ -16,9 +37,9 @@ tapid run <SCRIPT> [-- <ARGS>...]
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
 
-## Install
+## Install packages
 
-The supported install paths are the live npm path, validated lockfile replay, and the local registry fixture:
+The supported package installation paths are the live npm path, validated lockfile replay, and the local registry fixture:
 
 ```text
 tapid install --project-dir ./example
@@ -59,4 +80,4 @@ Install derives executable shims from verified package `bin` metadata. Unix uses
 - Full npm semver, aliases, tags, git/file/workspace specs, peer semantics, workspaces, and complete optional-dependency and lockfile compatibility are not implemented.
 - `add`, `remove`, `update`, `prune`, script approval, private-registry authentication, and package publishing are outside this slice.
 - JSR installation remains fail-closed unless metadata provides both an HTTPS npm tarball URL and a valid SHA-512 SRI value. Live JSR integrity behavior is unsupported and unverified.
-- Linux and Windows execution is configured in CI, but must not be described as locally verified until those jobs have run. macOS local execution does not prove Windows or Linux behavior.
+- CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform does not prove behavior on another.

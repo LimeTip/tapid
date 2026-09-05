@@ -10,10 +10,16 @@ type Dependency = string | {
   kind?: string | null;
   path?: string | null;
 };
-type MetadataPackage = { name: string; version: string; dependencies?: Dependency[] };
+type MetadataPackage = {
+  name: string;
+  version: string;
+  dependencies?: Dependency[];
+  publish?: string[] | null;
+};
 type CargoMetadata = { packages: MetadataPackage[] };
 type Package = { name: string; version: string };
 
+/** Returns local non-dev dependencies that must be published before this package. */
 function internalDependencies(pkg: MetadataPackage): string[] {
   return (pkg.dependencies ?? []).flatMap((dependency) => {
     if (typeof dependency === "string") return [dependency];
@@ -21,6 +27,16 @@ function internalDependencies(pkg: MetadataPackage): string[] {
   });
 }
 
+/** Reports whether Cargo permits this package to be published to crates.io. */
+function publishableToCratesIo(pkg: MetadataPackage): boolean {
+  return pkg.publish === undefined || pkg.publish === null || pkg.publish.includes("crates-io");
+}
+
+/**
+ * Builds a deterministic, dependency-first plan for missing crates.io versions.
+ * Packages restricted to other registries are excluded, and `tapid` is ordered last.
+ * Throws when metadata is incomplete, cyclic, or requires an unpublished local dependency that cannot be published.
+ */
 export function publicationPlan(metadata: CargoMetadata, published: Set<string>): Package[] {
   const packages = new Map(metadata.packages.map((pkg) => [pkg.name, pkg]));
   if (!packages.has("tapid")) throw new Error("cargo metadata is missing publishable package tapid");
@@ -28,20 +44,32 @@ export function publicationPlan(metadata: CargoMetadata, published: Set<string>)
   const visited = new Set<string>();
   const ordered: Package[] = [];
 
+  /** Visits one package, adding local dependencies first and rejecting cycles. */
   function visit(name: string): void {
-    if (visiting.has(name)) throw new Error(`workspace dependency cycle includes ${name}`);
     if (visited.has(name)) return;
     const pkg = packages.get(name);
     if (!pkg) throw new Error(`cargo metadata is missing publishable package ${name}`);
+    if (published.has(`${pkg.name}@${pkg.version}`)) {
+      visited.add(name);
+      return;
+    }
+    if (visiting.has(name)) throw new Error(`workspace dependency cycle includes ${name}`);
+    if (!publishableToCratesIo(pkg)) {
+      throw new Error(`workspace dependency ${name} is not publishable to crates.io`);
+    }
     visiting.add(name);
     for (const dependency of internalDependencies(pkg)) visit(dependency);
     visiting.delete(name);
     visited.add(name);
-    if (!published.has(`${pkg.name}@${pkg.version}`)) {
-      ordered.push({ name: pkg.name, version: pkg.version });
-    }
+    ordered.push({ name: pkg.name, version: pkg.version });
   }
 
+  const roots = [...packages.values()]
+    .filter(publishableToCratesIo)
+    .map((pkg) => pkg.name)
+    .filter((name) => name !== "tapid")
+    .sort();
+  for (const name of roots) visit(name);
   visit("tapid");
   return ordered;
 }
@@ -55,6 +83,7 @@ async function cargoMetadata(): Promise<CargoMetadata> {
   return JSON.parse(stdout);
 }
 
+/** Queries crates.io for one exact package version with bounded transient retries. */
 export async function isPublished(
   pkg: Package,
   fetchFn: typeof fetch = fetch,
@@ -95,8 +124,8 @@ async function waitUntilPublished(pkg: Package): Promise<void> {
 async function main(): Promise<void> {
   const metadata = await cargoMetadata();
   const published = new Set<string>();
-  const candidates = publicationPlan(metadata, published);
-  for (const pkg of candidates) {
+  for (const { name, version } of metadata.packages) {
+    const pkg = { name, version };
     if (await isPublished(pkg)) published.add(`${pkg.name}@${pkg.version}`);
   }
 

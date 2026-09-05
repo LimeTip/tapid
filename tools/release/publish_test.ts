@@ -21,13 +21,19 @@ test("publication plan follows dependency order and skips published versions", (
   const published = new Set(["tapid-core@0.0.4", "tapid-manifest@0.0.6"]);
   assertEquals(publicationPlan(metadata, published), [
     { name: "tapid-archive", version: "0.0.3" },
-    { name: "tapid-store", version: "0.0.4" },
     { name: "tapid-linker", version: "0.0.4" },
     { name: "tapid-lockfile", version: "0.0.8" },
+    { name: "tapid-policy", version: "0.0.2" },
     { name: "tapid-registry-client", version: "0.0.4" },
     { name: "tapid-resolver", version: "0.0.4" },
+    { name: "tapid-store", version: "0.0.4" },
     { name: "tapid", version: "0.0.7" },
   ]);
+});
+
+test("publication plan includes publishable workspace crates outside the tapid dependency closure", () => {
+  const plan = publicationPlan(metadata, new Set());
+  assertEquals(plan.some((pkg) => pkg.name === "tapid-policy"), true);
 });
 
 test("publication plan rejects a missing required package", () => {
@@ -53,7 +59,57 @@ test("publication plan rejects internal dependency cycles", () => {
   } catch (caught) {
     error = caught;
   }
-  assertEquals((error as Error).message, "workspace dependency cycle includes tapid");
+  assertEquals((error as Error).message, "workspace dependency cycle includes tapid-store");
+});
+
+test("publication plan rejects an unpublishable workspace runtime dependency", () => {
+  const unpublishable = {
+    packages: [
+      { name: "tapid", version: "1.0.0", dependencies: ["tapid-private"] },
+      { name: "tapid-private", version: "1.0.0", dependencies: [], publish: [] },
+    ],
+  };
+  assertRejects(
+    async () => publicationPlan(unpublishable, new Set()),
+    /workspace dependency tapid-private is not publishable to crates.io/,
+  );
+});
+
+test("publication plan accepts a published version of a locally unpublishable dependency", () => {
+  const publishedDependency = {
+    packages: [
+      { name: "tapid", version: "1.0.0", dependencies: ["itoa"] },
+      { name: "itoa", version: "1.0.15", dependencies: [], publish: [] },
+    ],
+  };
+  assertEquals(publicationPlan(publishedDependency, new Set(["itoa@1.0.15"])), [
+    { name: "tapid", version: "1.0.0" },
+  ]);
+});
+
+test("publication plan excludes packages restricted to another registry", () => {
+  const restricted = {
+    packages: [
+      { name: "tapid", version: "1.0.0", dependencies: [] },
+      { name: "tapid-private", version: "1.0.0", dependencies: [], publish: ["private"] },
+    ],
+  };
+  assertEquals(publicationPlan(restricted, new Set()), [
+    { name: "tapid", version: "1.0.0" },
+  ]);
+});
+
+test("publication plan includes packages explicitly permitted for crates.io", () => {
+  const explicit = {
+    packages: [
+      { name: "tapid", version: "1.0.0", dependencies: [] },
+      { name: "tapid-public", version: "1.0.0", dependencies: [], publish: ["crates-io"] },
+    ],
+  };
+  assertEquals(publicationPlan(explicit, new Set()), [
+    { name: "tapid-public", version: "1.0.0" },
+    { name: "tapid", version: "1.0.0" },
+  ]);
 });
 
 test("publication plan includes local build dependencies and excludes dev and registry dependencies", () => {
@@ -69,7 +125,7 @@ test("publication plan includes local build dependencies and excludes dev and re
         ],
       },
       { name: "tapid-build", version: "1.0.0", dependencies: [] },
-      { name: "tapid-dev", version: "1.0.0", dependencies: [] },
+      { name: "tapid-dev", version: "1.0.0", dependencies: [], publish: [] },
     ],
   };
   assertEquals(publicationPlan(objectMetadata, new Set()), [
