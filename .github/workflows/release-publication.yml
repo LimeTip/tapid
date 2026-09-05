@@ -186,7 +186,7 @@ jobs:
 
           matching_ids="$(mktemp)"
           release_visible=false
-          for _ in 1 2 3 4 5; do
+          for attempt in 1 2 3 4 5; do
             gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
               --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id" > "$matching_ids"
             if test "$(wc -l < "$matching_ids" | tr -d ' ')" = 1 && \
@@ -194,7 +194,7 @@ jobs:
               release_visible=true
               break
             fi
-            sleep 2
+            [ "$attempt" = 5 ] || sleep 2
           done
           test "$release_visible" = true || {
             echo "release read-back did not converge on exact ID $release_id" >&2
