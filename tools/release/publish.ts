@@ -19,6 +19,7 @@ type MetadataPackage = {
 type CargoMetadata = { packages: MetadataPackage[] };
 type Package = { name: string; version: string };
 
+/** Returns local non-dev dependencies that must be published before this package. */
 function internalDependencies(pkg: MetadataPackage): string[] {
   return (pkg.dependencies ?? []).flatMap((dependency) => {
     if (typeof dependency === "string") return [dependency];
@@ -26,10 +27,16 @@ function internalDependencies(pkg: MetadataPackage): string[] {
   });
 }
 
+/** Reports whether Cargo permits this package to be published to crates.io. */
 function publishableToCratesIo(pkg: MetadataPackage): boolean {
   return pkg.publish === undefined || pkg.publish === null || pkg.publish.includes("crates-io");
 }
 
+/**
+ * Builds a deterministic, dependency-first plan for missing crates.io versions.
+ * Packages restricted to other registries are excluded, and `tapid` is ordered last.
+ * Throws when metadata is incomplete, cyclic, or requires an unpublishable local dependency.
+ */
 export function publicationPlan(metadata: CargoMetadata, published: Set<string>): Package[] {
   const packages = new Map(metadata.packages.map((pkg) => [pkg.name, pkg]));
   if (!packages.has("tapid")) throw new Error("cargo metadata is missing publishable package tapid");
@@ -73,6 +80,7 @@ async function cargoMetadata(): Promise<CargoMetadata> {
   return JSON.parse(stdout);
 }
 
+/** Queries crates.io for one exact package version with bounded transient retries. */
 export async function isPublished(
   pkg: Package,
   fetchFn: typeof fetch = fetch,

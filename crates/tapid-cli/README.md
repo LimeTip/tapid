@@ -23,7 +23,7 @@ curl -fsSL https://tapid.dev/install.sh | bash
 iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
-The installers select the latest published release, verify the platform archive against its `SHA256SUMS` entry, and install Tapid without administrator privileges. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
+The installers select the latest published release from the immutable GitHub release assets published by `LimeTip/tapid`, verify the platform archive against its `SHA256SUMS` entry, and install Tapid without administrator privileges. Alternate repositories must provide their own equivalent release controls. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
 
 ## Commands
 

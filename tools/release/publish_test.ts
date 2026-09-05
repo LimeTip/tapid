@@ -87,6 +87,19 @@ test("publication plan excludes packages restricted to another registry", () => 
   ]);
 });
 
+test("publication plan includes packages explicitly permitted for crates.io", () => {
+  const explicit = {
+    packages: [
+      { name: "tapid", version: "1.0.0", dependencies: [] },
+      { name: "tapid-public", version: "1.0.0", dependencies: [], publish: ["crates-io"] },
+    ],
+  };
+  assertEquals(publicationPlan(explicit, new Set()), [
+    { name: "tapid-public", version: "1.0.0" },
+    { name: "tapid", version: "1.0.0" },
+  ]);
+});
+
 test("publication plan includes local build dependencies and excludes dev and registry dependencies", () => {
   const objectMetadata = {
     packages: [

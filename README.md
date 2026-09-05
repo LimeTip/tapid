@@ -23,7 +23,7 @@ curl -fsSL https://tapid.dev/install.sh | bash
 iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
-These commands install the latest published Tapid release from immutable GitHub release assets and verify the selected archive against its `SHA256SUMS` entry. See [installation details](#installation-details) for release selection, contributor source builds, alternate repositories, and uninstall instructions.
+These commands install the latest published Tapid release from the immutable GitHub release assets published by `LimeTip/tapid` and verify the selected archive against its `SHA256SUMS` entry. See [installation details](#installation-details) for release selection, contributor source builds, alternate repositories, and uninstall instructions.
 
 ## Quick start
 
@@ -126,7 +126,7 @@ Windows uninstall:
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
 ```
 
-The installers use the canonical `LimeTip/tapid` repository by default. Alternate repositories are explicit through `--repo` or `TAPID_REPO`. The uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Source installation remains the explicit development path. Release installation uses immutable GitHub release assets over HTTPS, verifies the archive against `SHA256SUMS`, validates that the archive contains only the expected regular executable, and stages the destination before replacement. The checksum and archive share the same GitHub trust boundary, so this is integrity checking rather than independent release authentication. `tapid upgrade` is intentionally unavailable; rerun the installer to upgrade.
+The installers use the canonical `LimeTip/tapid` repository by default. Its release installation uses immutable GitHub release assets over HTTPS, verifies the archive against `SHA256SUMS`, validates that the archive contains only the expected regular executable, and stages the destination before replacement. Alternate repositories are explicit through `--repo` or `TAPID_REPO`; the installers do not establish whether an alternate repository provides equivalent release immutability. The uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Source installation remains the explicit development path. The checksum and archive share the same GitHub trust boundary, so this is integrity checking rather than independent release authentication. `tapid upgrade` is intentionally unavailable; rerun the installer to upgrade.
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
 
