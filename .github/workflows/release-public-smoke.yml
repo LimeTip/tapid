@@ -1,0 +1,76 @@
+name: Public installer smoke
+
+run-name: Public installer smoke ${{ github.event.release.tag_name }}
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  unix:
+    name: Unix installer (${{ matrix.os }})
+    if: ${{ !github.event.release.prerelease }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install the published release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/tapid"
+          curl -fsSL https://tapid.dev/install.sh -o "$RUNNER_TEMP/install.sh"
+          sh "$RUNNER_TEMP/install.sh" --version "$RELEASE_TAG" --install-dir "$install_dir"
+          actual="$("$install_dir/tapid" --version)"
+          test "$actual" = "tapid ${RELEASE_TAG#v}"
+          "$install_dir/tapid" --help >/dev/null
+      - name: Install latest release through discovery
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/tapid-latest"
+          sh "$RUNNER_TEMP/install.sh" --install-dir "$install_dir"
+          test "$("$install_dir/tapid" --version)" = "tapid ${RELEASE_TAG#v}"
+
+  windows:
+    name: Windows installer
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: windows-latest
+    steps:
+      - name: Install the published release
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'install.ps1'
+          $installDir = Join-Path $env:RUNNER_TEMP 'tapid'
+          Invoke-WebRequest -UseBasicParsing https://tapid.dev/install.ps1 -OutFile $installer
+          & $installer -Version $env:RELEASE_TAG -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $installDir 'tapid.exe'
+          $actual = & $binary --version
+          $expected = "tapid " + $env:RELEASE_TAG.TrimStart('v')
+          if ($actual -ne $expected) { throw "Expected '$expected', got '$actual'" }
+          & $binary --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install latest release through discovery
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'install.ps1'
+          $installDir = Join-Path $env:RUNNER_TEMP 'tapid-latest'
+          & $installer -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $actual = & (Join-Path $installDir 'tapid.exe') --version
+          $expected = "tapid " + $env:RELEASE_TAG.TrimStart('v')
+          if ($actual -ne $expected) { throw "Expected '$expected', got '$actual'" }

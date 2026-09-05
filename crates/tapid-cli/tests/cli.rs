@@ -33,156 +33,18 @@ fn run_with_env(cwd: &PathBuf, args: &[&str], key: &str, value: &str) -> std::pr
         .output()
         .unwrap()
 }
-fn run_without_release_config(cwd: &PathBuf, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .args(args)
-        .current_dir(cwd)
-        .env_remove("TAPID_RELEASE_KEYRING")
-        .env_remove("TAPID_STABLE_ENDPOINTS")
-        .output()
-        .unwrap()
-}
+
 fn cleanup(path: PathBuf) {
     let _ = fs::remove_dir_all(path);
 }
-#[test]
-fn upgrade_uses_embedded_trust_root_without_manual_keyring() {
-    let dir = temp_dir("upgrade-no-keyring");
-    let destination = dir.join("tapid");
-    fs::write(&destination, b"old").unwrap();
-    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
-    let output = run(
-        &dir,
-        &[
-            "upgrade",
-            "--endpoint",
-            "https://example.invalid/stable.json",
-            "--destination",
-            destination.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("stable discovery unavailable"),
-        "unexpected stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required")
-    );
-    cleanup(dir);
-}
 
 #[test]
-fn upgrade_uses_built_in_stable_endpoints_and_embedded_keyring() {
-    let dir = temp_dir("upgrade-default-endpoints");
-    let output = run_without_release_config(&dir, &["upgrade"]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("unmarked non-Tapid-managed destination"),
-        "unexpected stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("trusted release keyring is required")
-    );
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("no stable discovery endpoints"));
+fn upgrade_is_not_exposed_without_an_authenticated_update_design() {
+    let dir = temp_dir("upgrade-disabled");
+    let output = run(&dir, &["upgrade"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand 'upgrade'"));
     cleanup(dir);
-}
-
-#[test]
-fn upgrade_rejects_unmanaged_destination_before_network() {
-    let dir = temp_dir("upgrade-unmanaged");
-    let destination = dir.join("tapid");
-    fs::write(&destination, b"old").unwrap();
-    let keyring = dir.join("keys.json");
-    fs::write(
-        &keyring,
-        br#"{"version":"tapid-release-keyring-v1","keys":[]}"#,
-    )
-    .unwrap();
-    let output = run(
-        &dir,
-        &[
-            "upgrade",
-            "--endpoint",
-            "https://example.invalid/stable.json",
-            "--keyring",
-            keyring.to_str().unwrap(),
-            "--destination",
-            destination.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Tapid-managed"));
-    assert_eq!(fs::read(&destination).unwrap(), b"old");
-    cleanup(dir);
-}
-#[test]
-fn upgrade_recovers_last_verified_artifact_when_discovery_is_unavailable() {
-    let dir = temp_dir("upgrade-recovery");
-    let destination = dir.join("tapid");
-    fs::write(&destination, b"old").unwrap();
-    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
-    let artifact_root = dir.join("artifact");
-    fs::create_dir(&artifact_root).unwrap();
-    fs::write(artifact_root.join("tapid"), b"recovered").unwrap();
-    let archive = dir.join("artifact.tar.gz");
-    assert!(
-        Command::new("tar")
-            .args(["--format=ustar", "-czf"])
-            .arg(&archive)
-            .args(["-C"])
-            .arg(&artifact_root)
-            .arg("tapid")
-            .status()
-            .unwrap()
-            .success()
-    );
-    let bytes = fs::read(&archive).unwrap();
-    let digest = format!("{:x}", Sha256::digest(&bytes));
-    fs::write(
-        dir.join(format!(".tapid-release-artifact-{digest}")),
-        &bytes,
-    )
-    .unwrap();
-    fs::write(dir.join(".tapid-release-state.json"), format!(r#"{{"schema":"tapid-release-state-v2","release_floor":"0.0.6","release_sequence":6,"last_known_good":{{"version":"0.0.6","artifact_sha256":"{digest}"}}}}"#)).unwrap();
-    let keyring = dir.join("keys.json");
-    fs::write(
-        &keyring,
-        br#"{"version":"tapid-release-keyring-v1","keys":[]}"#,
-    )
-    .unwrap();
-    let output = run(
-        &dir,
-        &[
-            "upgrade",
-            "--endpoint",
-            "https://example.invalid/stable.json",
-            "--keyring",
-            keyring.to_str().unwrap(),
-            "--destination",
-            destination.to_str().unwrap(),
-        ],
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fs::read(&destination).unwrap(), b"recovered");
-    cleanup(dir);
-}
-
-#[test]
-fn official_installers_write_the_upgrade_ownership_marker() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let sh = fs::read_to_string(root.join("scripts/install.sh")).unwrap();
-    let ps = fs::read_to_string(root.join("scripts/install.ps1")).unwrap();
-    for script in [sh, ps] {
-        assert!(script.contains(".tapid-managed"));
-        assert!(script.contains("tapid-managed-v1"));
-    }
 }
 
 fn lock_for_manifest(raw: &str) -> Lockfile {

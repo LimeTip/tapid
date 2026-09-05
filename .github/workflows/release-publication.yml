@@ -1,84 +1,46 @@
-name: Protected release publication
+name: Build release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Immutable 0.x.y release version"
-        required: true
-        type: string
-      tag:
-        description: "Immutable release tag (v0.x.y)"
-        required: true
-        type: string
-      commit:
-        description: "Full immutable commit SHA"
-        required: true
-        type: string
-      created_at:
-        description: "RFC3339 creation timestamp"
-        required: true
-        type: string
-      expires_at:
-        description: "RFC3339 expiry timestamp"
-        required: true
-        type: string
-      base_url:
-        description: "HTTPS artifact base URL"
-        required: true
-        type: string
-      manifest_endpoints:
-        description: "Ordered HTTPS manifest URLs, one per line"
-        required: true
-        type: string
+  push:
+    tags:
+      - "v*.*.*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: protected-release-${{ inputs.tag }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  prepare-source:
-    name: Validate immutable release source
+  prepare:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 0
           persist-credentials: false
-      - name: Validate commit and tag ancestry
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_COMMIT: ${{ inputs.commit }}
-        run: |
-          set -euo pipefail
-          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40,64}$ ]]
-          [[ "$RELEASE_TAG" =~ ^v0\.[0-9]+\.[0-9]+$ ]]
-          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          git cat-file -e "$RELEASE_COMMIT^{commit}"
-          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
-          test "$(git rev-list -n 1 "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
-      - name: Export validated source archive
-        env:
-          RELEASE_COMMIT: ${{ inputs.commit }}
-        run: git archive --format=tar --output=validated-source.tar "$RELEASE_COMMIT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-node@v4
         with:
-          name: validated-release-source
-          path: validated-source.tar
-          if-no-files-found: error
+          node-version: 22
+      - id: version
+        name: Validate annotated tag and Cargo version
+        shell: bash
+        run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" origin/main || {
+            echo "release tag must point to a commit on main" >&2
+            exit 1
+          }
+          version="$(node --experimental-strip-types tools/release/release.ts check-tag "$GITHUB_REF_NAME")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  build-artifacts:
-    name: Build ${{ matrix.target }} release artifact
-    needs: prepare-source
+  build:
+    needs: prepare
+    name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -102,241 +64,111 @@ jobs:
             target: aarch64-pc-windows-msvc
             binary: tapid.exe
     steps:
-      - name: Download validated release source
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: validated-release-source
-      - name: Extract validated release source
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build and archive
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir source
-          tar -xf validated-source.tar -C source
-          cd source
-          test -f Cargo.toml
-      - name: Build and package artifact
-        shell: bash
-        working-directory: source
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
           TARGET: ${{ matrix.target }}
           BINARY: ${{ matrix.binary }}
         run: |
           set -euo pipefail
-          actual_version="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "tapid"))')"
-          test "$actual_version" = "$VERSION" || {
-            echo "release version $VERSION does not match Cargo package version $actual_version" >&2
-            exit 1
-          }
-          rust_host="$(rustc -vV | sed -n 's/^host: //p')"
-          test "$rust_host" = "$TARGET" || {
-            echo "runner Rust host $rust_host does not match release target $TARGET" >&2
-            exit 1
-          }
-          rustup target add "$TARGET"
           cargo build --release --locked --bin tapid --target "$TARGET"
-          staging="$(mktemp -d)"
-          trap 'rm -rf "$staging"' EXIT
-          install -m 0755 "target/$TARGET/release/$BINARY" "$staging/$BINARY"
-          reported_version="$("$staging/$BINARY" --version | tr -d '\r')"
-          test "$reported_version" = "tapid $VERSION" || {
-            echo "packaged binary reported '$reported_version', expected 'tapid $VERSION'" >&2
-            exit 1
-          }
-          mkdir -p release-artifacts
-          tar -czf "release-artifacts/tapid-${VERSION}-${TARGET}.tar.gz" -C "$staging" "$BINARY"
-          test -s "release-artifacts/tapid-${VERSION}-${TARGET}.tar.gz"
+          mkdir staging release
+          cp "target/$TARGET/release/$BINARY" "staging/$BINARY"
+          "staging/$BINARY" --version | grep -Fx "tapid $VERSION"
+          tar -czf "release/tapid-$VERSION-$TARGET.tar.gz" -C staging "$BINARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: release-artifacts-${{ matrix.target }}
-          path: source/release-artifacts/*.tar.gz
+          name: tapid-${{ matrix.target }}
+          path: release/*.tar.gz
           if-no-files-found: error
 
-  sign-manifest:
-    name: Generate and sign release manifest
-    needs: build-artifacts
+  draft-release:
+    needs: [prepare, build]
     runs-on: ubuntu-latest
-    environment:
-      name: stable-release
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit }}
-          fetch-depth: 1
           persist-credentials: false
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          pattern: release-artifacts-*
-          path: release-artifacts
+          pattern: tapid-*
+          path: release
           merge-multiple: true
-      - name: Generate signed manifest
-        env:
-          RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_ED25519_PRIVATE_KEY }}
-          RELEASE_SIGNING_KEY_ID: ${{ vars.TAPID_RELEASE_SIGNING_KEY_ID }}
-        run: |
-          set -euo pipefail
-          test -n "${RELEASE_SIGNING_KEY:-}" || { echo 'Signing secret is missing' >&2; exit 1; }
-          test -n "${RELEASE_SIGNING_KEY_ID:-}" || { echo 'Signing key id is missing' >&2; exit 1; }
-          mapfile -t files < <(find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print | sort)
-          expected_names=(
-            "tapid-${{ inputs.version }}-aarch64-apple-darwin.tar.gz"
-            "tapid-${{ inputs.version }}-aarch64-pc-windows-msvc.tar.gz"
-            "tapid-${{ inputs.version }}-aarch64-unknown-linux-gnu.tar.gz"
-            "tapid-${{ inputs.version }}-x86_64-apple-darwin.tar.gz"
-            "tapid-${{ inputs.version }}-x86_64-pc-windows-msvc.tar.gz"
-            "tapid-${{ inputs.version }}-x86_64-unknown-linux-gnu.tar.gz"
-          )
-          test "${#files[@]}" -eq "${#expected_names[@]}" || {
-            echo "expected six release artifacts, found ${#files[@]}" >&2
-            exit 1
-          }
-          args=()
-          for index in "${!files[@]}"; do
-            file=${files[$index]}
-            name=$(basename "$file")
-            test "$name" = "${expected_names[$index]}" || {
-              echo "unexpected release artifact '$name', expected '${expected_names[$index]}'" >&2
-              exit 1
-            }
-            case "$name" in
-              tapid-${{ inputs.version }}-[A-Za-z0-9._-]*.tar.gz|tapid-${{ inputs.version }}-[A-Za-z0-9._-]*.zip) ;;
-              *) echo "invalid release artifact filename: $name" >&2; exit 1 ;;
-            esac
-            target=${name#tapid-${{ inputs.version }}-}
-            target=${target%.tar.gz}; target=${target%.zip}
-            args+=(--artifact "${target}=${file}")
-          done
-          python3 .github/release/generate_manifest.py \
-            --version '${{ inputs.version }}' --tag '${{ inputs.tag }}' --commit '${{ inputs.commit }}' \
-            --created-at '${{ inputs.created_at }}' --expires-at '${{ inputs.expires_at }}' \
-            --base-url '${{ inputs.base_url }}' --output release-manifest.json "${args[@]}"
-          test -s release-manifest.json
-          cargo run --locked --quiet --manifest-path .github/release/verifier/Cargo.toml -- \
-            release-manifest.json crates/tapid-signatures/data/release-keyring.json \
-            '${{ inputs.version }}' '${{ inputs.tag }}' '${{ inputs.commit }}'
-      - name: Upload signed manifest for approved advancement
-        uses: actions/upload-artifact@v4
+      - uses: actions/setup-node@v4
         with:
-          name: signed-release-manifest
-          path: release-manifest.json
-          if-no-files-found: error
-
-  advance-stable:
-    name: Advance stable channel (approval required)
-    needs: sign-manifest
-    runs-on: ubuntu-latest
-    environment:
-      name: stable-release
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.commit }}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Download signed manifest
-        uses: actions/download-artifact@v4
-        with:
-          name: signed-release-manifest
-          path: publication
-      - name: Download release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: release-artifacts-*
-          path: release-artifacts
-          merge-multiple: true
-      - name: Verify signed manifest against production protocol
-        run: |
-          set -euo pipefail
-          test -s publication/release-manifest.json
-          cargo run --locked --quiet --manifest-path .github/release/verifier/Cargo.toml -- \
-            publication/release-manifest.json crates/tapid-signatures/data/release-keyring.json \
-            '${{ inputs.version }}' '${{ inputs.tag }}' '${{ inputs.commit }}'
-          targets=(
-            aarch64-apple-darwin
-            aarch64-pc-windows-msvc
-            aarch64-unknown-linux-gnu
-            x86_64-apple-darwin
-            x86_64-pc-windows-msvc
-            x86_64-unknown-linux-gnu
-          )
-          for target in "${targets[@]}"; do
-            python3 scripts/bootstrap_verifier.py \
-              publication/release-manifest.json "$target" '${{ inputs.tag }}' >/dev/null
-          done
-      - name: Build ordered provider-neutral stable metadata
-        env:
-          ENDPOINTS: ${{ inputs.manifest_endpoints }}
-        run: |
-          set -euo pipefail
-          mapfile -t endpoints < <(printf '%s\n' "$ENDPOINTS" | sed '/^[[:space:]]*$/d')
-          test "${#endpoints[@]}" -gt 0 || { echo 'No stable manifest endpoints supplied' >&2; exit 1; }
-          args=()
-          for endpoint in "${endpoints[@]}"; do args+=(--endpoint "$endpoint"); done
-          python3 .github/release/stable_channel.py --output publication/stable.json "${args[@]}"
-          test -s publication/stable.json
-      - name: Publish signed release assets
+          node-version: 22
+      - name: Create checksums
+        run: node --experimental-strip-types tools/release/release.ts checksums release "${{ needs.prepare.outputs.version }}"
+      - name: Create draft GitHub release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          set -euo pipefail
-          mapfile -t artifacts < <(find release-artifacts -maxdepth 1 -type f -name '*.tar.gz' -print | sort)
-          expected_assets=(
-            "release-manifest.json"
-            "stable.json"
-            "tapid-${{ inputs.version }}-aarch64-apple-darwin.tar.gz"
-            "tapid-${{ inputs.version }}-aarch64-pc-windows-msvc.tar.gz"
-            "tapid-${{ inputs.version }}-aarch64-unknown-linux-gnu.tar.gz"
-            "tapid-${{ inputs.version }}-x86_64-apple-darwin.tar.gz"
-            "tapid-${{ inputs.version }}-x86_64-pc-windows-msvc.tar.gz"
-            "tapid-${{ inputs.version }}-x86_64-unknown-linux-gnu.tar.gz"
-          )
-          test "${#artifacts[@]}" -eq 6 || { echo "expected six release artifacts, found ${#artifacts[@]}" >&2; exit 1; }
-          for index in "${!artifacts[@]}"; do
-            expected_index=$((index + 2))
-            name=$(basename "${artifacts[$index]}")
-            test "$name" = "${expected_assets[$expected_index]}" || {
-              echo "unexpected release artifact '$name', expected '${expected_assets[$expected_index]}'" >&2
-              exit 1
-            }
-          done
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Tapid $RELEASE_TAG" --generate-notes
-          else
-            test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true || {
-              echo "release $RELEASE_TAG already exists publicly; refusing to replace its assets" >&2
-              exit 1
-            }
+          existing_releases="$(mktemp)"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$existing_releases"
+          if grep -Fxq "$GITHUB_REF_NAME" "$existing_releases"; then
+            echo "refusing to replace existing release $GITHUB_REF_NAME" >&2
+            exit 1
           fi
-          gh release upload "$RELEASE_TAG" \
-            "${artifacts[@]}" \
-            publication/release-manifest.json publication/stable.json --clobber
-          mapfile -t published_assets < <(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort)
-          test "${#published_assets[@]}" -eq "${#expected_assets[@]}" || {
-            echo "draft release contains ${#published_assets[@]} assets, expected ${#expected_assets[@]}" >&2
+
+          release_fields="$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$GITHUB_REF_NAME" \
+            -f name="$GITHUB_REF_NAME" \
+            -F draft=true \
+            -F prerelease=false \
+            -F generate_release_notes=true --jq '[.id, .upload_url] | @tsv')"
+          IFS=$'\t' read -r release_id upload_url <<< "$release_fields"
+          case "$release_id" in
+            ''|*[!0-9]*) echo "release creation returned an invalid ID" >&2; exit 1 ;;
+          esac
+          expected_upload_url="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets{?name,label}"
+          test "$upload_url" = "$expected_upload_url"
+
+          matching_ids="$(mktemp)"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" > "$matching_ids"
+          test "$(wc -l < "$matching_ids" | tr -d ' ')" = 1
+          test "$(tr -d '\r\n' < "$matching_ids")" = "$release_id"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "upload_url=${upload_url%%\{*}" >> "$GITHUB_OUTPUT"
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          UPLOAD_URL: ${{ steps.release.outputs.upload_url }}
+        run: |
+          release_id="$RELEASE_ID"
+          case "$release_id" in
+            ''|*[!0-9]*) echo "invalid release ID" >&2; exit 1 ;;
+          esac
+          for asset in release/*.tar.gz release/SHA256SUMS; do
+            name="${asset##*/}"
+            curl --fail --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@$asset" \
+              "$UPLOAD_URL?name=$name" >/dev/null
+          done
+      - name: Verify draft release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        run: |
+          release_id="$RELEASE_ID"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft)" = true
+          find release -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort > expected-assets.txt
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --jq '.[].name' | LC_ALL=C sort > actual-assets.txt
+          diff -u expected-assets.txt actual-assets.txt || {
+            echo "unexpected draft release assets" >&2
             exit 1
           }
-          for index in "${!expected_assets[@]}"; do
-            test "${published_assets[$index]}" = "${expected_assets[$index]}" || {
-              echo "unexpected draft asset '${published_assets[$index]}', expected '${expected_assets[$index]}'" >&2
-              exit 1
-            }
-          done
-          # Recheck freshness after upload and inspection, immediately before publication.
-          targets=(
-            aarch64-apple-darwin
-            aarch64-pc-windows-msvc
-            aarch64-unknown-linux-gnu
-            x86_64-apple-darwin
-            x86_64-pc-windows-msvc
-            x86_64-unknown-linux-gnu
-          )
-          for target in "${targets[@]}"; do
-            python3 scripts/bootstrap_verifier.py \
-              publication/release-manifest.json "$target" "$RELEASE_TAG" >/dev/null
-          done
-          gh release edit "$RELEASE_TAG" --draft=false --latest

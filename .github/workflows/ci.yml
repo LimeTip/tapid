@@ -37,10 +37,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --all --check
-      - name: Check architecture
-        run: python scripts/check_architecture.py
-      - name: Test architecture checker
-        run: python -m unittest tests.test_check_architecture
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Run tests
@@ -177,6 +173,39 @@ jobs:
           Write-Host 'Windows root-script, argument, exit-code, and lifecycle checks passed.'
           exit 0
 
+  release-contract:
+    name: Release workflow contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test release helpers and workflows
+        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts
+      - name: Check source architecture
+        run: node --experimental-strip-types tools/check_architecture.ts
+      - name: Validate Unix installer syntax and help
+        run: |
+          sh -n scripts/install.sh
+          sh scripts/install.sh --help >/dev/null
+      - name: Validate PowerShell installer syntax
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.PSParser]::Tokenize(
+            (Get-Content -Raw scripts/install.ps1),
+            [ref]$errors
+          )
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+            exit 1
+          }
+
   security:
     name: Dependency security checks
     runs-on: ubuntu-latest
@@ -199,6 +228,67 @@ jobs:
           tool: cargo-audit
       - name: Audit Rust dependencies
         run: cargo audit
+
+  windows-installer-contract:
+    name: Windows installer contract
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install and reject archive fixtures
+        shell: pwsh
+        run: |
+          $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          try {
+          $fixture = Join-Path $env:RUNNER_TEMP 'tapid-installer-fixture'
+          $payload = Join-Path $fixture 'payload'
+          $installDir = Join-Path $fixture 'installed'
+          New-Item -ItemType Directory -Force -Path $payload | Out-Null
+          [IO.File]::WriteAllBytes((Join-Path $payload 'tapid.exe'), [byte[]](1, 2, 3, 4))
+          $target = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+          $archiveName = "tapid-1.2.3-$target.tar.gz"
+          $archive = Join-Path $fixture $archiveName
+          & tar.exe -czf $archive -C $payload tapid.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          Set-Content -NoNewline -Path (Join-Path $fixture 'SHA256SUMS') -Value "$digest  $archiveName`n"
+          $installerUnderTest = Join-Path $fixture 'install.ps1'
+          $installerText = Get-Content -Raw scripts/install.ps1
+          $fixtureDownloader = @'
+          function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
+              Copy-Item -LiteralPath (Join-Path $env:TAPID_FIXTURE_ROOT ([IO.Path]::GetFileName($Uri))) -Destination $Path
+              if ((Get-Item -LiteralPath $Path).Length -gt $MaxBytes) { Fail "download exceeds the size limit" }
+          }
+          '@
+          $downloaderPattern = [regex]::new(
+            '^function Save-BoundedHttpsFile\([^\r\n]+\) \{.*?^\}',
+            ([Text.RegularExpressions.RegexOptions]::Multiline -bor [Text.RegularExpressions.RegexOptions]::Singleline)
+          )
+          $fixtureInstallerText = $downloaderPattern.Replace($installerText, $fixtureDownloader, 1)
+          if ($fixtureInstallerText -eq $installerText) { throw 'failed to create isolated installer fixture' }
+          Set-Content -NoNewline -Path $installerUnderTest -Value $fixtureInstallerText
+          $env:TAPID_FIXTURE_ROOT = $fixture
+          & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installed = Join-Path $installDir 'tapid.exe'
+          if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw 'valid fixture was not installed' }
+          $before = (Get-FileHash -Algorithm SHA256 $installed).Hash
+          [IO.File]::WriteAllBytes((Join-Path $payload 'extra'), [byte[]](5))
+          & tar.exe -czf $archive -C $payload tapid.exe extra
+          $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          Set-Content -NoNewline -Path (Join-Path $fixture 'SHA256SUMS') -Value "$digest  $archiveName`n"
+          try {
+            & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
+            throw 'unsafe fixture was accepted'
+          } catch {
+            if ($_.Exception.Message -notlike '*exactly one member named tapid.exe*') { throw }
+          }
+          if ((Get-FileHash -Algorithm SHA256 $installed).Hash -ne $before) { throw 'rejected fixture changed the installed binary' }
+          } finally {
+            Remove-Item Env:TAPID_FIXTURE_ROOT -ErrorAction SilentlyContinue
+            [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')
+          }
 
   package:
     name: Package workspace
