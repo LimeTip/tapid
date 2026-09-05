@@ -19,7 +19,7 @@ Client releases use:
 - a tag-triggered six-target build matrix;
 - standard GitHub Actions artifact aggregation;
 - `SHA256SUMS` for download integrity;
-- a new draft GitHub release created by a maintained release Action, followed by exact asset read-back;
+- a new draft GitHub release created through GitHub's API by the reviewed workflow, followed by exact asset read-back;
 - manual inspection and publication of the draft;
 - post-publication public installer smoke tests;
 - a separate crates.io workflow that requires the matching public release and successful installer smoke run, then uses Trusted Publishing and ordinary Cargo commands.
