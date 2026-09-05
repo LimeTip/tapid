@@ -47,9 +47,8 @@ fn parse_release_checksum(bytes: &[u8], archive_name: &str) -> Result<String, St
 fn fetch_latest_github_release<F: Fetcher>(
     fetcher: &mut F,
     target: &str,
-    repository: &str,
 ) -> Result<(String, String, Vec<u8>), ReleaseError> {
-    let api_url = format!("https://api.github.com/repos/{repository}/releases/latest");
+    let api_url = format!("https://api.github.com/repos/{DEFAULT_REPOSITORY}/releases/latest");
     let bytes = fetcher
         .fetch_with_limit(&api_url, MAX_RELEASE_API_BYTES)
         .map_err(ReleaseError::Fetch)?;
@@ -170,7 +169,7 @@ pub(crate) fn run(
     crate::filesystem::atomic::validate_upgrade_destination(&destination)?;
     let target = release::release_target();
     let mut fetcher = release::CurlFetcher;
-    let repository = std::env::var("TAPID_REPO").unwrap_or_else(|_| DEFAULT_REPOSITORY.to_owned());
+
     let downloaded = match fetch_verified_release(&mut fetcher, &endpoints, &keyring, target) {
         Ok(value) => {
             let name = value
@@ -178,20 +177,19 @@ pub(crate) fn run(
                 .artifact()
                 .map(|a| a.name.clone())
                 .unwrap_or_default();
-            (value.0.version, name, value.1)
+            (value.0.version, name, value.1, true)
         }
         Err(ReleaseError::AllEndpointsFailed { .. })
-            if endpoint_args.is_empty()
-                || endpoints
-                    == DEFAULT_STABLE_ENDPOINTS
-                        .iter()
-                        .map(|endpoint| (*endpoint).to_owned())
-                        .collect::<Vec<_>>() =>
+            if endpoints
+                == DEFAULT_STABLE_ENDPOINTS
+                    .iter()
+                    .map(|endpoint| (*endpoint).to_owned())
+                    .collect::<Vec<_>>() =>
         {
-            match fetch_latest_github_release(&mut fetcher, target, &repository) {
-                Ok(value) => value,
+            match fetch_latest_github_release(&mut fetcher, target) {
+                Ok(value) => (value.0, value.1, value.2, false),
                 Err(fallback) => match recover_last_known_good(&destination, target) {
-                    Ok(value) => value,
+                    Ok(value) => (value.0, value.1, value.2, true),
                     Err(recovery) => {
                         return Err(format!(
                             "stable discovery unavailable, GitHub release fallback failed ({fallback}), and recovery failed: {recovery}"
@@ -202,7 +200,7 @@ pub(crate) fn run(
         }
         Err(ReleaseError::AllEndpointsFailed { .. }) => {
             match recover_last_known_good(&destination, target) {
-                Ok(value) => value,
+                Ok(value) => (value.0, value.1, value.2, true),
                 Err(recovery) => {
                     return Err(format!(
                         "stable discovery unavailable and recovery failed: {recovery}"
@@ -236,7 +234,7 @@ pub(crate) fn run(
             digest,
         ))
     };
-    let (manifest_version, artifact_name, bytes) = downloaded;
+    let (manifest_version, artifact_name, bytes, signature_verified) = downloaded;
 
     let executable = crate::filesystem::atomic::materialize_artifact(&artifact_name, &bytes)?;
     if dry_run {
@@ -245,6 +243,7 @@ pub(crate) fn run(
             target: target.to_owned(),
             destination,
             dry_run: true,
+            signature_verified,
         });
     }
     match activate_and_persist(
@@ -259,6 +258,7 @@ pub(crate) fn run(
             target: target.to_owned(),
             destination,
             dry_run: false,
+            signature_verified,
         }),
         Err(error) => Err(error),
     }
@@ -269,8 +269,10 @@ pub(crate) struct UpgradeReport {
     pub(crate) target: String,
     pub(crate) destination: PathBuf,
     pub(crate) dry_run: bool,
+    pub(crate) signature_verified: bool,
 }
 
+#[allow(clippy::collapsible_if)]
 fn activate_and_persist<F>(
     destination: &Path,
     executable: &[u8],
@@ -279,14 +281,45 @@ fn activate_and_persist<F>(
     activate: F,
 ) -> Result<(), String>
 where
-    F: FnOnce(&Path, &[u8]) -> Result<(), String>,
+    F: Fn(&Path, &[u8]) -> Result<(), String>,
 {
+    let previous_executable = fs::read(destination).ok();
+    let previous_state = pending_state
+        .as_ref()
+        .and_then(|(path, _, _)| fs::read(path).ok());
     activate(destination, executable)
         .map_err(|error| format!("cannot activate verified artifact: {error}"))?;
     if let Some((state_path, state, digest)) = pending_state {
-        persist_activated_release(destination, &state_path, &state, &digest, bytes).map_err(
-            |error| format!("activated release but cannot persist last-known-good state: {error}"),
-        )?;
+        if let Err(error) =
+            persist_activated_release(destination, &state_path, &state, &digest, bytes)
+        {
+            let rollback = previous_executable
+                .as_deref()
+                .ok_or_else(|| {
+                    "cannot roll back executable: previous executable was unavailable".to_owned()
+                })
+                .and_then(|old| activate(destination, old));
+            let state_rollback = match previous_state {
+                Some(old) => fs::write(&state_path, old).map_err(|e| e.to_string()),
+                None => fs::remove_file(&state_path)
+                    .or_else(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
+                    })
+                    .map_err(|e| e.to_string()),
+            };
+            return Err(match (rollback, state_rollback) {
+                (Ok(()), Ok(())) => {
+                    format!("cannot persist last-known-good state; activation rolled back: {error}")
+                }
+                (rollback, state_rollback) => format!(
+                    "cannot persist last-known-good state: {error}; rollback executable={rollback:?}, state={state_rollback:?}"
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -629,6 +662,32 @@ mod upgrade_tests {
         assert!(result.is_err());
         assert!(!state_path.exists());
         assert!(!super::cached_artifact_path(&destination, &digest).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persistence_failure_rolls_back_the_activated_executable() {
+        let root = temp("rollback-persistence");
+        let destination = root.join("tapid");
+        let state_path = root.join(".tapid-release-state.json");
+        fs::write(&destination, b"old executable").unwrap();
+        let bytes = b"artifact";
+        let digest = format!("{:x}", sha2::Sha256::digest(bytes));
+        let cache_path = super::cached_artifact_path(&destination, &digest);
+        fs::write(&cache_path, b"different artifact").unwrap();
+        let state = ReleaseState::new("0.0.7", 7, digest.clone()).unwrap();
+
+        let result = super::activate_and_persist(
+            &destination,
+            b"new executable",
+            Some((state_path.clone(), state, digest)),
+            bytes,
+            |path, executable| fs::write(path, executable).map_err(|e| e.to_string()),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"old executable");
+        assert!(!state_path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

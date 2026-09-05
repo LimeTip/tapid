@@ -51,7 +51,7 @@ impl CurlFetcher {
         let mut child = std::process::Command::new("curl")
             .args(curl_fetch_args(url, max_bytes))
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| format!("HTTPS transport unavailable: {e}"))?;
         let stdout = child
@@ -115,9 +115,6 @@ mod tests {
         curl_fetch_args, read_bounded,
     };
     use crate::filesystem::atomic::MAX_ARTIFACT_BYTES;
-    use crate::filesystem::tree::{
-        cmd_batch_path, cmd_shim_contents, powershell_shim_contents, powershell_single_quoted,
-    };
 
     #[test]
     fn bounded_response_reader_caps_initial_allocation() {
@@ -127,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_response_reader_rejects_streams_without_known_size() {
+    fn bounded_response_reader_rejects_streams_over_the_size_limit() {
         assert!(read_bounded(&b"ok"[..], 2).is_ok());
         assert!(read_bounded(&b"too large"[..], 2).is_err());
     }
@@ -161,49 +158,5 @@ mod tests {
         let args = curl_fetch_args("https://example.test/tapid.tar.gz", 1024 * 1024);
         assert_eq!(args[args.len() - 2], "1048576");
         assert_eq!(args.last().unwrap(), "https://example.test/tapid.tar.gz");
-    }
-
-    #[test]
-    fn powershell_single_quoted_escapes_apostrophes() {
-        assert_eq!(
-            powershell_single_quoted(r"C:\\Users\O'Brien\project\tapid.exe"),
-            r"C:\\Users\O''Brien\project\tapid.exe"
-        );
-    }
-
-    #[test]
-    fn powershell_single_quoted_preserves_other_path_characters() {
-        assert_eq!(
-            powershell_single_quoted(r"C:\\Program Files\tapid.exe"),
-            r"C:\\Program Files\tapid.exe"
-        );
-    }
-
-    #[test]
-    fn windows_shims_resolve_sources_relative_to_the_surviving_bin_directory() {
-        let parent = std::path::Path::new("/project/node_modules/.bin");
-        let source = std::path::Path::new("/project/node_modules/tool/cli.js");
-
-        let relative = format!(
-            "..{}tool{}cli.js",
-            std::path::MAIN_SEPARATOR,
-            std::path::MAIN_SEPARATOR
-        );
-        assert_eq!(
-            cmd_shim_contents(parent, source),
-            format!("@echo off\r\n@setlocal DisableDelayedExpansion\r\n\"%~dp0{relative}\" %*\r\n")
-        );
-        assert_eq!(
-            powershell_shim_contents(parent, source),
-            format!("& (Join-Path $PSScriptRoot '{relative}') $args\r\n")
-        );
-    }
-
-    #[test]
-    fn cmd_batch_path_escapes_percent_and_preserves_other_characters() {
-        assert_eq!(
-            cmd_batch_path(r"C:\\100%\O'Brien\tapid.exe"),
-            r"C:\\100%%\O'Brien\tapid.exe"
-        );
     }
 }

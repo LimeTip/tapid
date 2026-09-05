@@ -88,7 +88,13 @@ pub(crate) fn validate_upgrade_destination(path: &Path) -> Result<(), String> {
     if !marker_metadata.file_type().is_file() {
         return Err("Tapid ownership marker must be a regular file".into());
     }
-    if fs::read(&marker).map_or(true, |bytes| bytes != b"tapid-managed-v1\n") {
+    let marker_bytes = fs::read(&marker).map_err(|e| {
+        format!(
+            "cannot read Tapid ownership marker '{}': {e}",
+            marker.display()
+        )
+    })?;
+    if marker_bytes != b"tapid-managed-v1\n" {
         return Err(format!(
             "refusing to replace unmarked non-Tapid-managed destination '{}'; expected {}",
             path.display(),

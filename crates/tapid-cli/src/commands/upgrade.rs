@@ -27,12 +27,22 @@ pub(crate) fn run(args: Args) -> ExitCode {
         Ok(report) => {
             if report.dry_run {
                 println!(
-                    "Verified stable Tapid {} for {}; dry-run did not replace {}",
+                    "{} Tapid {} for {}; dry-run did not replace {}",
+                    if report.signature_verified {
+                        "Verified"
+                    } else {
+                        "Warning: checksum-only"
+                    },
                     report.version,
                     report.target,
                     report.destination.display()
                 );
             } else {
+                if !report.signature_verified {
+                    println!(
+                        "Warning: signature verification was not performed for the GitHub fallback; release checksum matched"
+                    );
+                }
                 println!("Upgraded Tapid to {}", report.version);
             }
             ExitCode::SUCCESS
