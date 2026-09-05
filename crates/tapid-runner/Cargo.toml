@@ -10,8 +10,10 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10"
 tapid-policy = { version = "0.0.3", path = "../tapid-policy" }
+toml = "1.1.5"
 
 [lib]
 path = "src/lib.rs"

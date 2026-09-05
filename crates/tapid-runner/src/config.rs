@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path};
@@ -51,17 +52,11 @@ impl ExecutionLimits {
         max_processes: Option<u32>,
         max_memory_bytes: Option<u64>,
     ) -> Result<Self, ConfigError> {
-        let timeout_seconds = validate_nonzero("timeout_seconds", timeout_seconds, None)?;
-        let max_output_bytes = validate_nonzero("max_output_bytes", max_output_bytes, None)?;
-        let max_memory_bytes = validate_nonzero("max_memory_bytes", max_memory_bytes, None)?;
-        if max_processes == Some(0) {
-            return Err(invalid_limit("max_processes", "must be greater than zero"));
-        }
         Ok(Self {
-            timeout_seconds,
-            max_output_bytes,
-            max_processes,
-            max_memory_bytes,
+            timeout_seconds: nonzero("timeout_seconds", timeout_seconds)?,
+            max_output_bytes: nonzero("max_output_bytes", max_output_bytes)?,
+            max_processes: nonzero("max_processes", max_processes)?,
+            max_memory_bytes: nonzero("max_memory_bytes", max_memory_bytes)?,
         })
     }
 
@@ -184,7 +179,6 @@ impl fmt::Display for ConfigError {
         f.write_str(&self.message)
     }
 }
-
 impl std::error::Error for ConfigError {}
 
 /// Parsed checked-in run policy with deterministic per-script overrides.
@@ -196,12 +190,16 @@ pub struct RunConfig {
 
 impl RunConfig {
     pub fn parse_toml(input: &str) -> Result<Self, ConfigError> {
-        let run = parse_run_section(input)?;
-        let defaults = apply_profile(SandboxPolicy::default(), run.defaults)?;
-        let mut scripts = BTreeMap::new();
-        for (name, profile) in run.scripts {
-            scripts.insert(name, apply_profile(defaults.clone(), profile)?);
-        }
+        let root: ConfigDocument = toml::from_str(input).map_err(deserialize_error)?;
+        let defaults = apply_profile(SandboxPolicy::default(), root.run.defaults)?;
+        let scripts = root
+            .run
+            .scripts
+            .into_iter()
+            .map(|(name, profile)| {
+                apply_profile(defaults.clone(), profile).map(|policy| (name, policy))
+            })
+            .collect::<Result<_, _>>()?;
         Ok(Self { defaults, scripts })
     }
 
@@ -218,13 +216,21 @@ impl RunConfig {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ConfigDocument {
+    run: RunSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct RunSection {
     defaults: RawProfile,
     scripts: BTreeMap<String, RawProfile>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct RawProfile {
     read: Option<Vec<String>>,
     write: Option<Vec<String>>,
@@ -237,274 +243,64 @@ struct RawProfile {
     max_memory_bytes: Option<u64>,
 }
 
-#[derive(Clone, Debug)]
-enum CurrentProfile {
-    Defaults,
-    Script(String),
-}
-
-fn parse_run_section(input: &str) -> Result<RunSection, ConfigError> {
-    let mut run = RunSection::default();
-    let mut current: Option<CurrentProfile> = None;
-
-    for (index, original) in input.lines().enumerate() {
-        let line_number = index + 1;
-        let line = strip_comment(original)?.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') {
-            if !line.ends_with(']') {
-                return Err(malformed(line_number, "unterminated table header"));
-            }
-            let table = line[1..line.len() - 1].trim();
-            current = if table == "run.defaults" {
-                Some(CurrentProfile::Defaults)
-            } else if let Some(name) = table.strip_prefix("run.scripts.") {
-                Some(CurrentProfile::Script(parse_script_name(
-                    name,
-                    line_number,
-                )?))
-            } else {
-                return Err(ConfigError::new(
-                    ConfigErrorCategory::UnknownKey,
-                    format!("line {line_number}: unknown table {table:?}"),
-                ));
-            };
-            continue;
-        }
-
-        let (key, value) = line
-            .split_once('=')
-            .ok_or_else(|| malformed(line_number, "expected key = value"))?;
-        let key = key.trim();
-        let value = value.trim();
-        let profile = match current.as_ref() {
-            Some(CurrentProfile::Defaults) => &mut run.defaults,
-            Some(CurrentProfile::Script(name)) => run.scripts.entry(name.clone()).or_default(),
-            None => {
-                return Err(malformed(
-                    line_number,
-                    "fields must be inside a run profile",
-                ));
-            }
-        };
-        assign_field(profile, key, value, line_number)?;
-    }
-
-    Ok(run)
-}
-
-fn assign_field(
-    profile: &mut RawProfile,
-    key: &str,
-    value: &str,
-    line: usize,
-) -> Result<(), ConfigError> {
-    macro_rules! assign {
-        ($field:ident, $parsed:expr) => {{
-            if profile.$field.is_some() {
-                return Err(malformed(
-                    line,
-                    concat!("duplicate field ", stringify!($field)),
-                ));
-            }
-            profile.$field = Some($parsed?);
-        }};
-    }
-
-    match key {
-        "read" => assign!(read, parse_string_array(value, line)),
-        "write" => assign!(write, parse_string_array(value, line)),
-        "network" => assign!(network, parse_bool(value, line)),
-        "environment" => assign!(environment, parse_string_array(value, line)),
-        "subprocess" => assign!(subprocess, parse_bool(value, line)),
-        "timeout_seconds" => assign!(timeout_seconds, parse_limit(value, key, line)),
-        "max_output_bytes" => assign!(max_output_bytes, parse_limit(value, key, line)),
-        "max_processes" => assign!(max_processes, parse_limit(value, key, line)),
-        "max_memory_bytes" => assign!(max_memory_bytes, parse_limit(value, key, line)),
-        _ => {
-            return Err(ConfigError::new(
-                ConfigErrorCategory::UnknownKey,
-                format!("line {line}: unknown run profile field {key:?}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn parse_bool(value: &str, line: usize) -> Result<bool, ConfigError> {
-    match value {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(malformed(line, "expected a boolean")),
-    }
-}
-
-fn parse_limit(value: &str, name: &str, line: usize) -> Result<u64, ConfigError> {
-    value.parse::<u64>().map_err(|_| {
-        ConfigError::new(
-            ConfigErrorCategory::InvalidLimit,
-            format!("line {line}: {name} must be an unsigned 64-bit integer"),
-        )
-    })
-}
-
-fn parse_script_name(value: &str, line: usize) -> Result<String, ConfigError> {
-    let value = value.trim();
-    if value.starts_with('"') {
-        return parse_quoted_string(value, line);
-    }
-    if value.is_empty()
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+fn deserialize_error(error: toml::de::Error) -> ConfigError {
+    let message = error.to_string();
+    let category = if message.contains("unknown field") {
+        ConfigErrorCategory::UnknownKey
+    } else if [
+        "timeout_seconds",
+        "max_output_bytes",
+        "max_processes",
+        "max_memory_bytes",
+    ]
+    .iter()
+    .any(|field| message.contains(field))
+        && (message.contains("too large")
+            || message.contains("out of range")
+            || message.contains("expected u64"))
     {
-        return Err(malformed(line, "invalid script profile name"));
-    }
-    Ok(value.to_owned())
-}
-
-fn parse_string_array(value: &str, line: usize) -> Result<Vec<String>, ConfigError> {
-    let inner = value
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .ok_or_else(|| malformed(line, "expected an array of strings"))?
-        .trim();
-    if inner.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut values = Vec::new();
-    let mut start = 0;
-    let mut quoted = false;
-    let mut escaped = false;
-    for (index, byte) in inner.bytes().enumerate() {
-        if escaped {
-            escaped = false;
-        } else if byte == b'\\' && quoted {
-            escaped = true;
-        } else if byte == b'"' {
-            quoted = !quoted;
-        } else if byte == b',' && !quoted {
-            values.push(parse_quoted_string(inner[start..index].trim(), line)?);
-            start = index + 1;
-        }
-    }
-    if quoted || escaped {
-        return Err(malformed(line, "unterminated string in array"));
-    }
-    values.push(parse_quoted_string(inner[start..].trim(), line)?);
-    Ok(values)
-}
-
-fn parse_quoted_string(value: &str, line: usize) -> Result<String, ConfigError> {
-    let inner = value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .ok_or_else(|| malformed(line, "expected a basic quoted string"))?;
-    let mut output = String::new();
-    let mut chars = inner.chars();
-    while let Some(character) = chars.next() {
-        if character != '\\' {
-            output.push(character);
-            continue;
-        }
-        let escaped = chars
-            .next()
-            .ok_or_else(|| malformed(line, "unterminated string escape"))?;
-        output.push(match escaped {
-            '"' => '"',
-            '\\' => '\\',
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            _ => return Err(malformed(line, "unsupported string escape")),
-        });
-    }
-    Ok(output)
-}
-
-fn strip_comment(line: &str) -> Result<&str, ConfigError> {
-    let mut quoted = false;
-    let mut escaped = false;
-    for (index, byte) in line.bytes().enumerate() {
-        if escaped {
-            escaped = false;
-        } else if byte == b'\\' && quoted {
-            escaped = true;
-        } else if byte == b'"' {
-            quoted = !quoted;
-        } else if byte == b'#' && !quoted {
-            return Ok(&line[..index]);
-        }
-    }
-    if quoted || escaped {
-        return Err(ConfigError::new(
-            ConfigErrorCategory::Malformed,
-            "unterminated quoted string",
-        ));
-    }
-    Ok(line)
-}
-
-fn malformed(line: usize, reason: &str) -> ConfigError {
-    ConfigError::new(
-        ConfigErrorCategory::Malformed,
-        format!("line {line}: {reason}"),
-    )
+        ConfigErrorCategory::InvalidLimit
+    } else {
+        ConfigErrorCategory::Malformed
+    };
+    ConfigError::new(category, message)
 }
 
 fn apply_profile(mut policy: SandboxPolicy, raw: RawProfile) -> Result<SandboxPolicy, ConfigError> {
-    let read = raw.read.unwrap_or_else(|| policy.filesystem.read.clone());
-    let write = raw.write.unwrap_or_else(|| policy.filesystem.write.clone());
-    policy.filesystem = FilesystemPolicy::new(read, write)?;
-    if let Some(network) = raw.network {
-        policy.network = network;
-    }
+    policy.filesystem = FilesystemPolicy::new(
+        raw.read.unwrap_or(policy.filesystem.read),
+        raw.write.unwrap_or(policy.filesystem.write),
+    )?;
+    policy.network = raw.network.unwrap_or(policy.network);
     if let Some(environment) = raw.environment {
         for name in &environment {
             validate_environment_name(name)?;
         }
         policy.environment = environment;
     }
-    if let Some(subprocess) = raw.subprocess {
-        policy.subprocess = subprocess;
-    }
-    policy.limits.timeout_seconds = validate_nonzero(
-        "timeout_seconds",
-        raw.timeout_seconds,
-        policy.limits.timeout_seconds,
+    policy.subprocess = raw.subprocess.unwrap_or(policy.subprocess);
+    policy.limits = ExecutionLimits::new(
+        raw.timeout_seconds.or(policy.limits.timeout_seconds),
+        raw.max_output_bytes.or(policy.limits.max_output_bytes),
+        match raw.max_processes {
+            Some(value) => Some(u32::try_from(value).map_err(|_| {
+                invalid_limit("max_processes", "must fit in an unsigned 32-bit integer")
+            })?),
+            None => policy.limits.max_processes,
+        },
+        raw.max_memory_bytes.or(policy.limits.max_memory_bytes),
     )?;
-    policy.limits.max_output_bytes = validate_nonzero(
-        "max_output_bytes",
-        raw.max_output_bytes,
-        policy.limits.max_output_bytes,
-    )?;
-    policy.limits.max_memory_bytes = validate_nonzero(
-        "max_memory_bytes",
-        raw.max_memory_bytes,
-        policy.limits.max_memory_bytes,
-    )?;
-    policy.limits.max_processes = match raw.max_processes {
-        Some(0) => return Err(invalid_limit("max_processes", "must be greater than zero")),
-        Some(value) => Some(u32::try_from(value).map_err(|_| {
-            invalid_limit("max_processes", "must fit in an unsigned 32-bit integer")
-        })?),
-        None => policy.limits.max_processes,
-    };
     Ok(policy)
 }
 
-fn validate_nonzero(
-    name: &str,
-    value: Option<u64>,
-    inherited: Option<u64>,
-) -> Result<Option<u64>, ConfigError> {
-    match value {
-        Some(0) => Err(invalid_limit(name, "must be greater than zero")),
-        Some(value) => Ok(Some(value)),
-        None => Ok(inherited),
+fn nonzero<T>(name: &str, value: Option<T>) -> Result<Option<T>, ConfigError>
+where
+    T: Copy + Default + PartialEq,
+{
+    if value == Some(T::default()) {
+        Err(invalid_limit(name, "must be greater than zero"))
+    } else {
+        Ok(value)
     }
 }
 
@@ -543,7 +339,7 @@ fn validate_project_path(value: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_environment_name(name: &str) -> Result<(), ConfigError> {
+pub(crate) fn validate_environment_name(name: &str) -> Result<(), ConfigError> {
     let mut chars = name.chars();
     let valid_start = chars
         .next()
@@ -649,8 +445,48 @@ mod tests {
         let unknown = RunConfig::parse_toml("[run.defaults]\nsandbox = \"disabled\"").unwrap_err();
         assert_eq!(unknown.category(), ConfigErrorCategory::UnknownKey);
 
+        for source in [
+            "unexpected = true",
+            "[run]\nunexpected = true",
+            "[run.scripts.build]\nunexpected = true",
+        ] {
+            let error = RunConfig::parse_toml(source).unwrap_err();
+            assert_eq!(
+                error.category(),
+                ConfigErrorCategory::UnknownKey,
+                "{source}"
+            );
+        }
+
         let malformed = RunConfig::parse_toml("[run.defaults]\nnetwork = \"yes\"").unwrap_err();
         assert_eq!(malformed.category(), ConfigErrorCategory::Malformed);
+    }
+
+    #[test]
+    fn accepts_standard_toml_strings_comments_and_multiline_arrays() {
+        let config = RunConfig::parse_toml(
+            r#"
+            [run.defaults] # standard TOML comments are supported
+            read = [
+                '.',
+                "fixtures\u002fdata",
+            ]
+            environment = ["NODE_ENV"]
+
+            [run.scripts."build:web"]
+            write = ['dist']
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.defaults().filesystem().read(),
+            &[".", "fixtures/data"]
+        );
+        assert_eq!(
+            config.profile_for("build:web").filesystem().write(),
+            &["dist"]
+        );
     }
 
     #[test]
@@ -703,7 +539,8 @@ mod tests {
                 .unwrap_err();
         assert_eq!(
             integer_overflow.category(),
-            ConfigErrorCategory::InvalidLimit
+            ConfigErrorCategory::InvalidLimit,
+            "{integer_overflow}"
         );
     }
 

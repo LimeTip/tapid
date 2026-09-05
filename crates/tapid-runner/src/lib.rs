@@ -6,8 +6,9 @@ pub use config::{
     SandboxPolicy,
 };
 pub use execution::{
-    ContainmentSupport, EnforcementReceipt, ExecutionError, ExecutionErrorCategory,
-    ExecutionOutcome, ExecutionRequest, ExecutionRequestBuilder, Termination, execute,
+    BackendIdentity, ContainmentSupport, EnforcementDimensions, EnforcementReceipt, ExecutionError,
+    ExecutionErrorCategory, ExecutionOutcome, ExecutionRequest, ExecutionRequestBuilder,
+    ResolvedFilesystemGrants, Termination, execute,
 };
 
 use sha2::{Digest, Sha256};
