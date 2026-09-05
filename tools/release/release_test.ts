@@ -89,10 +89,13 @@ test("binary release follows the small draft release flow", async () => {
   const validateAnnotatedTag = workflow.indexOf('git cat-file -t "refs/tags/$RELEASE_TAG"');
   const fetchMain = workflow.indexOf("refs/heads/main:refs/remotes/origin/main");
   const ancestry = workflow.indexOf("merge-base --is-ancestor");
+  const checkoutVerifiedTag = workflow.indexOf('git checkout --detach "$tag_commit"');
+  const checkTag = workflow.indexOf('version="$(node --experimental-strip-types tools/release/release.ts check-tag "$RELEASE_TAG")"');
   assert(deriveTag >= 0 && deriveTag < validateTagInput);
   assert(validateTagInput < deleteCheckoutTag);
   assert(deleteCheckoutTag < fetchAnnotatedTag && fetchAnnotatedTag < validateAnnotatedTag);
   assert(validateAnnotatedTag < fetchMain && fetchMain < ancestry);
+  assert(ancestry < checkoutVerifiedTag && checkoutVerifiedTag < checkTag);
   assert(workflow.includes('tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"'));
   assert(workflow.includes('version="$(node --experimental-strip-types tools/release/release.ts check-tag "$RELEASE_TAG")"'));
   assert(!workflow.includes('ref: ${{ needs.prepare.outputs.tag_commit }}'));

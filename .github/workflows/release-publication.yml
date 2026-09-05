@@ -63,6 +63,7 @@ jobs:
             echo "release tag must point to a commit on main" >&2
             exit 1
           }
+          git checkout --detach "$tag_commit"
           version="$(node --experimental-strip-types tools/release/release.ts check-tag "$RELEASE_TAG")"
           {
             echo "version=$version"
