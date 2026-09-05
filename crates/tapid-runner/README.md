@@ -7,6 +7,8 @@
 [![License](https://img.shields.io/crates/l/tapid-runner)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
-Planning and validation contract for policy-aware package scripts. A `RunnerRequest` carries the exact artifact digest and script; approvals bind to the exact digest and SHA-256 hash of the normalized script (CRLF/CR normalized to LF and outer whitespace trimmed).
+Policy-aware package execution foundations for Tapid. Existing approval APIs bind an exact artifact digest to the SHA-256 hash of a normalized script.
 
-The crate does not execute processes or provide sandboxing/containment. It reports explicit unsupported-OS limitations and validates approvals before any future execution layer is called.
+`RunConfig::parse_toml` accepts checked-in `[run.defaults]` and `[run.scripts.<name>]` profiles. Profiles declare project-relative read/write grants, network access, environment-variable names, subprocess access, and optional resource limits. Configuration is strict, denies unknown fields, and cannot disable required sandboxing.
+
+The platform-neutral execution API validates requests and reports stable errors, termination states, containment support, and enforcement receipts. Platform backends are not implemented. `execute` therefore fails closed before spawning a child and does not claim that declarations were enforced. `SandboxMode::Disabled` exists only as an explicit programmatic override for a future CLI boundary; it cannot be selected from checked-in configuration.

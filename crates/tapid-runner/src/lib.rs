@@ -1,3 +1,15 @@
+pub mod config;
+pub mod execution;
+
+pub use config::{
+    ConfigError, ConfigErrorCategory, ExecutionLimits, FilesystemPolicy, RunConfig, SandboxMode,
+    SandboxPolicy,
+};
+pub use execution::{
+    ContainmentSupport, EnforcementReceipt, ExecutionError, ExecutionErrorCategory,
+    ExecutionOutcome, ExecutionRequest, ExecutionRequestBuilder, Termination, execute,
+};
+
 use sha2::{Digest, Sha256};
 use std::fmt;
 use tapid_policy::{Decision, Evidence, PolicyDecision, ReasonCode};
@@ -220,6 +232,23 @@ mod tests {
                 Err(ValidationError::PolicyDenied)
             );
         }
+    }
+
+    #[test]
+    fn existing_public_api_remains_source_compatible() {
+        let request = RunnerRequest {
+            artifact_digest: "sha256-aaaa".into(),
+            script: "echo compatible".into(),
+            unattended: false,
+            os: "linux".into(),
+        };
+        let hash: ScriptHash = normalized_script_hash(&request.script);
+        let approval: Approval = Approval::for_request(&request);
+        let plan: RunnerPlan = plan(&request, vec![]);
+
+        assert_eq!(hash, request.script_hash());
+        assert_eq!(approval.script_hash, hash);
+        assert!(plan.policy().evidence().is_empty());
     }
 
     #[test]
