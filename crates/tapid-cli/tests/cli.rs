@@ -120,7 +120,7 @@ fn clap_rejects_unknown_commands_with_usage_error() {
 fn run_executes_root_script_and_forwards_arguments() {
     let dir = temp_dir("run");
     #[cfg(unix)]
-    let manifest = r#"{"name":"demo","version":"1.0.0","scripts":{"init":"printf '%s' \"$1\" > forwarded","dev":"exit 37"}}"#;
+    let manifest = r#"{"name":"demo","version":"1.0.0","scripts":{"init":"printf '%s' > forwarded","dev":"exit 37"}}"#;
     #[cfg(windows)]
     let manifest = r#"{"name":"demo","version":"1.0.0","scripts":{"init":"echo > forwarded","dev":"exit /b 37"}}"#;
     fs::write(dir.join("package.json"), manifest).unwrap();

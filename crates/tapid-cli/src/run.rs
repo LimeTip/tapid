@@ -71,14 +71,17 @@ impl ShellBackend {
 
     pub fn invocation(&self, script: &str, arguments: &[String]) -> ShellInvocation {
         let (program, mut command_arguments) = match self {
-            Self::UnixSh => (
-                PathBuf::from("/bin/sh"),
-                vec![
-                    "-c".to_owned(),
-                    script.to_owned(),
-                    "tapid-script".to_owned(),
-                ],
-            ),
+            Self::UnixSh => {
+                let command = if arguments.is_empty() {
+                    script.to_owned()
+                } else {
+                    format!("{script} \"$@\"")
+                };
+                (
+                    PathBuf::from("/bin/sh"),
+                    vec!["-c".to_owned(), command, "tapid-script".to_owned()],
+                )
+            }
             Self::WindowsCmd => (
                 PathBuf::from("cmd.exe"),
                 vec![
@@ -268,14 +271,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unix_adapter_preserves_ordered_arguments_at_shell_boundary() {
+    fn unix_adapter_appends_ordered_arguments_to_script_command() {
         let dir = project();
-        let request = RunRequest::new(
-            dir,
-            Some("test \"$1\" = first && test \"$2\" = second".into()),
-        )
-        .with_arguments(["first", "second"]);
+        let output = dir.join("forwarded");
+        let request = RunRequest::new(dir, Some("printf '%s\\n' > forwarded".into()))
+            .with_arguments(["--hostname", "127.0.0.1", "--port", "3001"]);
         assert_eq!(execute(request).unwrap().exit_code(), Some(0));
+        assert_eq!(
+            fs::read_to_string(output).unwrap(),
+            "--hostname\n127.0.0.1\n--port\n3001\n"
+        );
     }
 
     #[cfg(unix)]
@@ -322,7 +327,7 @@ mod tests {
         assert_eq!(unix.program, PathBuf::from("/bin/sh"));
         assert_eq!(
             unix.arguments,
-            vec!["-c", "echo hi", "tapid-script", "a", "b"]
+            vec!["-c", "echo hi \"$@\"", "tapid-script", "a", "b"]
         );
         let windows = ShellBackend::WindowsCmd.invocation("echo hi", &["a".into()]);
         assert_eq!(windows.program, PathBuf::from("cmd.exe"));
