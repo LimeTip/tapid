@@ -74,6 +74,14 @@ test("binary release follows the small draft release flow", async () => {
   assert(!workflow.includes("softprops/action-gh-release"));
   assert(workflow.includes('gh api --paginate "repos/$GITHUB_REPOSITORY/releases"'));
   assert(workflow.includes('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"'));
+  const createRelease = workflow.indexOf('release_fields="$(gh api --method POST');
+  const boundedReleaseReadback = workflow.indexOf("for attempt in 1 2 3 4 5; do", createRelease);
+  const exactReleaseCount = workflow.indexOf(')" = 1 &&', boundedReleaseReadback);
+  const exactReleaseId = workflow.indexOf(')" = "$release_id"; then', exactReleaseCount);
+  assert(createRelease >= 0 && boundedReleaseReadback > createRelease);
+  assert(boundedReleaseReadback < exactReleaseCount && exactReleaseCount < exactReleaseId);
+  assert(workflow.includes('[ "$attempt" = 5 ] || sleep 2'));
+  assert(workflow.includes("release read-back did not converge"));
   assert(workflow.includes('expected_upload_url="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets{?name,label}"'));
   assert(workflow.includes('UPLOAD_URL: ${{ steps.release.outputs.upload_url }}'));
   assert(workflow.includes('"$UPLOAD_URL?name=$name"'));
@@ -102,7 +110,7 @@ test("binary release follows the small draft release flow", async () => {
   assertEquals(workflow.match(/git checkout --detach "\$TAG_COMMIT"/g)?.length, 2);
   assertEquals(workflow.match(/test "\$\(git rev-parse HEAD\)" = "\$TAG_COMMIT"/g)?.length, 2);
   assert(workflow.includes("unexpected draft release assets"));
-  assert(workflow.includes("actions/download-artifact@v4"));
+  assert(workflow.includes("actions/download-artifact@v8"));
   assert(workflow.includes("workflow_dispatch:"));
   assert(workflow.includes("if: github.event_name == 'workflow_dispatch'"));
   assert(workflow.includes("ref: main"));
@@ -112,6 +120,48 @@ test("binary release follows the small draft release flow", async () => {
   assert(!workflow.includes("release-manifest"));
   assert(!workflow.includes("python"));
   assert(!workflow.includes("gh release edit"));
+});
+
+test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM runner", async () => {
+  const workflow = await text(".github/workflows/release-publication.yml");
+  for (const action of [
+    "actions/checkout@v6",
+    "actions/setup-node@v7",
+    "actions/upload-artifact@v7",
+    "actions/download-artifact@v8",
+  ]) assert(workflow.includes(action));
+  for (const legacyAction of [
+    "actions/checkout@v4",
+    "actions/setup-node@v4",
+    "actions/upload-artifact@v4",
+    "actions/download-artifact@v4",
+  ]) assert(!workflow.includes(legacyAction));
+  assert(workflow.includes("runner: windows-11-vs2026-arm"));
+  assert(!workflow.includes("runner: windows-11-arm"));
+});
+
+test("repository workflows avoid the deprecated Node.js 20 action majors", async () => {
+  for (const path of [
+    ".github/workflows/ci.yml",
+    ".github/workflows/crates-publication.yml",
+    ".github/workflows/release-publication.yml",
+    ".github/workflows/website-installer-sync.yml",
+  ]) {
+    const workflow = await text(path);
+    for (const legacyAction of [
+      "actions/checkout@v4",
+      "actions/setup-node@v4",
+      "actions/upload-artifact@v4",
+      "actions/download-artifact@v4",
+    ]) assert(!workflow.includes(legacyAction), `${path} still uses ${legacyAction}`);
+  }
+  const ci = await text(".github/workflows/ci.yml");
+  assert(ci.includes("runner: windows-11-vs2026-arm"));
+  assert(!ci.includes("runner: windows-11-arm"));
+  assertEquals(
+    ci.match(/persist-credentials: false/g)?.length,
+    ci.match(/uses: actions\/checkout@v6/g)?.length,
+  );
 });
 
 test("crates publication uses trusted publishing and native Cargo", async () => {
@@ -127,7 +177,7 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(workflow.includes('check-tag "$TAG"'));
   assert(!workflow.includes('check-tag "${{ inputs.tag }}"'));
   const ancestry = workflow.indexOf('merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main');
-  const setupNode = workflow.indexOf("actions/setup-node@v4");
+  const setupNode = workflow.indexOf("actions/setup-node@v7");
   const repositoryCode = workflow.indexOf("tools/release/release.ts");
   assert(ancestry >= 0 && ancestry < setupNode && ancestry < repositoryCode);
   assert(workflow.includes("git cat-file -t \"refs/tags/$TAG\""));
@@ -311,6 +361,6 @@ cp "$TAPID_TEST_FIXTURE/\${url##*/}" "$out"
 
 test("CI runs the TypeScript tool suite", async () => {
   const workflow = await text(".github/workflows/ci.yml");
-  assert(workflow.includes("actions/setup-node@v4"));
+  assert(workflow.includes("actions/setup-node@v7"));
   assert(workflow.includes("node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts"));
 });

@@ -21,18 +21,18 @@ jobs:
       release_tag: ${{ steps.version.outputs.release_tag }}
       tag_commit: ${{ steps.version.outputs.tag_commit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         if: github.event_name != 'workflow_dispatch'
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         if: github.event_name == 'workflow_dispatch'
         with:
           ref: main
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - id: version
@@ -94,11 +94,11 @@ jobs:
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             binary: tapid.exe
-          - runner: windows-11-arm
+          - runner: windows-11-vs2026-arm
             target: aarch64-pc-windows-msvc
             binary: tapid.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -125,7 +125,7 @@ jobs:
           cp "target/$TARGET/release/$BINARY" "staging/$BINARY"
           "staging/$BINARY" --version | grep -Fx "tapid $VERSION"
           tar -czf "release/tapid-$VERSION-$TARGET.tar.gz" -C staging "$BINARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tapid-${{ matrix.target }}
           path: release/*.tar.gz
@@ -137,7 +137,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -148,12 +148,12 @@ jobs:
         run: |
           git checkout --detach "$TAG_COMMIT"
           test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: tapid-*
           path: release
           merge-multiple: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Create checksums
@@ -185,10 +185,21 @@ jobs:
           test "$upload_url" = "$expected_upload_url"
 
           matching_ids="$(mktemp)"
-          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
-            --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id" > "$matching_ids"
-          test "$(wc -l < "$matching_ids" | tr -d ' ')" = 1
-          test "$(tr -d '\r\n' < "$matching_ids")" = "$release_id"
+          release_visible=false
+          for attempt in 1 2 3 4 5; do
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+              --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id" > "$matching_ids"
+            if test "$(wc -l < "$matching_ids" | tr -d ' ')" = 1 && \
+              test "$(tr -d '\r\n' < "$matching_ids")" = "$release_id"; then
+              release_visible=true
+              break
+            fi
+            [ "$attempt" = 5 ] || sleep 2
+          done
+          test "$release_visible" = true || {
+            echo "release read-back did not converge on exact ID $release_id" >&2
+            exit 1
+          }
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
           echo "upload_url=${upload_url%%\{*}" >> "$GITHUB_OUTPUT"
       - name: Upload release assets

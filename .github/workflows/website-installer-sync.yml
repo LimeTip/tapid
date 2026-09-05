@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out Tapid
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Shell syntax
         run: sh -n scripts/install.sh
@@ -68,14 +68,14 @@ jobs:
 
       - name: Check out Tapid
         if: steps.sync-auth.outputs.available == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: tapid
           persist-credentials: false
 
       - name: Check out tapid-web
         if: steps.sync-auth.outputs.available == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: LimeTip/tapid-web
           ref: main
@@ -102,7 +102,7 @@ jobs:
 
       - name: Set up Node.js
         if: steps.changes.outputs.changed == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
