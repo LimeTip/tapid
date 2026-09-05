@@ -26,6 +26,8 @@ The installers accept only stable `vX.Y.Z` versions and HTTPS release endpoints.
 
 A workflow run does not publish the draft automatically. The manual draft review is the promotion boundary.
 
+If a tag-triggered run fails before creating a draft because of a workflow defect, merge the reviewed workflow correction into `main` and manually dispatch that current workflow with the existing annotated tag. The recovery run explicitly refetches and validates the remote annotated tag, checks out its exact peeled commit for every build, and retains the same create-only release behavior. Never move, recreate, or delete and replace the release tag to recover a failed run.
+
 ## TypeScript helper
 
 `tools/release/release.ts` contains the small amount of orchestration that is awkward in shell:
