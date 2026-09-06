@@ -1,6 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256, Sha512};
 use std::{
+    ffi::OsStr,
     fs,
     path::PathBuf,
     process::Command,
@@ -30,6 +31,16 @@ fn run_with_env(cwd: &PathBuf, args: &[&str], key: &str, value: &str) -> std::pr
         .args(args)
         .current_dir(cwd)
         .env(key, value)
+        .output()
+        .unwrap()
+}
+
+fn run_with_isolated_path(cwd: &PathBuf, args: &[&str], path: &OsStr) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .env("PATH", path)
         .output()
         .unwrap()
 }
@@ -139,6 +150,79 @@ fn run_requires_checked_in_configuration_before_execution() {
 }
 
 #[test]
+fn run_without_runtime_flag_discovers_node_then_reaches_sandbox_preflight() {
+    let dir = temp_dir("run-discovered-runtime");
+    fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.toml"), "[run.scripts.dev]\n").unwrap();
+    let runtime_dir = dir.join("host-runtime");
+    fs::create_dir(&runtime_dir).unwrap();
+    let runtime = runtime_dir.join(if cfg!(windows) { "node.exe" } else { "node" });
+    fs::copy(env!("CARGO_BIN_EXE_tapid"), &runtime).unwrap();
+
+    let output = run_with_isolated_path(
+        &dir,
+        &[
+            "run",
+            "dev",
+            "--",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            "3001",
+        ],
+        runtime_dir.as_os_str(),
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("sandbox execution failed (unsupported-containment)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("required arguments were not provided"));
+    cleanup(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn run_preserves_non_utf8_forwarded_argument_through_cli_boundary() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = temp_dir("run-non-utf8-argument");
+    fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.toml"), "[run.scripts.dev]\n").unwrap();
+    let runtime = dir.join("node");
+    fs::copy(env!("CARGO_BIN_EXE_tapid"), &runtime).unwrap();
+    let bad = std::ffi::OsString::from_vec(b"bad-\xff-arg".to_vec());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(&dir)
+        .env_clear()
+        .args(["run", "dev", "--node-runtime"])
+        .arg(&runtime)
+        .arg("--")
+        .arg(&bad)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unsupported-containment"), "{stderr}");
+    assert!(!stderr.contains("invalid UTF-8"));
+    cleanup(dir);
+}
+
+#[test]
 fn run_rejects_malformed_configuration_stably() {
     let dir = temp_dir("run-malformed-config");
     fs::write(
@@ -223,22 +307,24 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
     )
     .unwrap();
     let secret = "tapid-super-secret-value";
-    let output = run_with_env(
-        &dir,
-        &[
-            "run",
-            "dev",
-            "--node-runtime",
-            env!("CARGO_BIN_EXE_tapid"),
-            "--",
-            "--hostname",
-            "127.0.0.1",
-            "--port",
-            "4173",
-        ],
-        "SECRET_TOKEN",
-        secret,
-    );
+    let runtime = dir.join(if cfg!(windows) { "node.exe" } else { "node" });
+    fs::copy(env!("CARGO_BIN_EXE_tapid"), &runtime).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args([
+            OsStr::new("run"),
+            OsStr::new("dev"),
+            OsStr::new("--node-runtime"),
+            runtime.as_os_str(),
+            OsStr::new("--"),
+            OsStr::new("--hostname"),
+            OsStr::new("127.0.0.1"),
+            OsStr::new("--port"),
+            OsStr::new("4173"),
+        ])
+        .current_dir(&dir)
+        .env("SECRET_TOKEN", secret)
+        .output()
+        .unwrap();
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -292,7 +378,7 @@ fn run_rejects_a_missing_node_runtime_stably() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "error: node runtime must be an existing executable file\n"
+        "error: node runtime must be an executable named node or node.exe\n"
     );
     cleanup(dir);
 }

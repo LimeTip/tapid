@@ -1,8 +1,9 @@
 use clap::Args as ClapArgs;
 use std::{
-    collections::BTreeMap,
-    env, fs,
-    io::{self, Read, Write},
+    env,
+    ffi::OsString,
+    fs,
+    io::{self, Read},
     path::PathBuf,
     process::ExitCode,
 };
@@ -14,12 +15,12 @@ pub(crate) struct Args {
     /// Project directory containing package.json.
     #[arg(long, default_value = ".")]
     pub(crate) project_dir: PathBuf,
-    /// Exact Node executable used to construct the controlled runtime PATH.
+    /// Exact Node executable; otherwise the first valid Node on the host PATH is used.
     #[arg(long)]
-    pub(crate) node_runtime: PathBuf,
+    pub(crate) node_runtime: Option<PathBuf>,
     /// Arguments forwarded after `--` to the script.
     #[arg(last = true)]
-    pub(crate) arguments: Vec<String>,
+    pub(crate) arguments: Vec<OsString>,
 }
 
 fn config_error_category(category: tapid_runner::ConfigErrorCategory) -> &'static str {
@@ -96,17 +97,34 @@ pub(crate) fn run(args: Args) -> ExitCode {
         );
         return ExitCode::from(1);
     }
-    let ambient_environment = env::vars_os()
-        .filter_map(|(name, value)| name.into_string().ok().map(|name| (name, value)))
-        .collect::<BTreeMap<_, _>>();
+    let ambient_environment = match crate::run::read_allowlisted_environment(
+        config
+            .exact_profile(&args.script)
+            .expect("exact profile was checked")
+            .environment(),
+    ) {
+        Ok(environment) => environment,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let host_path = args
+        .node_runtime
+        .is_none()
+        .then(|| env::var_os("PATH"))
+        .flatten();
     let prepared = match crate::run::prepare_execution_request(
         &project_dir,
         &args.script,
         &config,
         &script,
         &args.arguments,
-        &args.node_runtime,
-        &ambient_environment,
+        crate::run::HostExecutionEnvironment {
+            node_runtime: args.node_runtime.as_deref(),
+            path: host_path.as_deref(),
+            allowlisted: &ambient_environment,
+        },
     ) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -169,8 +187,6 @@ fn execution_error_category(category: tapid_runner::ExecutionErrorCategory) -> &
 }
 
 fn render_outcome(outcome: &tapid_runner::ExecutionOutcome) -> ExitCode {
-    let _ = io::stdout().write_all(outcome.stdout());
-    let _ = io::stderr().write_all(outcome.stderr());
     let receipt = outcome.enforcement();
     eprintln!(
         "sandbox receipt: backend={}@{} requested={:?} declared={:?} observed={:?} enforced={:?}",

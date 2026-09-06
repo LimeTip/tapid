@@ -15,5 +15,8 @@ sha2 = "0.10"
 tapid-policy = { version = "0.0.3", path = "../tapid-policy" }
 toml = "1.1.5"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [lib]
 path = "src/lib.rs"

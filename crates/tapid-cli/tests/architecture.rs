@@ -96,6 +96,18 @@ fn sandboxed_run_path_cannot_spawn_directly() {
 }
 
 #[test]
+fn run_reads_only_allowlisted_host_environment_and_does_not_replay_child_output() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let planner = fs::read_to_string(root.join("run.rs")).expect("read run planner");
+    let command = fs::read_to_string(root.join("commands/run.rs")).expect("read run command");
+
+    assert!(planner.contains("std::env::var_os(name)"));
+    assert!(!planner.contains("std::env::vars_os()"));
+    assert!(!command.contains("outcome.stdout()"));
+    assert!(!command.contains("outcome.stderr()"));
+}
+
+#[test]
 fn rust_file_discovery_recurses_into_nested_modules() {
     let root = std::env::temp_dir().join(format!(
         "tapid-architecture-recursion-{}-{}",

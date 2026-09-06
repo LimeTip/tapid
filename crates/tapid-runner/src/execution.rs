@@ -911,6 +911,36 @@ impl fmt::Display for ExecutionError {
 }
 impl std::error::Error for ExecutionError {}
 
+#[cfg(windows)]
+fn windows_file_identity(path: &Path) -> Result<(u32, u64), ExecutionError> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let file =
+        fs::File::open(path).map_err(|error| path_error("trusted Node runtime", path, error))?;
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: `file` keeps a valid owned handle alive for the call and `information` points to
+    // writable storage of the exact structure required by `GetFileInformationByHandle`.
+    let succeeded = unsafe {
+        GetFileInformationByHandle(file.as_raw_handle() as isize, information.as_mut_ptr())
+    };
+    if succeeded == 0 {
+        return Err(path_error(
+            "trusted Node runtime identity",
+            path,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: a successful API call initialized the complete output structure.
+    let information = unsafe { information.assume_init() };
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Ok((information.dwVolumeSerialNumber, file_index))
+}
+
 /// Platform-neutral, validated request passed to a private execution backend.
 ///
 /// Search paths remain private adapter input: external callers can add them only through the
@@ -925,10 +955,101 @@ impl std::error::Error for ExecutionError {}
 /// let _ = request.executable_search_paths();
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct TrustedNodeRuntime {
+    path: PathBuf,
+    #[cfg(unix)]
+    identity: NativeIdentity,
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+}
+
+impl TrustedNodeRuntime {
+    fn checked(path: &Path) -> Result<Self, ExecutionError> {
+        let canonical = canonical_path(path, "trusted Node runtime")?;
+        if canonical != path || !is_node_executable_name(&canonical) {
+            return Err(invalid_request(
+                "trusted Node runtime must be canonical and named node or node.exe",
+            ));
+        }
+        let metadata = fs::metadata(&canonical)
+            .map_err(|error| path_error("trusted Node runtime", &canonical, error))?;
+        if !metadata.is_file() {
+            return Err(invalid_request(
+                "trusted Node runtime must be a regular file",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(invalid_request("trusted Node runtime must be executable"));
+            }
+            Ok(Self {
+                path: canonical,
+                identity: NativeIdentity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                },
+            })
+        }
+        #[cfg(windows)]
+        {
+            let (volume_serial_number, file_index) = windows_file_identity(&canonical)?;
+            Ok(Self {
+                path: canonical,
+                volume_serial_number,
+                file_index,
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
+        Ok(Self { path: canonical })
+    }
+
+    fn validate(&self, search_paths: &[PathBuf]) -> Result<(), ExecutionError> {
+        if search_paths
+            .first()
+            .and_then(|path| fs::canonicalize(path).ok())
+            .as_deref()
+            != self.path.parent()
+        {
+            return Err(invalid_request(
+                "trusted Node runtime directory must be the first executable search path",
+            ));
+        }
+        let current = Self::checked(&self.path).map_err(|_| {
+            ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "trusted Node runtime identity changed after request construction",
+            )
+        })?;
+        if &current != self {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "trusted Node runtime identity changed after request construction",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn is_node_executable_name(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        #[cfg(windows)]
+        return name.to_string_lossy().eq_ignore_ascii_case("node.exe");
+        #[cfg(not(windows))]
+        return name == OsStr::new("node");
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRequest {
     program: OsString,
     arguments: Vec<OsString>,
     executable_search_paths: Vec<PathBuf>,
+    trusted_node_runtime: Option<TrustedNodeRuntime>,
+    windows_verbatim_arguments: bool,
     project_root: PathBuf,
     policy: SandboxPolicy,
     environment: BTreeMap<OsString, OsString>,
@@ -940,6 +1061,8 @@ impl ExecutionRequest {
             program: program.into(),
             arguments: Vec::new(),
             executable_search_paths: Vec::new(),
+            trusted_node_runtime: None,
+            windows_verbatim_arguments: false,
             project_root: PathBuf::from("."),
             policy: SandboxPolicy::default(),
             environment: BTreeMap::new(),
@@ -952,9 +1075,27 @@ impl ExecutionRequest {
     pub fn arguments(&self) -> &[OsString] {
         &self.arguments
     }
+    /// Whether a Windows adapter must pass arguments without MSVCRT re-quoting.
+    pub fn uses_windows_verbatim_arguments(&self) -> bool {
+        self.windows_verbatim_arguments
+    }
     /// Ordered executable search directories for private platform adapters.
     fn executable_search_paths(&self) -> &[PathBuf] {
         &self.executable_search_paths
+    }
+    #[cfg(all(test, unix))]
+    fn trusted_node_runtime(&self) -> &Path {
+        self.trusted_node_runtime
+            .as_ref()
+            .expect("trusted Node runtime was requested")
+            .path
+            .as_path()
+    }
+    fn validate_trusted_node_runtime(&self) -> Result<(), ExecutionError> {
+        if let Some(runtime) = &self.trusted_node_runtime {
+            runtime.validate(&self.executable_search_paths)?;
+        }
+        Ok(())
     }
     pub fn project_root(&self) -> &Path {
         &self.project_root
@@ -981,7 +1122,39 @@ impl ExecutionRequest {
         environment
     }
 
+    fn validate_windows_verbatim_boundary(&self) -> Result<(), ExecutionError> {
+        if !self.windows_verbatim_arguments {
+            return Ok(());
+        }
+        let is_cmd = Path::new(&self.program)
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| {
+                name.eq_ignore_ascii_case("cmd") || name.eq_ignore_ascii_case("cmd.exe")
+            });
+        if !is_cmd
+            || self.arguments.len() != 4
+            || self.arguments[0] != OsStr::new("/D")
+            || self.arguments[1] != OsStr::new("/S")
+            || self.arguments[2] != OsStr::new("/C")
+        {
+            return Err(invalid_request(
+                "Windows verbatim arguments require cmd.exe /D /S /C plus one command payload",
+            ));
+        }
+        let payload = self.arguments[3].to_str().ok_or_else(|| {
+            invalid_request("Windows verbatim command payload must be valid Unicode")
+        })?;
+        if payload.contains(['\r', '\n']) {
+            return Err(invalid_request(
+                "Windows verbatim command payload cannot contain CR or LF",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), ExecutionError> {
+        self.validate_windows_verbatim_boundary()?;
         let program_units =
             validate_os_value("execution program", &self.program, MAX_PROGRAM_UNITS)?;
         if self.program.is_empty() {
@@ -1023,6 +1196,7 @@ impl ExecutionRequest {
         }
         let executable_search_path =
             validate_executable_search_paths(&self.executable_search_paths)?;
+        self.validate_trusted_node_runtime()?;
         // The complete block always contains PATH=<joined paths>\0 followed by the block's final
         // terminator. An empty path list therefore still contributes `PATH=\0\0`.
         let mut environment_units = 1usize
@@ -1084,6 +1258,8 @@ pub struct ExecutionRequestBuilder {
     program: OsString,
     arguments: Vec<OsString>,
     executable_search_paths: Vec<PathBuf>,
+    trusted_node_runtime: Option<PathBuf>,
+    windows_verbatim_arguments: bool,
     project_root: PathBuf,
     policy: SandboxPolicy,
     environment: BTreeMap<OsString, OsString>,
@@ -1111,6 +1287,18 @@ impl ExecutionRequestBuilder {
     /// resulting mandatory `PATH`) exceeds [`MAX_ENVIRONMENT_BLOCK_UNITS`].
     pub fn executable_search_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable_search_paths.push(path.into());
+        self
+    }
+
+    /// Binds the exact canonical Node executable to the first child PATH directory.
+    pub fn trusted_node_runtime(mut self, path: impl Into<PathBuf>) -> Self {
+        self.trusted_node_runtime = Some(path.into());
+        self
+    }
+
+    /// Requires the Windows adapter to use `CommandExt::raw_arg` or an equivalent verbatim seam.
+    pub fn windows_verbatim_arguments(mut self, enabled: bool) -> Self {
+        self.windows_verbatim_arguments = enabled;
         self
     }
 
@@ -1160,10 +1348,17 @@ impl ExecutionRequestBuilder {
     }
 
     pub fn build(self) -> Result<ExecutionRequest, ExecutionError> {
+        let trusted_node_runtime = self
+            .trusted_node_runtime
+            .as_deref()
+            .map(TrustedNodeRuntime::checked)
+            .transpose()?;
         let request = ExecutionRequest {
             program: self.program,
             arguments: self.arguments,
             executable_search_paths: self.executable_search_paths,
+            trusted_node_runtime,
+            windows_verbatim_arguments: self.windows_verbatim_arguments,
             project_root: self.project_root,
             policy: self.policy,
             environment: self.environment,
@@ -1443,6 +1638,7 @@ fn execute_with_backend(
             "validated child environment is missing mandatory PATH",
         ));
     }
+    request.validate_trusted_node_runtime()?;
     let outcome = backend.spawn(request, &preflight)?;
     outcome.validate_for_preflight(&preflight)?;
     Ok(outcome)
@@ -1828,6 +2024,59 @@ mod tests {
             request.environment().get(std::ffi::OsStr::new("NODE_ENV")),
             Some(&std::ffi::OsString::from("test"))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_node_runtime_identity_is_retained_and_revalidated() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temporary_directory("trusted-node-runtime");
+        let runtime = root.join("node");
+        fs::write(&runtime, b"first").unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
+        let runtime = fs::canonicalize(&runtime).unwrap();
+        let runtime_dir = fs::canonicalize(&root).unwrap();
+        let request = ExecutionRequest::builder("/bin/sh")
+            .trusted_node_runtime(&runtime)
+            .executable_search_path(&runtime_dir)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request.trusted_node_runtime(),
+            fs::canonicalize(&runtime).unwrap()
+        );
+        fs::remove_file(&runtime).unwrap();
+        fs::write(&runtime, b"replacement").unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = request.validate_trusted_node_runtime().unwrap_err();
+        assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn request_builder_preserves_windows_verbatim_boundary_contract() {
+        let request = ExecutionRequest::builder("cmd.exe")
+            .args(["/D", "/S", "/C", "echo ok"])
+            .windows_verbatim_arguments(true)
+            .build()
+            .unwrap();
+
+        assert!(request.uses_windows_verbatim_arguments());
+    }
+
+    #[test]
+    fn windows_verbatim_boundary_rejects_non_cmd_shapes_and_line_injection() {
+        for request in [
+            ExecutionRequest::builder("powershell.exe").args(["/D", "/S", "/C", "echo ok"]),
+            ExecutionRequest::builder("cmd.exe").args(["/C", "echo ok"]),
+            ExecutionRequest::builder("cmd.exe").args(["/D", "/S", "/C", "echo\rbreak"]),
+            ExecutionRequest::builder("cmd.exe").args(["/D", "/S", "/C", "echo\nbreak"]),
+        ] {
+            assert!(request.windows_verbatim_arguments(true).build().is_err());
+        }
     }
 
     #[test]
