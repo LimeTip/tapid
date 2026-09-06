@@ -1333,6 +1333,7 @@ dependencies = [
  "tapid-manifest",
  "tapid-registry-client",
  "tapid-resolver",
+ "tapid-runner",
  "tapid-store",
 ]
 
@@ -1455,6 +1456,7 @@ dependencies = [
  "sha2",
  "tapid-policy",
  "toml",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

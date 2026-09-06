@@ -7,18 +7,17 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use tapid_runner::RunConfig;
+
+static PROJECT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn project() -> (PathBuf, PathBuf) {
     let path = std::env::temp_dir().join(format!(
         "tapid-run-plan-{}-{}",
         std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        PROJECT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(path.join("node_modules/.bin")).unwrap();
     let runtime_dir = path.join("runtime/bin");

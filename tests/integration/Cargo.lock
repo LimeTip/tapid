@@ -1287,6 +1287,7 @@ dependencies = [
  "sha2",
  "tapid-policy",
  "toml",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
