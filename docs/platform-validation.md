@@ -88,7 +88,7 @@ A future `--no-sandbox` path requires separate tests. It must be explicit and pr
 
 ### macOS 26
 
-The planned Restricted backend is experimental Seatbelt applied through deprecated, path-based `sandbox-exec`. Before support can be claimed, probes must establish requested filesystem and network authority before spawn, restriction propagation to detached descendants, explicit environment/PATH and descriptor hygiene, and honest path-binding and lifecycle limitations. The profile generator or standalone `sandbox-exec` behavior is not integrated evidence. This backend is not implemented or validated.
+The Restricted backend is experimental Seatbelt applied through deprecated, path-based `sandbox-exec`. Integrated probes establish filesystem and network authority, descendant propagation, explicit environment/PATH, descriptor hygiene, and honest path-binding and lifecycle limitations before support is reported. Native acceptance must still be rerun at each exact commit being claimed.
 
 Native ManagedTree remains unsupported. Process groups are escapable with `setsid` and `setpgid`; Darwin has not supported recursive `EVFILT_PROC` tracking through `NOTE_TRACK`, `NOTE_TRACKERR`, or `NOTE_CHILD` since macOS 10.5; and `NOTE_FORK` plus process-table or `p_puniqueid` scans retains a rapid double-fork/intermediate-exit race. An optional strict Linux VM through Virtualization.framework is a separate future backend that changes platform, startup, filesystem-sharing, and network semantics; it must not be reported as native macOS ManagedTree.
 
@@ -108,7 +108,7 @@ ManagedTree additionally requires a non-breakaway Job Object assigned before unt
 
 | Platform/backend | Restricted status | ManagedTree status | Native evidence |
 |---|---|---|---|
-| macOS 26 Seatbelt/`sandbox-exec` | Planned experimental backend; not implemented or validated | Native support unavailable | No integrated evidence recorded |
+| macOS 26 Seatbelt/`sandbox-exec` | Experimental Restricted support; profiles with resource limits fail closed | Native support unavailable | Native macOS 26 behavioral suite and exact CLI HTTP acceptance |
 | Linux Landlock/`no_new_privs`/seccomp | Planned; runtime capability-dependent | Planned only with proven namespaces and cgroup delegation | No integrated evidence recorded |
 | Windows AppContainer or LPAC plus Job Object | Planned; not implemented or validated | Planned only with non-breakaway pre-execution Job assignment and tree-wide limits | No integrated evidence recorded |
 | Strict Linux VM through macOS Virtualization.framework | Optional future backend with Linux VM semantics | Future investigation | No implementation or evidence recorded |

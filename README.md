@@ -46,7 +46,7 @@ tapid run dev
 
 ADR 0005 separates authority containment from lifecycle ownership. The approved target schema requires compatible profiles to select **Restricted** explicitly with `assurance = "restricted"`: requested filesystem and network restrictions must be installed before spawn, descendants retain those restrictions, and the child receives explicit environment, `PATH`, and descriptor state. Omitting `assurance` preserves the legacy-safe **ManagedTree** contract rather than silently weakening an existing strict profile. ManagedTree additionally requires race-free kernel- or VM-owned descendants, a complete cleanup/kill boundary, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before spawn.
 
-No native backend is implemented or validated at the current exact HEAD, so the command above still fails before spawning a script. This is fail-closed policy wiring, not a containment guarantee. A noisy `--no-sandbox` escape for trusted interactive projects is planned but does not exist; it will have no enforcement receipt or silent fallback, and unattended use will require separate explicit authorization.
+macOS 26 has an experimental Restricted backend implemented with Apple's deprecated `/usr/bin/sandbox-exec`. It runs behavioral Seatbelt probes before project spawn and fails closed when a requested dimension is unavailable. Linux, Windows, and native macOS ManagedTree remain unsupported. No `--no-sandbox` escape exists.
 
 For example, a Next.js development server needs project writes and network access but does not need ambient credentials:
 
@@ -65,7 +65,7 @@ network = true
 environment = ["NODE_ENV"]
 ```
 
-This is a macOS-compatible Restricted **target profile**, not a currently runnable example: no native backend exists yet. It intentionally requests no timeout, process-count, or memory limit because native macOS 26 Restricted cannot provide the required complete-tree semantics. It also omits an output limit because no exact captured-output enforcement mechanism has been approved for that backend. `write = ["."]` permits Next.js to create `.next`, `next-env.d.ts`, and any other project-local generated files; narrow it after observing the project's actual writes. `network = true` is unrestricted networking under the current portable boolean schema, including listen and connect behavior. It is not a loopback-only rule. `--hostname` and `--port` below are application arguments, not Tapid policy; declared listen/connect scopes are future schema work. `environment` names variables that may be copied from the caller when present; it does not import the rest of the caller's environment. Pass the bind address explicitly without exposing `HOST`, cloud credentials, proxy settings, or agent sockets:
+This profile is runnable on the experimental macOS 26 Restricted backend. It intentionally requests no timeout, output, process-count, or memory limit because that backend rejects those unenforceable dimensions. `write = ["."]` permits project-local generated files; narrow it after observing actual writes. `network = true` is unrestricted networking under the portable boolean schema, including listen and connect behavior. `--hostname` and `--port` below are application arguments, not Tapid policy. `environment` names variables that may be copied from the caller when present; it does not import the rest of the caller's environment:
 
 ```bash
 tapid run dev -- --hostname 127.0.0.1 --port 3001
@@ -82,11 +82,11 @@ max_processes = 64
 max_memory_bytes = 2147483648
 ```
 
-Native macOS 26 cannot run that ManagedTree profile. The planned backend must reject it before spawn rather than silently downgrade it to Restricted.
+Native macOS 26 cannot run that ManagedTree profile. The backend rejects it before spawn rather than silently downgrading it to Restricted.
 
 ## Current consumer workflow
 
-The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, root-script policy selection, argument forwarding, and lifecycle suppression. Native ADR 0005 Restricted and ManagedTree containment remain unavailable until a platform backend passes the applicable integrated positive and negative probes.
+The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, root-script policy selection, argument forwarding, and lifecycle suppression. Experimental native macOS 26 Restricted execution is available; ManagedTree and non-macOS native containment remain unavailable.
 
 For a clean checkout, build Tapid and create the readable consumer fixture through the same helper used by CI:
 
@@ -108,7 +108,7 @@ target/debug/tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 
 
 The non-fixture online path requests abbreviated npm install metadata and requires registry-declared SHA-512 integrity by default. Unsupported npm range syntax and malformed historical metadata are filtered or rejected fail-closed according to their scope. Live JSR installation remains unverified. Do not treat fixture replay or one successful npm project as evidence of complete npm compatibility.
 
-The accepted invocation remains `tapid run <SCRIPT> -- <ARGS...>`. Values after the first `--` are forwarded in order to the selected script; the separator itself is not forwarded, and Tapid does not reinterpret forwarded values as Tapid options or policy. The integrated ADR 0005 path reads the script's merged `[run.defaults]` and exact `[run.scripts.<name>]` policy, constructs a minimal environment with a controlled `PATH`, and calls a backend only after preflight proves every requested restriction. The approved target adds explicitly selected Restricted profiles while preserving omitted `assurance` as ManagedTree. No backend currently passes the required native runtime probes, so this checkout fails before spawning the script and makes no native containment claim.
+The accepted invocation remains `tapid run <SCRIPT> -- <ARGS...>`. Values after the first `--` are forwarded in order to the selected script; the separator itself is not forwarded, and Tapid does not reinterpret forwarded values as Tapid options or policy. The integrated ADR 0005 path reads the merged policy, constructs a minimal environment with a controlled `PATH`, and calls a backend only after preflight proves every requested restriction. Restricted profiles run on the experimental macOS 26 backend; omitted `assurance` remains fail-closed ManagedTree.
 
 Use a project directory explicitly when running outside the project directory:
 
@@ -187,7 +187,7 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - `add`, `remove`, `update`, `prune`, workspaces, full npm lockfile compatibility, and private-registry authentication are not implemented.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
-- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. Native Restricted and ManagedTree backends and runtime enforcement evidence remain pending, so Tapid does not claim a verified sandbox on macOS, Linux, or Windows and currently refuses to spawn root scripts. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
+- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated Seatbelt `sandbox-exec`; ManagedTree, resource-limit profiles, and Linux/Windows native backends remain unavailable. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
 
 ## Development
 

@@ -2419,6 +2419,13 @@ fn filesystem_kind(path: &Path) -> Result<FilesystemGrantKind, ExecutionError> {
     } else if metadata.is_dir() {
         Ok(FilesystemGrantKind::DirectorySubtree)
     } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if metadata.file_type().is_char_device() {
+                return Ok(FilesystemGrantKind::ExactFile);
+            }
+        }
         Err(ExecutionError::new(
             ExecutionErrorCategory::PolicyViolation,
             format!(
@@ -2440,6 +2447,11 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
     )
 }
 
+#[cfg(target_os = "macos")]
+#[path = "macos_restricted.rs"]
+mod platform_backend;
+
+#[cfg(not(target_os = "macos"))]
 mod platform_backend {
     use super::{
         BackendIdentity, ContainmentSupport, EnforcementDimensions, ExecutionBackend,
@@ -3194,6 +3206,9 @@ mod tests {
         let support = platform_backend::containment_support(&request);
         assert!(!support.backend().name().is_empty());
         assert!(!support.backend().version().is_empty());
+        #[cfg(target_os = "macos")]
+        assert!(support.backend().deprecation().is_some());
+        #[cfg(not(target_os = "macos"))]
         assert!(support.backend().deprecation().is_none());
         assert_eq!(support.enforceable(), &EnforcementDimensions::none());
         assert!(support.requested().filesystem_read());
@@ -4864,5 +4879,137 @@ mod tests {
             ExecutionErrorCategory::InvalidRequest
         );
         assert_eq!(backend.probes.get(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_restricted_backend_executes_an_allowed_project_operation() {
+        let root = std::env::temp_dir().join(format!(
+            "tapid-macos-restricted-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(&root).unwrap();
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::Restricted,
+            FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder("/bin/sh")
+            .args([
+                "-c",
+                "printf allowed > allowed.txt; printf stdout; printf stderr >&2",
+            ])
+            .project_root(&root)
+            .policy(policy)
+            .executable_search_path("/usr/bin")
+            .build()
+            .unwrap();
+
+        let outcome = execute(&request).unwrap();
+        assert_eq!(outcome.termination(), &Termination::Exited(0));
+        assert_eq!(outcome.stdout(), b"stdout");
+        assert_eq!(outcome.stderr(), b"stderr");
+        assert_eq!(fs::read(root.join("allowed.txt")).unwrap(), b"allowed");
+        assert_eq!(
+            outcome.enforcement().backend().name(),
+            "tapid-runner/macos-seatbelt-restricted-experimental"
+        );
+        assert!(outcome.enforcement().backend().deprecation().is_some());
+        let root_runtime = outcome
+            .enforcement()
+            .resolved_filesystem()
+            .grants()
+            .iter()
+            .find(|grant| grant.path() == Path::new("/"))
+            .expect("effective root directory-data grant must be receipted");
+        assert_eq!(root_runtime.source(), FilesystemGrantSource::BackendRuntime);
+        assert_eq!(root_runtime.binding(), FilesystemBindingMode::CanonicalPath);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_restricted_backend_denies_an_outside_write() {
+        let root = std::env::temp_dir().join(format!(
+            "tapid-macos-deny-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let outside = root.with_extension("outside");
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(&root).unwrap();
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::Restricted,
+            FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder("/bin/sh")
+            .args(["-c", "printf denied > \"$1\"", "tapid-script"])
+            .arg(&outside)
+            .project_root(&root)
+            .policy(policy)
+            .executable_search_path("/usr/bin")
+            .build()
+            .unwrap();
+
+        let outcome = execute(&request).unwrap();
+        assert_ne!(outcome.termination(), &Termination::Exited(0));
+        assert!(!outside.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_write_grant_does_not_imply_read_authority() {
+        let root = std::env::temp_dir().join(format!(
+            "tapid-macos-write-only-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("secret"), b"hidden").unwrap();
+        let root = fs::canonicalize(&root).unwrap();
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::Restricted,
+            FilesystemPolicy::new(vec![], vec![".".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder("/bin/sh")
+            .args(["-c", "/bin/cat secret"])
+            .project_root(&root)
+            .policy(policy)
+            .executable_search_path("/usr/bin")
+            .build()
+            .unwrap();
+
+        let outcome = execute(&request).unwrap();
+        assert_ne!(outcome.termination(), &Termination::Exited(0));
+        fs::remove_dir_all(root).unwrap();
     }
 }

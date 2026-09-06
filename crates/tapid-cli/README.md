@@ -88,7 +88,7 @@ Install derives executable shims from verified package `bin` metadata. Unix uses
 
 - Dependency lifecycle scripts are disabled during every install path.
 - Root scripts run only after the explicit `tapid run` command.
-- Root-script execution is wired to fail-closed preflight, but Restricted and ManagedTree remain unavailable until a native backend passes the applicable runtime probes and can issue a checked receipt.
+- Root-script execution is wired to fail-closed preflight. macOS 26 has an experimental Restricted backend using deprecated Seatbelt `sandbox-exec`; ManagedTree, resource-limit profiles, and Linux/Windows native backends remain unavailable.
 - Full npm semver, aliases, tags, git/file/workspace specs, peer semantics, workspaces, and complete optional-dependency and lockfile compatibility are not implemented.
 - `add`, `remove`, `update`, `prune`, script approval, private-registry authentication, and package publishing are outside this slice.
 - JSR installation remains fail-closed unless metadata provides both an HTTPS npm tarball URL and a valid SHA-512 SRI value. Live JSR integrity behavior is unsupported and unverified.

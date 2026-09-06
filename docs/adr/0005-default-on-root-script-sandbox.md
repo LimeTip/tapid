@@ -4,7 +4,7 @@
 
 Accepted; amended to separate Restricted authority containment from ManagedTree lifecycle ownership
 
-No native backend is implemented or validated at the current exact HEAD. The integrated command therefore still fails closed before spawning a root script.
+An experimental macOS 26 Restricted backend is implemented with deprecated Seatbelt `sandbox-exec`. It probes enforcement before project spawn and issues checked Restricted receipts. ManagedTree, resource-limit profiles, and Linux/Windows native backends still fail closed before root-script spawn.
 
 ## Decision history
 
@@ -78,9 +78,9 @@ A future `--no-sandbox` escape is planned only for trusted interactive projects.
 
 ### Platform direction
 
-Platform backends are independent security boundaries and remain planned rather than implemented:
+Platform backends are independent security boundaries:
 
-- **macOS 26 Restricted:** an experimental Seatbelt profile applied through the deprecated, path-based `sandbox-exec` interface is the planned first backend. It may restrict filesystem and network authority and propagate those restrictions to descendants, but it provides no cleanup guarantee. Any best-effort cleanup actually attempted or observed must be reported separately with deprecation, path-binding, and lifecycle limitations. It is not implemented or validated.
+- **macOS 26 Restricted:** an experimental deny-default Seatbelt profile is applied through the deprecated, path-based `sandbox-exec` interface. It restricts filesystem and network authority and propagates those restrictions to descendants, but provides no complete cleanup guarantee. Checked receipts disclose deprecation, CanonicalPath binding, root metadata visibility, unrestricted networking when enabled, named sysctls, and best-effort process-group cleanup.
 - **macOS 26 ManagedTree:** native ManagedTree is unsupported. Process groups are escapable with `setsid` or `setpgid`, and public process-lineage scanning retains a rapid double-fork/intermediate-exit race. A future strict Linux VM hosted through Virtualization.framework is a separate backend that changes platform and operational semantics; it must not be described as native macOS containment.
 - **Linux Restricted:** the planned backend combines Landlock, `no_new_privs`, seccomp, and explicit environment/descriptor construction, selecting only enhancements proven available at runtime. A requested dimension that the active kernel or host cannot establish fails before spawn.
 - **Linux ManagedTree:** support requires proven namespace ownership and cgroup delegation for descendants, cleanup, and configured tree-wide limits. Their presence must be probed rather than inferred from running on Linux or in a container.
@@ -90,7 +90,7 @@ Platform backends are independent security boundaries and remain planned rather 
 
 Checked launch evidence is derived from the backend that actually established restrictions. For every dimension it reports the request, mechanism, assurance level, enforcement state, scope, and limitation, and it is accepted only when the exact requested enforcement is present. Requested, declared, observed, and enforced states remain distinct. Availability flags, successful allowed operations, canonical paths, or policy declarations are not enforcement evidence. Post-execution completion evidence reports lifecycle and cleanup results only and cannot re-attest launch-only authority.
 
-No platform or assurance level is described as supported until positive and negative runtime probes pass through the integrated `tapid run` path at the exact commit being claimed. Current fail-before-spawn behavior proves only that there is no silent uncontained fallback.
+No platform or assurance level is described as supported until positive and negative runtime probes and integrated `tapid run` acceptance pass at the exact commit being claimed. Unsupported profiles fail before untrusted spawn and never silently fall back.
 
 ## Consequences
 
@@ -103,7 +103,7 @@ No platform or assurance level is described as supported until positive and nega
 - Process execution remains behind the focused `tapid-runner` capability. The CLI owns parsing, file discovery, interaction, and rendering.
 - Dependency lifecycle scripts remain disabled by default and are not made eligible by a root-script profile. Root scripts run only through explicit selection.
 - Perfect containment is not claimed. Each backend and receipt reports only the dimensions and scopes it actually enforces.
-- At the current exact HEAD, no native backend exists, `--no-sandbox` does not exist, and `tapid run` still refuses to spawn root scripts.
+- At the current exact HEAD, experimental native macOS 26 Restricted execution exists. ManagedTree and non-macOS native containment remain unavailable, and `--no-sandbox` does not exist.
 
 ## Rejected alternatives
 

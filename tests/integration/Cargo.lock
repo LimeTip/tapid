@@ -1283,6 +1283,7 @@ dependencies = [
 name = "tapid-runner"
 version = "0.0.3"
 dependencies = [
+ "libc",
  "serde",
  "sha2",
  "tapid-policy",
