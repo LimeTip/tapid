@@ -160,7 +160,7 @@ test("repository workflows avoid the deprecated Node.js 20 action majors", async
   assert(!ci.includes("runner: windows-11-arm"));
   assertEquals(
     ci.match(/persist-credentials: false/g)?.length,
-    ci.match(/uses: actions\/checkout@v6/g)?.length,
+    ci.match(/uses: actions\/checkout@(?:v6|d23441a48e516b6c34aea4fa41551a30e30af803)/g)?.length,
   );
 });
 
@@ -361,6 +361,6 @@ cp "$TAPID_TEST_FIXTURE/\${url##*/}" "$out"
 
 test("CI runs the TypeScript tool suite", async () => {
   const workflow = await text(".github/workflows/ci.yml");
-  assert(workflow.includes("actions/setup-node@v7"));
+  assert(workflow.includes("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"));
   assert(workflow.includes("node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts"));
 });

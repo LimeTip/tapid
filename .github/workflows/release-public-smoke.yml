@@ -5,51 +5,160 @@ run-name: Public installer smoke ${{ github.event.release.tag_name }}
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Stable release tag; empty resolves current latest'
+        type: string
+        required: false
+  schedule:
+    - cron: '23 5 * * *'
 
 permissions:
   contents: read
 
+concurrency:
+  group: public-smoke-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  resolve:
+    if: ${{ github.event_name != 'release' || !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+      runner_sha: ${{ steps.release.outputs.runner_sha }}
+      latest_tag: ${{ steps.release.outputs.latest_tag }}
+      unix_matrix: ${{ steps.release.outputs.unix_matrix }}
+    steps:
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest_tag="$(gh api repos/LimeTip/tapid/releases/latest --jq .tag_name)"
+          [[ "$latest_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="${REQUESTED_TAG:-$latest_tag}"
+          runner_sha="$(gh api repos/LimeTip/tapid/commits/main --jq .sha)"
+          [[ "$runner_sha" =~ ^[a-f0-9]{40}$ ]]
+          printf 'latest_tag=%s\nrunner_sha=%s\n' "$latest_tag" "$runner_sha" >> "$GITHUB_OUTPUT"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          stable="$(gh api "repos/LimeTip/tapid/releases/tags/$tag" --jq '(.draft == false) and (.prerelease == false)')"
+          test "$stable" = true
+          sha="$(gh api "repos/LimeTip/tapid/commits/$tag" --jq .sha)"
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
+          printf 'tag=%s\nsha=%s\n' "$tag" "$sha" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = schedule ]; then
+            printf 'unix_matrix=["ubuntu-latest"]\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'unix_matrix=["ubuntu-latest","macos-latest"]\n' >> "$GITHUB_OUTPUT"
+          fi
   unix:
     name: Unix installer (${{ matrix.os }})
-    if: ${{ !github.event.release.prerelease }}
+    needs: resolve
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(needs.resolve.outputs.unix_matrix) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve.outputs.runner_sha }} # trusted current runner, not historical release code
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
       - name: Install the published release
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           set -euo pipefail
           install_dir="$RUNNER_TEMP/tapid"
-          curl -fsSL https://tapid.dev/install.sh -o "$RUNNER_TEMP/install.sh"
-          sh "$RUNNER_TEMP/install.sh" --version "$RELEASE_TAG" --install-dir "$install_dir"
+          mkdir -p "$RUNNER_TEMP/tapid-home"
+          curl --proto '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL https://tapid.dev/install.sh -o "$RUNNER_TEMP/install.sh"
+          env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh \
+            sh "$RUNNER_TEMP/install.sh" --version "$RELEASE_TAG" --install-dir "$install_dir"
+          shasum -a 256 "$RUNNER_TEMP/install.sh" > "$RUNNER_TEMP/installer-sha256.txt"
           actual="$("$install_dir/tapid" --version)"
           test "$actual" = "tapid ${RELEASE_TAG#v}"
           "$install_dir/tapid" --help >/dev/null
+      - name: Run canonical published quickstart
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/tapid/tapid"
+          digest="$(shasum -a 256 "$binary" | cut -d ' ' -f 1)"
+          python3 scripts/check-doc-examples.py --lane published --example quickstart --example upgrade-help \
+            --allow-network --binary "$binary" --expected-sha256 "$digest" \
+            --expected-version "tapid ${RELEASE_TAG#v}" --release-tag "$RELEASE_TAG" --release-source-sha "$RELEASE_SHA" \
+            --report "$RUNNER_TEMP/doc-contract-published.json"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Create supplemental root-script fixture (not package evidence)
+        run: node tests/fixtures/create_consumer_project.js
+      - name: Check published root-script forwarding and exit code
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/tapid/tapid"
+          env -i HOME="$RUNNER_TEMP/tapid-home" PATH="$PATH" TAPID_FIXTURE=1 "$binary" install --project-dir "$TAPID_FIXTURE_PROJECT" --offline --frozen
+          test ! -e "$TAPID_FIXTURE_PROJECT/LIFECYCLE_SHOULD_NOT_RUN"
+          env -i HOME="$RUNNER_TEMP/tapid-home" PATH="$PATH" TAPID_FIXTURE=1 "$binary" run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 0
+          set +e
+          env -i HOME="$RUNNER_TEMP/tapid-home" PATH="$PATH" TAPID_FIXTURE=1 "$binary" run --project-dir "$TAPID_FIXTURE_PROJECT" test -- wrong 0
+          status=$?
+          set -e
+          test "$status" -eq 41
+      - name: Retain published documentation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: doc-contract-published-${{ runner.os }}
+          path: |
+            ${{ runner.temp }}/doc-contract-published.json
+            ${{ runner.temp }}/installer-sha256.txt
+          retention-days: 30
+          if-no-files-found: error
       - name: Install latest release through discovery
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.latest_tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           set -euo pipefail
           install_dir="$RUNNER_TEMP/tapid-latest"
-          sh "$RUNNER_TEMP/install.sh" --install-dir "$install_dir"
+          env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh sh "$RUNNER_TEMP/install.sh" --install-dir "$install_dir"
           test "$("$install_dir/tapid" --version)" = "tapid ${RELEASE_TAG#v}"
 
   windows:
     name: Windows installer
-    if: ${{ !github.event.release.prerelease }}
+    needs: resolve
+    if: github.event_name != 'schedule'
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve.outputs.runner_sha }}
       - name: Install the published release
         shell: powershell
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           $installer = Join-Path $env:RUNNER_TEMP 'install.ps1'
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid'
@@ -62,10 +171,49 @@ jobs:
           if ($actual -ne $expected) { throw "Expected '$expected', got '$actual'" }
           & $binary --help | Out-Null
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run native published documentation contract
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          $binary = Join-Path $env:RUNNER_TEMP 'tapid/tapid.exe'
+          $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
+          & ./scripts/check-doc-examples.ps1 -Binary $binary -ExpectedSha256 $digest -ExpectedVersion ('tapid ' + $env:RELEASE_TAG.Substring(1)) -ReleaseTag $env:RELEASE_TAG -ReportPath (Join-Path $env:RUNNER_TEMP 'doc-contract-published.json')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Create supplemental root-script fixture (not package evidence)
+        run: node tests/fixtures/create_consumer_project.js
+      - name: Check published native root-script forwarding and exit code
+        shell: pwsh
+        run: |
+          $env:TAPID_FIXTURE = '1'
+          $env:USERPROFILE = Join-Path $env:RUNNER_TEMP 'tapid-home'
+          $env:LOCALAPPDATA = $env:USERPROFILE
+          $binary = Join-Path $env:RUNNER_TEMP 'tapid/tapid.exe'
+          & $binary install --project-dir $env:TAPID_FIXTURE_PROJECT --offline --frozen
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path (Join-Path $env:TAPID_FIXTURE_PROJECT 'LIFECYCLE_SHOULD_NOT_RUN')) { throw 'lifecycle script ran' }
+          & $binary run --project-dir $env:TAPID_FIXTURE_PROJECT test -- forwarded 0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $binary run --project-dir $env:TAPID_FIXTURE_PROJECT test -- wrong 0
+          if ($LASTEXITCODE -ne 41) { throw 'unexpected child exit code' }
+          exit 0
+      - name: Retain native documentation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: doc-contract-published-Windows
+          path: ${{ runner.temp }}/doc-contract-published.json
+          retention-days: 30
+          if-no-files-found: error
       - name: Install latest release through discovery
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.latest_tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           $installer = Join-Path $env:RUNNER_TEMP 'install.ps1'
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid-latest'
