@@ -66,7 +66,7 @@ Every category needs a positive control proving the fixture can perform the oper
 
 ### macOS
 
-The initial design uses a generated Seatbelt profile through Apple's deprecated `sandbox-exec`, plus explicit environment/descriptor construction, process-group supervision, and representable resource limits. The job must run a behavioral startup probe before untrusted code. Record the backend as deprecated. If `sandbox-exec` is absent or behavior differs from the probe, required containment is unavailable and execution must fail closed; there is no uncontained fallback.
+macOS 26 is unsupported for required root-script containment. A generated Seatbelt profile can restrict filesystem and network access, but it does not provide descendant lifecycle ownership. Process groups are escapable with `setsid` and `setpgid`; Darwin has not supported recursive `EVFILT_PROC` tracking through `NOTE_TRACK`, `NOTE_TRACKERR`, or `NOTE_CHILD` since macOS 10.5; and `NOTE_FORK` plus process-table or `p_puniqueid` scans retains a rapid double-fork/intermediate-exit race. The recursive Endpoint Security descendants client is introduced only in macOS 27, requires a restricted Apple entitlement, and still needs separate termination and crash-cleanup validation. Tapid must fail before spawn on macOS 26 rather than issue a partial receipt or fall back to uncontained execution.
 
 ### Linux
 
@@ -80,7 +80,8 @@ The proposed design uses AppContainer for filesystem/network isolation, a non-br
 
 | Backend | ADR 0005 status | Evidence |
 |---|---|---|
-| macOS Seatbelt (`sandbox-exec`, deprecated) | Pending implementation and integrated verification | None recorded |
+| macOS 26 | Unsupported by the accepted lifecycle contract | Direct forked-child `setsid` escape reproduced; public unprivileged replacement unavailable |
+| macOS 27+ Endpoint Security descendants client | Future investigation; not supported | API is entitlement-restricted and no integrated termination/crash-cleanup evidence exists |
 | Linux Landlock plus network/process controls | Pending implementation and integrated verification | None recorded |
 | Windows AppContainer plus Job Object | Pending implementation and integrated verification | None recorded |
 

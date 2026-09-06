@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted, with macOS 26 unsupported
 
 ## Context
 
@@ -32,7 +32,7 @@ An explicit `--no-sandbox` CLI escape may be provided for compatibility. It cann
 
 Platform backends are independent security boundaries:
 
-- macOS uses a behaviorally probed Seatbelt profile through the deprecated `sandbox-exec` facility plus explicit environment construction, process-group supervision, and resource limits. The backend is reported as deprecated and fails closed if its functional probe changes or disappears.
+- macOS 26 has no public, unprivileged primitive that can provide race-free ownership of an arbitrary descendant tree. Seatbelt restrictions inherit across ordinary fork and exec, but process groups can be escaped with `setsid` or `setpgid`, and per-process `NOTE_FORK` or `p_puniqueid` scanning retains a rapid double-fork/intermediate-exit race. Tapid therefore reports required containment as unsupported and starts no script on macOS 26. A future backend may be reconsidered only with a kernel-maintained descendant boundary, such as the restricted Endpoint Security descendant API introduced in macOS 27, or a separately reviewed VM boundary.
 - Linux uses Landlock for filesystem access, `no_new_privs` and seccomp or a network namespace for network restrictions, explicit descriptor and environment construction, process supervision, and resource limits. Unsupported kernel or namespace requirements fail closed.
 - Windows uses AppContainer for filesystem and network isolation, a non-breakaway Job Object for descendant and resource control, explicit token/environment/handle construction, and race-free assignment before untrusted execution. Incomplete AppContainer or Job setup fails closed.
 
@@ -47,7 +47,7 @@ No platform is described as supported until positive and negative runtime probes
 - Root scripts no longer inherit arbitrary credentials, agent sockets, proxy variables, or the full user environment by default.
 - Process execution moves behind the focused `tapid-runner` capability. The CLI remains responsible for parsing, file discovery, interaction, and rendering.
 - The implementation must include adversarial tests for filesystem escape, network denial, environment-secret removal, descendant inheritance and cleanup, resource limits, argument fidelity, and fail-closed startup.
-- macOS depends initially on a deprecated facility. Its backend name and diagnostics must expose that limitation, and removal by Apple makes required mode unavailable rather than unsandboxed.
+- macOS 26 cannot run root scripts under this contract. This preserves the fail-closed guarantee but prevents `tapid run`, including development servers, until a stronger lifecycle boundary is selected and verified.
 - Perfect containment is not claimed. Each backend reports only the dimensions it actually enforces.
 
 ## Rejected alternatives
