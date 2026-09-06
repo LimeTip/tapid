@@ -23,6 +23,16 @@ pub enum SandboxMode {
     Disabled,
 }
 
+/// Strength of the portable execution guarantee requested from a backend.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AssuranceLevel {
+    /// Restrict ambient authority for the launched process and its descendants.
+    Restricted,
+    /// Also own the complete process tree and its cleanup boundary.
+    ManagedTree,
+}
+
 /// Project-relative filesystem grants for a sandboxed process.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FilesystemPolicy {
@@ -96,6 +106,7 @@ impl ExecutionLimits {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxPolicy {
     mode: SandboxMode,
+    assurance: AssuranceLevel,
     filesystem: FilesystemPolicy,
     network: bool,
     environment: Vec<String>,
@@ -106,6 +117,26 @@ pub struct SandboxPolicy {
 impl SandboxPolicy {
     pub fn new(
         mode: SandboxMode,
+        filesystem: FilesystemPolicy,
+        network: bool,
+        environment: Vec<String>,
+        subprocess: bool,
+        limits: ExecutionLimits,
+    ) -> Result<Self, ConfigError> {
+        Self::new_with_assurance(
+            mode,
+            AssuranceLevel::ManagedTree,
+            filesystem,
+            network,
+            environment,
+            subprocess,
+            limits,
+        )
+    }
+
+    pub fn new_with_assurance(
+        mode: SandboxMode,
+        assurance: AssuranceLevel,
         filesystem: FilesystemPolicy,
         network: bool,
         environment: Vec<String>,
@@ -124,6 +155,7 @@ impl SandboxPolicy {
         }
         Ok(Self {
             mode,
+            assurance,
             filesystem,
             network,
             environment,
@@ -134,6 +166,9 @@ impl SandboxPolicy {
 
     pub fn mode(&self) -> SandboxMode {
         self.mode
+    }
+    pub fn assurance(&self) -> AssuranceLevel {
+        self.assurance
     }
     pub fn filesystem(&self) -> &FilesystemPolicy {
         &self.filesystem
@@ -156,6 +191,7 @@ impl Default for SandboxPolicy {
     fn default() -> Self {
         Self {
             mode: SandboxMode::Required,
+            assurance: AssuranceLevel::ManagedTree,
             filesystem: FilesystemPolicy {
                 read: vec![".".to_owned()],
                 write: Vec::new(),
@@ -289,6 +325,7 @@ struct RunSection {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawProfile {
+    assurance: Option<AssuranceLevel>,
     read: Option<Vec<String>>,
     write: Option<Vec<String>>,
     network: Option<bool>,
@@ -324,6 +361,7 @@ fn deserialize_error(error: toml::de::Error) -> ConfigError {
 }
 
 fn apply_profile(mut policy: SandboxPolicy, raw: RawProfile) -> Result<SandboxPolicy, ConfigError> {
+    policy.assurance = raw.assurance.unwrap_or(policy.assurance);
     policy.filesystem = FilesystemPolicy::new(
         raw.read.unwrap_or(policy.filesystem.read),
         raw.write.unwrap_or(policy.filesystem.write),
@@ -462,6 +500,25 @@ pub(crate) fn validate_environment_name(name: &str) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assurance_defaults_to_managed_tree_and_can_be_restricted_explicitly() {
+        let legacy = RunConfig::parse_toml("").unwrap();
+        assert_eq!(legacy.defaults().assurance(), AssuranceLevel::ManagedTree);
+
+        let restricted = RunConfig::parse_toml(
+            "[run.defaults]\nassurance = \"restricted\"\n[run.scripts.strict]\nassurance = \"managed-tree\"",
+        )
+        .unwrap();
+        assert_eq!(
+            restricted.defaults().assurance(),
+            AssuranceLevel::Restricted
+        );
+        assert_eq!(
+            restricted.profile_for("strict").assurance(),
+            AssuranceLevel::ManagedTree
+        );
+    }
 
     #[test]
     fn defaults_are_fail_closed_and_profiles_override_individual_fields() {

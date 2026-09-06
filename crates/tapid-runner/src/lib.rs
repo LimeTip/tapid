@@ -2,19 +2,20 @@ pub mod config;
 pub mod execution;
 
 pub use config::{
-    ConfigError, ConfigErrorCategory, ExecutionLimits, FilesystemPolicy, MAX_CONFIG_BYTES,
-    MAX_ENVIRONMENT_COUNT, MAX_GRANT_COUNT, MAX_PROFILE_COUNT, MAX_STRING_BYTES, RunConfig,
-    SandboxMode, SandboxPolicy,
+    AssuranceLevel, ConfigError, ConfigErrorCategory, ExecutionLimits, FilesystemPolicy,
+    MAX_CONFIG_BYTES, MAX_ENVIRONMENT_COUNT, MAX_GRANT_COUNT, MAX_PROFILE_COUNT, MAX_STRING_BYTES,
+    RunConfig, SandboxMode, SandboxPolicy,
 };
 pub use execution::{
-    BackendIdentity, ContainmentSupport, EnforcementDimensions, EnforcementReceipt, ExecutionError,
-    ExecutionErrorCategory, ExecutionOutcome, ExecutionRequest, ExecutionRequestBuilder,
-    FilesystemAccess, FilesystemBindingMode, FilesystemGrantKind, FilesystemGrantSource,
-    MAX_ARGUMENT_COUNT, MAX_ARGUMENT_UNITS, MAX_ARGV_UNITS, MAX_BACKEND_IDENTITY_BYTES,
-    MAX_ENVIRONMENT_BLOCK_UNITS, MAX_ENVIRONMENT_VALUE_UNITS, MAX_EXECUTABLE_SEARCH_PATH_COUNT,
-    MAX_EXECUTABLE_SEARCH_PATH_UNITS, MAX_EXECUTABLE_SEARCH_PATHS_UNITS, MAX_PROGRAM_UNITS,
-    MAX_PROJECT_ROOT_UNITS, ResolvedFilesystemGrant, ResolvedFilesystemGrants, Termination,
-    execute,
+    BackendIdentity, CleanupConfidence, CompletionEvidence, ContainmentSupport, DimensionEvidence,
+    EnforcementDimension, EnforcementDimensions, EnforcementReceipt, EnforcementScope,
+    ExecutionError, ExecutionErrorCategory, ExecutionOutcome, ExecutionRequest,
+    ExecutionRequestBuilder, FilesystemAccess, FilesystemBindingMode, FilesystemGrantKind,
+    FilesystemGrantSource, MAX_ARGUMENT_COUNT, MAX_ARGUMENT_UNITS, MAX_ARGV_UNITS,
+    MAX_BACKEND_IDENTITY_BYTES, MAX_ENVIRONMENT_BLOCK_UNITS, MAX_ENVIRONMENT_VALUE_UNITS,
+    MAX_EXECUTABLE_SEARCH_PATH_COUNT, MAX_EXECUTABLE_SEARCH_PATH_UNITS,
+    MAX_EXECUTABLE_SEARCH_PATHS_UNITS, MAX_PROGRAM_UNITS, MAX_PROJECT_ROOT_UNITS,
+    ResolvedFilesystemGrant, ResolvedFilesystemGrants, Termination, execute,
 };
 
 use sha2::{Digest, Sha256};

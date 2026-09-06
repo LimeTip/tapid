@@ -1,4 +1,6 @@
-use crate::config::{ExecutionLimits, SandboxMode, SandboxPolicy, validate_environment_name};
+use crate::config::{
+    AssuranceLevel, ExecutionLimits, SandboxMode, SandboxPolicy, validate_environment_name,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -92,8 +94,12 @@ pub struct EnforcementDimensions {
     filesystem_write: bool,
     network: bool,
     environment_sanitization: bool,
+    descriptor_hygiene: bool,
     subprocess_restriction: bool,
+    descendant_authority_propagation: bool,
     descendant_lifecycle: bool,
+    process_tree_membership: bool,
+    complete_cleanup: bool,
     timeout: bool,
     output: bool,
     process_count: bool,
@@ -107,8 +113,12 @@ impl EnforcementDimensions {
             filesystem_write: false,
             network: false,
             environment_sanitization: false,
+            descriptor_hygiene: false,
             subprocess_restriction: false,
+            descendant_authority_propagation: false,
             descendant_lifecycle: false,
+            process_tree_membership: false,
+            complete_cleanup: false,
             timeout: false,
             output: false,
             process_count: false,
@@ -128,11 +138,23 @@ impl EnforcementDimensions {
     pub fn environment_sanitization(&self) -> bool {
         self.environment_sanitization
     }
+    pub fn descriptor_hygiene(&self) -> bool {
+        self.descriptor_hygiene
+    }
     pub fn subprocess_restriction(&self) -> bool {
         self.subprocess_restriction
     }
+    pub fn descendant_authority_propagation(&self) -> bool {
+        self.descendant_authority_propagation
+    }
     pub fn descendant_lifecycle(&self) -> bool {
         self.descendant_lifecycle
+    }
+    pub fn process_tree_membership(&self) -> bool {
+        self.process_tree_membership
+    }
+    pub fn complete_cleanup(&self) -> bool {
+        self.complete_cleanup
     }
     pub fn timeout(&self) -> bool {
         self.timeout
@@ -156,13 +178,18 @@ impl EnforcementDimensions {
             return Self::none();
         }
         let limits = policy.limits();
+        let managed_tree = policy.assurance() == AssuranceLevel::ManagedTree;
         Self {
             filesystem_read: true,
             filesystem_write: true,
             network: true,
             environment_sanitization: true,
+            descriptor_hygiene: true,
             subprocess_restriction: !policy.subprocess(),
-            descendant_lifecycle: true,
+            descendant_authority_propagation: true,
+            descendant_lifecycle: managed_tree,
+            process_tree_membership: managed_tree,
+            complete_cleanup: managed_tree,
             timeout: limits.timeout_seconds().is_some(),
             output: limits.max_output_bytes().is_some(),
             process_count: limits.max_processes().is_some(),
@@ -176,13 +203,197 @@ impl EnforcementDimensions {
             && (!required.filesystem_write || self.filesystem_write)
             && (!required.network || self.network)
             && (!required.environment_sanitization || self.environment_sanitization)
+            && (!required.descriptor_hygiene || self.descriptor_hygiene)
             && (!required.subprocess_restriction || self.subprocess_restriction)
+            && (!required.descendant_authority_propagation || self.descendant_authority_propagation)
             && (!required.descendant_lifecycle || self.descendant_lifecycle)
+            && (!required.process_tree_membership || self.process_tree_membership)
+            && (!required.complete_cleanup || self.complete_cleanup)
             && (!required.timeout || self.timeout)
             && (!required.output || self.output)
             && (!required.process_count || self.process_count)
             && (!required.memory || self.memory)
     }
+}
+
+/// One independently reportable portable enforcement dimension.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum EnforcementDimension {
+    FilesystemRead,
+    FilesystemWrite,
+    Network,
+    EnvironmentSanitization,
+    DescriptorHygiene,
+    SubprocessRestriction,
+    DescendantAuthorityPropagation,
+    DescendantLifecycle,
+    ProcessTreeMembership,
+    CompleteCleanup,
+    Timeout,
+    Output,
+    ProcessCount,
+    Memory,
+}
+
+/// The processes to which one dimension applies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnforcementScope {
+    LaunchProcess,
+    DescendantTree,
+    ManagedTree,
+}
+
+/// Backend-specific evidence for one dimension. Its private fields prevent forgery by callers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DimensionEvidence {
+    dimension: EnforcementDimension,
+    scope: EnforcementScope,
+    mechanism: String,
+    limitations: Vec<String>,
+}
+
+impl DimensionEvidence {
+    fn new(
+        dimension: EnforcementDimension,
+        scope: EnforcementScope,
+        mechanism: impl Into<String>,
+        limitations: Vec<String>,
+    ) -> Self {
+        Self {
+            dimension,
+            scope,
+            mechanism: mechanism.into(),
+            limitations,
+        }
+    }
+
+    pub fn dimension(&self) -> EnforcementDimension {
+        self.dimension
+    }
+    pub fn scope(&self) -> EnforcementScope {
+        self.scope
+    }
+    pub fn mechanism(&self) -> &str {
+        &self.mechanism
+    }
+    pub fn limitations(&self) -> &[String] {
+        &self.limitations
+    }
+}
+
+fn evidence_for_dimensions(
+    dimensions: &EnforcementDimensions,
+    mechanism: &str,
+    limitations: &[&str],
+) -> Vec<DimensionEvidence> {
+    let managed = dimensions.process_tree_membership;
+    [
+        (
+            EnforcementDimension::FilesystemRead,
+            dimensions.filesystem_read,
+        ),
+        (
+            EnforcementDimension::FilesystemWrite,
+            dimensions.filesystem_write,
+        ),
+        (EnforcementDimension::Network, dimensions.network),
+        (
+            EnforcementDimension::EnvironmentSanitization,
+            dimensions.environment_sanitization,
+        ),
+        (
+            EnforcementDimension::DescriptorHygiene,
+            dimensions.descriptor_hygiene,
+        ),
+        (
+            EnforcementDimension::SubprocessRestriction,
+            dimensions.subprocess_restriction,
+        ),
+        (
+            EnforcementDimension::DescendantAuthorityPropagation,
+            dimensions.descendant_authority_propagation,
+        ),
+        (
+            EnforcementDimension::DescendantLifecycle,
+            dimensions.descendant_lifecycle,
+        ),
+        (
+            EnforcementDimension::ProcessTreeMembership,
+            dimensions.process_tree_membership,
+        ),
+        (
+            EnforcementDimension::CompleteCleanup,
+            dimensions.complete_cleanup,
+        ),
+        (EnforcementDimension::Timeout, dimensions.timeout),
+        (EnforcementDimension::Output, dimensions.output),
+        (EnforcementDimension::ProcessCount, dimensions.process_count),
+        (EnforcementDimension::Memory, dimensions.memory),
+    ]
+    .into_iter()
+    .filter(|(_, enabled)| *enabled)
+    .map(|(dimension, _)| {
+        let scope = match dimension {
+            EnforcementDimension::EnvironmentSanitization
+            | EnforcementDimension::DescriptorHygiene => EnforcementScope::LaunchProcess,
+            EnforcementDimension::DescendantLifecycle
+            | EnforcementDimension::ProcessTreeMembership
+            | EnforcementDimension::CompleteCleanup => EnforcementScope::ManagedTree,
+            EnforcementDimension::Timeout
+            | EnforcementDimension::Output
+            | EnforcementDimension::ProcessCount
+            | EnforcementDimension::Memory
+                if managed =>
+            {
+                EnforcementScope::ManagedTree
+            }
+            _ => EnforcementScope::DescendantTree,
+        };
+        DimensionEvidence::new(
+            dimension,
+            scope,
+            mechanism,
+            limitations
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+        )
+    })
+    .collect()
+}
+
+fn validate_dimension_evidence(
+    dimensions: &EnforcementDimensions,
+    evidence: &[DimensionEvidence],
+) -> Result<(), ExecutionError> {
+    let expected = evidence_for_dimensions(dimensions, "expected", &[]);
+    if evidence.len() != expected.len()
+        || expected.iter().any(|required| {
+            evidence
+                .iter()
+                .filter(|candidate| candidate.dimension == required.dimension)
+                .count()
+                != 1
+                || !evidence.iter().any(|candidate| {
+                    candidate.dimension == required.dimension
+                        && candidate.scope == required.scope
+                        && !candidate.mechanism.is_empty()
+                        && candidate.mechanism.len() <= MAX_BACKEND_IDENTITY_BYTES
+                        && !candidate.mechanism.chars().any(char::is_control)
+                        && candidate.limitations.iter().all(|limitation| {
+                            !limitation.is_empty()
+                                && limitation.len() <= MAX_BACKEND_IDENTITY_BYTES
+                                && !limitation.chars().any(char::is_control)
+                        })
+                })
+        })
+    {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::UnsupportedContainment,
+            "backend dimension metadata is incomplete, duplicated, invalid, or has the wrong scope",
+        ));
+    }
+    Ok(())
 }
 
 /// Access associated with one effective filesystem grant.
@@ -562,50 +773,110 @@ fn grant_confinement_error(path: &Path) -> ExecutionError {
     )
 }
 
-/// The platform backend's ability to enforce the requested containment policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupportAvailability {
+    Supported,
+    Unsupported,
+}
+
+/// The platform backend's dimensioned ability to enforce the requested containment policy.
+///
+/// Callers can inspect this report but cannot manufacture one.
+///
+/// ```compile_fail
+/// use tapid_runner::{BackendIdentity, ContainmentSupport, EnforcementDimensions};
+/// let none = EnforcementDimensions::none();
+/// let _ = ContainmentSupport::Supported {
+///     backend: BackendIdentity::new("fake", "1", None).unwrap(),
+///     requested: none.clone(), declared: none.clone(), observed: none,
+///     declared_evidence: vec![], observed_evidence: vec![],
+/// };
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ContainmentSupport {
-    Supported {
-        backend: BackendIdentity,
-        requested: EnforcementDimensions,
-        declared: EnforcementDimensions,
-        observed: EnforcementDimensions,
-    },
-    Unsupported {
-        backend: BackendIdentity,
-        platform: String,
-        reason: String,
-        requested: EnforcementDimensions,
-        declared: EnforcementDimensions,
-        observed: EnforcementDimensions,
-    },
+pub struct ContainmentSupport {
+    availability: SupportAvailability,
+    backend: BackendIdentity,
+    platform: Option<String>,
+    reason: Option<String>,
+    requested: EnforcementDimensions,
+    declared: EnforcementDimensions,
+    observed: EnforcementDimensions,
+    declared_evidence: Vec<DimensionEvidence>,
+    observed_evidence: Vec<DimensionEvidence>,
 }
 
 impl ContainmentSupport {
-    pub fn backend(&self) -> &BackendIdentity {
-        match self {
-            Self::Supported { backend, .. } | Self::Unsupported { backend, .. } => backend,
+    #[allow(dead_code)] // Reserved for a platform backend; tests exercise the contract now.
+    fn supported(
+        backend: BackendIdentity,
+        requested: EnforcementDimensions,
+        declared: EnforcementDimensions,
+        observed: EnforcementDimensions,
+        declared_evidence: Vec<DimensionEvidence>,
+        observed_evidence: Vec<DimensionEvidence>,
+    ) -> Self {
+        Self {
+            availability: SupportAvailability::Supported,
+            backend,
+            platform: None,
+            reason: None,
+            requested,
+            declared,
+            observed,
+            declared_evidence,
+            observed_evidence,
         }
+    }
+
+    fn unsupported(
+        backend: BackendIdentity,
+        platform: impl Into<String>,
+        reason: impl Into<String>,
+        requested: EnforcementDimensions,
+        declared: EnforcementDimensions,
+        observed: EnforcementDimensions,
+    ) -> Self {
+        Self {
+            availability: SupportAvailability::Unsupported,
+            backend,
+            platform: Some(platform.into()),
+            reason: Some(reason.into()),
+            requested,
+            declared,
+            observed,
+            declared_evidence: Vec::new(),
+            observed_evidence: Vec::new(),
+        }
+    }
+
+    fn is_supported(&self) -> bool {
+        self.availability == SupportAvailability::Supported
+    }
+
+    pub fn backend(&self) -> &BackendIdentity {
+        &self.backend
     }
 
     pub fn requested(&self) -> &EnforcementDimensions {
-        match self {
-            Self::Supported { requested, .. } | Self::Unsupported { requested, .. } => requested,
-        }
+        &self.requested
     }
 
-    /// Backend capabilities declared by its implementation.
+    /// Compatibility summary. Prefer [`Self::declared_evidence`].
     pub fn declared(&self) -> &EnforcementDimensions {
-        match self {
-            Self::Supported { declared, .. } | Self::Unsupported { declared, .. } => declared,
-        }
+        &self.declared
     }
 
-    /// Capabilities confirmed by runtime probes for this backend.
+    /// Compatibility summary. Prefer [`Self::observed_evidence`].
     pub fn observed(&self) -> &EnforcementDimensions {
-        match self {
-            Self::Supported { observed, .. } | Self::Unsupported { observed, .. } => observed,
-        }
+        &self.observed
+    }
+
+    pub fn declared_evidence(&self) -> &[DimensionEvidence] {
+        &self.declared_evidence
+    }
+
+    pub fn observed_evidence(&self) -> &[DimensionEvidence] {
+        &self.observed_evidence
     }
 
     /// Compatibility alias for [`Self::declared`].
@@ -614,10 +885,7 @@ impl ContainmentSupport {
     }
 
     pub fn unsupported_reason(&self) -> Option<&str> {
-        match self {
-            Self::Supported { .. } => None,
-            Self::Unsupported { reason, .. } => Some(reason),
-        }
+        self.reason.as_deref()
     }
 }
 
@@ -638,6 +906,7 @@ impl ContainmentSupport {
 pub struct EnforcementReceipt {
     support: ContainmentSupport,
     enforced: EnforcementDimensions,
+    established_evidence: Vec<DimensionEvidence>,
     resolved_filesystem: ResolvedFilesystemGrants,
     configured_limits: ExecutionLimits,
 }
@@ -647,9 +916,10 @@ impl EnforcementReceipt {
     fn checked(
         preflight: &ValidatedPreflight,
         enforced: EnforcementDimensions,
+        established_evidence: Vec<DimensionEvidence>,
     ) -> Result<Self, ExecutionError> {
         let support = &preflight.support;
-        if !matches!(support, ContainmentSupport::Supported { .. }) {
+        if !support.is_supported() {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::UnsupportedContainment,
                 "cannot issue an enforcement receipt for unsupported containment",
@@ -662,10 +932,10 @@ impl EnforcementReceipt {
                 "disabled sandbox execution cannot issue an enforcement receipt",
             ));
         }
-        if enforced != *requested {
+        if !enforced.contains(requested) {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
-                "enforced dimensions must exactly match requested restrictions",
+                "established dimensions do not cover every requested restriction",
             ));
         }
         if !support.declared().contains(requested) || !support.observed().contains(requested) {
@@ -685,9 +955,11 @@ impl EnforcementReceipt {
                 "configured limits do not match requested resource restrictions",
             ));
         }
+        validate_dimension_evidence(&enforced, &established_evidence)?;
         Ok(Self {
             support: support.clone(),
             enforced,
+            established_evidence,
             resolved_filesystem: preflight.bindings.receipt(),
             configured_limits: configured_limits.clone(),
         })
@@ -717,12 +989,69 @@ impl EnforcementReceipt {
         &self.enforced
     }
 
+    /// Launch-time evidence that the backend established each reported restriction before spawn.
+    pub fn established_evidence(&self) -> &[DimensionEvidence] {
+        &self.established_evidence
+    }
+
     pub fn resolved_filesystem(&self) -> &ResolvedFilesystemGrants {
         &self.resolved_filesystem
     }
 
     pub fn configured_limits(&self) -> &ExecutionLimits {
         &self.configured_limits
+    }
+}
+
+/// Confidence that process cleanup was observed at execution completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CleanupConfidence {
+    /// Cleanup is outside the portable restricted-authority contract.
+    NotGuaranteed,
+    /// A kernel or VM owned the complete process-tree cleanup boundary.
+    KernelOwnedComplete,
+}
+
+/// Completion-time evidence, distinct from launch-time enforcement evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletionEvidence {
+    confirmed: EnforcementDimensions,
+    evidence: Vec<DimensionEvidence>,
+    cleanup_confidence: CleanupConfidence,
+}
+
+impl CompletionEvidence {
+    #[allow(dead_code)] // The no-backend scaffold cannot produce completion evidence yet.
+    fn checked(
+        preflight: &ValidatedPreflight,
+        confirmed: EnforcementDimensions,
+        evidence: Vec<DimensionEvidence>,
+        cleanup_confidence: CleanupConfidence,
+    ) -> Result<Self, ExecutionError> {
+        if !confirmed.contains(preflight.support.requested()) {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "completion evidence does not cover every requested dimension",
+            ));
+        }
+        validate_dimension_evidence(&confirmed, &evidence)?;
+        Ok(Self {
+            evidence,
+            confirmed,
+            cleanup_confidence,
+        })
+    }
+
+    pub fn confirmed(&self) -> &EnforcementDimensions {
+        &self.confirmed
+    }
+
+    pub fn evidence(&self) -> &[DimensionEvidence] {
+        &self.evidence
+    }
+
+    pub fn cleanup_confidence(&self) -> CleanupConfidence {
+        self.cleanup_confidence
     }
 }
 
@@ -757,6 +1086,7 @@ pub struct ExecutionOutcome {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     enforcement: EnforcementReceipt,
+    completion: CompletionEvidence,
 }
 
 impl ExecutionOutcome {
@@ -766,11 +1096,26 @@ impl ExecutionOutcome {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
         enforcement: EnforcementReceipt,
+        completion: CompletionEvidence,
     ) -> Result<Self, ExecutionError> {
-        if enforcement.enforced() != enforcement.requested() {
+        if !enforcement.enforced().contains(enforcement.requested()) {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
                 "execution outcome lacks complete enforcement evidence",
+            ));
+        }
+        if !completion.confirmed().contains(enforcement.requested()) {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "execution outcome lacks complete completion evidence",
+            ));
+        }
+        if enforcement.requested().process_tree_membership()
+            && completion.cleanup_confidence() != CleanupConfidence::KernelOwnedComplete
+        {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "managed-tree execution requires kernel-owned complete cleanup evidence",
             ));
         }
         Ok(Self {
@@ -778,6 +1123,7 @@ impl ExecutionOutcome {
             stdout,
             stderr,
             enforcement,
+            completion,
         })
     }
 
@@ -786,11 +1132,12 @@ impl ExecutionOutcome {
         let receipt = self.enforcement();
         if receipt.support() != &preflight.support
             || receipt.requested() != required
-            || receipt.enforced() != required
+            || !receipt.enforced().contains(required)
             || !receipt.declared().contains(required)
             || !receipt.observed().contains(required)
             || receipt.configured_limits() != &preflight.policy.limits
             || receipt.resolved_filesystem() != &preflight.bindings.receipt()
+            || !self.completion.confirmed().contains(required)
         {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
@@ -857,6 +1204,9 @@ impl ExecutionOutcome {
     }
     pub fn enforcement(&self) -> &EnforcementReceipt {
         &self.enforcement
+    }
+    pub fn completion(&self) -> &CompletionEvidence {
+        &self.completion
     }
 }
 
@@ -1669,34 +2019,29 @@ fn validate_supported_evidence(
             )
         })?;
     }
-    match support {
-        ContainmentSupport::Unsupported {
-            platform, reason, ..
-        } => Err(ExecutionError::new(
+    if !support.is_supported() {
+        let platform = support.platform.as_deref().unwrap_or("unknown platform");
+        let reason = support.reason.as_deref().unwrap_or("no reason reported");
+        return Err(ExecutionError::new(
             ExecutionErrorCategory::UnsupportedContainment,
             format!("sandbox containment is unavailable on {platform}: {reason}"),
-        )),
-        ContainmentSupport::Supported {
-            requested,
-            declared,
-            observed,
-            ..
-        } => {
-            if requested != &required {
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::PolicyViolation,
-                    "backend requested evidence does not match the execution policy",
-                ));
-            }
-            if !declared.contains(&required) || !observed.contains(&required) {
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::UnsupportedContainment,
-                    "requested restrictions lack declared or observed backend support",
-                ));
-            }
-            Ok(())
-        }
+        ));
     }
+    if support.requested != required {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            "backend requested evidence does not match the execution policy",
+        ));
+    }
+    if !support.declared.contains(&required) || !support.observed.contains(&required) {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::UnsupportedContainment,
+            "requested restrictions lack declared or observed backend support",
+        ));
+    }
+    validate_dimension_evidence(&support.declared, support.declared_evidence())?;
+    validate_dimension_evidence(&support.observed, support.observed_evidence())?;
+    Ok(())
 }
 
 fn resolve_policy(
@@ -1971,26 +2316,24 @@ mod platform_backend {
     }
 
     pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupport {
-        ContainmentSupport::Unsupported {
-            backend: BackendIdentity::new(
-                "tapid-runner/no-backend",
-                env!("CARGO_PKG_VERSION"),
-                None,
-            )
-            .expect("static backend identity must satisfy the checked contract"),
-            platform: std::env::consts::OS.to_owned(),
-            reason: "no platform execution backend is implemented".to_owned(),
-            requested: EnforcementDimensions::requested_by(request.policy()),
-            declared: EnforcementDimensions::none(),
-            observed: EnforcementDimensions::none(),
-        }
+        ContainmentSupport::unsupported(
+            BackendIdentity::new("tapid-runner/no-backend", env!("CARGO_PKG_VERSION"), None)
+                .expect("static backend identity must satisfy the checked contract"),
+            std::env::consts::OS,
+            "no platform execution backend is implemented",
+            EnforcementDimensions::requested_by(request.policy()),
+            EnforcementDimensions::none(),
+            EnforcementDimensions::none(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ExecutionLimits, FilesystemPolicy, SandboxMode, SandboxPolicy};
+    use crate::config::{
+        AssuranceLevel, ExecutionLimits, FilesystemPolicy, SandboxMode, SandboxPolicy,
+    };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2004,6 +2347,120 @@ mod tests {
             ExecutionLimits::new(None, None, None, None).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn restricted_separates_authority_containment_from_managed_tree_ownership() {
+        let restricted = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::Restricted,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let restricted = EnforcementDimensions::requested_by(&restricted);
+        assert!(restricted.descriptor_hygiene());
+        assert!(restricted.descendant_authority_propagation());
+        assert!(!restricted.process_tree_membership());
+        assert!(!restricted.complete_cleanup());
+
+        let managed = EnforcementDimensions::requested_by(&required_policy());
+        assert!(managed.process_tree_membership());
+        assert!(managed.complete_cleanup());
+    }
+
+    #[test]
+    fn managed_tree_reports_lifecycle_ownership_as_an_independent_dimension() {
+        let managed = required_policy();
+        let managed_requested = EnforcementDimensions::requested_by(&managed);
+        let managed_evidence = evidence_for_dimensions(&managed_requested, "test", &[]);
+        assert!(
+            managed_evidence
+                .iter()
+                .any(|evidence| evidence.dimension() == EnforcementDimension::DescendantLifecycle)
+        );
+
+        let restricted = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::Restricted,
+            managed.filesystem().clone(),
+            managed.network(),
+            managed.environment().to_vec(),
+            managed.subprocess(),
+            managed.limits().clone(),
+        )
+        .unwrap();
+        let restricted_evidence = evidence_for_dimensions(
+            &EnforcementDimensions::requested_by(&restricted),
+            "test",
+            &[],
+        );
+        assert!(
+            !restricted_evidence
+                .iter()
+                .any(|evidence| evidence.dimension() == EnforcementDimension::DescendantLifecycle)
+        );
+    }
+
+    #[test]
+    fn support_reports_each_dimension_with_scope_mechanism_and_limitations() {
+        let requested = EnforcementDimensions::requested_by(&required_policy());
+        let support = support_with_evidence(requested.clone(), requested.clone(), requested);
+
+        let filesystem = support
+            .declared_evidence()
+            .iter()
+            .find(|evidence| evidence.dimension() == EnforcementDimension::FilesystemRead)
+            .unwrap();
+        assert_eq!(filesystem.scope(), EnforcementScope::DescendantTree);
+        assert_eq!(filesystem.mechanism(), "test mechanism");
+        assert_eq!(filesystem.limitations(), &["test evidence only"]);
+        assert_eq!(
+            support.observed_evidence().len(),
+            support.declared_evidence().len()
+        );
+    }
+
+    #[test]
+    fn missing_dimension_metadata_fails_before_spawn() {
+        struct Backend {
+            support: ContainmentSupport,
+            spawns: std::cell::Cell<usize>,
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, _request: &ExecutionRequest) -> ContainmentSupport {
+                self.support.clone()
+            }
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                self.spawns.set(self.spawns.get() + 1);
+                unreachable!()
+            }
+        }
+
+        let request = ExecutionRequest::builder("node").build().unwrap();
+        let required = EnforcementDimensions::requested_by(request.policy());
+        let mut support = support_with_evidence(required.clone(), required.clone(), required);
+        support
+            .declared_evidence
+            .retain(|evidence| evidence.dimension() != EnforcementDimension::DescriptorHygiene);
+        let backend = Backend {
+            support,
+            spawns: std::cell::Cell::new(0),
+        };
+        assert_eq!(
+            execute_with_backend(&request, &backend)
+                .unwrap_err()
+                .category(),
+            ExecutionErrorCategory::UnsupportedContainment
+        );
+        assert_eq!(backend.spawns.get(), 0);
     }
 
     #[test]
@@ -2272,18 +2729,18 @@ mod tests {
 
         impl ExecutionBackend for CountingBackend {
             fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
-                ContainmentSupport::Unsupported {
-                    backend: BackendIdentity {
+                ContainmentSupport::unsupported(
+                    BackendIdentity {
                         name: "test/unsupported".into(),
                         version: "1".into(),
                         deprecation: None,
                     },
-                    platform: "test".into(),
-                    reason: "deliberately unavailable".into(),
-                    requested: EnforcementDimensions::requested_by(request.policy()),
-                    declared: EnforcementDimensions::none(),
-                    observed: EnforcementDimensions::none(),
-                }
+                    "test",
+                    "deliberately unavailable",
+                    EnforcementDimensions::requested_by(request.policy()),
+                    EnforcementDimensions::none(),
+                    EnforcementDimensions::none(),
+                )
             }
 
             fn spawn(
@@ -2512,8 +2969,12 @@ mod tests {
         declared: EnforcementDimensions,
         observed: EnforcementDimensions,
     ) -> ContainmentSupport {
-        ContainmentSupport::Supported {
-            backend: BackendIdentity {
+        let declared_evidence =
+            evidence_for_dimensions(&declared, "test mechanism", &["test evidence only"]);
+        let observed_evidence =
+            evidence_for_dimensions(&observed, "test mechanism", &["test evidence only"]);
+        ContainmentSupport::supported(
+            BackendIdentity {
                 name: "test".into(),
                 version: "1".into(),
                 deprecation: None,
@@ -2521,7 +2982,28 @@ mod tests {
             requested,
             declared,
             observed,
-        }
+            declared_evidence,
+            observed_evidence,
+        )
+    }
+
+    fn receipt_for(
+        preflight: &ValidatedPreflight,
+        enforced: EnforcementDimensions,
+    ) -> Result<EnforcementReceipt, ExecutionError> {
+        let evidence = evidence_for_dimensions(&enforced, "test launch establishment", &[]);
+        EnforcementReceipt::checked(preflight, enforced, evidence)
+    }
+
+    fn completion_for(preflight: &ValidatedPreflight) -> CompletionEvidence {
+        let requested = preflight.support.requested().clone();
+        let confidence = if requested.process_tree_membership() {
+            CleanupConfidence::KernelOwnedComplete
+        } else {
+            CleanupConfidence::NotGuaranteed
+        };
+        let evidence = evidence_for_dimensions(&requested, "test completion observation", &[]);
+        CompletionEvidence::checked(preflight, requested, evidence, confidence).unwrap()
     }
 
     struct OutcomeBackend {
@@ -2543,13 +3025,13 @@ mod tests {
             preflight: &ValidatedPreflight,
         ) -> Result<ExecutionOutcome, ExecutionError> {
             self.spawns.set(self.spawns.get() + 1);
-            let receipt =
-                EnforcementReceipt::checked(preflight, preflight.support.requested().clone())?;
+            let receipt = receipt_for(preflight, preflight.support.requested().clone())?;
             ExecutionOutcome::checked(
                 self.termination.clone(),
                 self.stdout.clone(),
                 self.stderr.clone(),
                 receipt,
+                completion_for(preflight),
             )
         }
     }
@@ -2794,9 +3276,14 @@ mod tests {
                             .expect("validated search paths must join")
                     )
                 );
-                let receipt =
-                    EnforcementReceipt::checked(preflight, preflight.support.requested().clone())?;
-                ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt)
+                let receipt = receipt_for(preflight, preflight.support.requested().clone())?;
+                ExecutionOutcome::checked(
+                    Termination::Exited(0),
+                    vec![],
+                    vec![],
+                    receipt,
+                    completion_for(preflight),
+                )
             }
         }
 
@@ -2931,8 +3418,14 @@ mod tests {
                     GrantResolution::MissingWriteDirectory { .. }
                 ));
                 let enforced = preflight.support.requested().clone();
-                let receipt = EnforcementReceipt::checked(preflight, enforced)?;
-                ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt)
+                let receipt = receipt_for(preflight, enforced)?;
+                ExecutionOutcome::checked(
+                    Termination::Exited(0),
+                    vec![],
+                    vec![],
+                    receipt,
+                    completion_for(preflight),
+                )
             }
         }
 
@@ -3101,20 +3594,21 @@ mod tests {
     }
 
     #[test]
-    fn checked_receipt_rejects_extra_or_missing_enforcement_dimensions() {
+    fn checked_receipt_validates_each_required_dimension_without_rejecting_extras() {
         let policy = required_policy();
         let requested = EnforcementDimensions::requested_by(&policy);
-        let support =
-            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+        let mut declared = requested.clone();
+        declared.timeout = true;
+        let support = support_with_evidence(requested.clone(), declared.clone(), declared);
         let preflight = preflight_for(policy, support);
 
         let mut extra = requested.clone();
         extra.timeout = true;
-        assert!(EnforcementReceipt::checked(&preflight, extra).is_err());
+        assert!(receipt_for(&preflight, extra).is_ok());
 
         let mut missing = requested.clone();
         missing.network = false;
-        assert!(EnforcementReceipt::checked(&preflight, missing).is_err());
+        assert!(receipt_for(&preflight, missing).is_err());
     }
 
     #[test]
@@ -3135,7 +3629,7 @@ mod tests {
         not_observed.memory = false;
         let support = support_with_evidence(requested.clone(), requested.clone(), not_observed);
         let preflight = preflight_for(policy, support);
-        assert!(EnforcementReceipt::checked(&preflight, requested).is_err());
+        assert!(receipt_for(&preflight, requested).is_err());
     }
 
     #[test]
@@ -3153,7 +3647,107 @@ mod tests {
         let support = support_with_evidence(none.clone(), none.clone(), none.clone());
         let preflight = preflight_for(policy, support);
 
-        assert!(EnforcementReceipt::checked(&preflight, none).is_err());
+        assert!(receipt_for(&preflight, none).is_err());
+    }
+
+    #[test]
+    fn receipt_keeps_launch_establishment_evidence_distinct_from_support_observation() {
+        let policy = required_policy();
+        let requested = EnforcementDimensions::requested_by(&policy);
+        let support =
+            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+        let preflight = preflight_for(policy, support);
+        let launch = evidence_for_dimensions(&requested, "launch establishment", &[]);
+
+        let receipt = EnforcementReceipt::checked(&preflight, requested, launch).unwrap();
+
+        assert!(
+            receipt
+                .established_evidence()
+                .iter()
+                .all(|evidence| evidence.mechanism() == "launch establishment")
+        );
+        assert_ne!(
+            receipt.established_evidence(),
+            receipt.support().observed_evidence()
+        );
+    }
+
+    #[test]
+    fn completion_evidence_is_distinct_and_managed_tree_requires_complete_cleanup() {
+        let policy = required_policy();
+        let requested = EnforcementDimensions::requested_by(&policy);
+        let support =
+            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+        let preflight = preflight_for(policy, support);
+        let receipt = receipt_for(&preflight, requested.clone()).unwrap();
+        assert!(!receipt.established_evidence().is_empty());
+
+        let incomplete_dimensions = requested.clone();
+        let incomplete_evidence = evidence_for_dimensions(
+            &incomplete_dimensions,
+            "incomplete cleanup observation",
+            &[],
+        );
+        let incomplete = CompletionEvidence::checked(
+            &preflight,
+            incomplete_dimensions,
+            incomplete_evidence,
+            CleanupConfidence::NotGuaranteed,
+        )
+        .unwrap();
+        assert!(
+            ExecutionOutcome::checked(
+                Termination::Exited(0),
+                vec![],
+                vec![],
+                receipt.clone(),
+                incomplete,
+            )
+            .is_err()
+        );
+
+        let complete_evidence =
+            evidence_for_dimensions(&requested, "complete cleanup observation", &[]);
+        let complete = CompletionEvidence::checked(
+            &preflight,
+            requested,
+            complete_evidence,
+            CleanupConfidence::KernelOwnedComplete,
+        )
+        .unwrap();
+        let outcome =
+            ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt, complete)
+                .unwrap();
+        assert_eq!(
+            outcome.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+    }
+
+    #[test]
+    fn completion_keeps_backend_observation_evidence() {
+        let policy = required_policy();
+        let requested = EnforcementDimensions::requested_by(&policy);
+        let support =
+            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+        let preflight = preflight_for(policy, support);
+        let observed = evidence_for_dimensions(&requested, "completion observation", &[]);
+
+        let completion = CompletionEvidence::checked(
+            &preflight,
+            requested,
+            observed,
+            CleanupConfidence::KernelOwnedComplete,
+        )
+        .unwrap();
+
+        assert!(
+            completion
+                .evidence()
+                .iter()
+                .all(|evidence| evidence.mechanism() == "completion observation")
+        );
     }
 
     #[test]
@@ -3163,9 +3757,11 @@ mod tests {
         let support =
             support_with_evidence(requested.clone(), requested.clone(), requested.clone());
         let preflight = preflight_for(policy, support);
-        let receipt = EnforcementReceipt::checked(&preflight, requested).unwrap();
+        let receipt = receipt_for(&preflight, requested).unwrap();
+        let completion = completion_for(&preflight);
         let outcome =
-            ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt).unwrap();
+            ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt, completion)
+                .unwrap();
         assert_eq!(outcome.termination(), &Termination::Exited(0));
     }
 
@@ -3609,10 +4205,7 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 let mut support =
                     support_with_evidence(requested.clone(), requested.clone(), requested);
-                match &mut support {
-                    ContainmentSupport::Supported { backend, .. } => backend.name.clear(),
-                    ContainmentSupport::Unsupported { .. } => unreachable!(),
-                }
+                support.backend.name.clear();
                 support
             }
             fn runtime_filesystem_additions(
@@ -3818,9 +4411,14 @@ mod tests {
                     Some(&OsString::new())
                 );
                 assert_eq!(preflight.child_environment.len(), 1);
-                let receipt =
-                    EnforcementReceipt::checked(preflight, preflight.support.requested().clone())?;
-                ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt)
+                let receipt = receipt_for(preflight, preflight.support.requested().clone())?;
+                ExecutionOutcome::checked(
+                    Termination::Exited(0),
+                    vec![],
+                    vec![],
+                    receipt,
+                    completion_for(preflight),
+                )
             }
         }
 
