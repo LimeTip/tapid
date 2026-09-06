@@ -49,8 +49,24 @@ const fixtureScript = [
   '',
 ].join('\n');
 
+const runPolicy = [
+  '[run.defaults]',
+  'read = ["."]',
+  'write = []',
+  'network = false',
+  'environment = []',
+  'subprocess = true',
+  'timeout_seconds = 30',
+  'max_output_bytes = 1048576',
+  '',
+  '[run.scripts.test]',
+  'environment = ["TAPID_FIXTURE"]',
+  '',
+].join('\n');
+
 fs.writeFileSync(path.join(projectDirectory, 'package.json'), packageJson);
 fs.writeFileSync(path.join(projectDirectory, 'tapid.lock'), lockfile);
+fs.writeFileSync(path.join(projectDirectory, 'tapid.toml'), runPolicy);
 fs.writeFileSync(path.join(projectDirectory, 'fixture.js'), fixtureScript);
 fs.writeFileSync(
   path.join(projectDirectory, 'fixture-contract.json'),
@@ -59,6 +75,7 @@ fs.writeFileSync(
     checks: [
       'install',
       'root-script',
+      'checked-in-run-policy',
       'argument-forwarding',
       'exit-code',
       'lifecycle-suppression',
