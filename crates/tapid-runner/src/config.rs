@@ -24,7 +24,21 @@ pub enum SandboxMode {
 }
 
 /// Strength of the portable execution guarantee requested from a backend.
+///
+/// Consumers must include a wildcard arm so future assurance levels remain additive:
+///
+/// ```compile_fail
+/// use tapid_runner::AssuranceLevel;
+///
+/// fn label(level: AssuranceLevel) -> &'static str {
+///     match level {
+///         AssuranceLevel::Restricted => "restricted",
+///         AssuranceLevel::ManagedTree => "managed-tree",
+///     }
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[non_exhaustive]
 #[serde(rename_all = "kebab-case")]
 pub enum AssuranceLevel {
     /// Restrict ambient authority for the launched process and its descendants.

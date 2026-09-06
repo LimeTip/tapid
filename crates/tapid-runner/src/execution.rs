@@ -1981,33 +1981,26 @@ pub fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, Execution
     execute_with_backend(request, &platform_backend::PlatformBackend)
 }
 
-/// A backend lifecycle that owns every process created by one successful spawn operation.
+/// A prepared backend lifecycle. The owner exists before `execute` may create a process.
 trait ExecutionLifecycle {
-    fn finish(&mut self) -> PostSpawnCompletion;
+    /// Create the native process and drive it through completion.
+    fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError>;
     fn cleanup(&mut self) -> CompletionEvidence;
 }
 
-#[allow(dead_code)] // Reserved for platform backends; test backends exercise both variants.
-enum PostSpawnCompletion {
-    Finished(Box<ExecutionOutcome>),
-    Failed {
-        error: ExecutionError,
-        completion: CompletionEvidence,
-    },
-}
+/// A preparation failure raised before an owned attempt can create a process.
+struct PreparationError(ExecutionError);
 
-/// Distinguishes setup failures that occurred before process creation from an owned attempt.
-struct PreSpawnError(ExecutionError);
-
-impl From<ExecutionError> for PreSpawnError {
+impl From<ExecutionError> for PreparationError {
     fn from(error: ExecutionError) -> Self {
         Self(error)
     }
 }
 
-/// Owns the post-spawn lifecycle. Explicit finish validates every returned disposition. Drop can
-/// only attempt fallback cleanup: because it cannot report validation errors, invalid evidence
-/// panics instead of being represented as a checked disposition.
+/// Owns the lifecycle before native process creation. Explicit finish validates every returned
+/// disposition and cleans up every execution error. Drop can only attempt fallback cleanup:
+/// because it cannot report validation errors, invalid evidence panics instead of being represented
+/// as a checked disposition.
 struct OwnedExecutionAttempt<'a> {
     preflight: &'a ValidatedPreflight,
     lifecycle: Box<dyn ExecutionLifecycle + 'a>,
@@ -2025,21 +2018,15 @@ impl<'a> OwnedExecutionAttempt<'a> {
     }
 
     fn finish(mut self) -> Result<ExecutionOutcome, ExecutionError> {
-        match self.lifecycle.finish() {
-            PostSpawnCompletion::Finished(outcome) => {
+        match self.lifecycle.execute() {
+            Ok(outcome) => {
                 if let Err(error) = outcome.validate_for_preflight(self.preflight) {
                     return Err(self.checked_fallback(error));
                 }
                 self.finished = true;
                 Ok(*outcome)
             }
-            PostSpawnCompletion::Failed { error, completion } => {
-                if validate_completion_for_preflight(&completion, self.preflight).is_err() {
-                    return Err(self.checked_fallback(error));
-                }
-                self.finished = true;
-                Err(error.with_completion(completion))
-            }
+            Err(error) => Err(self.checked_fallback(error)),
         }
     }
 
@@ -2109,11 +2096,12 @@ trait ExecutionBackend {
         FilesystemBindings::canonical_path(policy)
     }
 
-    fn spawn<'a>(
+    /// Perform preparation that cannot create a native process, then return its lifecycle owner.
+    fn prepare<'a>(
         &'a self,
         request: &ExecutionRequest,
         preflight: &'a ValidatedPreflight,
-    ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError>;
+    ) -> Result<OwnedExecutionAttempt<'a>, PreparationError>;
 }
 
 fn execute_with_backend(
@@ -2141,7 +2129,8 @@ fn execute_with_backend(
         bindings,
         child_environment: request.child_environment(),
     };
-    // This is deliberately the final generic operation before the adapter's native setup/spawn.
+    // This is deliberately the final generic operation before backend preparation. Native process
+    // creation is reachable only through the owned lifecycle returned by `prepare`.
     preflight.bindings.validate(&preflight.policy)?;
     if !preflight.child_environment.contains_key(OsStr::new("PATH")) {
         return Err(ExecutionError::new(
@@ -2151,7 +2140,7 @@ fn execute_with_backend(
     }
     request.validate_trusted_node_runtime()?;
     backend
-        .spawn(request, &preflight)
+        .prepare(request, &preflight)
         .map_err(|error| error.0)?
         .finish()
 }
@@ -2455,7 +2444,7 @@ mod platform_backend {
     use super::{
         BackendIdentity, ContainmentSupport, EnforcementDimensions, ExecutionBackend,
         ExecutionError, ExecutionErrorCategory, ExecutionRequest, OwnedExecutionAttempt,
-        PreSpawnError, ValidatedPreflight,
+        PreparationError, ValidatedPreflight,
     };
 
     pub(super) struct PlatformBackend;
@@ -2465,12 +2454,12 @@ mod platform_backend {
             containment_support(request)
         }
 
-        fn spawn<'a>(
+        fn prepare<'a>(
             &'a self,
             _request: &ExecutionRequest,
             _preflight: &'a ValidatedPreflight,
-        ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-            Err(PreSpawnError::from(ExecutionError::new(
+        ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+            Err(PreparationError::from(ExecutionError::new(
                 ExecutionErrorCategory::Internal,
                 "containment backend reported support but execution is not implemented",
             )))
@@ -2590,18 +2579,18 @@ mod tests {
     fn missing_dimension_metadata_fails_before_spawn() {
         struct Backend {
             support: ContainmentSupport,
-            spawns: std::cell::Cell<usize>,
+            preparations: std::cell::Cell<usize>,
         }
         impl ExecutionBackend for Backend {
             fn containment_support(&self, _request: &ExecutionRequest) -> ContainmentSupport {
                 self.support.clone()
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-                self.spawns.set(self.spawns.get() + 1);
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+                self.preparations.set(self.preparations.get() + 1);
                 unreachable!()
             }
         }
@@ -2614,7 +2603,7 @@ mod tests {
             .retain(|evidence| evidence.dimension() != EnforcementDimension::DescriptorHygiene);
         let backend = Backend {
             support,
-            spawns: std::cell::Cell::new(0),
+            preparations: std::cell::Cell::new(0),
         };
         assert_eq!(
             execute_with_backend(&request, &backend)
@@ -2622,7 +2611,7 @@ mod tests {
                 .category(),
             ExecutionErrorCategory::UnsupportedContainment
         );
-        assert_eq!(backend.spawns.get(), 0);
+        assert_eq!(backend.preparations.get(), 0);
     }
 
     #[test]
@@ -2884,9 +2873,9 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_preflight_makes_zero_spawn_attempts() {
+    fn unsupported_preflight_makes_zero_prepare_attempts() {
         struct CountingBackend {
-            spawn_attempts: std::cell::Cell<usize>,
+            prepare_attempts: std::cell::Cell<usize>,
         }
 
         impl ExecutionBackend for CountingBackend {
@@ -2905,21 +2894,21 @@ mod tests {
                 )
             }
 
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-                self.spawn_attempts.set(self.spawn_attempts.get() + 1);
-                Err(PreSpawnError::from(ExecutionError::new(
-                    ExecutionErrorCategory::Spawn,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+                self.prepare_attempts.set(self.prepare_attempts.get() + 1);
+                Err(PreparationError::from(ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
                     "must not be reached",
                 )))
             }
         }
 
         let backend = CountingBackend {
-            spawn_attempts: std::cell::Cell::new(0),
+            prepare_attempts: std::cell::Cell::new(0),
         };
         let request = ExecutionRequest::builder("node")
             .policy(required_policy())
@@ -2930,14 +2919,14 @@ mod tests {
             error.category(),
             ExecutionErrorCategory::UnsupportedContainment
         );
-        assert_eq!(backend.spawn_attempts.get(), 0);
+        assert_eq!(backend.prepare_attempts.get(), 0);
     }
 
     #[test]
-    fn malformed_supported_preflight_makes_zero_spawn_attempts() {
+    fn malformed_supported_preflight_makes_zero_prepare_attempts() {
         struct CountingBackend {
             support: ContainmentSupport,
-            spawn_attempts: std::cell::Cell<usize>,
+            prepare_attempts: std::cell::Cell<usize>,
         }
 
         impl ExecutionBackend for CountingBackend {
@@ -2945,14 +2934,14 @@ mod tests {
                 self.support.clone()
             }
 
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-                self.spawn_attempts.set(self.spawn_attempts.get() + 1);
-                Err(PreSpawnError::from(ExecutionError::new(
-                    ExecutionErrorCategory::Spawn,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+                self.prepare_attempts.set(self.prepare_attempts.get() + 1);
+                Err(PreparationError::from(ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
                     "must not be reached",
                 )))
             }
@@ -2977,7 +2966,7 @@ mod tests {
         ] {
             let backend = CountingBackend {
                 support,
-                spawn_attempts: std::cell::Cell::new(0),
+                prepare_attempts: std::cell::Cell::new(0),
             };
             let error = execute_with_backend(&request, &backend).unwrap_err();
             assert!(
@@ -2988,14 +2977,14 @@ mod tests {
                 ),
                 "{error}"
             );
-            assert_eq!(backend.spawn_attempts.get(), 0);
+            assert_eq!(backend.prepare_attempts.get(), 0);
         }
     }
 
     #[test]
-    fn disabled_mode_makes_zero_spawn_attempts() {
+    fn disabled_mode_makes_zero_prepare_attempts() {
         struct CountingBackend {
-            spawn_attempts: std::cell::Cell<usize>,
+            prepare_attempts: std::cell::Cell<usize>,
         }
 
         impl ExecutionBackend for CountingBackend {
@@ -3004,14 +2993,14 @@ mod tests {
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
 
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-                self.spawn_attempts.set(self.spawn_attempts.get() + 1);
-                Err(PreSpawnError::from(ExecutionError::new(
-                    ExecutionErrorCategory::Spawn,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+                self.prepare_attempts.set(self.prepare_attempts.get() + 1);
+                Err(PreparationError::from(ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
                     "must not be reached",
                 )))
             }
@@ -3031,12 +3020,77 @@ mod tests {
             .build()
             .unwrap();
         let backend = CountingBackend {
-            spawn_attempts: std::cell::Cell::new(0),
+            prepare_attempts: std::cell::Cell::new(0),
         };
 
         let error = execute_with_backend(&request, &backend).unwrap_err();
         assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
-        assert_eq!(backend.spawn_attempts.get(), 0);
+        assert_eq!(backend.prepare_attempts.get(), 0);
+    }
+
+    #[test]
+    fn process_creation_error_cannot_escape_owned_cleanup() {
+        struct Backend {
+            process_creations: std::rc::Rc<std::cell::Cell<usize>>,
+            cleanup_checks: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+        struct Lifecycle {
+            process_creations: std::rc::Rc<std::cell::Cell<usize>>,
+            cleanup_checks: std::rc::Rc<std::cell::Cell<usize>>,
+            cleanup_completion: CompletionEvidence,
+        }
+        impl ExecutionLifecycle for Lifecycle {
+            fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError> {
+                self.process_creations.set(self.process_creations.get() + 1);
+                Err(ExecutionError::new(
+                    ExecutionErrorCategory::Spawn,
+                    "native process creation failed after creating a child",
+                ))
+            }
+            fn cleanup(&mut self) -> CompletionEvidence {
+                self.cleanup_checks.set(self.cleanup_checks.get() + 1);
+                self.cleanup_completion.clone()
+            }
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn prepare<'a>(
+                &'a self,
+                _request: &ExecutionRequest,
+                preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+                Ok(OwnedExecutionAttempt::new(
+                    preflight,
+                    Box::new(Lifecycle {
+                        process_creations: self.process_creations.clone(),
+                        cleanup_checks: self.cleanup_checks.clone(),
+                        cleanup_completion: completion_for(preflight),
+                    }),
+                ))
+            }
+        }
+
+        let process_creations = std::rc::Rc::new(std::cell::Cell::new(0));
+        let cleanup_checks = std::rc::Rc::new(std::cell::Cell::new(0));
+        let request = ExecutionRequest::builder("node")
+            .policy(required_policy())
+            .build()
+            .unwrap();
+        let error = execute_with_backend(
+            &request,
+            &Backend {
+                process_creations: process_creations.clone(),
+                cleanup_checks: cleanup_checks.clone(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.category(), ExecutionErrorCategory::Spawn);
+        assert_eq!(process_creations.get(), 1);
+        assert_eq!(cleanup_checks.get(), 1);
     }
 
     #[test]
@@ -3045,16 +3099,15 @@ mod tests {
             cleanup_checks: std::rc::Rc<std::cell::Cell<usize>>,
         }
         struct Lifecycle {
-            failed_completion: Option<CompletionEvidence>,
             cleanup_completion: Option<CompletionEvidence>,
             cleanup_checks: std::rc::Rc<std::cell::Cell<usize>>,
         }
         impl ExecutionLifecycle for Lifecycle {
-            fn finish(&mut self) -> PostSpawnCompletion {
-                PostSpawnCompletion::Failed {
-                    error: ExecutionError::new(ExecutionErrorCategory::Spawn, "wait failed"),
-                    completion: self.failed_completion.take().unwrap(),
-                }
+            fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError> {
+                Err(ExecutionError::new(
+                    ExecutionErrorCategory::Spawn,
+                    "wait failed",
+                ))
             }
             fn cleanup(&mut self) -> CompletionEvidence {
                 self.cleanup_checks.set(self.cleanup_checks.get() + 1);
@@ -3066,21 +3119,14 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
                 let dimensions =
                     EnforcementDimensions::completion_required(preflight.support.requested());
                 let evidence = evidence_for_dimensions(&dimensions, "cleanup observation", &[]);
-                let failed_completion = CompletionEvidence::checked(
-                    preflight,
-                    dimensions.clone(),
-                    evidence.clone(),
-                    CleanupConfidence::NotGuaranteed,
-                )
-                .unwrap();
                 let cleanup_completion = CompletionEvidence::checked(
                     preflight,
                     dimensions,
@@ -3091,7 +3137,6 @@ mod tests {
                 Ok(OwnedExecutionAttempt::new(
                     preflight,
                     Box::new(Lifecycle {
-                        failed_completion: Some(failed_completion),
                         cleanup_completion: Some(cleanup_completion),
                         cleanup_checks: self.cleanup_checks.clone(),
                     }),
@@ -3252,12 +3297,12 @@ mod tests {
     }
 
     struct FinishedLifecycle {
-        result: Option<PostSpawnCompletion>,
+        result: Option<Result<Box<ExecutionOutcome>, ExecutionError>>,
         cleanup: CompletionEvidence,
     }
 
     impl ExecutionLifecycle for FinishedLifecycle {
-        fn finish(&mut self) -> PostSpawnCompletion {
+        fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError> {
             self.result.take().expect("test lifecycle finishes once")
         }
 
@@ -3274,7 +3319,7 @@ mod tests {
         OwnedExecutionAttempt::new(
             preflight,
             Box::new(FinishedLifecycle {
-                result: Some(PostSpawnCompletion::Finished(Box::new(outcome))),
+                result: Some(Ok(Box::new(outcome))),
                 cleanup,
             }),
         )
@@ -3284,7 +3329,7 @@ mod tests {
         termination: Termination,
         stdout: Vec<u8>,
         stderr: Vec<u8>,
-        spawns: std::cell::Cell<usize>,
+        preparations: std::cell::Cell<usize>,
     }
 
     impl ExecutionBackend for OutcomeBackend {
@@ -3293,12 +3338,12 @@ mod tests {
             support_with_evidence(requested.clone(), requested.clone(), requested)
         }
 
-        fn spawn<'a>(
+        fn prepare<'a>(
             &'a self,
             _request: &ExecutionRequest,
             preflight: &'a ValidatedPreflight,
-        ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-            self.spawns.set(self.spawns.get() + 1);
+        ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+            self.preparations.set(self.preparations.get() + 1);
             let receipt = receipt_for(preflight, preflight.support.requested().clone()).unwrap();
             let outcome = ExecutionOutcome::checked(
                 self.termination.clone(),
@@ -3335,7 +3380,7 @@ mod tests {
                 .category(),
             ExecutionErrorCategory::PolicyViolation
         );
-        assert_eq!(backend.spawns.get(), 1);
+        assert_eq!(backend.preparations.get(), 1);
     }
 
     #[test]
@@ -3346,7 +3391,7 @@ mod tests {
                 termination: Termination::Exited(0),
                 stdout: vec![1, 2],
                 stderr: vec![3, 4],
-                spawns: std::cell::Cell::new(0),
+                preparations: std::cell::Cell::new(0),
             },
         );
     }
@@ -3359,7 +3404,7 @@ mod tests {
                 termination: Termination::TimedOut,
                 stdout: vec![],
                 stderr: vec![],
-                spawns: std::cell::Cell::new(0),
+                preparations: std::cell::Cell::new(0),
             },
         );
     }
@@ -3372,7 +3417,7 @@ mod tests {
                 termination: Termination::OutputLimitExceeded,
                 stdout: vec![],
                 stderr: vec![],
-                spawns: std::cell::Cell::new(0),
+                preparations: std::cell::Cell::new(0),
             },
         );
     }
@@ -3385,7 +3430,7 @@ mod tests {
                 termination: Termination::ProcessLimitExceeded,
                 stdout: vec![],
                 stderr: vec![],
-                spawns: std::cell::Cell::new(0),
+                preparations: std::cell::Cell::new(0),
             },
         );
     }
@@ -3398,7 +3443,7 @@ mod tests {
                 termination: Termination::MemoryLimitExceeded,
                 stdout: vec![],
                 stderr: vec![],
-                spawns: std::cell::Cell::new(0),
+                preparations: std::cell::Cell::new(0),
             },
         );
     }
@@ -3443,7 +3488,7 @@ mod tests {
                 termination: termination.clone(),
                 stdout,
                 stderr,
-                spawns: std::cell::Cell::new(0),
+                preparations: std::cell::Cell::new(0),
             };
             let request = ExecutionRequest::builder("node")
                 .policy(policy_with_limits(limits))
@@ -3451,7 +3496,7 @@ mod tests {
                 .unwrap();
             let outcome = execute_with_backend(&request, &backend).unwrap();
             assert_eq!(outcome.termination(), &termination);
-            assert_eq!(backend.spawns.get(), 1);
+            assert_eq!(backend.preparations.get(), 1);
         }
     }
 
@@ -3507,7 +3552,7 @@ mod tests {
                 termination: Termination::Exited(0),
                 stdout: vec![],
                 stderr: vec![],
-                spawns: std::cell::Cell::new(0),
+                preparations: std::cell::Cell::new(0),
             };
             let request = ExecutionRequest::builder("node")
                 .project_root(&canonical_root)
@@ -3520,7 +3565,7 @@ mod tests {
                     .category(),
                 ExecutionErrorCategory::PolicyViolation
             );
-            assert_eq!(backend.spawns.get(), 0);
+            assert_eq!(backend.preparations.get(), 0);
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -3533,11 +3578,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 request: &ExecutionRequest,
                 preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
                 assert_eq!(
                     request.executable_search_paths(),
                     [
@@ -3605,7 +3650,7 @@ mod tests {
 
         struct Backend {
             probes: std::cell::Cell<usize>,
-            spawns: std::cell::Cell<usize>,
+            preparations: std::cell::Cell<usize>,
         }
         impl ExecutionBackend for Backend {
             fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
@@ -3613,12 +3658,12 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-                self.spawns.set(self.spawns.get() + 1);
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+                self.preparations.set(self.preparations.get() + 1);
                 unreachable!()
             }
         }
@@ -3637,14 +3682,14 @@ mod tests {
             .unwrap();
         let backend = Backend {
             probes: std::cell::Cell::new(0),
-            spawns: std::cell::Cell::new(0),
+            preparations: std::cell::Cell::new(0),
         };
 
         let error = execute_with_backend(&request, &backend).unwrap_err();
         assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
         assert!(error.to_string().contains("alias"), "{error}");
         assert_eq!(backend.probes.get(), 1);
-        assert_eq!(backend.spawns.get(), 0);
+        assert_eq!(backend.preparations.get(), 0);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3685,11 +3730,11 @@ mod tests {
                 FilesystemBindings::canonical_path(policy)
             }
 
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
                 assert_eq!(preflight.policy.read.len(), 2);
                 assert_eq!(preflight.policy.write.len(), 1);
                 assert!(matches!(
@@ -3813,21 +3858,21 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         struct Backend {
-            spawn_attempts: std::cell::Cell<usize>,
+            prepare_attempts: std::cell::Cell<usize>,
         }
         impl ExecutionBackend for Backend {
             fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-                self.spawn_attempts.set(self.spawn_attempts.get() + 1);
-                Err(PreSpawnError::from(ExecutionError::new(
-                    ExecutionErrorCategory::Spawn,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+                self.prepare_attempts.set(self.prepare_attempts.get() + 1);
+                Err(PreparationError::from(ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
                     "must not be reached",
                 )))
             }
@@ -3851,12 +3896,12 @@ mod tests {
             .build()
             .unwrap();
         let backend = Backend {
-            spawn_attempts: std::cell::Cell::new(0),
+            prepare_attempts: std::cell::Cell::new(0),
         };
 
         let error = execute_with_backend(&request, &backend).unwrap_err();
         assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
-        assert_eq!(backend.spawn_attempts.get(), 0);
+        assert_eq!(backend.prepare_attempts.get(), 0);
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
     }
@@ -4249,11 +4294,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
                 unreachable!()
             }
         }
@@ -4380,7 +4425,7 @@ mod tests {
     fn missing_read_grant_fails_before_backend_binding_or_spawn() {
         struct Backend {
             bind_attempts: std::cell::Cell<usize>,
-            spawn_attempts: std::cell::Cell<usize>,
+            prepare_attempts: std::cell::Cell<usize>,
         }
         impl ExecutionBackend for Backend {
             fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
@@ -4398,15 +4443,15 @@ mod tests {
                     "must not bind",
                 ))
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-                self.spawn_attempts.set(self.spawn_attempts.get() + 1);
-                Err(PreSpawnError::from(ExecutionError::new(
-                    ExecutionErrorCategory::Spawn,
-                    "must not spawn",
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+                self.prepare_attempts.set(self.prepare_attempts.get() + 1);
+                Err(PreparationError::from(ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
+                    "must not prepare",
                 )))
             }
         }
@@ -4427,7 +4472,7 @@ mod tests {
             .unwrap();
         let backend = Backend {
             bind_attempts: std::cell::Cell::new(0),
-            spawn_attempts: std::cell::Cell::new(0),
+            prepare_attempts: std::cell::Cell::new(0),
         };
         assert_eq!(
             execute_with_backend(&request, &backend)
@@ -4436,7 +4481,7 @@ mod tests {
             ExecutionErrorCategory::PolicyViolation
         );
         assert_eq!(backend.bind_attempts.get(), 0);
-        assert_eq!(backend.spawn_attempts.get(), 0);
+        assert_eq!(backend.prepare_attempts.get(), 0);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4451,11 +4496,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
                 unreachable!()
             }
         }
@@ -4511,11 +4556,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
                 unreachable!()
             }
         }
@@ -4539,7 +4584,7 @@ mod tests {
     fn invalid_backend_identity_prevents_runtime_additions_and_spawn() {
         struct Backend {
             additions: std::cell::Cell<usize>,
-            spawns: std::cell::Cell<usize>,
+            preparations: std::cell::Cell<usize>,
         }
         impl ExecutionBackend for Backend {
             fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
@@ -4556,18 +4601,18 @@ mod tests {
                 self.additions.set(self.additions.get() + 1);
                 Ok(RuntimeFilesystemAdditions::default())
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-                self.spawns.set(self.spawns.get() + 1);
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+                self.preparations.set(self.preparations.get() + 1);
                 unreachable!()
             }
         }
         let backend = Backend {
             additions: std::cell::Cell::new(0),
-            spawns: std::cell::Cell::new(0),
+            preparations: std::cell::Cell::new(0),
         };
         let request = ExecutionRequest::builder("node").build().unwrap();
         assert_eq!(
@@ -4577,25 +4622,25 @@ mod tests {
             ExecutionErrorCategory::PolicyViolation
         );
         assert_eq!(backend.additions.get(), 0);
-        assert_eq!(backend.spawns.get(), 0);
+        assert_eq!(backend.preparations.get(), 0);
     }
 
     #[test]
-    fn missing_write_requires_adapter_materialization_and_never_spawns_by_default() {
+    fn missing_write_requires_adapter_materialization_and_never_prepares_by_default() {
         struct Backend {
-            spawns: std::cell::Cell<usize>,
+            preparations: std::cell::Cell<usize>,
         }
         impl ExecutionBackend for Backend {
             fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
-                self.spawns.set(self.spawns.get() + 1);
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+                self.preparations.set(self.preparations.get() + 1);
                 unreachable!()
             }
         }
@@ -4615,7 +4660,7 @@ mod tests {
             .build()
             .unwrap();
         let backend = Backend {
-            spawns: std::cell::Cell::new(0),
+            preparations: std::cell::Cell::new(0),
         };
         assert_eq!(
             execute_with_backend(&request, &backend)
@@ -4623,7 +4668,7 @@ mod tests {
                 .category(),
             ExecutionErrorCategory::UnsupportedContainment
         );
-        assert_eq!(backend.spawns.get(), 0);
+        assert_eq!(backend.preparations.get(), 0);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4742,11 +4787,11 @@ mod tests {
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
 
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
                 assert_eq!(
                     preflight.child_environment.get(OsStr::new("PATH")),
                     Some(&OsString::new())
@@ -4781,11 +4826,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn<'a>(
+            fn prepare<'a>(
                 &'a self,
                 _request: &ExecutionRequest,
                 _preflight: &'a ValidatedPreflight,
-            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
+            ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
                 unreachable!()
             }
         }
