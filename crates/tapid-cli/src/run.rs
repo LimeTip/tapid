@@ -127,6 +127,9 @@ pub fn prepare_execution_request(
         .parent()
         .ok_or(RunPreparationError::InvalidNodeRuntime)?
         .to_owned();
+    #[cfg(target_os = "macos")]
+    let search_directories = vec![managed_bin, runtime_bin];
+    #[cfg(not(target_os = "macos"))]
     let search_directories = vec![runtime_bin, managed_bin];
 
     let environment = policy

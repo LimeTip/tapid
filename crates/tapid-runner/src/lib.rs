@@ -1,3 +1,50 @@
+/// Proof that this executable installed private launcher dispatch before application work.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateLauncher {
+    executable: Option<std::path::PathBuf>,
+    #[cfg(target_os = "macos")]
+    identity: Option<(u64, u64)>,
+}
+static LAUNCHER: std::sync::OnceLock<PrivateLauncher> = std::sync::OnceLock::new();
+
+/// Call as the first operation in main. Private invocations dispatch and never return.
+/// Subsequent requests retain this opaque token; missing integration fails before spawn.
+pub fn initialize_or_dispatch_private_launcher() -> PrivateLauncher {
+    #[cfg(target_os = "macos")]
+    execution::dispatch_private_launcher();
+    LAUNCHER
+        .get_or_init(|| {
+            let executable = std::env::current_exe()
+                .ok()
+                .and_then(|p| std::fs::canonicalize(p).ok());
+            #[cfg(target_os = "macos")]
+            let identity = executable
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| {
+                    use std::os::unix::fs::MetadataExt;
+                    (m.dev(), m.ino())
+                });
+            PrivateLauncher {
+                executable,
+                #[cfg(target_os = "macos")]
+                identity,
+            }
+        })
+        .clone()
+}
+
+// The library test executable needs the same early dispatch as a consumer main.
+#[cfg(all(test, target_os = "macos"))]
+#[used]
+#[unsafe(link_section = "__DATA,__mod_init_func")]
+static TEST_LAUNCHER_INIT: extern "C" fn() = {
+    extern "C" fn init() {
+        initialize_or_dispatch_private_launcher();
+    }
+    init
+};
+
 pub mod config;
 pub mod execution;
 

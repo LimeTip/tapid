@@ -1,3 +1,13 @@
+#[cfg(target_os = "macos")]
+#[used]
+#[unsafe(link_section = "__DATA,__mod_init_func")]
+static TEST_LAUNCHER_INIT: extern "C" fn() = {
+    extern "C" fn init() {
+        tapid_runner::initialize_or_dispatch_private_launcher();
+    }
+    init
+};
+
 #[path = "../src/run.rs"]
 #[allow(dead_code)]
 mod run;
@@ -81,6 +91,7 @@ fn prepared_request_uses_npm_shell_exact_arguments_and_controlled_search_directo
         assert_eq!(prepared.request().program(), "cmd.exe");
         assert_eq!(&prepared.request().arguments()[..3], ["/D", "/S", "/C"]);
     }
+    #[cfg(not(target_os = "macos"))]
     assert_eq!(
         prepared.executable_search_directories(),
         [
@@ -88,6 +99,19 @@ fn prepared_request_uses_npm_shell_exact_arguments_and_controlled_search_directo
             fs::canonicalize(project.join("node_modules/.bin")).unwrap(),
         ]
     );
+    #[cfg(target_os = "macos")]
+    {
+        let paths = prepared.executable_search_directories();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(
+            paths[0],
+            fs::canonicalize(project.join("node_modules/.bin")).unwrap()
+        );
+        assert_eq!(
+            paths[1],
+            fs::canonicalize(runtime.parent().unwrap()).unwrap()
+        );
+    }
 
     assert_eq!(
         prepared
@@ -298,4 +322,224 @@ fn windows_allowlist_rejects_case_equivalent_duplicates() {
         Err(run::RunPreparationError::DuplicateEnvironmentName(name)) if name == "Node_Env"
     ));
     assert!(run::validate_allowlisted_environment_names(&names, false).is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn local_bin_wins_over_runtime_tools_but_node_stays_verified() {
+    use std::os::unix::fs::PermissionsExt;
+    let (project, runtime) = project();
+    let local = project.join("node_modules/.bin");
+    for (path, contents) in [
+        (
+            runtime.clone(),
+            "#!/bin/sh\ncase \"$1\" in */node_modules/.bin/pick) printf local-pick ;; *) printf verified-node ;; esac",
+        ),
+        (
+            runtime.parent().unwrap().join("pick"),
+            "#!/bin/sh\nprintf runtime-pick",
+        ),
+        (local.join("pick"), "#!/usr/bin/env node\nlocal executable"),
+        (local.join("node"), "#!/bin/sh\nprintf hostile-node"),
+    ] {
+        fs::write(&path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let config = RunConfig::parse_toml("[run.scripts.dev]\nassurance = \"restricted\"\n").unwrap();
+    for caller_path in ["/hostile", ""] {
+        let prepared = run::prepare_execution_request(
+            &project,
+            "dev",
+            &config,
+            "pick; node",
+            &[],
+            run::HostExecutionEnvironment {
+                node_runtime: Some(&runtime),
+                path: Some(OsStr::new(caller_path)),
+                allowlisted: &BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let outcome = run::execute_checked(&prepared).unwrap();
+        assert_eq!(outcome.termination(), &tapid_runner::Termination::Exited(0));
+        assert_eq!(outcome.stdout(), b"local-pickverified-node");
+        use std::os::unix::ffi::OsStrExt;
+        let evidence = outcome.enforcement().executable_resolution().unwrap();
+        assert!(!evidence.caller_path_inherited);
+        assert_eq!(evidence.path_order.len(), 3);
+        assert_eq!(
+            evidence.path_order[1],
+            fs::canonicalize(&local).unwrap().as_os_str().as_bytes()
+        );
+        assert_eq!(
+            evidence.path_order[2],
+            fs::canonicalize(runtime.parent().unwrap())
+                .unwrap()
+                .as_os_str()
+                .as_bytes()
+        );
+        assert_eq!(evidence.path, evidence.path_order.join(&b':'));
+        let node = evidence.reserved_node.as_ref().unwrap();
+        assert_eq!(node.mechanism, "verified-hard-link");
+        assert!(!node.cleanup_observed);
+        assert!(node.limitations.contains("retained"));
+        fs::remove_dir_all(std::path::Path::new(OsStr::from_bytes(
+            &evidence.path_order[0],
+        )))
+        .unwrap();
+    }
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cli_receipt_reports_assurance_authority_and_completion_without_duplicate_output() {
+    let (project, runtime) = project();
+    fs::write(project.join("package.json"), r#"{"name":"receipt-test","version":"1.0.0","scripts":{"dev":"printf unique-child-output; printf unique-child-error >&2"}}"#).unwrap();
+    fs::write(
+        project.join("tapid.toml"),
+        "[run.scripts.dev]\nassurance = \"restricted\"\n",
+    )
+    .unwrap();
+    let mut receipts = Vec::new();
+    for machine in [false, true] {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tapid"));
+        command
+            .args(["run", "dev", "--project-dir"])
+            .arg(&project)
+            .arg("--node-runtime")
+            .arg(&runtime);
+        if machine {
+            command.arg("--receipt-json");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"unique-child-output");
+        let text = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(text.matches("unique-child-error").count(), 1);
+        for field in [
+            "assurance",
+            "Restricted",
+            "mechanism",
+            "scope",
+            "limitations",
+            "effective_filesystem",
+            "ProjectPolicy",
+            "BackendRuntime",
+            "configured_limits",
+            "completion",
+            "cleanup_confidence",
+        ] {
+            assert!(text.contains(field), "missing {field}: {text}");
+        }
+        let mut value: serde_json::Value = if machine {
+            serde_json::from_str(text.lines().last().unwrap()).unwrap()
+        } else {
+            serde_json::from_str(text.split_once("sandbox receipt: ").unwrap().1.trim()).unwrap()
+        };
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["assurance"], "Restricted");
+        let private = value["executable_resolution"]["reserved_node"]["private_path"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as u8)
+            .collect::<Vec<_>>();
+        let directory = &private[..private.len() - b"/node".len()];
+        assert_eq!(
+            value["executable_resolution"]["reserved_node"]["cleanup_observed"],
+            false
+        );
+        assert!(
+            value["executable_resolution"]["reserved_node"]["limitations"]
+                .as_str()
+                .unwrap()
+                .contains("retained")
+        );
+        fs::remove_dir_all(PathBuf::from(
+            String::from_utf8(directory.to_vec()).unwrap(),
+        ))
+        .unwrap();
+        // The per-launch random directory is the only difference permitted.
+        fn normalize(value: &mut serde_json::Value, directory: &[u8]) {
+            match value {
+                serde_json::Value::String(s) => {
+                    *s = s.replace(std::str::from_utf8(directory).unwrap(), "<reserved>");
+                }
+                serde_json::Value::Array(values) => {
+                    let prefix = directory
+                        .iter()
+                        .map(|b| serde_json::json!(*b))
+                        .collect::<Vec<_>>();
+                    if values.starts_with(&prefix) {
+                        values.splice(
+                            ..prefix.len(),
+                            b"<reserved>".iter().map(|b| serde_json::json!(*b)),
+                        );
+                    } else {
+                        for item in values {
+                            normalize(item, directory);
+                        }
+                    }
+                }
+                serde_json::Value::Object(values) => {
+                    for item in values.values_mut() {
+                        normalize(item, directory);
+                    }
+                }
+                _ => {}
+            }
+        }
+        normalize(&mut value, directory);
+        receipts.push(value);
+    }
+    assert_eq!(
+        receipts[0], receipts[1],
+        "complete human/JSON receipts differ"
+    );
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cli_launch_failure_is_nonzero_without_receipt_and_cleans_reserved_directory() {
+    let (project, runtime) = project();
+    fs::write(
+        project.join("package.json"),
+        r#"{"name":"failed-launch","version":"1.0.0","scripts":{"dev":": > marker"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        project.join("tapid.toml"),
+        "[run.scripts.dev]\nassurance = \"restricted\"\n",
+    )
+    .unwrap();
+    let temporary = project.join("private-tmp");
+    fs::create_dir(&temporary).unwrap();
+    for machine in [false, true] {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tapid"));
+        command
+            .args(["run", "dev", "--project-dir"])
+            .arg(&project)
+            .arg("--node-runtime")
+            .arg(&runtime)
+            .env("TMPDIR", &temporary);
+        if machine {
+            command.arg("--receipt-json");
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("no enforcement receipt"), "{stderr}");
+        assert!(!stderr.contains("schema_version"));
+        assert!(!stderr.contains("sandbox receipt:"));
+        assert!(!project.join("marker").exists());
+        assert_eq!(fs::read_dir(&temporary).unwrap().count(), 0);
+    }
+    fs::remove_dir_all(project).unwrap();
 }

@@ -18,6 +18,9 @@ pub(crate) struct Args {
     /// Exact Node executable; otherwise the first valid Node on the host PATH is used.
     #[arg(long)]
     pub(crate) node_runtime: Option<PathBuf>,
+    /// Emit the versioned receipt as one JSON line on stderr after child output.
+    #[arg(long)]
+    pub(crate) receipt_json: bool,
     /// Arguments forwarded after `--` to the script.
     #[arg(last = true)]
     pub(crate) arguments: Vec<OsString>,
@@ -133,7 +136,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
         }
     };
     match crate::run::execute_checked(&prepared) {
-        Ok(outcome) => render_outcome(&outcome),
+        Ok(outcome) => render_outcome(&outcome, args.receipt_json),
         Err(error) => {
             if error.category() == tapid_runner::ExecutionErrorCategory::UnsupportedContainment {
                 eprintln!(
@@ -186,17 +189,52 @@ fn execution_error_category(category: tapid_runner::ExecutionErrorCategory) -> &
     }
 }
 
-fn render_outcome(outcome: &tapid_runner::ExecutionOutcome) -> ExitCode {
+fn receipt_value(outcome: &tapid_runner::ExecutionOutcome) -> serde_json::Value {
+    use serde_json::json;
     let receipt = outcome.enforcement();
-    eprintln!(
-        "sandbox receipt: backend={}@{} requested={:?} declared={:?} observed={:?} enforced={:?}",
-        receipt.backend().name(),
-        receipt.backend().version(),
-        receipt.requested(),
-        receipt.declared(),
-        receipt.observed(),
-        receipt.enforced()
-    );
+    let evidence = |items: &[tapid_runner::DimensionEvidence]| {
+        items.iter().map(|item| json!({
+        "dimension": format!("{:?}", item.dimension()), "scope": format!("{:?}", item.scope()),
+        "mechanism": item.mechanism(), "limitations": item.limitations(),
+    })).collect::<Vec<_>>()
+    };
+    let grants = receipt.resolved_filesystem().grants().iter().map(|grant| {
+        #[cfg(unix)]
+        let native_path = { use std::os::unix::ffi::OsStrExt; json!({"encoding": "unix-bytes", "units": grant.path().as_os_str().as_bytes()}) };
+        #[cfg(windows)]
+        let native_path = { use std::os::windows::ffi::OsStrExt; json!({"encoding": "windows-utf16", "units": grant.path().as_os_str().encode_wide().collect::<Vec<_>>()}) };
+        #[cfg(not(any(unix, windows)))]
+        let native_path = json!({"encoding": "display", "units": grant.path().to_string_lossy()});
+        json!({"path": grant.path().to_string_lossy(), "native_path": native_path,
+            "access": format!("{:?}", grant.access()), "kind": format!("{:?}", grant.kind()),
+            "source": format!("{:?}", grant.source()), "binding": format!("{:?}", grant.binding())})
+    }).collect::<Vec<_>>();
+    let limits = receipt.configured_limits();
+    json!({
+        "executable_resolution": receipt.executable_resolution(),
+        "schema_version": 1, "assurance": format!("{:?}", receipt.assurance()),
+        "backend": {"name": receipt.backend().name(), "version": receipt.backend().version(), "deprecation": receipt.backend().deprecation()},
+        "requested": receipt.requested(), "declared": receipt.declared(), "observed": receipt.observed(), "enforced": receipt.enforced(),
+        "declared_evidence": evidence(receipt.support().declared_evidence()),
+        "observed_evidence": evidence(receipt.support().observed_evidence()),
+        "established_evidence": evidence(receipt.established_evidence()),
+        "effective_filesystem": grants,
+        "configured_limits": {"timeout_seconds": limits.timeout_seconds(), "max_output_bytes": limits.max_output_bytes(), "max_processes": limits.max_processes(), "max_memory_bytes": limits.max_memory_bytes()},
+        "termination": format!("{:?}", outcome.termination()),
+        "completion": {"confirmed": outcome.completion().confirmed(), "evidence": evidence(outcome.completion().evidence()), "cleanup_confidence": format!("{:?}", outcome.completion().cleanup_confidence())}
+    })
+}
+
+fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> ExitCode {
+    let value = receipt_value(outcome);
+    if machine {
+        eprintln!("\n{value}");
+    } else {
+        eprintln!(
+            "\nsandbox receipt: {}",
+            serde_json::to_string_pretty(&value).expect("receipt JSON values are serializable")
+        );
+    }
     match outcome.termination() {
         tapid_runner::Termination::TimedOut => {
             eprintln!("error: root package script exceeded its timeout limit");

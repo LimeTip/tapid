@@ -88,7 +88,7 @@ fn validate_identity_field(kind: &str, value: &str) -> Result<(), ExecutionError
 }
 
 /// Independently reportable containment dimensions.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct EnforcementDimensions {
     filesystem_read: bool,
     filesystem_write: bool,
@@ -410,6 +410,10 @@ fn validate_dimension_evidence(
 /// Access associated with one effective filesystem grant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FilesystemAccess {
+    /// Data only, excluding implicit metadata access.
+    ReadData,
+    /// Metadata only, without file contents or directory listings.
+    ReadMetadata,
     Read,
     Write,
 }
@@ -417,6 +421,10 @@ pub enum FilesystemAccess {
 /// The policy semantics declared for a target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FilesystemGrantKind {
+    /// Only the directory itself, excluding descendants.
+    ExactDirectory,
+    /// An explicit backend-owned character device, with identity revalidation.
+    CharacterDevice,
     ExactFile,
     DirectorySubtree,
 }
@@ -477,9 +485,14 @@ impl ResolvedFilesystemGrants {
         &self.grants
     }
     pub fn read(&self) -> impl Iterator<Item = &ResolvedFilesystemGrant> {
-        self.grants
-            .iter()
-            .filter(|grant| grant.access == FilesystemAccess::Read)
+        self.grants.iter().filter(|grant| {
+            matches!(
+                grant.access,
+                FilesystemAccess::Read
+                    | FilesystemAccess::ReadData
+                    | FilesystemAccess::ReadMetadata
+            )
+        })
     }
     pub fn write(&self) -> impl Iterator<Item = &ResolvedFilesystemGrant> {
         self.grants
@@ -496,6 +509,12 @@ enum GrantResolution {
         relative_target: PathBuf,
     },
     RuntimeCanonical,
+    #[cfg(target_os = "macos")]
+    RuntimeDevice {
+        device: u64,
+        inode: u64,
+        rdev: u64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -532,6 +551,7 @@ impl RuntimeFilesystemAdditions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ResolvedSandboxPolicy {
+    assurance: AssuranceLevel,
     mode: SandboxMode,
     project_root: PathBuf,
     read: Vec<ResolvedGrant>,
@@ -578,7 +598,7 @@ impl FilesystemBindings {
             .chain(&policy.write)
             .map(|grant| {
                 let canonical = canonical_path(&grant.path, "native filesystem binding")?;
-                if canonical != grant.path || filesystem_kind(&canonical)? != grant.kind {
+                if canonical != grant.path || !grant_kind_matches(grant, &canonical)? {
                     return Err(binding_mismatch());
                 }
                 let held = fs::File::open(&canonical).map_err(|error| {
@@ -614,7 +634,7 @@ impl FilesystemBindings {
                 return Err(binding_mismatch());
             }
             let canonical = canonical_path(&expected.path, "filesystem binding revalidation")?;
-            if canonical != expected.path || filesystem_kind(&canonical)? != expected.kind {
+            if canonical != expected.path || !grant_kind_matches(expected, &canonical)? {
                 return Err(binding_mismatch());
             }
             match bound.receipt.binding {
@@ -691,7 +711,7 @@ fn bind_canonical(grant: &ResolvedGrant) -> Result<BoundFilesystemGrant, Executi
                 error
             }
         })?;
-    if canonical != grant.path || filesystem_kind(&canonical)? != grant.kind {
+    if canonical != grant.path || !grant_kind_matches(grant, &canonical)? {
         return Err(binding_mismatch());
     }
     Ok(BoundFilesystemGrant {
@@ -755,6 +775,13 @@ impl ResolvedSandboxPolicy {
                     }
                 }
                 GrantResolution::RuntimeCanonical => validate_canonical_path(&grant.path)?,
+                #[cfg(target_os = "macos")]
+                GrantResolution::RuntimeDevice { .. } => {
+                    validate_canonical_path(&grant.path)?;
+                    if !grant_kind_matches(grant, &grant.path)? {
+                        return Err(binding_mismatch());
+                    }
+                }
             }
         }
         Ok(())
@@ -929,6 +956,8 @@ impl ContainmentSupport {
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnforcementReceipt {
+    executable_resolution: Option<ExecutableResolutionEvidence>,
+    assurance: AssuranceLevel,
     support: ContainmentSupport,
     enforced: EnforcementDimensions,
     established_evidence: Vec<DimensionEvidence>,
@@ -936,8 +965,35 @@ pub struct EnforcementReceipt {
     configured_limits: ExecutionLimits,
 }
 
+/// Exact Unix bytes for PATH and each entry, preserving non-UTF-8 paths.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct ExecutableResolutionEvidence {
+    pub path: Vec<u8>,
+    pub path_order: Vec<Vec<u8>>,
+    pub caller_path_inherited: bool,
+    pub reserved_node: Option<ReservedExecutableEvidence>,
+}
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct ReservedExecutableEvidence {
+    pub command: String,
+    pub private_path: Vec<u8>,
+    pub trusted_runtime: Vec<u8>,
+    pub device: u64,
+    pub inode: u64,
+    pub mechanism: String,
+    pub identity_checks: String,
+    /// Whether the private binding was removed, not whether descendants were cleaned.
+    /// macOS retains it when subprocess-enabled targets may have executed.
+    pub cleanup_observed: bool,
+    pub limitations: String,
+}
+
 impl EnforcementReceipt {
-    #[allow(dead_code)] // The no-backend scaffold cannot produce receipts yet.
+    pub fn executable_resolution(&self) -> Option<&ExecutableResolutionEvidence> {
+        self.executable_resolution.as_ref()
+    }
+
+    #[allow(dead_code)] // Non-macOS backends cannot produce receipts.
     fn checked(
         preflight: &ValidatedPreflight,
         enforced: EnforcementDimensions,
@@ -982,12 +1038,18 @@ impl EnforcementReceipt {
         }
         validate_dimension_evidence(&enforced, &established_evidence)?;
         Ok(Self {
+            executable_resolution: None,
+            assurance: preflight.policy.assurance,
             support: support.clone(),
             enforced,
             established_evidence,
             resolved_filesystem: preflight.bindings.receipt(),
             configured_limits: configured_limits.clone(),
         })
+    }
+
+    pub fn assurance(&self) -> AssuranceLevel {
+        self.assurance
     }
 
     pub fn support(&self) -> &ContainmentSupport {
@@ -1060,7 +1122,7 @@ pub struct CompletionEvidence {
 }
 
 impl CompletionEvidence {
-    #[allow(dead_code)] // The no-backend scaffold cannot produce completion evidence yet.
+    #[allow(dead_code)] // Non-macOS backends cannot produce completion evidence.
     fn checked(
         preflight: &ValidatedPreflight,
         confirmed: EnforcementDimensions,
@@ -1130,7 +1192,7 @@ pub struct ExecutionOutcome {
 }
 
 impl ExecutionOutcome {
-    #[allow(dead_code)] // The no-backend scaffold cannot produce outcomes yet.
+    #[allow(dead_code)] // Non-macOS backends cannot produce outcomes.
     fn checked(
         termination: Termination,
         stdout: Vec<u8>,
@@ -1412,14 +1474,24 @@ impl TrustedNodeRuntime {
     }
 
     fn validate(&self, search_paths: &[PathBuf]) -> Result<(), ExecutionError> {
+        #[cfg(not(target_os = "macos"))]
         if search_paths
             .first()
-            .and_then(|path| fs::canonicalize(path).ok())
+            .and_then(|directory| fs::canonicalize(directory.join(self.path.file_name()?)).ok())
             .as_deref()
-            != self.path.parent()
+            != Some(self.path.as_path())
         {
             return Err(invalid_request(
-                "trusted Node runtime directory must be the first executable search path",
+                "first executable search directory must resolve node to the verified runtime",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        if !search_paths
+            .iter()
+            .any(|p| Some(p.as_path()) == self.path.parent())
+        {
+            return Err(invalid_request(
+                "search paths must contain the trusted runtime parent",
             ));
         }
         let current = Self::checked(&self.path).map_err(|_| {
@@ -1449,6 +1521,9 @@ fn is_node_executable_name(path: &Path) -> bool {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRequest {
+    #[cfg(target_os = "macos")]
+    reserved_node: Option<platform_backend::ReservedNodeBinding>,
+    launcher: Option<crate::PrivateLauncher>,
     program: OsString,
     arguments: Vec<OsString>,
     executable_search_paths: Vec<PathBuf>,
@@ -1496,6 +1571,10 @@ impl ExecutionRequest {
             .as_path()
     }
     fn validate_trusted_node_runtime(&self) -> Result<(), ExecutionError> {
+        #[cfg(target_os = "macos")]
+        if let Some(binding) = &self.reserved_node {
+            return binding.validate();
+        }
         if let Some(runtime) = &self.trusted_node_runtime {
             runtime.validate(&self.executable_search_paths)?;
         }
@@ -1758,6 +1837,9 @@ impl ExecutionRequestBuilder {
             .map(TrustedNodeRuntime::checked)
             .transpose()?;
         let request = ExecutionRequest {
+            #[cfg(target_os = "macos")]
+            reserved_node: None,
+            launcher: crate::LAUNCHER.get().cloned(),
             program: self.program,
             arguments: self.arguments,
             executable_search_paths: self.executable_search_paths,
@@ -1975,9 +2057,12 @@ fn os_contains_nul(value: &OsStr) -> bool {
 
 /// Attempts execution through a private platform backend.
 ///
-/// Platform backends are intentionally not implemented yet. This function performs
-/// containment preflight and fails before spawning any child process.
+/// Experimental macOS Restricted execution requires early private-launcher initialization.
+/// Unsupported platforms and required dimensions fail before target spawn.
 pub fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
+    #[cfg(target_os = "macos")]
+    return platform_backend::execute_reserved(request);
+    #[cfg(not(target_os = "macos"))]
     execute_with_backend(request, &platform_backend::PlatformBackend)
 }
 
@@ -2225,6 +2310,7 @@ fn resolve_policy(
     write.extend(additions.write);
 
     Ok(ResolvedSandboxPolicy {
+        assurance: request.policy().assurance(),
         mode: request.policy().mode(),
         project_root,
         read,
@@ -2402,6 +2488,28 @@ fn resolve_runtime_grant(
             ),
         ));
     }
+    #[cfg(target_os = "macos")]
+    if matches!(
+        canonical.to_str(),
+        Some("/dev/null" | "/dev/random" | "/dev/urandom")
+    ) {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let metadata = fs::metadata(&canonical).map_err(|_| binding_mismatch())?;
+        if !metadata.file_type().is_char_device() {
+            return Err(binding_mismatch());
+        }
+        return Ok(ResolvedGrant {
+            path: canonical,
+            access,
+            kind: FilesystemGrantKind::CharacterDevice,
+            source: FilesystemGrantSource::BackendRuntime,
+            resolution: GrantResolution::RuntimeDevice {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                rdev: metadata.rdev(),
+            },
+        });
+    }
     Ok(ResolvedGrant {
         kind: filesystem_kind(&canonical)?,
         path: canonical,
@@ -2409,6 +2517,27 @@ fn resolve_runtime_grant(
         source: FilesystemGrantSource::BackendRuntime,
         resolution: GrantResolution::RuntimeCanonical,
     })
+}
+
+fn grant_kind_matches(grant: &ResolvedGrant, path: &Path) -> Result<bool, ExecutionError> {
+    #[cfg(target_os = "macos")]
+    if let GrantResolution::RuntimeDevice {
+        device,
+        inode,
+        rdev,
+    } = grant.resolution
+    {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let metadata = fs::metadata(path).map_err(|_| binding_mismatch())?;
+        return Ok(grant.source == FilesystemGrantSource::BackendRuntime
+            && grant.kind == FilesystemGrantKind::CharacterDevice
+            && metadata.file_type().is_char_device()
+            && (metadata.dev(), metadata.ino(), metadata.rdev()) == (device, inode, rdev));
+    }
+    let actual = filesystem_kind(path)?;
+    Ok(actual == grant.kind
+        || (actual == FilesystemGrantKind::DirectorySubtree
+            && grant.kind == FilesystemGrantKind::ExactDirectory))
 }
 
 fn filesystem_kind(path: &Path) -> Result<FilesystemGrantKind, ExecutionError> {
@@ -2419,13 +2548,6 @@ fn filesystem_kind(path: &Path) -> Result<FilesystemGrantKind, ExecutionError> {
     } else if metadata.is_dir() {
         Ok(FilesystemGrantKind::DirectorySubtree)
     } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileTypeExt;
-            if metadata.file_type().is_char_device() {
-                return Ok(FilesystemGrantKind::ExactFile);
-            }
-        }
         Err(ExecutionError::new(
             ExecutionErrorCategory::PolicyViolation,
             format!(
@@ -2490,6 +2612,9 @@ mod platform_backend {
         )
     }
 }
+
+#[cfg(target_os = "macos")]
+pub(crate) use platform_backend::dispatch_private_launcher;
 
 #[cfg(test)]
 mod tests {
@@ -2624,6 +2749,38 @@ mod tests {
             ExecutionErrorCategory::UnsupportedContainment
         );
         assert_eq!(backend.preparations.get(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn backend_devices_are_explicit_typed_and_identity_checked() {
+        let grant =
+            resolve_runtime_grant(PathBuf::from("/dev/null"), FilesystemAccess::Read).unwrap();
+        assert_eq!(grant.kind, FilesystemGrantKind::CharacterDevice);
+        assert!(bind_canonical(&grant).is_ok());
+        let mut changed = grant.clone();
+        changed.path = PathBuf::from("/dev/random");
+        assert!(bind_canonical(&changed).is_err());
+        assert!(resolve_runtime_grant(PathBuf::from("/dev/zero"), FilesystemAccess::Read).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_policy_rejects_devices_and_special_files() {
+        use std::os::unix::net::UnixListener;
+        let root = temporary_directory("special-files");
+        let socket = PathBuf::from(format!("/tmp/tapid-special-{}.sock", std::process::id()));
+        let _listener = UnixListener::bind(&socket).unwrap();
+        for path in [Path::new("/dev/null"), socket.as_path()] {
+            for access in [FilesystemAccess::Read, FilesystemAccess::Write] {
+                assert!(
+                    resolve_project_grant(Path::new("/"), path.to_str().unwrap(), access).is_err(),
+                    "accepted {path:?}"
+                );
+            }
+        }
+        fs::remove_file(socket).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

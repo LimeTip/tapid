@@ -1,6 +1,6 @@
 # Root-script platform validation
 
-ADR 0005 CLI wiring is integrated and fails closed when no backend can prove every required restriction. No native Restricted or ManagedTree backend is implemented at the current exact HEAD, and no enforcement receipt can be produced. Existing consumer jobs and local macOS tests exercise package-manager behavior and fail-closed preflight, not native containment, descendant authority propagation, lifecycle ownership, or resource-limit enforcement.
+ADR 0005 CLI wiring and experimental macOS Restricted containment are integrated. Native behavioral controls gate support, and accepted executions produce checked enforcement receipts. ManagedTree, resource-limit profiles, and Linux/Windows native containment remain unsupported. Local dirty-tree results are development evidence, not the clean-commit platform acceptance record required below.
 
 A platform may be marked Restricted only after the Restricted probe set passes through `tapid run <SCRIPT> -- <ARGS...>` at the exact integrated commit. ManagedTree requires the Restricted probes plus the ManagedTree-only probes. A unit test of policy declarations, backend availability, compilation, a generated native profile, or a successful allowed operation is insufficient.
 
@@ -88,7 +88,7 @@ A future `--no-sandbox` path requires separate tests. It must be explicit and pr
 
 ### macOS 26
 
-The Restricted backend is experimental Seatbelt applied through deprecated, path-based `sandbox-exec`. Integrated probes establish filesystem and network authority, descendant propagation, explicit environment/PATH, descriptor hygiene, and honest path-binding and lifecycle limitations before support is reported. Native acceptance must still be rerun at each exact commit being claimed.
+The Restricted backend is experimental Seatbelt installed by deprecated `sandbox-exec`, with path-based parameter grants and a current-executable private helper. Native syscall probes also use private Seatbelt APIs. Startup probes sample generated deny-default filesystem/network controls, descendant writes, explicit environment, descriptor hygiene, and exec replacement. Each negative syscall control requires permission denial and its own successful positive control. They require no Ruby, Python, compiler, or network service. These samples are support gates, not an exhaustive proof of Seatbelt behavior. Broader development tests may use system Ruby and must fail rather than skip when it is absent. Native acceptance must still be rerun at each exact commit being claimed.
 
 Native ManagedTree remains unsupported. Process groups are escapable with `setsid` and `setpgid`; Darwin has not supported recursive `EVFILT_PROC` tracking through `NOTE_TRACK`, `NOTE_TRACKERR`, or `NOTE_CHILD` since macOS 10.5; and `NOTE_FORK` plus process-table or `p_puniqueid` scans retains a rapid double-fork/intermediate-exit race. An optional strict Linux VM through Virtualization.framework is a separate future backend that changes platform, startup, filesystem-sharing, and network semantics; it must not be reported as native macOS ManagedTree.
 
@@ -108,9 +108,11 @@ ManagedTree additionally requires a non-breakaway Job Object assigned before unt
 
 | Platform/backend | Restricted status | ManagedTree status | Native evidence |
 |---|---|---|---|
-| macOS 26 Seatbelt/`sandbox-exec` | Experimental Restricted support; profiles with resource limits fail closed | Native support unavailable | Native macOS 26 behavioral suite and exact CLI HTTP acceptance |
+| macOS 26 native Seatbelt | Experimental Restricted support; profiles with resource limits fail closed | Native support unavailable | Native macOS 26 behavioral suite and exact CLI HTTP acceptance |
 | Linux Landlock/`no_new_privs`/seccomp | Planned; runtime capability-dependent | Planned only with proven namespaces and cgroup delegation | No integrated evidence recorded |
 | Windows AppContainer or LPAC plus Job Object | Planned; not implemented or validated | Planned only with non-breakaway pre-execution Job assignment and tree-wide limits | No integrated evidence recorded |
 | Strict Linux VM through macOS Virtualization.framework | Optional future backend with Linux VM semantics | Future investigation | No implementation or evidence recorded |
 
 Keep package-manager, installer, CLI preflight, Restricted enforcement, and ManagedTree evidence separate. A local result on one platform or assurance level is never evidence for another.
+
+The reserved-Node lifecycle regression launches a detached descendant with redirected stdio, returns a root receipt, waits for private-directory removal with a bounded retention control, then invokes bare `node` with hostile project `.bin/node` present. The hostile marker must remain absent and the verified runtime must execute. Subprocess-enabled receipts must disclose the retained binding with `cleanup_observed = false`; failed pre-exec launches must remove it, and subprocess-disabled successful cleanup requires native fork denial and observed root exit. Retained bindings are never reused or deleted on a timer. Temporary-storage retention lasts until OS cleanup or host removal; removal during descendant survival ends the binding guarantee.
