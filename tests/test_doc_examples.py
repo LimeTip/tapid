@@ -13,6 +13,15 @@ SPEC = importlib.util.spec_from_file_location('doc_examples', ROOT / 'scripts/ch
 
 
 class RunnerTests(unittest.TestCase):
+    def test_public_installer_workflow_cannot_access_or_push_private_website(self):
+        workflow = (ROOT / '.github/workflows/website-installer-sync.yml').read_text()
+        self.assertNotIn('repository: LimeTip/tapid-web', workflow)
+        self.assertNotIn('TAPID_WEB_SYNC_TOKEN', workflow)
+        self.assertNotIn('git push', workflow)
+        self.assertNotIn('sync-website:', workflow)
+        self.assertIn('sh -n scripts/install.sh', workflow)
+        self.assertIn('PowerShell syntax', workflow)
+
     def load(self):
         self.assertTrue(Path(SPEC.origin).is_file(), 'missing executable example runner')
         module = importlib.util.module_from_spec(SPEC)
