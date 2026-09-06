@@ -11,7 +11,8 @@ pub use execution::{
     ExecutionErrorCategory, ExecutionOutcome, ExecutionRequest, ExecutionRequestBuilder,
     FilesystemAccess, FilesystemBindingMode, FilesystemGrantKind, FilesystemGrantSource,
     MAX_ARGUMENT_COUNT, MAX_ARGUMENT_UNITS, MAX_ARGV_UNITS, MAX_BACKEND_IDENTITY_BYTES,
-    MAX_ENVIRONMENT_BLOCK_UNITS, MAX_ENVIRONMENT_VALUE_UNITS, MAX_PROGRAM_UNITS,
+    MAX_ENVIRONMENT_BLOCK_UNITS, MAX_ENVIRONMENT_VALUE_UNITS, MAX_EXECUTABLE_SEARCH_PATH_COUNT,
+    MAX_EXECUTABLE_SEARCH_PATH_UNITS, MAX_EXECUTABLE_SEARCH_PATHS_UNITS, MAX_PROGRAM_UNITS,
     MAX_PROJECT_ROOT_UNITS, ResolvedFilesystemGrant, ResolvedFilesystemGrants, Termination,
     execute,
 };

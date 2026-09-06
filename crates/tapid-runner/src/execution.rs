@@ -22,6 +22,12 @@ pub const MAX_ENVIRONMENT_VALUE_UNITS: usize = 32_767;
 pub const MAX_ENVIRONMENT_BLOCK_UNITS: usize = 32_767;
 /// Maximum project-root length in bytes on Unix or UTF-16 code units on Windows.
 pub const MAX_PROJECT_ROOT_UNITS: usize = 32_767;
+/// Maximum number of explicit executable search directories.
+pub const MAX_EXECUTABLE_SEARCH_PATH_COUNT: usize = 256;
+/// Maximum length of one executable search directory in native platform units.
+pub const MAX_EXECUTABLE_SEARCH_PATH_UNITS: usize = 4_096;
+/// Maximum serialized executable search path, including separators and its terminating NUL.
+pub const MAX_EXECUTABLE_SEARCH_PATHS_UNITS: usize = 32_767;
 
 /// Identity and lifecycle status of a containment backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -905,10 +911,23 @@ impl fmt::Display for ExecutionError {
 impl std::error::Error for ExecutionError {}
 
 /// Platform-neutral, validated request passed to a private execution backend.
+///
+/// Search paths remain private adapter input: external callers can add them only through the
+/// checked builder and cannot replace validated paths after construction.
+///
+/// ```compile_fail
+/// use tapid_runner::ExecutionRequest;
+/// let request = ExecutionRequest::builder("node")
+///     .executable_search_path("/runtime/bin")
+///     .build()
+///     .unwrap();
+/// let _ = request.executable_search_paths();
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRequest {
     program: OsString,
     arguments: Vec<OsString>,
+    executable_search_paths: Vec<PathBuf>,
     project_root: PathBuf,
     policy: SandboxPolicy,
     environment: BTreeMap<OsString, OsString>,
@@ -919,6 +938,7 @@ impl ExecutionRequest {
         ExecutionRequestBuilder {
             program: program.into(),
             arguments: Vec::new(),
+            executable_search_paths: Vec::new(),
             project_root: PathBuf::from("."),
             policy: SandboxPolicy::default(),
             environment: BTreeMap::new(),
@@ -930,6 +950,10 @@ impl ExecutionRequest {
     }
     pub fn arguments(&self) -> &[OsString] {
         &self.arguments
+    }
+    /// Ordered executable search directories for private platform adapters.
+    fn executable_search_paths(&self) -> &[PathBuf] {
+        &self.executable_search_paths
     }
     pub fn project_root(&self) -> &Path {
         &self.project_root
@@ -983,6 +1007,7 @@ impl ExecutionRequest {
         if self.project_root.as_os_str().is_empty() {
             return Err(invalid_request("project root must not be empty"));
         }
+        validate_executable_search_paths(&self.executable_search_paths)?;
         let mut environment_units = 1usize;
         for (name, value) in &self.environment {
             let Some(name) = name.to_str() else {
@@ -1035,6 +1060,7 @@ impl ExecutionRequest {
 pub struct ExecutionRequestBuilder {
     program: OsString,
     arguments: Vec<OsString>,
+    executable_search_paths: Vec<PathBuf>,
     project_root: PathBuf,
     policy: SandboxPolicy,
     environment: BTreeMap<OsString, OsString>,
@@ -1052,6 +1078,23 @@ impl ExecutionRequestBuilder {
         S: Into<OsString>,
     {
         self.arguments.extend(arguments.into_iter().map(Into::into));
+        self
+    }
+
+    /// Adds one executable search directory after existing entries.
+    pub fn executable_search_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.executable_search_paths.push(path.into());
+        self
+    }
+
+    /// Adds ordered executable search directories without consulting ambient `PATH`.
+    pub fn executable_search_paths<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.executable_search_paths
+            .extend(paths.into_iter().map(Into::into));
         self
     }
 
@@ -1090,6 +1133,7 @@ impl ExecutionRequestBuilder {
         let request = ExecutionRequest {
             program: self.program,
             arguments: self.arguments,
+            executable_search_paths: self.executable_search_paths,
             project_root: self.project_root,
             policy: self.policy,
             environment: self.environment,
@@ -1097,6 +1141,37 @@ impl ExecutionRequestBuilder {
         request.validate()?;
         Ok(request)
     }
+}
+
+fn validate_executable_search_paths(paths: &[PathBuf]) -> Result<(), ExecutionError> {
+    if paths.len() > MAX_EXECUTABLE_SEARCH_PATH_COUNT {
+        return Err(invalid_request(format!(
+            "execution request exceeds {MAX_EXECUTABLE_SEARCH_PATH_COUNT} executable search directories"
+        )));
+    }
+    let mut total_units = 1usize;
+    for (index, path) in paths.iter().enumerate() {
+        if paths[..index].contains(path) {
+            return Err(invalid_request(format!(
+                "duplicate executable search directory: {}",
+                path.display()
+            )));
+        }
+        let units = validate_os_value(
+            "executable search directory",
+            path.as_os_str(),
+            MAX_EXECUTABLE_SEARCH_PATH_UNITS,
+        )?;
+        total_units = total_units
+            .saturating_add(usize::from(index != 0))
+            .saturating_add(units);
+        if total_units > MAX_EXECUTABLE_SEARCH_PATHS_UNITS {
+            return Err(invalid_request(format!(
+                "executable search path exceeds {MAX_EXECUTABLE_SEARCH_PATHS_UNITS} bytes/code units"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn invalid_request(message: impl Into<String>) -> ExecutionError {
@@ -1340,6 +1415,13 @@ fn resolve_policy(
         .iter()
         .map(|grant| resolve_project_grant(&project_root, grant, FilesystemAccess::Write))
         .collect::<Result<Vec<_>, _>>()?;
+    read.extend(
+        request
+            .executable_search_paths()
+            .iter()
+            .map(|path| resolve_executable_search_directory(path))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     read.extend(additions.read);
     write.extend(additions.write);
 
@@ -1418,6 +1500,46 @@ fn resolve_project_grant(
             canonical_ancestor,
             relative_target,
         },
+    })
+}
+
+fn resolve_executable_search_directory(path: &Path) -> Result<ResolvedGrant, ExecutionError> {
+    if !path.is_absolute() {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            format!(
+                "executable search directory must be absolute: {}",
+                path.display()
+            ),
+        ));
+    }
+    let canonical = canonical_path(path, "executable search directory")?;
+    if canonical != path {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            format!(
+                "executable search directory must already be canonical: {}",
+                path.display()
+            ),
+        ));
+    }
+    let metadata = fs::metadata(&canonical)
+        .map_err(|error| path_error("executable search directory", &canonical, error))?;
+    if !metadata.is_dir() {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            format!(
+                "executable search path is not a directory: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(ResolvedGrant {
+        path: canonical,
+        access: FilesystemAccess::Read,
+        kind: FilesystemGrantKind::DirectorySubtree,
+        source: FilesystemGrantSource::BackendRuntime,
+        resolution: GrantResolution::RuntimeCanonical,
     })
 }
 
@@ -1561,6 +1683,97 @@ mod tests {
         assert_eq!(
             request.environment().get(std::ffi::OsStr::new("NODE_ENV")),
             Some(&std::ffi::OsString::from("test"))
+        );
+    }
+
+    #[test]
+    fn request_builder_preserves_ordered_executable_search_paths() {
+        let request = ExecutionRequest::builder("node")
+            .executable_search_paths(["/project/node_modules/.bin", "/runtime/bin"])
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request.executable_search_paths(),
+            [
+                PathBuf::from("/project/node_modules/.bin"),
+                PathBuf::from("/runtime/bin")
+            ]
+        );
+    }
+
+    #[test]
+    fn executable_search_path_payload_bounds_and_duplicates_are_rejected() {
+        let at_count = (0..MAX_EXECUTABLE_SEARCH_PATH_COUNT)
+            .map(|index| PathBuf::from(format!("/{index}")))
+            .collect::<Vec<_>>();
+        assert!(
+            ExecutionRequest::builder("node")
+                .executable_search_paths(at_count.clone())
+                .build()
+                .is_ok()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .executable_search_paths(at_count.into_iter().chain([PathBuf::from("/over")]))
+                .build()
+                .is_err()
+        );
+
+        let at_path_limit = format!("/{}", "x".repeat(MAX_EXECUTABLE_SEARCH_PATH_UNITS - 1));
+        assert!(
+            ExecutionRequest::builder("node")
+                .executable_search_path(&at_path_limit)
+                .build()
+                .is_ok()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .executable_search_path(format!("{at_path_limit}x"))
+                .build()
+                .is_err()
+        );
+
+        let mut at_total = (0..7)
+            .map(|index| {
+                let prefix = format!("/{index}/");
+                PathBuf::from(format!(
+                    "{prefix}{}",
+                    "x".repeat(MAX_EXECUTABLE_SEARCH_PATH_UNITS - prefix.len())
+                ))
+            })
+            .collect::<Vec<_>>();
+        let used = 7 * MAX_EXECUTABLE_SEARCH_PATH_UNITS + 7 + 1;
+        let remainder = MAX_EXECUTABLE_SEARCH_PATHS_UNITS - used;
+        at_total.push(PathBuf::from(format!(
+            "/last/{}",
+            "x".repeat(remainder - "/last/".len())
+        )));
+        assert!(
+            ExecutionRequest::builder("node")
+                .executable_search_paths(at_total.clone())
+                .build()
+                .is_ok()
+        );
+        at_total.last_mut().unwrap().as_mut_os_string().push("x");
+        assert!(
+            ExecutionRequest::builder("node")
+                .executable_search_paths(at_total)
+                .build()
+                .is_err()
+        );
+
+        assert!(
+            ExecutionRequest::builder("node")
+                .executable_search_paths(["/same", "/same"])
+                .build()
+                .is_err()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .executable_search_path("/bad\0path")
+                .build()
+                .is_err()
         );
     }
 
@@ -2059,6 +2272,106 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
         directory
+    }
+
+    #[test]
+    fn invalid_search_directories_fail_generic_preflight_before_spawn() {
+        let root = temporary_directory("invalid-search-paths");
+        let directory = root.join("directory");
+        let file = root.join("file");
+        fs::create_dir(&directory).unwrap();
+        fs::write(&file, b"not a directory").unwrap();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let canonical_directory = fs::canonicalize(&directory).unwrap();
+        let noncanonical = canonical_directory
+            .join("..")
+            .join(canonical_directory.file_name().unwrap());
+        let invalid = [
+            PathBuf::from("relative"),
+            canonical_root.join("missing"),
+            fs::canonicalize(file).unwrap(),
+            noncanonical,
+        ];
+
+        for path in invalid {
+            let backend = OutcomeBackend {
+                termination: Termination::Exited(0),
+                stdout: vec![],
+                stderr: vec![],
+                spawns: std::cell::Cell::new(0),
+            };
+            let request = ExecutionRequest::builder("node")
+                .project_root(&canonical_root)
+                .executable_search_path(path)
+                .build()
+                .unwrap();
+            assert_eq!(
+                execute_with_backend(&request, &backend)
+                    .unwrap_err()
+                    .category(),
+                ExecutionErrorCategory::PolicyViolation
+            );
+            assert_eq!(backend.spawns.get(), 0);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_directories_are_ordered_backend_runtime_receipt_grants() {
+        struct Backend;
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn spawn(
+                &self,
+                request: &ExecutionRequest,
+                preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                assert_eq!(
+                    request.executable_search_paths(),
+                    [
+                        preflight.policy.read[1].path.clone(),
+                        preflight.policy.read[2].path.clone()
+                    ]
+                );
+                let receipt =
+                    EnforcementReceipt::checked(preflight, preflight.support.requested().clone())?;
+                ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt)
+            }
+        }
+
+        let root = temporary_directory("search-path-root");
+        let managed_bin = root.join("node_modules/.bin");
+        let node_bin = root.join("selected-node/bin");
+        fs::create_dir_all(&managed_bin).unwrap();
+        fs::create_dir_all(&node_bin).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let managed_bin = fs::canonicalize(managed_bin).unwrap();
+        let node_bin = fs::canonicalize(node_bin).unwrap();
+        let request = ExecutionRequest::builder("node")
+            .project_root(&root)
+            .executable_search_paths([managed_bin.clone(), node_bin.clone()])
+            .build()
+            .unwrap();
+
+        let outcome = execute_with_backend(&request, &Backend).unwrap();
+        let runtime_grants = outcome
+            .enforcement()
+            .resolved_filesystem()
+            .grants()
+            .iter()
+            .filter(|grant| grant.source() == FilesystemGrantSource::BackendRuntime)
+            .collect::<Vec<_>>();
+        assert_eq!(runtime_grants.len(), 2);
+        assert_eq!(runtime_grants[0].path(), managed_bin);
+        assert_eq!(runtime_grants[1].path(), node_bin);
+        assert!(runtime_grants.iter().all(|grant| {
+            grant.access() == FilesystemAccess::Read
+                && grant.kind() == FilesystemGrantKind::DirectorySubtree
+        }));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2680,6 +2993,62 @@ mod tests {
         assert_eq!(backend.bind_attempts.get(), 0);
         assert_eq!(backend.spawn_attempts.get(), 0);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_search_path_payload_is_rejected_before_support_probing() {
+        struct Backend {
+            probes: std::cell::Cell<usize>,
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                self.probes.set(self.probes.get() + 1);
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                unreachable!()
+            }
+        }
+
+        let malformed = [
+            vec![PathBuf::from(format!(
+                "/{}",
+                "x".repeat(MAX_EXECUTABLE_SEARCH_PATH_UNITS)
+            ))],
+            vec![PathBuf::from("/bad\0path")],
+            vec![PathBuf::from("/same"), PathBuf::from("/same")],
+            (0..=MAX_EXECUTABLE_SEARCH_PATH_COUNT)
+                .map(|index| PathBuf::from(format!("/{index}")))
+                .collect(),
+            (0..9)
+                .map(|index| {
+                    let prefix = format!("/{index}/");
+                    PathBuf::from(format!(
+                        "{prefix}{}",
+                        "x".repeat(MAX_EXECUTABLE_SEARCH_PATH_UNITS - prefix.len())
+                    ))
+                })
+                .collect(),
+        ];
+        for executable_search_paths in malformed {
+            let backend = Backend {
+                probes: std::cell::Cell::new(0),
+            };
+            let mut request = ExecutionRequest::builder("node").build().unwrap();
+            request.executable_search_paths = executable_search_paths;
+            assert_eq!(
+                execute_with_backend(&request, &backend)
+                    .unwrap_err()
+                    .category(),
+                ExecutionErrorCategory::InvalidRequest
+            );
+            assert_eq!(backend.probes.get(), 0);
+        }
     }
 
     #[test]
