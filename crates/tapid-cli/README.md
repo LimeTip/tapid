@@ -32,7 +32,7 @@ tapid init [PATH]
 tapid manifest validate [PATH]
 tapid lock verify
 tapid install [OPTIONS]
-tapid run <SCRIPT> --node-runtime <PATH> [-- <ARGS>...]
+tapid run <SCRIPT> [--node-runtime <PATH>] [-- <ARGS>...]
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.

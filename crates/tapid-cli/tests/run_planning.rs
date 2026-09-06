@@ -226,6 +226,26 @@ fn windows_initial_executable_selects_native_or_double_escape() {
     ));
     assert!(run::windows_initial_command_double_escape(
         "explicit.cmd serve",
+        std::slice::from_ref(&bin)
+    ));
+    assert!(!run::windows_initial_command_double_escape(
+        "\"wrapper\" serve",
+        std::slice::from_ref(&bin)
+    ));
+    assert!(!run::windows_initial_command_double_escape(
+        "\"wrapper.cmd\" serve",
+        std::slice::from_ref(&bin)
+    ));
+    assert!(!run::windows_initial_command_double_escape(
+        "wrapper\tserve",
+        std::slice::from_ref(&bin)
+    ));
+    assert!(!run::windows_initial_command_double_escape(
+        "native && wrapper.cmd",
+        std::slice::from_ref(&bin)
+    ));
+    assert!(run::windows_initial_command_double_escape(
+        "wrapper.cmd && native",
         &[bin]
     ));
     fs::remove_dir_all(root).unwrap();

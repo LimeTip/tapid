@@ -308,14 +308,18 @@ pub fn windows_cmd_escape_argument(
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn windows_initial_command_double_escape(script: &str, search_directories: &[PathBuf]) -> bool {
+    // Match npm promise-spawn's initial-command scan exactly: only a literal
+    // space terminates the first token, quote characters remain part of the
+    // lookup string, and either quote kind toggles the in-quotes state.
     let mut initial = String::new();
-    let mut quote = None;
+    let mut inside_quotes = false;
     for character in script.chars() {
-        match (quote, character) {
-            (None, ' ' | '\t') => break,
-            (None, '"' | '\'') => quote = Some(character),
-            (Some(open), close) if open == close => quote = None,
-            _ => initial.push(character),
+        if character == ' ' && !inside_quotes {
+            break;
+        }
+        initial.push(character);
+        if character == '"' || character == '\'' {
+            inside_quotes = !inside_quotes;
         }
     }
     let initial_lower = initial.to_ascii_lowercase();
