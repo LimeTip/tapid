@@ -44,7 +44,7 @@ tapid run dev
 
 `tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`.
 
-ADR 0005 makes containment default-on and fail-closed for root scripts. The configuration parser, platform backends, and CLI wiring are still pending integrated verification; this describes the accepted target contract, not a guarantee provided by the current binary.
+ADR 0005 makes containment default-on and fail-closed for root scripts. The policy parser and platform-neutral execution contracts are implemented, while CLI wiring and Linux/Windows runtime enforcement remain pending integrated verification. macOS 26 is unsupported because it lacks a public unprivileged primitive for race-free descendant ownership. This describes the accepted target contract, not a containment guarantee provided by the current binary.
 
 For example, a Next.js development server needs project writes and network access but does not need ambient credentials:
 
