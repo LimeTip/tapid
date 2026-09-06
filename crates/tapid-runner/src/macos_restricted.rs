@@ -15,8 +15,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -24,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const INTERNAL_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 const PIPE_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
+const LIVE_SINK_BACKPRESSURE_GRACE: Duration = Duration::from_millis(250);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const LIMITATIONS: &[&str] = &[
     "sampled positive/negative syscall controls are not an exhaustive proof of Seatbelt semantics",
@@ -1212,16 +1213,36 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
 
         let stop = Arc::new(AtomicBool::new(false));
         let overflow = Arc::new(AtomicBool::new(false));
+        let sink_backpressure = Arc::new(AtomicBool::new(false));
+        let output_bytes = Arc::new(AtomicUsize::new(0));
+        let (mut sinks, stdout_sink, stderr_sink) = LiveSinks::spawn()?;
         let stdout_reader = spawn_reader(
             stdout,
-            false,
             Arc::clone(&stop),
             Arc::clone(&overflow),
-            true,
+            Arc::clone(&output_bytes),
+            Some(stdout_sink),
+            Arc::clone(&sink_backpressure),
         );
-        let stderr_reader =
-            spawn_reader(stderr, true, Arc::clone(&stop), Arc::clone(&overflow), true);
+        let stderr_reader = spawn_reader(
+            stderr,
+            Arc::clone(&stop),
+            Arc::clone(&overflow),
+            output_bytes,
+            Some(stderr_sink),
+            Arc::clone(&sink_backpressure),
+        );
         let status = loop {
+            if sink_backpressure.load(Ordering::Acquire) {
+                self.kill_group();
+                stop.store(true, Ordering::Release);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
+                    "live output sink remained backpressured past the bounded grace period",
+                ));
+            }
             if overflow.load(Ordering::Acquire) {
                 self.kill_group();
                 stop.store(true, Ordering::Release);
@@ -1230,7 +1251,7 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
                 return Err(ExecutionError::new(
                     ExecutionErrorCategory::OutputLimit,
                     format!(
-                        "internal output safety ceiling of {INTERNAL_OUTPUT_CEILING} bytes was exceeded"
+                        "shared internal stdout+stderr safety ceiling of {INTERNAL_OUTPUT_CEILING} combined bytes was exceeded"
                     ),
                 ));
             }
@@ -1254,6 +1275,9 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
                 }
             }
         };
+        // `try_wait` reaped the leader. Its numeric process-group ID can now be reused,
+        // so it must never be signalled during delayed pipe shutdown.
+        self.process_group = None;
         self.child = None;
         if let Some(binding) = &self.request.reserved_node {
             let _ = binding.launch.root_reaped.set(());
@@ -1274,6 +1298,7 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
         let stderr = stderr_reader.join().map_err(|_| {
             ExecutionError::new(ExecutionErrorCategory::Internal, "stderr reader panicked")
         })??;
+        sinks.finish()?;
         let requested = self.preflight.support.requested().clone();
         let established = evidence_for_dimensions(
             &requested,
@@ -1328,6 +1353,10 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
 
 impl MacosLifecycle<'_> {
     fn kill_group(&mut self) {
+        if self.child.is_none() {
+            self.process_group = None;
+            return;
+        }
         let Some(group) = self.process_group else {
             return;
         };
@@ -1423,41 +1452,38 @@ fn set_nonblocking<T: std::os::fd::AsRawFd>(value: &T) -> Result<(), ExecutionEr
 
 fn spawn_reader<R: Read + Send + 'static>(
     mut reader: R,
-    stderr: bool,
     stop: Arc<AtomicBool>,
     overflow: Arc<AtomicBool>,
-    live_output: bool,
+    output_bytes: Arc<AtomicUsize>,
+    mut live_sink: Option<ChildStdin>,
+    sink_backpressure: Arc<AtomicBool>,
 ) -> thread::JoinHandle<Result<Vec<u8>, ExecutionError>> {
     thread::spawn(move || {
         let mut captured = Vec::new();
         let mut chunk = [0_u8; 8192];
         loop {
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(count) => {
-                    if captured.len().saturating_add(count) > INTERNAL_OUTPUT_CEILING {
+                    if output_bytes
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                            used.checked_add(count)
+                                .filter(|total| *total <= INTERNAL_OUTPUT_CEILING)
+                        })
+                        .is_err()
+                    {
                         overflow.store(true, Ordering::Release);
                         break;
                     }
                     captured.extend_from_slice(&chunk[..count]);
-                    if live_output {
-                        let result = if stderr {
-                            std::io::stderr().write_all(&chunk[..count])
-                        } else {
-                            std::io::stdout().write_all(&chunk[..count])
-                        };
-                        result.map_err(|error| {
-                            ExecutionError::new(
-                                ExecutionErrorCategory::Internal,
-                                format!("cannot stream child output: {error}"),
-                            )
-                        })?;
+                    if let Some(sink) = live_sink.as_mut() {
+                        write_live_output(sink, &chunk[..count], &stop, &sink_backpressure)?;
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if stop.load(Ordering::Acquire) {
-                        break;
-                    }
                     thread::sleep(POLL_INTERVAL);
                 }
                 Err(error) => {
@@ -1470,6 +1496,160 @@ fn spawn_reader<R: Read + Send + 'static>(
         }
         Ok(captured)
     })
+}
+
+fn write_live_output(
+    sink: &mut ChildStdin,
+    bytes: &[u8],
+    stop: &AtomicBool,
+    backpressure: &AtomicBool,
+) -> Result<(), ExecutionError> {
+    let mut written = 0;
+    let mut blocked_since = None;
+    while written < bytes.len() {
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        match sink.write(&bytes[written..]) {
+            Ok(0) => {
+                backpressure.store(true, Ordering::Release);
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
+                    "live output sink closed before accepting child output",
+                ));
+            }
+            Ok(count) => {
+                written += count;
+                blocked_since = None;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let since = blocked_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= LIVE_SINK_BACKPRESSURE_GRACE {
+                    backpressure.store(true, Ordering::Release);
+                    return Err(ExecutionError::new(
+                        ExecutionErrorCategory::Internal,
+                        "live output sink remained backpressured past the bounded grace period",
+                    ));
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(error) => {
+                backpressure.store(true, Ordering::Release);
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
+                    format!("cannot stream child output: {error}"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+struct LiveSinks {
+    children: Vec<Child>,
+}
+
+impl LiveSinks {
+    fn spawn() -> Result<(Self, ChildStdin, ChildStdin), ExecutionError> {
+        let (stdout_child, stdout_input) = spawn_live_sink(libc::STDOUT_FILENO)?;
+        let (stderr_child, stderr_input) = match spawn_live_sink(libc::STDERR_FILENO) {
+            Ok(sink) => sink,
+            Err(error) => {
+                let mut child = stdout_child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        Ok((
+            Self {
+                children: vec![stdout_child, stderr_child],
+            },
+            stdout_input,
+            stderr_input,
+        ))
+    }
+
+    fn finish(&mut self) -> Result<(), ExecutionError> {
+        let deadline = Instant::now() + LIVE_SINK_BACKPRESSURE_GRACE;
+        loop {
+            let mut complete = true;
+            for child in &mut self.children {
+                match child.try_wait() {
+                    Ok(Some(status)) if status.success() => {}
+                    Ok(Some(_)) => {
+                        return Err(ExecutionError::new(
+                            ExecutionErrorCategory::Internal,
+                            "live output sink failed",
+                        ));
+                    }
+                    Ok(None) => complete = false,
+                    Err(error) => {
+                        return Err(ExecutionError::new(
+                            ExecutionErrorCategory::Internal,
+                            format!("cannot supervise live output sink: {error}"),
+                        ));
+                    }
+                }
+            }
+            if complete {
+                self.children.clear();
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
+                    "live output sink remained backpressured past the bounded grace period",
+                ));
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+}
+
+impl Drop for LiveSinks {
+    fn drop(&mut self) {
+        for child in &mut self.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn spawn_live_sink(destination: i32) -> Result<(Child, ChildStdin), ExecutionError> {
+    // SAFETY: duplicate the caller's live stream descriptor into independent ownership.
+    let duplicate = unsafe { libc::fcntl(destination, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::Internal,
+            format!(
+                "cannot duplicate live output sink: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    // SAFETY: `duplicate` is a newly owned descriptor.
+    let output = unsafe { OwnedFd::from_raw_fd(duplicate) };
+    let mut child = Command::new("/bin/cat")
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            ExecutionError::new(
+                ExecutionErrorCategory::Internal,
+                format!("cannot start bounded live output sink: {error}"),
+            )
+        })?;
+    let input = child.stdin.take().ok_or_else(|| {
+        ExecutionError::new(
+            ExecutionErrorCategory::Internal,
+            "live output sink input is unavailable",
+        )
+    })?;
+    set_nonblocking(&input)?;
+    Ok((child, input))
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -2274,7 +2454,7 @@ mod tests {
             };
             let start = Instant::now();
             let result = lifecycle.execute();
-            let pid = lifecycle.process_group.unwrap() as u32;
+            let pid = lifecycle.process_group.map(|group| group as u32);
             let cleanup = lifecycle.cleanup();
             if fault == "valid" {
                 assert!(result.is_ok(), "valid real-pipe control failed: {result:?}");
@@ -2292,15 +2472,17 @@ mod tests {
                 );
             }
             assert!(lifecycle.child.is_none());
-            assert_eq!(
-                unsafe { libc::kill(pid as i32, 0) },
-                -1,
-                "{fault} child survived"
-            );
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH)
-            );
+            if let Some(pid) = pid {
+                assert_eq!(
+                    unsafe { libc::kill(pid as i32, 0) },
+                    -1,
+                    "{fault} child survived"
+                );
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH)
+                );
+            }
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -2787,14 +2969,355 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_sanitation_is_bounded_for_huge_limits_and_fails_closed_when_full() {
+        const CHILD: &str = "TAPID_TEST_DESCRIPTOR_LIMIT_CHILD";
+        if let Ok(mode) = std::env::var(CHILD) {
+            let mut original: libc::rlimit = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut original) },
+                0
+            );
+            let requested = match mode.as_str() {
+                "infinity" | "full" => libc::RLIM_INFINITY,
+                "huge" => 1_000_000_000,
+                "lowered" => 1024,
+                _ => unreachable!(),
+            };
+            let raised = libc::rlimit {
+                rlim_cur: requested,
+                rlim_max: original.rlim_max,
+            };
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) }, 0);
+            let code = match mode.as_str() {
+                "infinity" | "huge" => usize::from(sanitize_descriptors(false).is_err()),
+                "full" => {
+                    let files: Vec<_> = (0..16_500)
+                        .map(|_| fs::File::open("/dev/null").unwrap())
+                        .collect();
+                    let rejected = sanitize_descriptors(false).is_err();
+                    drop(files);
+                    usize::from(!rejected)
+                }
+                "lowered" => {
+                    let file = fs::File::open("/etc/hosts").unwrap();
+                    assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), 900) }, 900);
+                    assert_eq!(unsafe { libc::fcntl(900, libc::F_SETFD, 0) }, 0);
+                    let lowered = libc::rlimit {
+                        rlim_cur: 256,
+                        rlim_max: original.rlim_max,
+                    };
+                    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) }, 0);
+                    let root = temp_project("lowered-fd-limit");
+                    let outcome = run_ruby(
+                        &root,
+                        "begin; IO.for_fd(900, autoclose: false); exit 9; rescue Errno::EBADF; exit 0; end",
+                        false,
+                        true,
+                    );
+                    let success = outcome.termination() == &Termination::Exited(0);
+                    unsafe { libc::close(900) };
+                    fs::remove_dir_all(root).unwrap();
+                    usize::from(!success)
+                }
+                _ => unreachable!(),
+            };
+            unsafe { libc::_exit(code as i32) }
+        }
+
+        for mode in ["infinity", "huge", "full", "lowered"] {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "execution::platform_backend::tests::descriptor_sanitation_is_bounded_for_huge_limits_and_fails_closed_when_full",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "{mode} child failed with {status}");
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{mode} descriptor sanitation exceeded deadline");
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+        }
+    }
+
+    #[test]
+    fn first_support_probe_preserves_occupied_fd_100_during_concurrent_churn() {
+        const CHILD: &str = "TAPID_TEST_PROBE_FD_100_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let file = fs::File::open("/etc/hosts").unwrap();
+            assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), 100) }, 100);
+            assert_eq!(unsafe { libc::fcntl(100, libc::F_SETFD, 0) }, 0);
+            let mut before: libc::stat = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::fstat(100, &mut before) }, 0);
+            let running = Arc::new(AtomicBool::new(true));
+            let churn_running = Arc::clone(&running);
+            let churn = thread::spawn(move || {
+                while churn_running.load(Ordering::Acquire) {
+                    if let Ok(file) = fs::File::open("/dev/null") {
+                        drop(file);
+                    }
+                }
+            });
+            let probe = run_support_probes();
+            running.store(false, Ordering::Release);
+            churn.join().unwrap();
+            let mut after: libc::stat = unsafe { std::mem::zeroed() };
+            let intact = unsafe { libc::fstat(100, &mut after) } == 0
+                && (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino);
+            let mut byte = [0_u8; 1];
+            let readable = unsafe { libc::pread(100, byte.as_mut_ptr().cast(), 1, 0) } == 1;
+            unsafe { libc::close(100) };
+            let code =
+                usize::from(probe.is_err()) + usize::from(!intact) * 2 + usize::from(!readable) * 4;
+            unsafe { libc::_exit(code as i32) }
+        }
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "execution::platform_backend::tests::first_support_probe_preserves_occupied_fd_100_during_concurrent_churn",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "probe child failed with {status}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "support probe exceeded deadline");
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    #[test]
+    fn unread_parent_output_pipes_fail_bounded_and_clean_the_target() {
+        const CHILD: &str = "TAPID_TEST_UNREAD_OUTPUT_CHILD";
+        if let Ok(root) = std::env::var(CHILD) {
+            let root = PathBuf::from(root);
+            let request = ExecutionRequest::builder("/bin/sh")
+                .args([
+                    "-c",
+                    "printf '%s' $$ > child-pid; chunk=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; while :; do printf '%s' \"$chunk\"; printf '%s' \"$chunk\" >&2; done; : > marker",
+                ])
+                .project_root(&root)
+                .policy(policy(false, true, Vec::new()))
+                .build()
+                .unwrap();
+            let code = match super::super::execute(&request) {
+                Err(error) if error.category() == ExecutionErrorCategory::Internal => 0,
+                _ => 2,
+            };
+            // SAFETY: this isolated regression child must not let libtest write a completion line
+            // into the deliberately full inherited output pipes.
+            unsafe { libc::_exit(code) }
+        }
+
+        let root = temp_project("unread-output");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "execution::platform_backend::tests::unread_parent_output_pipes_fail_bounded_and_clean_the_target",
+                "--nocapture",
+            ])
+            .env(CHILD, &root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            thread::sleep(POLL_INTERVAL);
+        };
+        if status.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let target_pid = fs::read_to_string(root.join("child-pid"))
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok());
+        let target_survived = target_pid.is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0);
+        if let Some(pid) = target_pid {
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+        let marker = root.join("marker").exists();
+        fs::remove_dir_all(root).unwrap();
+        assert!(status.is_some(), "supervisor hung on unread output pipes");
+        assert!(
+            status.unwrap().success(),
+            "bounded sink path failed its assertions"
+        );
+        assert!(!marker, "target reached its post-output marker");
+        assert!(
+            !target_survived,
+            "target survived sink-backpressure cleanup"
+        );
+    }
+
+    #[test]
+    fn group_signal_is_never_attempted_after_leader_is_reaped() {
+        let root = temp_project("post-reap-group");
+        let request = ExecutionRequest::builder("/bin/sh")
+            .project_root(&root)
+            .policy(policy(false, true, Vec::new()))
+            .build()
+            .unwrap();
+        let additions = PlatformBackend
+            .runtime_filesystem_additions(&request)
+            .unwrap();
+        let resolved = super::super::resolve_policy(&request, additions).unwrap();
+        let preflight = ValidatedPreflight {
+            support: containment_support(&request),
+            bindings: FilesystemBindings::canonical_path(&resolved).unwrap(),
+            policy: resolved,
+            child_environment: request.child_environment(),
+        };
+        let mut lifecycle = MacosLifecycle {
+            request,
+            preflight: &preflight,
+            launch: None,
+            child: None,
+            process_group: Some(i32::MAX),
+            cleanup_attempted: false,
+            cleanup_observed: false,
+        };
+        lifecycle.kill_group();
+        assert!(!lifecycle.cleanup_attempted);
+        assert_eq!(lifecycle.process_group, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn output_reader_sets_overflow_without_growing_past_internal_ceiling() {
         let stop = Arc::new(AtomicBool::new(false));
         let overflow = Arc::new(AtomicBool::new(false));
         let input = std::io::Cursor::new(vec![b'x'; INTERNAL_OUTPUT_CEILING + 1]);
-        let reader = spawn_reader(input, false, stop, Arc::clone(&overflow), false);
+        let reader = spawn_reader(
+            input,
+            stop,
+            Arc::clone(&overflow),
+            Arc::new(AtomicUsize::new(0)),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        );
         let captured = reader.join().unwrap().unwrap();
         assert!(overflow.load(Ordering::Acquire));
         assert!(captured.len() <= INTERNAL_OUTPUT_CEILING);
+    }
+
+    #[test]
+    fn output_readers_enforce_one_combined_internal_ceiling() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let overflow = Arc::new(AtomicBool::new(false));
+        let output_bytes = Arc::new(AtomicUsize::new(0));
+        let stdout = spawn_reader(
+            std::io::Cursor::new(vec![b'o'; 9 * 1024 * 1024]),
+            Arc::clone(&stop),
+            Arc::clone(&overflow),
+            Arc::clone(&output_bytes),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let stderr = spawn_reader(
+            std::io::Cursor::new(vec![b'e'; 9 * 1024 * 1024]),
+            stop,
+            Arc::clone(&overflow),
+            output_bytes,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let stdout = stdout.join().unwrap().unwrap();
+        let stderr = stderr.join().unwrap().unwrap();
+        assert!(overflow.load(Ordering::Acquire));
+        assert!(stdout.len() + stderr.len() <= INTERNAL_OUTPUT_CEILING);
+    }
+
+    #[test]
+    fn output_readers_accept_combined_output_at_or_below_internal_ceiling() {
+        for (stdout_size, stderr_size) in [
+            (8 * 1024 * 1024, 8 * 1024 * 1024),
+            (9 * 1024 * 1024, 7 * 1024 * 1024),
+        ] {
+            let stop = Arc::new(AtomicBool::new(false));
+            let overflow = Arc::new(AtomicBool::new(false));
+            let output_bytes = Arc::new(AtomicUsize::new(0));
+            let stdout = spawn_reader(
+                std::io::Cursor::new(vec![b'o'; stdout_size]),
+                Arc::clone(&stop),
+                Arc::clone(&overflow),
+                Arc::clone(&output_bytes),
+                None,
+                Arc::new(AtomicBool::new(false)),
+            );
+            let stderr = spawn_reader(
+                std::io::Cursor::new(vec![b'e'; stderr_size]),
+                stop,
+                Arc::clone(&overflow),
+                output_bytes,
+                None,
+                Arc::new(AtomicBool::new(false)),
+            );
+            let stdout = stdout.join().unwrap().unwrap();
+            let stderr = stderr.join().unwrap().unwrap();
+            assert!(!overflow.load(Ordering::Acquire));
+            assert_eq!(stdout.len() + stderr.len(), INTERNAL_OUTPUT_CEILING);
+        }
+    }
+
+    #[test]
+    fn closed_live_sink_sets_the_supervisor_failure_signal() {
+        let (read, write) = launch_pipe().unwrap();
+        let (mut child, mut input) = spawn_live_sink(write.as_raw_fd()).unwrap();
+        drop(write);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        drop(read);
+        let stop = AtomicBool::new(false);
+        let failed = AtomicBool::new(false);
+        assert!(write_live_output(&mut input, b"output", &stop, &failed).is_err());
+        assert!(failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn bounded_live_sink_preserves_normal_output_exactly_once() {
+        let (read, write) = launch_pipe().unwrap();
+        let (child, mut input) = spawn_live_sink(write.as_raw_fd()).unwrap();
+        drop(write);
+        let stop = AtomicBool::new(false);
+        let backpressure = AtomicBool::new(false);
+        write_live_output(&mut input, b"first\n", &stop, &backpressure).unwrap();
+        write_live_output(&mut input, b"second\n", &stop, &backpressure).unwrap();
+        drop(input);
+        let mut sinks = LiveSinks {
+            children: vec![child],
+        };
+        sinks.finish().unwrap();
+        let mut output = Vec::new();
+        fs::File::from(read).read_to_end(&mut output).unwrap();
+        assert_eq!(output, b"first\nsecond\n");
+        assert!(!backpressure.load(Ordering::Acquire));
     }
 
     #[test]
@@ -3073,7 +3596,7 @@ mod tests {
         let started = Instant::now();
         let outcome = run_ruby(
             &root,
-            "Process.fork { sleep 30 }; puts 'parent-exit'",
+            "pid = Process.fork { sleep 30 }; File.write('child-pid', pid); puts 'parent-exit'",
             false,
             true,
         );
@@ -3081,8 +3604,13 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
         assert_eq!(
             outcome.completion().cleanup_confidence(),
-            CleanupConfidence::BestEffortObserved
+            CleanupConfidence::NotGuaranteed
         );
+        let child_pid = fs::read_to_string(root.join("child-pid"))
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+        unsafe { libc::kill(child_pid, libc::SIGKILL) };
         fs::remove_dir_all(root).unwrap();
     }
 }
