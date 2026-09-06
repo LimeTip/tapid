@@ -11,8 +11,9 @@ For each operating system, architecture, backend, and assurance level, retain:
 - the full 40-character commit from `git rev-parse HEAD`, with a clean tracked tree and the commit containing the runner backend, configuration parser, CLI wiring, probes, and documentation;
 - the workflow URL and immutable run/job identifiers, attempt number, runner image/version, OS build or kernel version, architecture, shell/runtime versions, and Rust toolchain;
 - the built `tapid` artifact digest and logs that identify the same commit;
-- the exact checked-in `tapid.toml`, fixture scripts, commands, exit codes, stdout/stderr, enforcement receipt, and pass/fail result for every probe;
-- evidence that human and machine-readable receipts agree about each dimension's request, mechanism, assurance level, declared/observed/enforced state, scope, and limitation;
+- the exact checked-in `tapid.toml`, fixture scripts, commands, exit codes, stdout/stderr, checked launch and completion evidence, and pass/fail result for every probe;
+- evidence that human and machine-readable launch evidence agree about each dimension's request, mechanism, assurance level, declared/observed/enforced state, scope, and limitation, and that enforcement exactly matches the request;
+- completion evidence limited to lifecycle and cleanup results, without re-confirming launch-only authority;
 - the backend identity, native primitive versions or feature probes, and any deprecation, path-binding, broker, delegation, or best-effort lifecycle limitation.
 
 `CanonicalPath` evidence proves only fresh pathname resolution for setup and retains its documented host-race assumption. It must never be recorded as `NativeObject` unless the backend holds and revalidates a native object identity.
@@ -21,7 +22,7 @@ Do not update platform status from a run against a merge commit, rebuilt artifac
 
 ## Common Restricted probes
 
-Every filesystem and network category needs a positive control proving the fixture can perform an operation when granted and a negative control proving the same operation is denied when not granted. Negative probes must also confirm a nonzero result and an enforcement receipt; a crash, missing dependency, malformed command, or skipped test is not a containment pass.
+Every filesystem and network category needs a positive control proving the fixture can perform an operation when granted and a negative control proving the same operation is denied when not granted. Negative probes must also confirm a nonzero result and checked launch evidence matching the exact request; a crash, missing dependency, malformed command, or skipped test is not a containment pass.
 
 ### Filesystem
 
@@ -52,19 +53,19 @@ Every filesystem and network category needs a positive control proving the fixtu
 
 - With `subprocess = true`, start the required platform shell, a child Node process, and descendants that detach, re-parent, or create a new session. Verify each retains the same filesystem, network, environment, and descriptor restrictions.
 - With `subprocess = false`, verify an attempted child does not start when the backend claims that restriction.
-- Restricted may use best-effort lifecycle supervision, but its receipt must identify which descendants were observed or controlled, which cleanup was attempted, and where races or escape uncertainty remain. A delayed surviving marker fails any claim of complete cleanup but does not by itself disprove authority propagation if the surviving process remains natively restricted.
+- Restricted provides no cleanup guarantee. If the backend attempts best-effort lifecycle supervision or cleanup, completion evidence must identify which descendants were observed or controlled, what cleanup was attempted, and where races or escape uncertainty remain. A delayed surviving marker fails any claim of complete cleanup but does not by itself disprove launch-time authority propagation if the surviving process remains natively restricted.
 
 ### Restricted limits and lifecycle reporting
 
 - Exercise each configured timeout, output, process, and memory limit and record whether it applies to the initial process, observed descendants, or a complete native tree.
 - Do not describe a process-local or best-effort aggregate limit as tree-wide. If policy requires a scope the backend cannot establish, verify failure before spawn.
-- Exercise normal completion, cancellation, timeout, and Tapid termination. Restricted cleanup may be incomplete, but the result must report that limitation and must not claim ManagedTree.
+- Exercise normal completion, cancellation, timeout, and Tapid termination. Restricted completion evidence must distinguish no cleanup guarantee from best-effort cleanup actually attempted or observed, must report uncertainty, and must not claim ManagedTree or re-confirm launch-only authority.
 
 ### Fail-closed startup and receipts
 
 - Corrupt or remove the required backend primitive, request an unsupported combination, and use invalid or unknown `tapid.toml` fields. Verify no script or descendant marker is created.
 - Verify failure to establish a required filesystem, network, environment, descriptor/handle, subprocess, or limit dimension aborts before untrusted code starts; partial setup must be torn down.
-- Compare human and machine-readable output for the same run. Reject any receipt that labels requested, declared, or merely observed capability as enforced, reports `CanonicalPath` as `NativeObject`, or omits mechanism, scope, or limitation.
+- Compare human and machine-readable output for the same run. Reject launch evidence unless the exact requested enforcement is present. Reject any evidence that labels a requested, declared, or merely observed capability as enforced, reports `CanonicalPath` as `NativeObject`, omits mechanism, scope, or limitation, or uses completion results to re-confirm launch-only authority.
 
 ## Additional ManagedTree probes
 

@@ -44,7 +44,7 @@ tapid run dev
 
 `tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`.
 
-ADR 0005 separates authority containment from lifecycle ownership. Once a native backend is implemented and validated, `tapid run` defaults to **Restricted** execution for compatible checked-in root-script profiles: requested filesystem and network restrictions must be installed before spawn, descendants retain those restrictions, and the child receives explicit environment, `PATH`, and descriptor state. Restricted cleanup may be best effort and must report its scope and uncertainty. **ManagedTree** additionally requires race-free kernel- or VM-owned descendants, a complete cleanup/kill boundary, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before spawn.
+ADR 0005 separates authority containment from lifecycle ownership. The approved target schema requires compatible profiles to select **Restricted** explicitly with `assurance = "restricted"`: requested filesystem and network restrictions must be installed before spawn, descendants retain those restrictions, and the child receives explicit environment, `PATH`, and descriptor state. Omitting `assurance` preserves the legacy-safe **ManagedTree** contract rather than silently weakening an existing strict profile. ManagedTree additionally requires race-free kernel- or VM-owned descendants, a complete cleanup/kill boundary, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before spawn.
 
 No native backend is implemented or validated at the current exact HEAD, so the command above still fails before spawning a script. This is fail-closed policy wiring, not a containment guarantee. A noisy `--no-sandbox` escape for trusted interactive projects is planned but does not exist; it will have no enforcement receipt or silent fallback, and unattended use will require separate explicit authorization.
 
@@ -57,26 +57,32 @@ write = []
 network = false
 environment = []
 subprocess = true
-timeout_seconds = 300
-max_output_bytes = 8388608
-max_processes = 32
-max_memory_bytes = 1073741824
 
 [run.scripts.dev]
+assurance = "restricted"
 write = ["."]
 network = true
 environment = ["NODE_ENV"]
-timeout_seconds = 28800
+```
+
+This is a macOS-compatible Restricted **target profile**, not a currently runnable example: no native backend exists yet. It intentionally requests no timeout, process-count, or memory limit because native macOS 26 Restricted cannot provide the required complete-tree semantics. It also omits an output limit because no exact captured-output enforcement mechanism has been approved for that backend. `write = ["."]` permits Next.js to create `.next`, `next-env.d.ts`, and any other project-local generated files; narrow it after observing the project's actual writes. `network = true` is unrestricted networking under the current portable boolean schema, including listen and connect behavior. It is not a loopback-only rule. `--hostname` and `--port` below are application arguments, not Tapid policy; declared listen/connect scopes are future schema work. `environment` names variables that may be copied from the caller when present; it does not import the rest of the caller's environment. Pass the bind address explicitly without exposing `HOST`, cloud credentials, proxy settings, or agent sockets:
+
+```bash
+tapid run dev -- --hostname 127.0.0.1 --port 3001
+```
+
+An existing strict profile that omits `assurance` remains ManagedTree. Such a profile may request tree-wide limits separately:
+
+```toml
+[run.scripts.ci]
+# assurance omitted intentionally: legacy-safe ManagedTree
+timeout_seconds = 900
 max_output_bytes = 67108864
 max_processes = 64
 max_memory_bytes = 2147483648
 ```
 
-`write = ["."]` permits Next.js to create `.next`, `next-env.d.ts`, and any other project-local generated files; narrow it after observing the project's actual writes. `network = true` is unrestricted networking under the current portable boolean schema, including listen and connect behavior. It is not a loopback-only rule. `--hostname` and `--port` below are application arguments, not Tapid policy; declared listen/connect scopes are future schema work. `environment` names variables that may be copied from the caller when present; it does not import the rest of the caller's environment. Pass the bind address explicitly without exposing `HOST`, cloud credentials, proxy settings, or agent sockets:
-
-```bash
-tapid run dev -- --hostname 127.0.0.1 --port 3001
-```
+Native macOS 26 cannot run that ManagedTree profile. The planned backend must reject it before spawn rather than silently downgrade it to Restricted.
 
 ## Current consumer workflow
 
@@ -102,7 +108,7 @@ target/debug/tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 
 
 The non-fixture online path requests abbreviated npm install metadata and requires registry-declared SHA-512 integrity by default. Unsupported npm range syntax and malformed historical metadata are filtered or rejected fail-closed according to their scope. Live JSR installation remains unverified. Do not treat fixture replay or one successful npm project as evidence of complete npm compatibility.
 
-The accepted invocation remains `tapid run <SCRIPT> -- <ARGS...>`. Values after the first `--` are forwarded in order to the selected script; the separator itself is not forwarded, and Tapid does not reinterpret forwarded values as Tapid options or policy. The integrated ADR 0005 path reads the script's merged `[run.defaults]` and exact `[run.scripts.<name>]` policy, constructs a minimal environment with a controlled `PATH`, and calls a backend only after preflight proves every requested restriction. The staged target is Restricted first, then ManagedTree only where complete lifecycle ownership and tree-wide limits are proven. No backend currently passes the required native runtime probes, so this checkout fails before spawning the script and makes no native containment claim.
+The accepted invocation remains `tapid run <SCRIPT> -- <ARGS...>`. Values after the first `--` are forwarded in order to the selected script; the separator itself is not forwarded, and Tapid does not reinterpret forwarded values as Tapid options or policy. The integrated ADR 0005 path reads the script's merged `[run.defaults]` and exact `[run.scripts.<name>]` policy, constructs a minimal environment with a controlled `PATH`, and calls a backend only after preflight proves every requested restriction. The approved target adds explicitly selected Restricted profiles while preserving omitted `assurance` as ManagedTree. No backend currently passes the required native runtime probes, so this checkout fails before spawning the script and makes no native containment claim.
 
 Use a project directory explicitly when running outside the project directory:
 

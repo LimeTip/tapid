@@ -10,7 +10,7 @@ No native backend is implemented or validated at the current exact HEAD. The int
 
 The original decision required filesystem, network, environment, descendant ownership, cleanup, and tree-wide resource controls as one indivisible sandbox contract. That strict position prevented a partial backend from being presented as complete containment and correctly exposed the lack of a race-free descendant boundary on macOS 26.
 
-This amendment preserves that original contract as the **ManagedTree** assurance level. It adds **Restricted** as the default target for compatible checked-in root-script profiles, separating authority containment from complete lifecycle ownership. The amendment does not reinterpret existing fail-before-spawn evidence as native enforcement and does not make any platform supported.
+This amendment preserves that original contract as the **ManagedTree** assurance level, including for legacy profiles that omit an assurance selector. It adds **Restricted** as an explicit target for compatible checked-in root-script profiles, separating authority containment from complete lifecycle ownership without silently weakening existing strict profiles. The amendment does not reinterpret existing fail-before-spawn evidence as native enforcement and does not make any platform supported.
 
 ## Context
 
@@ -27,7 +27,7 @@ Containment quality and available primitives differ substantially between operat
 
 ## Decision
 
-`tapid run` remains default-on and fail-closed. Once a native backend is implemented and validated, an explicitly selected root script with a compatible checked-in profile runs at **Restricted** assurance by default. **ManagedTree** is a stronger, separately requested assurance level. The configuration or CLI syntax for selecting ManagedTree is future schema work and is not defined by this ADR.
+`tapid run` remains default-on and fail-closed. In the approved target schema, a compatible checked-in profile selects **Restricted** with `assurance = "restricted"`. If `assurance` is omitted, the profile remains **ManagedTree**, preserving the original strict contract for existing configuration. The schema correction is pending and this ADR does not claim it is implemented at the current exact HEAD.
 
 The desired invocation remains:
 
@@ -43,7 +43,7 @@ tapid run dev -- --hostname 127.0.0.1 --port 3001
 
 Values after `--` are opaque script arguments. They do not grant or restrict authority. In particular, `--hostname 127.0.0.1` and `--port 3001` may affect application behavior but do not make `network = true` loopback-only or constrain a broker or sandbox.
 
-A checked-in `tapid.toml` may define defaults and exact per-script permissions. Configuration can grant project-relative reads and writes, network access, selected environment variables, subprocess use, and bounded resource limits. Unknown fields, invalid paths, invalid environment names, unsupported combinations, and unrepresentable required dimensions are rejected before a shell starts. Project configuration cannot disable containment.
+A checked-in `tapid.toml` may define defaults and exact per-script permissions. The target `assurance` selector is resolved with the profile; `assurance = "restricted"` is explicit, while omission resolves to ManagedTree. Configuration can grant project-relative reads and writes, network access, selected environment variables, subprocess use, and bounded resource limits. Unknown fields, invalid paths, invalid environment names, unsupported combinations, and unrepresentable required dimensions are rejected before a shell starts. Project configuration cannot disable containment.
 
 The portable `network` field remains boolean. `network = false` requests network denial. `network = true` grants unrestricted networking, including listen and connect behavior; it is not a host, port, protocol, loopback, ingress, or egress policy. Declared listen/connect scopes and brokered-port policy require future schema and native enforcement work.
 
@@ -57,7 +57,7 @@ Restricted requires all of the following before untrusted execution starts:
 - authority restrictions that propagate to descendants, including descendants that detach, re-parent, or create new sessions;
 - rejection before spawn when a required Restricted dimension cannot be established.
 
-Restricted does **not** claim race-free ownership of every descendant or a complete kill and cleanup boundary. Supervision and cleanup may be best effort. A Restricted receipt must report the mechanism used, the authority scope that propagates, the lifecycle scope actually observed or controlled, escape or race uncertainty, and any limit that is process-local or otherwise narrower than the complete tree. It must not label best-effort discovery as ManagedTree ownership.
+Restricted does **not** claim race-free ownership of every descendant or a complete kill and cleanup boundary. It provides no cleanup guarantee. A backend may attempt best-effort cleanup, but completion evidence must say what was actually attempted or observed and where races or escape uncertainty remain; it must distinguish that evidence from having no cleanup guarantee. Checked launch evidence must exactly match the requested authority and report the mechanism, assurance level, enforcement scope, and limitations. Completion evidence covers lifecycle and cleanup only: it cannot re-confirm authority established before launch or label best-effort discovery as ManagedTree ownership.
 
 Path evidence is similarly scoped. `CanonicalPath` means the path was freshly resolved for setup and retains the documented host-race limitation. It is not `NativeObject`; only a backend that holds and revalidates a native object identity may report `NativeObject`.
 
@@ -80,7 +80,7 @@ A future `--no-sandbox` escape is planned only for trusted interactive projects.
 
 Platform backends are independent security boundaries and remain planned rather than implemented:
 
-- **macOS 26 Restricted:** an experimental Seatbelt profile applied through the deprecated, path-based `sandbox-exec` interface is the planned first backend. It may restrict filesystem and network authority and propagate those restrictions to descendants, but it must disclose deprecation, path-binding limitations, and best-effort lifecycle cleanup. It is not implemented or validated.
+- **macOS 26 Restricted:** an experimental Seatbelt profile applied through the deprecated, path-based `sandbox-exec` interface is the planned first backend. It may restrict filesystem and network authority and propagate those restrictions to descendants, but it provides no cleanup guarantee. Any best-effort cleanup actually attempted or observed must be reported separately with deprecation, path-binding, and lifecycle limitations. It is not implemented or validated.
 - **macOS 26 ManagedTree:** native ManagedTree is unsupported. Process groups are escapable with `setsid` or `setpgid`, and public process-lineage scanning retains a rapid double-fork/intermediate-exit race. A future strict Linux VM hosted through Virtualization.framework is a separate backend that changes platform and operational semantics; it must not be described as native macOS containment.
 - **Linux Restricted:** the planned backend combines Landlock, `no_new_privs`, seccomp, and explicit environment/descriptor construction, selecting only enhancements proven available at runtime. A requested dimension that the active kernel or host cannot establish fails before spawn.
 - **Linux ManagedTree:** support requires proven namespace ownership and cgroup delegation for descendants, cleanup, and configured tree-wide limits. Their presence must be probed rather than inferred from running on Linux or in a container.
@@ -88,13 +88,14 @@ Platform backends are independent security boundaries and remain planned rather 
 
 ### Receipts and support claims
 
-An enforcement receipt is derived from the backend that actually established restrictions. For every dimension it reports the request, mechanism, assurance level, enforcement state, scope, and limitation. Requested, declared, observed, and enforced states remain distinct. Availability flags, successful allowed operations, canonical paths, or policy declarations are not enforcement evidence.
+Checked launch evidence is derived from the backend that actually established restrictions. For every dimension it reports the request, mechanism, assurance level, enforcement state, scope, and limitation, and it is accepted only when the exact requested enforcement is present. Requested, declared, observed, and enforced states remain distinct. Availability flags, successful allowed operations, canonical paths, or policy declarations are not enforcement evidence. Post-execution completion evidence reports lifecycle and cleanup results only and cannot re-attest launch-only authority.
 
 No platform or assurance level is described as supported until positive and negative runtime probes pass through the integrated `tapid run` path at the exact commit being claimed. Current fail-before-spawn behavior proves only that there is no silent uncontained fallback.
 
 ## Consequences
 
 - Existing projects may need a `tapid.toml` permission entry before build, test, or development scripts can write files or use the network.
+- Existing profiles that omit `assurance` retain ManagedTree semantics. New profiles that need the less strict lifecycle contract opt into Restricted explicitly.
 - `tapid run dev` commonly requires project writes and unrestricted networking under the current boolean schema. Application bind arguments do not narrow that grant.
 - Root scripts do not inherit arbitrary credentials, agent sockets, proxy variables, or the full user environment when a future Restricted or ManagedTree backend runs them.
 - Restricted can become useful on platforms where authority restrictions propagate but complete lifecycle ownership is unavailable, without overstating cleanup or resource guarantees.
@@ -110,9 +111,9 @@ No platform or assurance level is described as supported until positive and nega
 
 Rejected. Its reasoning remains valid for ManagedTree and for callers that require complete descendant cleanup and tree-wide limits.
 
-### Require ManagedTree for every ordinary root script
+### Silently reinterpret existing profiles as Restricted
 
-Rejected because complete lifecycle ownership is not the same guarantee as authority restriction. Requiring both together would prevent a transparently scoped Restricted backend from reducing ambient authority where native tree ownership is unavailable.
+Rejected because existing profiles were written against the original strict descendant and tree-wide limit contract. Restricted is useful where authority propagates but complete lifecycle ownership is unavailable, but selecting it must be explicit.
 
 ### Preserve unsandboxed compatibility as the default
 
@@ -137,10 +138,10 @@ Rejected because native policy formats are platform-specific and would make equi
 ## Staged implementation and verification
 
 1. Preserve the current checked configuration, exact root-script selection, argument forwarding, controlled environment/PATH construction, and fail-before-spawn behavior.
-2. Add one native Restricted backend behind private runner adapters. Prove pre-spawn filesystem/network enforcement, descendant propagation, environment and descriptor hygiene, and honest lifecycle/limit scope before enabling execution.
+2. Implement the assurance schema so `assurance = "restricted"` opts in explicitly and omission remains ManagedTree, then add one native Restricted backend behind private runner adapters. Prove pre-spawn filesystem/network enforcement, descendant propagation, environment and descriptor hygiene, and honest lifecycle/limit scope before enabling execution.
 3. Integrate that backend through the exact `tapid run <SCRIPT> -- <ARGS...>` path and retain exact-commit positive and negative evidence. Do not infer support from a standalone probe.
 4. Add ManagedTree only on platforms where race-free ownership, complete cleanup, and configured tree-wide limits are proven. Unsupported required dimensions continue to fail before spawn.
-5. Design narrower listen/connect policy, a ManagedTree selector, or `--no-sandbox` as separate schema and CLI changes with their own review and evidence.
+5. Design narrower listen/connect policy, an explicit ManagedTree spelling beyond legacy omission, or `--no-sandbox` as separate schema and CLI changes with their own review and evidence.
 
 Verification includes:
 
@@ -150,6 +151,6 @@ Verification includes:
 - environment and inherited descriptor/handle tests;
 - descendant authority-propagation probes for Restricted;
 - descendant escape, cleanup, timeout, output, process, and memory probes for ManagedTree;
-- human and machine-readable receipt equivalence at each assurance level;
+- human and machine-readable launch and completion evidence equivalence at each assurance level, without using completion to re-attest launch authority;
 - exact-commit platform evidence through the integrated CLI path;
 - documentation checks that reject unsupported or overstated sandbox claims.
