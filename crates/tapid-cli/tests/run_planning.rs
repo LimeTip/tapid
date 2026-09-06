@@ -380,7 +380,7 @@ fn local_bin_wins_over_runtime_tools_but_node_stays_verified() {
         );
         assert_eq!(evidence.path, evidence.path_order.join(&b':'));
         let node = evidence.reserved_node.as_ref().unwrap();
-        assert_eq!(node.mechanism, "verified-hard-link");
+        assert_eq!(node.mechanism, "byte-verified private snapshot");
         assert!(!node.cleanup_observed);
         assert!(node.limitations.contains("retained"));
         fs::remove_dir_all(std::path::Path::new(OsStr::from_bytes(
@@ -495,6 +495,7 @@ fn cli_receipt_reports_assurance_authority_and_completion_without_duplicate_outp
             }
         }
         normalize(&mut value, directory);
+        value["executable_resolution"]["reserved_node"]["inode"] = serde_json::json!(0);
         receipts.push(value);
     }
     assert_eq!(

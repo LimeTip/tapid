@@ -10,7 +10,7 @@ use super::{
 };
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -751,6 +751,10 @@ fn compile_profile(
             "(allow {operation} ({filter} (param \"{key}\")))\n"
         ));
         parameters.push((key, grant.path().as_os_str().to_owned()));
+    }
+    if let Some(binding) = &request.reserved_node {
+        text.push_str("(deny file-link)\n(deny file-write* (subpath (param \"N0\")))\n");
+        parameters.push(("N0".into(), binding.directory.as_os_str().to_owned()));
     }
     let helper = fs::canonicalize(std::env::current_exe().map_err(|_| ExecConfirmation::error())?)
         .map_err(|_| ExecConfirmation::error())?;
@@ -1630,18 +1634,24 @@ fn spawn_live_sink(destination: i32) -> Result<(Child, ChildStdin), ExecutionErr
     }
     // SAFETY: `duplicate` is a newly owned descriptor.
     let output = unsafe { OwnedFd::from_raw_fd(duplicate) };
-    let mut child = Command::new("/bin/cat")
+    let mut command = Command::new("/bin/cat");
+    command
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::from(output))
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            ExecutionError::new(
-                ExecutionErrorCategory::Internal,
-                format!("cannot start bounded live output sink: {error}"),
-            )
-        })?;
+        .stderr(Stdio::null());
+    // SAFETY: std has installed the relay's assigned stdio before this closure runs.
+    // Mark every remaining descriptor close-on-exec, including Rust's spawn-error channel;
+    // that channel must survive until exec and is closed atomically by a successful exec.
+    unsafe {
+        command.pre_exec(|| sanitize_descriptors(false));
+    }
+    let mut child = command.spawn().map_err(|error| {
+        ExecutionError::new(
+            ExecutionErrorCategory::Internal,
+            format!("cannot start bounded live output sink: {error}"),
+        )
+    })?;
     let input = child.stdin.take().ok_or_else(|| {
         ExecutionError::new(
             ExecutionErrorCategory::Internal,
@@ -1664,6 +1674,8 @@ pub(super) struct ReservedNodeBinding {
     directory: PathBuf,
     runtime: PathBuf,
     identity: (u64, u64),
+    mode: u32,
+    size: u64,
     launch: Arc<ReservedLaunch>,
 }
 impl ReservedNodeBinding {
@@ -1672,22 +1684,37 @@ impl ReservedNodeBinding {
         policy: &ResolvedSandboxPolicy,
     ) -> Result<(), ExecutionError> {
         let directory = fs::canonicalize(&self.directory).map_err(|_| ExecConfirmation::error())?;
-        let overlaps = |path: &Path| directory.starts_with(path) || path.starts_with(&directory);
-        if overlaps(&policy.project_root)
-            || policy.write.iter().any(|grant| {
-                overlaps(&grant.path)
-                    || match &grant.resolution {
-                        super::GrantResolution::MissingWriteDirectory {
-                            canonical_ancestor,
-                            ..
-                        } => overlaps(canonical_ancestor),
-                        _ => false,
-                    }
-            })
-        {
+        let private_overlaps =
+            |path: &Path| directory.starts_with(path) || path.starts_with(&directory);
+        if policy.write.iter().any(|grant| {
+            private_overlaps(&grant.path)
+                || match &grant.resolution {
+                    super::GrantResolution::MissingWriteDirectory {
+                        canonical_ancestor, ..
+                    } => private_overlaps(canonical_ancestor),
+                    _ => false,
+                }
+        }) {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
                 "reserved node directory overlaps project write authority",
+            ));
+        }
+        if policy.write.iter().any(|grant| {
+            self.runtime.starts_with(&grant.path)
+                || match &grant.resolution {
+                    super::GrantResolution::MissingWriteDirectory {
+                        canonical_ancestor,
+                        relative_target,
+                    } => self
+                        .runtime
+                        .starts_with(canonical_ancestor.join(relative_target)),
+                    _ => false,
+                }
+        }) {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                "trusted Node runtime overlaps project write authority",
             ));
         }
         Ok(())
@@ -1703,6 +1730,9 @@ impl ReservedNodeBinding {
             || dir.uid() != unsafe { libc::geteuid() }
             || !meta.is_file()
             || (meta.dev(), meta.ino()) != self.identity
+            || meta.mode() != self.mode
+            || meta.len() != self.size
+            || meta.nlink() != 1
         {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
@@ -1719,15 +1749,13 @@ struct ReservedNode {
 }
 impl ReservedNode {
     fn create(runtime: &super::TrustedNodeRuntime, project: &Path) -> Result<Self, ExecutionError> {
-        Self::create_with_link(runtime, project, |source, target| {
-            fs::hard_link(source, target)
-        })
+        Self::create_with_copy(runtime, project, copy_runtime_snapshot)
     }
 
-    fn create_with_link(
+    fn create_with_copy(
         runtime: &super::TrustedNodeRuntime,
         project: &Path,
-        link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+        copy: impl FnOnce(&Path, &Path) -> std::io::Result<(u64, u64, u64, u64, u32, u64)>,
     ) -> Result<Self, ExecutionError> {
         use std::os::unix::fs::DirBuilderExt;
         let project = fs::canonicalize(project).map_err(|_| ExecConfirmation::error())?;
@@ -1753,23 +1781,30 @@ impl ReservedNode {
             .mode(0o700)
             .create(&directory)
             .map_err(|_| ExecConfirmation::error())?;
-        let guard = Self {
+        let mut guard = Self {
             evidence: ReservedNodeBinding {
                 directory,
                 runtime: runtime.path.clone(),
-                identity: (runtime.identity.device, runtime.identity.inode),
+                identity: (0, 0),
+                mode: 0,
+                size: 0,
                 launch: Arc::new(ReservedLaunch::default()),
             },
             descendants_allowed: true,
         };
-        link(&runtime.path, &guard.evidence.directory.join("node")).map_err(|error| {
-            ExecutionError::new(
-                ExecutionErrorCategory::PolicyViolation,
-                format!(
-                    "cannot create reserved node hard link (cross-device is unsupported): {error}"
-                ),
-            )
-        })?;
+        let (source_device, source_inode, device, inode, mode, size) =
+            copy(&runtime.path, &guard.evidence.directory.join("node")).map_err(|error| {
+                ExecutionError::new(
+                    ExecutionErrorCategory::PolicyViolation,
+                    format!("cannot create verified reserved Node snapshot: {error}"),
+                )
+            })?;
+        if (source_device, source_inode) != (runtime.identity.device, runtime.identity.inode) {
+            return Err(ExecConfirmation::error());
+        }
+        guard.evidence.identity = (device, inode);
+        guard.evidence.mode = mode;
+        guard.evidence.size = size;
         guard.evidence.validate()?;
         Ok(guard)
     }
@@ -1789,6 +1824,71 @@ impl Drop for ReservedNode {
     fn drop(&mut self) {
         self.cleanup();
     }
+}
+
+fn copy_runtime_snapshot(
+    source: &Path,
+    target: &Path,
+) -> std::io::Result<(u64, u64, u64, u64, u32, u64)> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let mut source_file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(source)?;
+    let before = source_file.metadata()?;
+    let mut target_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(target)?;
+    std::io::copy(&mut source_file, &mut target_file)?;
+    target_file.sync_all()?;
+    target_file.set_permissions(fs::Permissions::from_mode(before.mode()))?;
+
+    source_file.seek(SeekFrom::Start(0))?;
+    target_file.seek(SeekFrom::Start(0))?;
+    let mut source_bytes = [0_u8; 64 * 1024];
+    let mut target_bytes = [0_u8; 64 * 1024];
+    loop {
+        let source_count = source_file.read(&mut source_bytes)?;
+        let target_count = target_file.read(&mut target_bytes)?;
+        if source_count != target_count
+            || source_bytes[..source_count] != target_bytes[..target_count]
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "reserved Node snapshot differs from held runtime",
+            ));
+        }
+        if source_count == 0 {
+            break;
+        }
+    }
+    let after = source_file.metadata()?;
+    let snapshot = target_file.metadata()?;
+    if (before.dev(), before.ino(), before.mode(), before.len())
+        != (after.dev(), after.ino(), after.mode(), after.len())
+        || !snapshot.is_file()
+        || snapshot.mode() != before.mode()
+        || snapshot.len() != before.len()
+        || (snapshot.dev(), snapshot.ino()) == (before.dev(), before.ino())
+        || snapshot.nlink() != 1
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "reserved Node snapshot metadata validation failed",
+        ));
+    }
+    Ok((
+        before.dev(),
+        before.ino(),
+        snapshot.dev(),
+        snapshot.ino(),
+        snapshot.mode(),
+        snapshot.len(),
+    ))
 }
 
 pub(super) fn execute_reserved(
@@ -1820,15 +1920,15 @@ pub(super) fn execute_reserved(
             reserved_node: request.reserved_node.as_ref().map(|b| super::ReservedExecutableEvidence {
                 command: "node".into(), private_path: b.directory.join("node").as_os_str().as_bytes().to_vec(),
                 trusted_runtime: b.runtime.as_os_str().as_bytes().to_vec(), device: b.identity.0, inode: b.identity.1,
-                mechanism: "verified-hard-link".into(),
-                identity_checks: "runtime capture; hard-link creation; immediately before spawn".into(),
+                mechanism: "byte-verified private snapshot".into(),
+                identity_checks: "held runtime identity and executable metadata; distinct snapshot inode; exact byte comparison; immediately before spawn".into(),
                 cleanup_observed: cleanup.unwrap_or(false),
                 limitations: if cleanup == Some(true) {
-                    "private binding removed after target exit under subprocess=false, whose Seatbelt process-fork denial prevents descendants; host writes to the inode or races after final validation remain possible; explicit project node paths are outside reserved bare-node/env-shebang resolution"
+                    "private snapshot removed after target exit under subprocess=false, whose Seatbelt process-fork denial prevents descendants; host writes or races after final validation remain possible; explicit project node paths are outside reserved bare-node/env-shebang resolution"
                 } else if request.policy().subprocess() {
-                    "private binding retained because subprocess-enabled descendants may survive Restricted cleanup; fresh owner-only random directory per attempt, never reused; consumes temporary storage until OS cleanup or host removal after all descendants exit; removal while descendants survive ends reserved-node protection; host writes to the inode or races after final validation remain possible; explicit project node paths are outside reserved bare-node/env-shebang resolution"
+                    "private snapshot retained because subprocess-enabled descendants may survive Restricted cleanup; fresh owner-only random directory and distinct inode per attempt, never reused; Seatbelt denies target and descendant writes to the snapshot while project writes remain allowed; consumes temporary storage until OS cleanup or host removal after all descendants exit; removal while descendants survive ends reserved-node protection; host writes or races after final validation remain possible; explicit project node paths are outside reserved bare-node/env-shebang resolution"
                 } else {
-                    "private binding removal was not observed after subprocess=false root exit; temporary storage may remain until OS cleanup or host removal; directories are never reused; host writes to the inode or races after final validation remain possible; explicit project node paths are outside reserved bare-node/env-shebang resolution"
+                    "private snapshot removal was not observed after subprocess=false root exit; temporary storage may remain until OS cleanup or host removal; directories are never reused; host writes or races after final validation remain possible; explicit project node paths are outside reserved bare-node/env-shebang resolution"
                 }.into(),
             }),
         });
@@ -1899,6 +1999,7 @@ mod tests {
     use crate::config::{ExecutionLimits, FilesystemPolicy, SandboxMode, SandboxPolicy};
     use std::net::{TcpListener, TcpStream};
     use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
 
     fn temp_project(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -1911,6 +2012,15 @@ mod tests {
         ));
         fs::create_dir(&path).unwrap();
         fs::canonicalize(path).unwrap()
+    }
+
+    fn temp_node_runtime(label: &str, bytes: &[u8]) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = temp_project(label);
+        let runtime = directory.join("node");
+        fs::write(&runtime, bytes).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        (directory, runtime)
     }
 
     fn policy(network: bool, subprocess: bool, environment: Vec<String>) -> SandboxPolicy {
@@ -1996,19 +2106,15 @@ mod tests {
     fn surviving_descendant_keeps_reserved_node_after_root_receipt() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let root = temp_project("surviving-node");
+        let (runtime_dir, runtime) = temp_node_runtime(
+            "surviving-node-runtime",
+            b"#!/bin/sh\nprintf verified > verified\n",
+        );
         let local = root.join("node_modules/.bin");
         fs::create_dir_all(&local).unwrap();
-        let runtime = root.join("node");
-        for (path, script) in [
-            (&runtime, "#!/bin/sh\nprintf verified > verified\n"),
-            (
-                &local.join("node"),
-                "#!/bin/sh\nprintf hijacked > hijacked\n",
-            ),
-        ] {
-            fs::write(path, script).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-        }
+        let hostile = local.join("node");
+        fs::write(&hostile, "#!/bin/sh\nprintf hijacked > hijacked\n").unwrap();
+        fs::set_permissions(&hostile, fs::Permissions::from_mode(0o700)).unwrap();
         // setsid escapes best-effort group cleanup. Redirect every stream so root
         // completion does not depend on the descendant closing an inherited pipe.
         let script = r#"
@@ -2036,7 +2142,7 @@ mod tests {
             .args(["--disable-gems", "-e", script])
             .project_root(&root)
             .trusted_node_runtime(&runtime)
-            .executable_search_paths([local, root.clone(), PathBuf::from("/usr/bin")])
+            .executable_search_paths([local, runtime_dir.clone(), PathBuf::from("/usr/bin")])
             .policy(policy(false, true, Vec::new()))
             .build()
             .unwrap();
@@ -2065,6 +2171,7 @@ mod tests {
         // This test knows the descendant has finished using PATH. Production does not.
         let _ = fs::remove_dir_all(directory);
         fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(runtime_dir).unwrap();
         assert!(
             !hijacked,
             "hostile node created hijacked marker despite receipt; binding={state}; cleanup_observed={}",
@@ -2081,16 +2188,16 @@ mod tests {
 
     #[test]
     fn reserved_node_cleans_after_subprocess_denied_root_exit() {
-        use std::os::unix::fs::PermissionsExt;
         let root = temp_project("node-no-descendants");
-        let runtime = root.join("node");
-        fs::write(&runtime, "#!/bin/sh\nprintf verified\n").unwrap();
-        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime_dir, runtime) = temp_node_runtime(
+            "node-no-descendants-runtime",
+            b"#!/bin/sh\nprintf verified\n",
+        );
         let request = ExecutionRequest::builder("/bin/sh")
             .args(["-c", "exec node"])
             .project_root(&root)
             .trusted_node_runtime(&runtime)
-            .executable_search_path(&root)
+            .executable_search_path(&runtime_dir)
             .policy(policy(false, false, Vec::new()))
             .build()
             .unwrap();
@@ -2111,17 +2218,15 @@ mod tests {
             .unwrap();
         assert!(!directory.exists());
         fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(runtime_dir).unwrap();
     }
 
     #[test]
     fn reserved_node_preserves_native_bytes_and_exact_empty_caller_path() {
-        use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
+        use std::os::unix::ffi::OsStringExt;
         let root = temp_project("node-bytes");
-        let runtime_dir = root.join("runtime");
-        fs::create_dir(&runtime_dir).unwrap();
-        let runtime = runtime_dir.join("node");
-        fs::write(&runtime, b"#!/bin/sh\nprintf '%s' \"$1\"").unwrap();
-        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime_dir, runtime) =
+            temp_node_runtime("node-bytes-runtime", b"#!/bin/sh\nprintf '%s' \"$1\"");
         let local = root.join("local");
         fs::create_dir(&local).unwrap();
         let value = OsString::from_vec(b"f\x80o".to_vec());
@@ -2152,19 +2257,20 @@ mod tests {
         )))
         .unwrap();
         fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(runtime_dir).unwrap();
     }
 
     #[test]
-    fn reserved_node_executes_captured_inode_after_source_rename() {
-        use std::os::unix::fs::PermissionsExt;
+    fn reserved_node_executes_snapshot_after_source_rename() {
         let root = temp_project("node-source-rename");
-        let runtime = root.join("node");
-        fs::write(&runtime, b"#!/bin/sh\nprintf captured-inode").unwrap();
-        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime_dir, runtime) = temp_node_runtime(
+            "node-source-rename-runtime",
+            b"#!/bin/sh\nprintf captured-inode",
+        );
         let mut request = ExecutionRequest::builder("/bin/sh")
             .args(["-c", "node"])
             .trusted_node_runtime(&runtime)
-            .executable_search_path(&root)
+            .executable_search_path(&runtime_dir)
             .project_root(&root)
             .policy(policy(false, true, Vec::new()))
             .build()
@@ -2175,7 +2281,7 @@ mod tests {
             .executable_search_paths
             .insert(0, binding.evidence.directory.clone());
         request.reserved_node = Some(binding.evidence.clone());
-        fs::rename(&runtime, root.join("renamed-node")).unwrap();
+        fs::rename(&runtime, runtime_dir.join("renamed-node")).unwrap();
         let outcome = super::super::execute_with_backend(&request, &PlatformBackend).unwrap();
         assert_eq!(outcome.stdout(), b"captured-inode");
         assert!(
@@ -2189,10 +2295,11 @@ mod tests {
         );
         drop(binding);
         fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(runtime_dir).unwrap();
     }
 
     #[test]
-    fn reserved_node_is_a_verified_hardlink_and_detects_tampering() {
+    fn reserved_node_is_a_verified_snapshot_and_detects_tampering() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let root = temp_project("node-identity");
         let runtime = root.join("node");
@@ -2207,10 +2314,11 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
-        assert_eq!(
+        assert_ne!(
             fs::metadata(&node).unwrap().ino(),
             fs::metadata(&runtime).unwrap().ino()
         );
+        assert_eq!(fs::read(&node).unwrap(), fs::read(&runtime).unwrap());
         assert_eq!(
             fs::metadata(&binding.evidence.directory).unwrap().mode() & 0o777,
             0o700
@@ -2226,6 +2334,137 @@ mod tests {
         assert!(!directory.exists());
         assert!(ReservedNode::create(&trusted, &root).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reserved_node_rejects_a_runtime_under_project_write_authority() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_project("node-runtime-write-authority");
+        let runtime = root.join("node");
+        fs::write(&runtime, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let request = ExecutionRequest::builder("/bin/sh")
+            .args(["-c", ": > marker"])
+            .trusted_node_runtime(&runtime)
+            .executable_search_path(&root)
+            .project_root(&root)
+            .policy(policy(false, true, Vec::new()))
+            .build()
+            .unwrap();
+        let error = super::super::execute(&request)
+            .expect_err("project-writable trusted runtime issued a receipt");
+        assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+        assert!(
+            error
+                .to_string()
+                .contains("trusted Node runtime overlaps project write authority")
+        );
+        assert!(!root.join("marker").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
+        use std::os::unix::{
+            ffi::OsStringExt,
+            fs::{MetadataExt, PermissionsExt},
+        };
+        let project = temp_project("node-hardlink-project");
+        let trusted = temp_project("node-hardlink-trusted");
+        let selected = Command::new("/usr/bin/which").arg("node").output().unwrap();
+        assert!(
+            selected.status.success(),
+            "real Node runtime is unavailable"
+        );
+        let source = PathBuf::from(OsString::from_vec(
+            selected.stdout[..selected.stdout.len() - 1].to_vec(),
+        ));
+        let runtime = trusted.join("node");
+        fs::copy(fs::canonicalize(source).unwrap(), &runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let original = fs::read(&runtime).unwrap();
+        let script = r##"
+            private_node = File.join(ENV.fetch('PATH').split(':').first, 'node')
+            begin
+              File.link(private_node, 'node-alias')
+              File.write('node-alias', "#!/bin/sh\nprintf mutated > \"$TAPID_NODE_RESULT\"\n")
+              File.chmod(0700, 'node-alias')
+            rescue SystemCallError => error
+              File.write('mutation-denied', error.class.name)
+            end
+            abort 'second node failed' unless system('node', '-e', "require('fs').writeFileSync('second-node', 'verified')")
+            Process.fork do
+              Process.setsid
+              STDIN.reopen('/dev/null')
+              STDOUT.reopen('descendant.stdout', 'w')
+              STDERR.reopen('descendant.stderr', 'w')
+              sleep 0.01 until File.exist?('receipt-returned')
+              system('node', '-e', "require('fs').writeFileSync('detached-node', 'verified')")
+              exit! 0
+            end
+            File.write('descendant-ready', 'ready')
+        "##;
+        let request = ExecutionRequest::builder("/usr/bin/ruby")
+            .args(["--disable-gems", "-e", script])
+            .trusted_node_runtime(&runtime)
+            .executable_search_paths([
+                trusted.clone(),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ])
+            .project_root(&project)
+            .policy(policy(false, true, Vec::new()))
+            .build()
+            .unwrap();
+        let outcome = super::super::execute(&request).unwrap();
+        assert_eq!(outcome.termination(), &Termination::Exited(0));
+        assert!(project.join("descendant-ready").exists());
+        fs::write(project.join("receipt-returned"), b"receipt").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !project.join("detached-node").exists() && Instant::now() < deadline {
+            thread::sleep(POLL_INTERVAL);
+        }
+        let resolution = outcome.enforcement().executable_resolution().unwrap();
+        let private = PathBuf::from(OsString::from_vec(
+            resolution
+                .reserved_node
+                .as_ref()
+                .unwrap()
+                .private_path
+                .clone(),
+        ));
+        assert_eq!(
+            fs::read(&runtime).unwrap(),
+            original,
+            "selected runtime mutated"
+        );
+        assert_eq!(fs::read(project.join("second-node")).unwrap(), b"verified");
+        assert_eq!(
+            fs::read(project.join("detached-node")).unwrap(),
+            b"verified"
+        );
+        assert_eq!(
+            fs::read(&private).unwrap(),
+            original,
+            "reserved binding mutated"
+        );
+        let private_metadata = fs::metadata(&private).unwrap();
+        let runtime_metadata = fs::metadata(&runtime).unwrap();
+        assert_ne!(
+            (private_metadata.dev(), private_metadata.ino()),
+            (runtime_metadata.dev(), runtime_metadata.ino()),
+            "private snapshot shares the selected runtime inode"
+        );
+        assert_eq!(private_metadata.nlink(), 1);
+        assert!(!project.join("node-alias").exists());
+        assert_eq!(
+            resolution.reserved_node.as_ref().unwrap().mechanism,
+            "byte-verified private snapshot"
+        );
+        assert!(project.join("mutation-denied").exists());
+        fs::remove_dir_all(private.parent().unwrap()).unwrap();
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(trusted).unwrap();
     }
 
     #[test]
@@ -2498,10 +2737,12 @@ mod tests {
                 } else {
                     root.join("missing-target").into_os_string()
                 };
+                let runtime = PathBuf::from(std::env::var_os("TAPID_TEST_RUNTIME").unwrap());
+                let runtime_dir = runtime.parent().unwrap();
                 let mut request = ExecutionRequest::builder(program)
                     .project_root(&root)
-                    .trusted_node_runtime(root.join("node"))
-                    .executable_search_path(&root)
+                    .trusted_node_runtime(&runtime)
+                    .executable_search_path(runtime_dir)
                     .policy(policy(false, true, Vec::new()))
                     .build()
                     .unwrap();
@@ -2530,16 +2771,16 @@ mod tests {
             }
             return;
         }
-        use std::os::unix::fs::PermissionsExt;
         let root = temp_project("reserved-failure");
         let temporary = temp_project("reserved-failure-tmp");
-        fs::write(root.join("node"), "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(root.join("node"), fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime_dir, runtime) =
+            temp_node_runtime("reserved-failure-runtime", b"#!/bin/sh\nexit 0\n");
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "execution::platform_backend::tests::reserved_execution_failures_leave_no_receipt_or_private_directory", "--nocapture"])
-            .current_dir(&root).env(CHILD, "1").env("TMPDIR", &temporary).output().unwrap();
+            .current_dir(&root).env(CHILD, "1").env("TAPID_TEST_RUNTIME", &runtime).env("TMPDIR", &temporary).output().unwrap();
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(temporary).unwrap();
+        fs::remove_dir_all(runtime_dir).unwrap();
         assert!(
             output.status.success(),
             "{} {}",
@@ -2549,7 +2790,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_hardlink_creation_failure_removes_private_directory() {
+    fn reserved_snapshot_creation_failure_removes_private_directory() {
         use std::os::unix::fs::PermissionsExt;
         let root = temp_project("link-failure");
         let path = root.join("node");
@@ -2557,7 +2798,7 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let runtime = super::super::TrustedNodeRuntime::checked(&path).unwrap();
         let mut created = None;
-        let result = ReservedNode::create_with_link(&runtime, &root, |_, target| {
+        let result = ReservedNode::create_with_copy(&runtime, &root, |_, target| {
             let directory = target.parent().unwrap().to_path_buf();
             assert!(directory.is_dir());
             created = Some(directory);
@@ -2567,7 +2808,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("cannot create reserved node hard link")
+                .contains("cannot create verified reserved Node snapshot")
         );
         assert!(
             !created.unwrap().exists(),
@@ -2580,15 +2821,14 @@ mod tests {
     fn prepared_launch_revalidates_identities_and_cleans_failed_attempts() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let root = temp_project("prepared-tamper");
-        let runtime = root.join("node");
-        fs::write(&runtime, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime_dir, runtime) =
+            temp_node_runtime("prepared-tamper-runtime", b"#!/bin/sh\nexit 0\n");
         for fault in ["helper", "binding", "spawn", "preparation"] {
             let mut request = ExecutionRequest::builder("/bin/sh")
                 .args(["-c", ": > marker"])
                 .project_root(&root)
                 .trusted_node_runtime(&runtime)
-                .executable_search_path(&root)
+                .executable_search_path(&runtime_dir)
                 .policy(policy(false, true, Vec::new()))
                 .build()
                 .unwrap();
@@ -2662,6 +2902,7 @@ mod tests {
             let _ = fs::remove_file(root.join("old-helper"));
         }
         fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(runtime_dir).unwrap();
     }
 
     #[test]
@@ -3318,6 +3559,75 @@ mod tests {
         fs::File::from(read).read_to_end(&mut output).unwrap();
         assert_eq!(output, b"first\nsecond\n");
         assert!(!backpressure.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
+        const CHILD: &str = "TAPID_TEST_LIVE_SINK_FDS";
+        if std::env::var_os(CHILD).is_some() {
+            let file = fs::File::open("/etc/hosts").unwrap();
+            let (pipe_read, pipe_write) = launch_pipe().unwrap();
+            let (socket, peer) = UnixStream::pair().unwrap();
+            for (source, target) in [
+                (file.as_raw_fd(), 100),
+                (pipe_read.as_raw_fd(), 101),
+                (socket.as_raw_fd(), 102),
+            ] {
+                assert_eq!(unsafe { libc::dup2(source, target) }, target);
+                assert_eq!(unsafe { libc::fcntl(target, libc::F_SETFD, 0) }, 0);
+            }
+            let (destination_read, destination_write) = launch_pipe().unwrap();
+            let (mut sink, input) = spawn_live_sink(destination_write.as_raw_fd()).unwrap();
+            drop(destination_write);
+            let mut entries = [libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0,
+            }; 128];
+            let bytes = unsafe {
+                libc::proc_pidinfo(
+                    sink.id() as i32,
+                    libc::PROC_PIDLISTFDS,
+                    0,
+                    entries.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&entries) as libc::c_int,
+                )
+            };
+            assert!(bytes > 0);
+            let inherited: Vec<_> = entries
+                [..bytes as usize / std::mem::size_of::<libc::proc_fdinfo>()]
+                .iter()
+                .map(|entry| entry.proc_fd)
+                .filter(|fd| *fd > 2)
+                .collect();
+            drop(input);
+            assert!(sink.wait().unwrap().success());
+            drop(destination_read);
+            drop(pipe_write);
+            drop(peer);
+            for fd in [100, 101, 102] {
+                unsafe { libc::close(fd) };
+            }
+            assert!(
+                inherited.is_empty(),
+                "relay inherited descriptors {inherited:?}"
+            );
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "execution::platform_backend::tests::live_sink_exec_closes_unrelated_inheritable_descriptors",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

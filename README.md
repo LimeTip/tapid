@@ -199,8 +199,8 @@ node --experimental-strip-types --test tools/check_architecture_test.ts tools/re
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
-cargo test --manifest-path tests/integration/Cargo.toml --tests
-cargo diff --check
+cargo test --manifest-path tests/integration/Cargo.toml --tests --locked
+git diff --check
 ```
 
 The workspace is under active development. Do not treat the current binary or registry behavior as a production package-management guarantee. Do not push, publish, or release from a documentation-only checkout.
