@@ -177,7 +177,7 @@ pub(crate) fn run(
                 .artifact()
                 .map(|a| a.name.clone())
                 .unwrap_or_default();
-            (value.0.version, name, value.1, true)
+            (value.0.version, name, value.1, true, true)
         }
         Err(ReleaseError::AllEndpointsFailed { .. })
             if endpoints
@@ -187,9 +187,9 @@ pub(crate) fn run(
                     .collect::<Vec<_>>() =>
         {
             match fetch_latest_github_release(&mut fetcher, target) {
-                Ok(value) => (value.0, value.1, value.2, false),
+                Ok(value) => (value.0, value.1, value.2, false, true),
                 Err(fallback) => match recover_last_known_good(&destination, target) {
-                    Ok(value) => (value.0, value.1, value.2, true),
+                    Ok(value) => value,
                     Err(recovery) => {
                         return Err(format!(
                             "stable discovery unavailable, GitHub release fallback failed ({fallback}), and recovery failed: {recovery}"
@@ -200,7 +200,7 @@ pub(crate) fn run(
         }
         Err(ReleaseError::AllEndpointsFailed { .. }) => {
             match recover_last_known_good(&destination, target) {
-                Ok(value) => (value.0, value.1, value.2, true),
+                Ok(value) => value,
                 Err(recovery) => {
                     return Err(format!(
                         "stable discovery unavailable and recovery failed: {recovery}"
@@ -210,31 +210,46 @@ pub(crate) fn run(
         }
         Err(error) => return Err(error.to_string()),
     };
-    let digest = format!("{:x}", Sha256::digest(&downloaded.2));
+    let (manifest_version, artifact_name, bytes, signature_verified, verification_known) =
+        downloaded;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
     let state_path = release_state_path(&destination);
     let pending_state = if state_path.exists() {
         let previous = read_release_state(&state_path)
             .map_err(|error| format!("cannot read release state: {error}"))?;
-        Some((
-            state_path,
-            accept_release(
-                &previous,
-                &downloaded.0,
-                previous.release_sequence.saturating_add(1),
-                digest.clone(),
-            )
-            .map_err(|error| format!("cannot accept verified release state: {error}"))?,
-            digest,
-        ))
+        let mut state = accept_release(
+            &previous,
+            &manifest_version,
+            previous.release_sequence.saturating_add(1),
+            digest.clone(),
+        )
+        .map_err(|error| format!("cannot accept verified release state: {error}"))?;
+        state.verification = if verification_known {
+            if signature_verified {
+                "signature"
+            } else {
+                "checksum"
+            }
+        } else {
+            "unknown"
+        }
+        .into();
+        Some((state_path, state, digest))
     } else {
-        Some((
-            state_path,
-            ReleaseState::new(&downloaded.0, 1, digest.clone())
-                .map_err(|error| format!("cannot create release state: {error}"))?,
-            digest,
-        ))
+        let mut state = ReleaseState::new(&manifest_version, 1, digest.clone())
+            .map_err(|error| format!("cannot create release state: {error}"))?;
+        state.verification = if verification_known {
+            if signature_verified {
+                "signature"
+            } else {
+                "checksum"
+            }
+        } else {
+            "unknown"
+        }
+        .into();
+        Some((state_path, state, digest))
     };
-    let (manifest_version, artifact_name, bytes, signature_verified) = downloaded;
 
     let executable = crate::filesystem::atomic::materialize_artifact(&artifact_name, &bytes)?;
     if dry_run {
@@ -244,6 +259,7 @@ pub(crate) fn run(
             destination,
             dry_run: true,
             signature_verified,
+            verification_known,
         });
     }
     match activate_and_persist(
@@ -259,6 +275,7 @@ pub(crate) fn run(
             destination,
             dry_run: false,
             signature_verified,
+            verification_known,
         }),
         Err(error) => Err(error),
     }
@@ -270,6 +287,7 @@ pub(crate) struct UpgradeReport {
     pub(crate) destination: PathBuf,
     pub(crate) dry_run: bool,
     pub(crate) signature_verified: bool,
+    pub(crate) verification_known: bool,
 }
 
 #[allow(clippy::collapsible_if)]
@@ -426,7 +444,7 @@ fn write_cached_artifact(destination: &Path, digest: &str, bytes: &[u8]) -> Resu
 fn recover_last_known_good(
     destination: &Path,
     target: &str,
-) -> Result<(String, String, Vec<u8>), String> {
+) -> Result<(String, String, Vec<u8>, bool, bool), String> {
     let state = read_release_state(&release_state_path(destination))
         .map_err(|e| format!("invalid or missing last-known-good state: {e}"))?;
     let path = cached_artifact_path(destination, &state.last_known_good.artifact_sha256);
@@ -442,7 +460,13 @@ fn recover_last_known_good(
         return Err("cached artifact digest does not match last-known-good state".into());
     }
     let name = format!("tapid-{}-{target}.tar.gz", state.last_known_good.version);
-    Ok((state.last_known_good.version, name, bytes))
+    Ok((
+        state.last_known_good.version,
+        name,
+        bytes,
+        state.verification == "signature",
+        state.verification != "unknown",
+    ))
 }
 
 fn fetch_verified_release<F: Fetcher>(

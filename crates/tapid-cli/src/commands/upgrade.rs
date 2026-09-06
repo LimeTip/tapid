@@ -28,7 +28,9 @@ pub(crate) fn run(args: Args) -> ExitCode {
             if report.dry_run {
                 println!(
                     "{} Tapid {} for {}; dry-run did not replace {}",
-                    if report.signature_verified {
+                    if !report.verification_known {
+                        "Warning: provenance unknown"
+                    } else if report.signature_verified {
                         "Verified"
                     } else {
                         "Warning: checksum-only"
@@ -38,7 +40,11 @@ pub(crate) fn run(args: Args) -> ExitCode {
                     report.destination.display()
                 );
             } else {
-                if !report.signature_verified {
+                if !report.verification_known {
+                    println!(
+                        "Warning: verification provenance is unknown for the recovered artifact"
+                    );
+                } else if !report.signature_verified {
                     println!(
                         "Warning: signature verification was not performed for the GitHub fallback; release checksum matched"
                     );
