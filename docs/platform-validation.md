@@ -1,6 +1,6 @@
 # Root-script platform validation
 
-ADR 0005 platform backends and CLI wiring are pending. Existing Ubuntu and Windows consumer jobs exercise the pre-ADR runner path; local macOS tests exercise only the current checkout. None is evidence that default-on containment, minimal environment construction, descendant control, or resource limits are enforced.
+ADR 0005 CLI wiring is integrated and fails closed when no backend can prove every requested restriction. Platform backends and native enforcement evidence remain pending. Existing consumer jobs and local macOS tests exercise package-manager behavior and fail-closed preflight, not native containment, descendant control, or resource-limit enforcement.
 
 No macOS, Linux, or Windows backend may be marked supported until the complete probe set below passes through `tapid run <SCRIPT> -- <ARGS...>` at the exact integrated commit. A unit test of policy declarations, backend availability check, compilation result, or successful allowed operation is insufficient by itself.
 
@@ -85,4 +85,4 @@ The proposed design uses AppContainer for filesystem/network isolation, a non-br
 | Linux Landlock plus network/process controls | Pending implementation and integrated verification | None recorded |
 | Windows AppContainer plus Job Object | Pending implementation and integrated verification | None recorded |
 
-Keep package-manager, installer, and pre-ADR consumer evidence separate from this table. A local result on one platform is never evidence for another.
+Keep package-manager, installer, CLI preflight, and native containment evidence separate. A local result on one platform is never evidence for another.

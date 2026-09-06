@@ -179,7 +179,7 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - `add`, `remove`, `update`, `prune`, workspaces, full npm lockfile compatibility, and private-registry authentication are not implemented.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
-- ADR 0005 accepts an OS-backed, default-on root-script containment contract, but the configuration parser, platform backends, CLI wiring, and integrated runtime evidence are pending. Tapid does not yet claim a verified sandbox on macOS, Linux, or Windows. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
+- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. Native platform backends and runtime enforcement evidence remain pending, so Tapid does not claim a verified sandbox on macOS, Linux, or Windows and currently refuses to spawn root scripts. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
 
 ## Development
 
