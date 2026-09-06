@@ -135,6 +135,7 @@ def execute_example(report, script, binary, expected_digest, expected_version, *
                'XDG_CACHE_HOME': str(home / '.cache'), 'TMPDIR': tmp,
                'LANG': 'C', 'SHELL': '/bin/sh'}
         version = bounded_process([str(installed), '--version'], cwd=root, env=env, timeout=10, output_limit=output_limit)
+        report['version_probe'] = version
         if version['failure_class'] or version['exit_code'] or version['output'].strip() != expected_version:
             report.update(status='failed', failure_class='provenance', error='binary version mismatch')
             return report

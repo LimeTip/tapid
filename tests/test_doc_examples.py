@@ -45,6 +45,12 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(report['failure_class'], 'provenance')
         self.assertEqual(report['commands'], [])
 
+    def test_version_mismatch_retains_observed_probe(self):
+        report = self.fixture_run('tapid init\n', expected_version='tapid 9.9.9')
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual(report.get('version_probe'), {
+            'exit_code': 0, 'output': 'tapid 1.2.3\n', 'failure_class': None})
+
     def test_wrong_version_rejected_before_commands(self):
         report = self.fixture_run('tapid init\n', expected_version='tapid 9.9.9')
         self.assertEqual(report['status'], 'failed')
