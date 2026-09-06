@@ -44,7 +44,7 @@ tapid run dev
 
 `tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`.
 
-ADR 0005 makes containment default-on and fail-closed for root scripts. The policy parser and platform-neutral execution contracts are implemented, while CLI wiring and Linux/Windows runtime enforcement remain pending integrated verification. macOS 26 is unsupported because it lacks a public unprivileged primitive for race-free descendant ownership. This describes the accepted target contract, not a containment guarantee provided by the current binary.
+ADR 0005 makes containment default-on and fail-closed for root scripts. The CLI loads an exact checked-in script profile, constructs a sanitized environment and controlled executable search path, and routes execution through the platform-neutral runner contract. No native backend is currently supported: Linux and Windows remain pending native enforcement validation, while macOS 26 is unsupported because it lacks a public unprivileged primitive for race-free descendant ownership. The command therefore fails before spawning a script on these platforms; this is fail-closed policy wiring, not a containment guarantee.
 
 For example, a Next.js development server needs project writes and network access but does not need ambient credentials:
 
@@ -73,12 +73,12 @@ max_memory_bytes = 2147483648
 `write = ["."]` permits Next.js to create `.next`, `next-env.d.ts`, and any other project-local generated files; narrow it after observing the project's actual writes. `network = true` is the selected schema's portable boolean grant: it lets the server bind locally but also permits outbound connections, so it is not a loopback-only rule. `environment` names variables that may be copied from the caller when present; it does not import the rest of the caller's environment. Pass the bind address explicitly without exposing `HOST`, cloud credentials, proxy settings, or agent sockets:
 
 ```bash
-tapid run dev -- --hostname 127.0.0.1 --port 3000
+tapid run dev -- --hostname 127.0.0.1 --port 3001
 ```
 
 ## Current consumer workflow
 
-The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, the pre-ADR root-script path, argument forwarding, and lifecycle suppression. It does not verify ADR 0005 containment.
+The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, root-script policy selection, argument forwarding, and lifecycle suppression. Native ADR 0005 containment remains unavailable until a platform backend passes its required native positive and negative probes.
 
 For a clean checkout, build Tapid and create the readable consumer fixture through the same helper used by CI:
 
