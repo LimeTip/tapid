@@ -1,5 +1,5 @@
 use crate::config::{ExecutionLimits, SandboxMode, SandboxPolicy, validate_environment_name};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
@@ -502,6 +502,7 @@ struct ValidatedPreflight {
     support: ContainmentSupport,
     policy: ResolvedSandboxPolicy,
     bindings: FilesystemBindings,
+    child_environment: BTreeMap<OsString, OsString>,
 }
 
 impl ResolvedSandboxPolicy {
@@ -962,9 +963,22 @@ impl ExecutionRequest {
         &self.policy
     }
 
-    /// Explicit child environment. Backends must not add ambient variables.
+    /// Explicit caller-provided environment.
+    ///
+    /// This does not expose the mandatory adapter-owned `PATH`. Private adapters receive the
+    /// explicit entries plus `PATH` serialized from the ordered executable-search directories;
+    /// an empty directory list produces an explicitly empty `PATH`.
     pub fn environment(&self) -> &BTreeMap<OsString, OsString> {
         &self.environment
+    }
+
+    /// Complete adapter-owned child environment, including a controlled `PATH` entry.
+    fn child_environment(&self) -> BTreeMap<OsString, OsString> {
+        let mut environment = self.environment.clone();
+        let path = join_executable_search_paths(&self.executable_search_paths)
+            .expect("validated executable search paths must remain joinable");
+        environment.insert(OsString::from("PATH"), path);
+        environment
     }
 
     fn validate(&self) -> Result<(), ExecutionError> {
@@ -1007,8 +1021,18 @@ impl ExecutionRequest {
         if self.project_root.as_os_str().is_empty() {
             return Err(invalid_request("project root must not be empty"));
         }
-        validate_executable_search_paths(&self.executable_search_paths)?;
-        let mut environment_units = 1usize;
+        let executable_search_path =
+            validate_executable_search_paths(&self.executable_search_paths)?;
+        // The complete block always contains PATH=<joined paths>\0 followed by the block's final
+        // terminator. An empty path list therefore still contributes `PATH=\0\0`.
+        let mut environment_units = 1usize
+            .checked_add(os_units(OsStr::new("PATH")))
+            .and_then(|units| units.checked_add(os_units(&executable_search_path)))
+            .and_then(|units| units.checked_add(2))
+            .ok_or_else(environment_block_too_large)?;
+        if environment_units > MAX_ENVIRONMENT_BLOCK_UNITS {
+            return Err(environment_block_too_large());
+        }
         for (name, value) in &self.environment {
             let Some(name) = name.to_str() else {
                 return Err(invalid_request(
@@ -1032,13 +1056,12 @@ impl ExecutionRequest {
                 MAX_ENVIRONMENT_VALUE_UNITS,
             )?;
             environment_units = environment_units
-                .saturating_add(name_units)
-                .saturating_add(value_units)
-                .saturating_add(2);
+                .checked_add(name_units)
+                .and_then(|units| units.checked_add(value_units))
+                .and_then(|units| units.checked_add(2))
+                .ok_or_else(environment_block_too_large)?;
             if environment_units > MAX_ENVIRONMENT_BLOCK_UNITS {
-                return Err(invalid_request(format!(
-                    "execution environment exceeds {MAX_ENVIRONMENT_BLOCK_UNITS} bytes/code units"
-                )));
+                return Err(environment_block_too_large());
             }
             if !self
                 .policy
@@ -1082,12 +1105,19 @@ impl ExecutionRequestBuilder {
     }
 
     /// Adds one executable search directory after existing entries.
+    ///
+    /// [`Self::build`] rejects entries that the target platform's [`std::env::join_paths`] cannot
+    /// serialize, exact duplicates, and requests whose complete child environment (including the
+    /// resulting mandatory `PATH`) exceeds [`MAX_ENVIRONMENT_BLOCK_UNITS`].
     pub fn executable_search_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable_search_paths.push(path.into());
         self
     }
 
     /// Adds ordered executable search directories without consulting ambient `PATH`.
+    ///
+    /// [`Self::build`] validates every entry's representation and size before duplicate checks,
+    /// then applies the target platform's exact [`std::env::join_paths`] serialization rules.
     pub fn executable_search_paths<I, P>(mut self, paths: I) -> Self
     where
         I: IntoIterator<Item = P>,
@@ -1143,35 +1173,61 @@ impl ExecutionRequestBuilder {
     }
 }
 
-fn validate_executable_search_paths(paths: &[PathBuf]) -> Result<(), ExecutionError> {
+fn validate_executable_search_paths(paths: &[PathBuf]) -> Result<OsString, ExecutionError> {
     if paths.len() > MAX_EXECUTABLE_SEARCH_PATH_COUNT {
         return Err(invalid_request(format!(
             "execution request exceeds {MAX_EXECUTABLE_SEARCH_PATH_COUNT} executable search directories"
         )));
     }
-    let mut total_units = 1usize;
-    for (index, path) in paths.iter().enumerate() {
-        if paths[..index].contains(path) {
+
+    // Bound and validate every value before any duplicate comparison. This keeps comparisons over
+    // attacker-controlled native strings bounded even when an earlier value is repeated.
+    for path in paths {
+        validate_os_value(
+            "executable search directory",
+            path.as_os_str(),
+            MAX_EXECUTABLE_SEARCH_PATH_UNITS,
+        )?;
+    }
+
+    let joined = join_executable_search_paths(paths)?;
+    let total_units = os_units(&joined)
+        .checked_add(1)
+        .ok_or_else(executable_search_path_too_large)?;
+    if total_units > MAX_EXECUTABLE_SEARCH_PATHS_UNITS {
+        return Err(executable_search_path_too_large());
+    }
+
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        if !seen.insert(path.as_os_str()) {
             return Err(invalid_request(format!(
                 "duplicate executable search directory: {}",
                 path.display()
             )));
         }
-        let units = validate_os_value(
-            "executable search directory",
-            path.as_os_str(),
-            MAX_EXECUTABLE_SEARCH_PATH_UNITS,
-        )?;
-        total_units = total_units
-            .saturating_add(usize::from(index != 0))
-            .saturating_add(units);
-        if total_units > MAX_EXECUTABLE_SEARCH_PATHS_UNITS {
-            return Err(invalid_request(format!(
-                "executable search path exceeds {MAX_EXECUTABLE_SEARCH_PATHS_UNITS} bytes/code units"
-            )));
-        }
     }
-    Ok(())
+    Ok(joined)
+}
+
+fn join_executable_search_paths(paths: &[PathBuf]) -> Result<OsString, ExecutionError> {
+    std::env::join_paths(paths).map_err(|error| {
+        invalid_request(format!(
+            "executable search directory cannot be joined into PATH: {error}"
+        ))
+    })
+}
+
+fn executable_search_path_too_large() -> ExecutionError {
+    invalid_request(format!(
+        "executable search path exceeds {MAX_EXECUTABLE_SEARCH_PATHS_UNITS} bytes/code units"
+    ))
+}
+
+fn environment_block_too_large() -> ExecutionError {
+    invalid_request(format!(
+        "execution environment exceeds {MAX_ENVIRONMENT_BLOCK_UNITS} bytes/code units"
+    ))
 }
 
 fn invalid_request(message: impl Into<String>) -> ExecutionError {
@@ -1212,6 +1268,47 @@ fn validate_windows_command_line_units(
         )));
     }
     Ok(())
+}
+
+/// Mirrors `std::env::join_paths` on Windows so its separator quoting remains host-testable.
+#[cfg(test)]
+fn join_windows_path_units<'a>(paths: impl IntoIterator<Item = &'a [u16]>) -> Result<Vec<u16>, ()> {
+    const SEPARATOR: u16 = b';' as u16;
+    const QUOTE: u16 = b'"' as u16;
+    let mut joined = Vec::new();
+    for (index, path) in paths.into_iter().enumerate() {
+        if index != 0 {
+            joined.push(SEPARATOR);
+        }
+        if path.contains(&QUOTE) {
+            return Err(());
+        }
+        if path.contains(&SEPARATOR) {
+            joined.push(QUOTE);
+            joined.extend_from_slice(path);
+            joined.push(QUOTE);
+        } else {
+            joined.extend_from_slice(path);
+        }
+    }
+    Ok(joined)
+}
+
+#[cfg(any(windows, test))]
+fn windows_path_units_semantically_equal(left: &[u16], right: &[u16]) -> bool {
+    fn fold_ascii_case(unit: u16) -> u16 {
+        if unit >= u16::from(b'A') && unit <= u16::from(b'Z') {
+            unit + u16::from(b'a' - b'A')
+        } else {
+            unit
+        }
+    }
+
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(&left, &right)| fold_ascii_case(left) == fold_ascii_case(right))
 }
 
 fn validate_os_value(kind: &str, value: &OsStr, maximum: usize) -> Result<usize, ExecutionError> {
@@ -1336,9 +1433,16 @@ fn execute_with_backend(
         support,
         policy,
         bindings,
+        child_environment: request.child_environment(),
     };
     // This is deliberately the final generic operation before the adapter's native setup/spawn.
     preflight.bindings.validate(&preflight.policy)?;
+    if !preflight.child_environment.contains_key(OsStr::new("PATH")) {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::Internal,
+            "validated child environment is missing mandatory PATH",
+        ));
+    }
     let outcome = backend.spawn(request, &preflight)?;
     outcome.validate_for_preflight(&preflight)?;
     Ok(outcome)
@@ -1415,13 +1519,16 @@ fn resolve_policy(
         .iter()
         .map(|grant| resolve_project_grant(&project_root, grant, FilesystemAccess::Write))
         .collect::<Result<Vec<_>, _>>()?;
-    read.extend(
-        request
-            .executable_search_paths()
-            .iter()
-            .map(|path| resolve_executable_search_directory(path))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
+    let executable_search_paths = request
+        .executable_search_paths()
+        .iter()
+        .map(|path| resolve_executable_search_directory(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_resolved_executable_search_paths(
+        request.executable_search_paths(),
+        &executable_search_paths,
+    )?;
+    read.extend(executable_search_paths);
     read.extend(additions.read);
     write.extend(additions.write);
 
@@ -1514,15 +1621,6 @@ fn resolve_executable_search_directory(path: &Path) -> Result<ResolvedGrant, Exe
         ));
     }
     let canonical = canonical_path(path, "executable search directory")?;
-    if canonical != path {
-        return Err(ExecutionError::new(
-            ExecutionErrorCategory::PolicyViolation,
-            format!(
-                "executable search directory must already be canonical: {}",
-                path.display()
-            ),
-        ));
-    }
     let metadata = fs::metadata(&canonical)
         .map_err(|error| path_error("executable search directory", &canonical, error))?;
     if !metadata.is_dir() {
@@ -1541,6 +1639,52 @@ fn resolve_executable_search_directory(path: &Path) -> Result<ResolvedGrant, Exe
         source: FilesystemGrantSource::BackendRuntime,
         resolution: GrantResolution::RuntimeCanonical,
     })
+}
+
+fn validate_resolved_executable_search_paths(
+    requested: &[PathBuf],
+    resolved: &[ResolvedGrant],
+) -> Result<(), ExecutionError> {
+    for (index, grant) in resolved.iter().enumerate() {
+        if resolved[..index]
+            .iter()
+            .any(|prior| platform_paths_semantically_equal(&prior.path, &grant.path))
+        {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                format!(
+                    "executable search directories resolve to the same platform alias: {}",
+                    requested[index].display()
+                ),
+            ));
+        }
+    }
+
+    for (requested, resolved) in requested.iter().zip(resolved) {
+        if requested != &resolved.path {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::PolicyViolation,
+                format!(
+                    "executable search directory must already be canonical: {}",
+                    requested.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn platform_paths_semantically_equal(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
+#[cfg(windows)]
+fn platform_paths_semantically_equal(left: &Path, right: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    let left = left.as_os_str().encode_wide().collect::<Vec<_>>();
+    let right = right.as_os_str().encode_wide().collect::<Vec<_>>();
+    windows_path_units_semantically_equal(&left, &right)
 }
 
 fn resolve_runtime_grant(
@@ -1749,19 +1893,15 @@ mod tests {
             "/last/{}",
             "x".repeat(remainder - "/last/".len())
         )));
+        assert!(validate_executable_search_paths(&at_total).is_ok());
         assert!(
             ExecutionRequest::builder("node")
                 .executable_search_paths(at_total.clone())
                 .build()
-                .is_ok()
-        );
-        at_total.last_mut().unwrap().as_mut_os_string().push("x");
-        assert!(
-            ExecutionRequest::builder("node")
-                .executable_search_paths(at_total)
-                .build()
                 .is_err()
         );
+        at_total.last_mut().unwrap().as_mut_os_string().push("x");
+        assert!(validate_executable_search_paths(&at_total).is_err());
 
         assert!(
             ExecutionRequest::builder("node")
@@ -1775,6 +1915,67 @@ mod tests {
                 .build()
                 .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_search_directory_must_match_native_join_paths_semantics() {
+        let paths = [PathBuf::from("/runtime/with:colon")];
+        assert!(std::env::join_paths(&paths).is_err());
+
+        let error = ExecutionRequest::builder("node")
+            .executable_search_paths(paths)
+            .build()
+            .unwrap_err();
+        assert_eq!(error.category(), ExecutionErrorCategory::InvalidRequest);
+        assert!(error.to_string().contains("cannot be joined into PATH"));
+    }
+
+    #[test]
+    fn windows_join_paths_helper_matches_quoted_separator_semantics() {
+        let first: Vec<u16> = r"C:\runtime\bin".encode_utf16().collect();
+        let with_separator: Vec<u16> = r"C:\runtime;tools\bin".encode_utf16().collect();
+        let joined =
+            join_windows_path_units([first.as_slice(), with_separator.as_slice()]).unwrap();
+        assert_eq!(
+            String::from_utf16(&joined).unwrap(),
+            r#"C:\runtime\bin;"C:\runtime;tools\bin""#
+        );
+
+        let with_quote: Vec<u16> = "C:\\bad\"path".encode_utf16().collect();
+        assert!(join_windows_path_units([with_quote.as_slice()]).is_err());
+    }
+
+    #[test]
+    fn every_search_directory_is_bounded_and_joinable_before_duplicate_comparison() {
+        let oversized = PathBuf::from(format!("/{}", "x".repeat(MAX_EXECUTABLE_SEARCH_PATH_UNITS)));
+        let error = ExecutionRequest::builder("node")
+            .executable_search_paths([oversized.clone(), oversized])
+            .build()
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds"), "{error}");
+        assert!(!error.to_string().contains("duplicate"), "{error}");
+
+        #[cfg(unix)]
+        {
+            let unjoinable = PathBuf::from("/bad:entry");
+            let error = ExecutionRequest::builder("node")
+                .executable_search_paths([unjoinable.clone(), unjoinable])
+                .build()
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("cannot be joined into PATH"),
+                "{error}"
+            );
+            assert!(!error.to_string().contains("duplicate"), "{error}");
+        }
+    }
+
+    #[test]
+    fn windows_alias_helper_rejects_ascii_case_equivalent_paths() {
+        let upper: Vec<u16> = r"C:\Runtime\BIN".encode_utf16().collect();
+        let lower: Vec<u16> = r"c:\runtime\bin".encode_utf16().collect();
+        assert!(windows_path_units_semantically_equal(&upper, &lower));
     }
 
     #[test]
@@ -2258,6 +2459,7 @@ mod tests {
             support,
             policy,
             bindings,
+            child_environment: request.child_environment(),
         }
     }
 
@@ -2336,6 +2538,13 @@ mod tests {
                         preflight.policy.read[2].path.clone()
                     ]
                 );
+                assert_eq!(
+                    preflight.child_environment.get(OsStr::new("PATH")),
+                    Some(
+                        &std::env::join_paths(request.executable_search_paths())
+                            .expect("validated search paths must join")
+                    )
+                );
                 let receipt =
                     EnforcementReceipt::checked(preflight, preflight.support.requested().clone())?;
                 ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt)
@@ -2371,6 +2580,56 @@ mod tests {
             grant.access() == FilesystemAccess::Read
                 && grant.kind() == FilesystemGrantKind::DirectorySubtree
         }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_resolution_aliases_are_rejected_deterministically() {
+        use std::os::unix::fs::symlink;
+
+        struct Backend {
+            probes: std::cell::Cell<usize>,
+            spawns: std::cell::Cell<usize>,
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                self.probes.set(self.probes.get() + 1);
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                self.spawns.set(self.spawns.get() + 1);
+                unreachable!()
+            }
+        }
+
+        let root = temporary_directory("search-path-alias");
+        let target = root.join("target");
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir(&target).unwrap();
+        symlink(&target, &first).unwrap();
+        symlink(&target, &second).unwrap();
+        let request = ExecutionRequest::builder("node")
+            .project_root(fs::canonicalize(&root).unwrap())
+            .executable_search_paths([first, second])
+            .build()
+            .unwrap();
+        let backend = Backend {
+            probes: std::cell::Cell::new(0),
+            spawns: std::cell::Cell::new(0),
+        };
+
+        let error = execute_with_backend(&request, &backend).unwrap_err();
+        assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+        assert!(error.to_string().contains("alias"), "{error}");
+        assert_eq!(backend.probes.get(), 1);
+        assert_eq!(backend.spawns.get(), 0);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3015,7 +3274,7 @@ mod tests {
             }
         }
 
-        let malformed = [
+        let mut malformed = vec![
             vec![PathBuf::from(format!(
                 "/{}",
                 "x".repeat(MAX_EXECUTABLE_SEARCH_PATH_UNITS)
@@ -3035,6 +3294,10 @@ mod tests {
                 })
                 .collect(),
         ];
+        #[cfg(unix)]
+        malformed.push(vec![PathBuf::from("/bad:entry")]);
+        #[cfg(windows)]
+        malformed.push(vec![PathBuf::from("C:\\bad\"entry")]);
         for executable_search_paths in malformed {
             let backend = Backend {
                 probes: std::cell::Cell::new(0),
@@ -3203,7 +3466,7 @@ mod tests {
     }
 
     #[test]
-    fn environment_block_limit_is_enforced() {
+    fn complete_environment_block_limit_counts_mandatory_path() {
         let exact_policy = SandboxPolicy::new(
             SandboxMode::Required,
             FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
@@ -3213,7 +3476,13 @@ mod tests {
             ExecutionLimits::default(),
         )
         .unwrap();
-        let exact_value_units = MAX_ENVIRONMENT_BLOCK_UNITS - 1 - "ONE".len() - 2;
+        let final_block_terminator = 1;
+        let empty_path_entry = "PATH".len() + 1 + 1;
+        let explicit_entry_framing = "ONE".len() + 1 + 1;
+        let exact_value_units = MAX_ENVIRONMENT_BLOCK_UNITS
+            - final_block_terminator
+            - empty_path_entry
+            - explicit_entry_framing;
         assert!(
             ExecutionRequest::builder("node")
                 .policy(exact_policy.clone())
@@ -3243,5 +3512,121 @@ mod tests {
             .env("ONE", "x".repeat(MAX_ENVIRONMENT_VALUE_UNITS / 2))
             .env("TWO", "y".repeat(MAX_ENVIRONMENT_VALUE_UNITS / 2));
         assert!(request.build().is_err());
+    }
+
+    #[test]
+    fn complete_environment_combined_bound_includes_joined_path_and_has_no_off_by_one() {
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec!["ONE".into()],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let path = PathBuf::from("/bin");
+        let path_units = os_units(path.as_os_str());
+        let path_entry_units = "PATH".len() + 1 + path_units + 1;
+        let explicit_entry_framing = "ONE".len() + 1 + 1;
+        let exact_value_units =
+            MAX_ENVIRONMENT_BLOCK_UNITS - 1 - path_entry_units - explicit_entry_framing;
+
+        assert!(
+            ExecutionRequest::builder("node")
+                .policy(policy.clone())
+                .executable_search_path(&path)
+                .env("ONE", "x".repeat(exact_value_units))
+                .build()
+                .is_ok()
+        );
+        assert!(
+            ExecutionRequest::builder("node")
+                .policy(policy)
+                .executable_search_path(path)
+                .env("ONE", "x".repeat(exact_value_units + 1))
+                .build()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_search_list_produces_an_explicitly_empty_child_path() {
+        struct Backend;
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                assert_eq!(
+                    preflight.child_environment.get(OsStr::new("PATH")),
+                    Some(&OsString::new())
+                );
+                assert_eq!(preflight.child_environment.len(), 1);
+                let receipt =
+                    EnforcementReceipt::checked(preflight, preflight.support.requested().clone())?;
+                ExecutionOutcome::checked(Termination::Exited(0), vec![], vec![], receipt)
+            }
+        }
+
+        let request = ExecutionRequest::builder("node").build().unwrap();
+        execute_with_backend(&request, &Backend).unwrap();
+    }
+
+    #[test]
+    fn over_limit_complete_environment_is_rejected_before_support_probing() {
+        struct Backend {
+            probes: std::cell::Cell<usize>,
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                self.probes.set(self.probes.get() + 1);
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn spawn(
+                &self,
+                _request: &ExecutionRequest,
+                _preflight: &ValidatedPreflight,
+            ) -> Result<ExecutionOutcome, ExecutionError> {
+                unreachable!()
+            }
+        }
+
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec!["ONE".into()],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let mut request = ExecutionRequest::builder("node")
+            .policy(policy)
+            .env("ONE", "ok")
+            .build()
+            .unwrap();
+        request.environment.insert(
+            OsString::from("ONE"),
+            OsString::from("x".repeat(MAX_ENVIRONMENT_BLOCK_UNITS)),
+        );
+        let backend = Backend {
+            probes: std::cell::Cell::new(0),
+        };
+
+        assert_eq!(
+            execute_with_backend(&request, &backend)
+                .unwrap_err()
+                .category(),
+            ExecutionErrorCategory::InvalidRequest
+        );
+        assert_eq!(backend.probes.get(), 0);
     }
 }
