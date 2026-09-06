@@ -84,10 +84,15 @@ jobs:
           set -euo pipefail
           install_dir="$RUNNER_TEMP/tapid"
           mkdir -p "$RUNNER_TEMP/tapid-home"
-          curl --proto '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL https://tapid.dev/install.sh -o "$RUNNER_TEMP/install.sh"
+          # Exercise the tagged URL rendered by the website, not its compatibility copy.
+          installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$RELEASE_TAG/scripts/install.sh"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL "$installer_url" -o "$RUNNER_TEMP/install.sh"
+          shasum -a 256 "$RUNNER_TEMP/install.sh" > "$RUNNER_TEMP/installer-sha256.txt"
+          installer_digest="$(cut -d ' ' -f 1 "$RUNNER_TEMP/installer-sha256.txt")"
+          printf 'installer_url=%s\nrelease_tag=%s\nrelease_source_sha=%s\ninstaller_sha256=%s\n' \
+            "$installer_url" "$RELEASE_TAG" "$RELEASE_SHA" "$installer_digest" > "$RUNNER_TEMP/installer-provenance.txt"
           env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh \
             sh "$RUNNER_TEMP/install.sh" --version "$RELEASE_TAG" --install-dir "$install_dir"
-          shasum -a 256 "$RUNNER_TEMP/install.sh" > "$RUNNER_TEMP/installer-sha256.txt"
           actual="$("$install_dir/tapid" --version)"
           test "$actual" = "tapid ${RELEASE_TAG#v}"
           "$install_dir/tapid" --help >/dev/null
@@ -130,6 +135,8 @@ jobs:
           path: |
             ${{ runner.temp }}/doc-contract-published.json
             ${{ runner.temp }}/installer-sha256.txt
+            ${{ runner.temp }}/installer-provenance.txt
+            ${{ runner.temp }}/install.sh
           retention-days: 30
           if-no-files-found: error
       - name: Install latest release through discovery
@@ -162,7 +169,18 @@ jobs:
         run: |
           $installer = Join-Path $env:RUNNER_TEMP 'install.ps1'
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid'
-          Invoke-WebRequest -UseBasicParsing https://tapid.dev/install.ps1 -OutFile $installer
+          # curl.exe bounds the download on Windows PowerShell 5.1 as well as pwsh.
+          $installerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:RELEASE_TAG/scripts/install.ps1"
+          curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL $installerUrl --output $installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installerDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+          "$installerDigest  install.ps1" | Set-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'installer-sha256.txt')
+          @(
+            "installer_url=$installerUrl"
+            "release_tag=$env:RELEASE_TAG"
+            "release_source_sha=$env:RELEASE_SHA"
+            "installer_sha256=$installerDigest"
+          ) | Set-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'installer-provenance.txt')
           & $installer -Version $env:RELEASE_TAG -InstallDir $installDir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $binary = Join-Path $installDir 'tapid.exe'
@@ -206,7 +224,11 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: doc-contract-published-Windows
-          path: ${{ runner.temp }}/doc-contract-published.json
+          path: |
+            ${{ runner.temp }}/doc-contract-published.json
+            ${{ runner.temp }}/installer-sha256.txt
+            ${{ runner.temp }}/installer-provenance.txt
+            ${{ runner.temp }}/install.ps1
           retention-days: 30
           if-no-files-found: error
       - name: Install latest release through discovery
