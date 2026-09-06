@@ -197,6 +197,15 @@ impl EnforcementDimensions {
         }
     }
 
+    fn completion_required(requested: &Self) -> Self {
+        Self {
+            descendant_lifecycle: requested.descendant_lifecycle,
+            process_tree_membership: requested.process_tree_membership,
+            complete_cleanup: requested.complete_cleanup,
+            ..Self::none()
+        }
+    }
+
     #[allow(dead_code)] // Used by checked construction when a platform backend lands.
     fn contains(&self, required: &Self) -> bool {
         (!required.filesystem_read || self.filesystem_read)
@@ -218,6 +227,7 @@ impl EnforcementDimensions {
 
 /// One independently reportable portable enforcement dimension.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[non_exhaustive]
 pub enum EnforcementDimension {
     FilesystemRead,
     FilesystemWrite,
@@ -237,6 +247,7 @@ pub enum EnforcementDimension {
 
 /// The processes to which one dimension applies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum EnforcementScope {
     LaunchProcess,
     DescendantTree,
@@ -783,6 +794,14 @@ enum SupportAvailability {
 ///
 /// Callers can inspect this report but cannot manufacture one.
 ///
+/// ```
+/// use tapid_runner::ContainmentSupport;
+/// fn inspect(report: &ContainmentSupport) {
+///     let _: bool = report.is_supported();
+///     let _: Option<&str> = report.platform();
+/// }
+/// ```
+///
 /// ```compile_fail
 /// use tapid_runner::{BackendIdentity, ContainmentSupport, EnforcementDimensions};
 /// let none = EnforcementDimensions::none();
@@ -818,7 +837,7 @@ impl ContainmentSupport {
         Self {
             availability: SupportAvailability::Supported,
             backend,
-            platform: None,
+            platform: Some(std::env::consts::OS.to_owned()),
             reason: None,
             requested,
             declared,
@@ -849,8 +868,14 @@ impl ContainmentSupport {
         }
     }
 
-    fn is_supported(&self) -> bool {
+    pub fn is_supported(&self) -> bool {
         self.availability == SupportAvailability::Supported
+    }
+
+    /// Platform named by the backend report. The report remains non-forgeable because all fields
+    /// and constructors are private while these accessors make its claims inspectable.
+    pub fn platform(&self) -> Option<&str> {
+        self.platform.as_deref()
     }
 
     pub fn backend(&self) -> &BackendIdentity {
@@ -932,10 +957,10 @@ impl EnforcementReceipt {
                 "disabled sandbox execution cannot issue an enforcement receipt",
             ));
         }
-        if !enforced.contains(requested) {
+        if &enforced != requested {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
-                "established dimensions do not cover every requested restriction",
+                "established dimensions do not exactly match the requested restrictions",
             ));
         }
         if !support.declared().contains(requested) || !support.observed().contains(requested) {
@@ -1004,10 +1029,24 @@ impl EnforcementReceipt {
 }
 
 /// Confidence that process cleanup was observed at execution completion.
+///
+/// ```compile_fail
+/// use tapid_runner::CleanupConfidence;
+/// fn exhaustive(value: CleanupConfidence) {
+///     match value {
+///         CleanupConfidence::NotGuaranteed => {}
+///         CleanupConfidence::BestEffortObserved => {}
+///         CleanupConfidence::KernelOwnedComplete => {}
+///     }
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum CleanupConfidence {
     /// Cleanup is outside the portable restricted-authority contract.
     NotGuaranteed,
+    /// Cleanup was attempted and observed without complete descendant ownership.
+    BestEffortObserved,
     /// A kernel or VM owned the complete process-tree cleanup boundary.
     KernelOwnedComplete,
 }
@@ -1028,10 +1067,11 @@ impl CompletionEvidence {
         evidence: Vec<DimensionEvidence>,
         cleanup_confidence: CleanupConfidence,
     ) -> Result<Self, ExecutionError> {
-        if !confirmed.contains(preflight.support.requested()) {
+        let required = EnforcementDimensions::completion_required(preflight.support.requested());
+        if confirmed != required {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
-                "completion evidence does not cover every requested dimension",
+                "completion evidence does not exactly match completion-observable dimensions",
             ));
         }
         validate_dimension_evidence(&confirmed, &evidence)?;
@@ -1098,13 +1138,15 @@ impl ExecutionOutcome {
         enforcement: EnforcementReceipt,
         completion: CompletionEvidence,
     ) -> Result<Self, ExecutionError> {
-        if !enforcement.enforced().contains(enforcement.requested()) {
+        if enforcement.enforced() != enforcement.requested() {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
                 "execution outcome lacks complete enforcement evidence",
             ));
         }
-        if !completion.confirmed().contains(enforcement.requested()) {
+        let completion_required =
+            EnforcementDimensions::completion_required(enforcement.requested());
+        if completion.confirmed() != &completion_required {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
                 "execution outcome lacks complete completion evidence",
@@ -1132,12 +1174,12 @@ impl ExecutionOutcome {
         let receipt = self.enforcement();
         if receipt.support() != &preflight.support
             || receipt.requested() != required
-            || !receipt.enforced().contains(required)
+            || receipt.enforced() != required
             || !receipt.declared().contains(required)
             || !receipt.observed().contains(required)
             || receipt.configured_limits() != &preflight.policy.limits
             || receipt.resolved_filesystem() != &preflight.bindings.receipt()
-            || !self.completion.confirmed().contains(required)
+            || self.completion.confirmed() != &EnforcementDimensions::completion_required(required)
         {
             return Err(ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
@@ -1239,6 +1281,7 @@ pub enum ExecutionErrorCategory {
 pub struct ExecutionError {
     category: ExecutionErrorCategory,
     message: String,
+    completion: Option<CompletionEvidence>,
 }
 
 impl ExecutionError {
@@ -1246,11 +1289,22 @@ impl ExecutionError {
         Self {
             category,
             message: message.into(),
+            completion: None,
         }
+    }
+
+    fn with_completion(mut self, completion: CompletionEvidence) -> Self {
+        self.completion = Some(completion);
+        self
     }
 
     pub fn category(&self) -> ExecutionErrorCategory {
         self.category
+    }
+
+    /// Checked cleanup disposition for a failure after process creation; absent before spawn.
+    pub fn completion(&self) -> Option<&CompletionEvidence> {
+        self.completion.as_ref()
     }
 }
 
@@ -1927,6 +1981,113 @@ pub fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, Execution
     execute_with_backend(request, &platform_backend::PlatformBackend)
 }
 
+/// A backend lifecycle that owns every process created by one successful spawn operation.
+trait ExecutionLifecycle {
+    fn finish(&mut self) -> PostSpawnCompletion;
+    fn cleanup(&mut self) -> CompletionEvidence;
+}
+
+#[allow(dead_code)] // Reserved for platform backends; test backends exercise both variants.
+enum PostSpawnCompletion {
+    Finished(Box<ExecutionOutcome>),
+    Failed {
+        error: ExecutionError,
+        completion: CompletionEvidence,
+    },
+}
+
+/// Distinguishes setup failures that occurred before process creation from an owned attempt.
+struct PreSpawnError(ExecutionError);
+
+impl From<ExecutionError> for PreSpawnError {
+    fn from(error: ExecutionError) -> Self {
+        Self(error)
+    }
+}
+
+/// Owns the post-spawn lifecycle. Explicit finish validates every returned disposition. Drop can
+/// only attempt fallback cleanup: because it cannot report validation errors, invalid evidence
+/// panics instead of being represented as a checked disposition.
+struct OwnedExecutionAttempt<'a> {
+    preflight: &'a ValidatedPreflight,
+    lifecycle: Box<dyn ExecutionLifecycle + 'a>,
+    finished: bool,
+}
+
+impl<'a> OwnedExecutionAttempt<'a> {
+    #[allow(dead_code)] // Reserved for platform backends; test backends exercise owned attempts.
+    fn new(preflight: &'a ValidatedPreflight, lifecycle: Box<dyn ExecutionLifecycle + 'a>) -> Self {
+        Self {
+            preflight,
+            lifecycle,
+            finished: false,
+        }
+    }
+
+    fn finish(mut self) -> Result<ExecutionOutcome, ExecutionError> {
+        match self.lifecycle.finish() {
+            PostSpawnCompletion::Finished(outcome) => {
+                if let Err(error) = outcome.validate_for_preflight(self.preflight) {
+                    return Err(self.checked_fallback(error));
+                }
+                self.finished = true;
+                Ok(*outcome)
+            }
+            PostSpawnCompletion::Failed { error, completion } => {
+                if validate_completion_for_preflight(&completion, self.preflight).is_err() {
+                    return Err(self.checked_fallback(error));
+                }
+                self.finished = true;
+                Err(error.with_completion(completion))
+            }
+        }
+    }
+
+    fn checked_fallback(&mut self, error: ExecutionError) -> ExecutionError {
+        // Prevent a validation panic from causing a second cleanup attempt during unwinding.
+        self.finished = true;
+        let completion = self.lifecycle.cleanup();
+        validate_completion_for_preflight(&completion, self.preflight)
+            .expect("post-spawn fallback cleanup did not satisfy the checked contract");
+        error.with_completion(completion)
+    }
+}
+
+impl Drop for OwnedExecutionAttempt<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let completion = self.lifecycle.cleanup();
+        validate_completion_for_preflight(&completion, self.preflight)
+            .expect("dropped post-spawn attempt did not satisfy the checked cleanup contract");
+        self.finished = true;
+    }
+}
+
+fn validate_completion_for_preflight(
+    completion: &CompletionEvidence,
+    preflight: &ValidatedPreflight,
+) -> Result<(), ExecutionError> {
+    let required = EnforcementDimensions::completion_required(preflight.support.requested());
+    if completion.confirmed() != &required {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            "post-spawn completion does not match completion-observable dimensions",
+        ));
+    }
+    validate_dimension_evidence(&required, completion.evidence())?;
+    if required.process_tree_membership()
+        && completion.cleanup_confidence() != CleanupConfidence::KernelOwnedComplete
+    {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            "managed-tree completion lacks kernel-owned complete cleanup",
+        ));
+    }
+    Ok(())
+}
+
 trait ExecutionBackend {
     fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport;
 
@@ -1948,11 +2109,11 @@ trait ExecutionBackend {
         FilesystemBindings::canonical_path(policy)
     }
 
-    fn spawn(
-        &self,
+    fn spawn<'a>(
+        &'a self,
         request: &ExecutionRequest,
-        preflight: &ValidatedPreflight,
-    ) -> Result<ExecutionOutcome, ExecutionError>;
+        preflight: &'a ValidatedPreflight,
+    ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError>;
 }
 
 fn execute_with_backend(
@@ -1989,9 +2150,10 @@ fn execute_with_backend(
         ));
     }
     request.validate_trusted_node_runtime()?;
-    let outcome = backend.spawn(request, &preflight)?;
-    outcome.validate_for_preflight(&preflight)?;
-    Ok(outcome)
+    backend
+        .spawn(request, &preflight)
+        .map_err(|error| error.0)?
+        .finish()
 }
 
 fn validate_supported_evidence(
@@ -2292,8 +2454,8 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
 mod platform_backend {
     use super::{
         BackendIdentity, ContainmentSupport, EnforcementDimensions, ExecutionBackend,
-        ExecutionError, ExecutionErrorCategory, ExecutionOutcome, ExecutionRequest,
-        ValidatedPreflight,
+        ExecutionError, ExecutionErrorCategory, ExecutionRequest, OwnedExecutionAttempt,
+        PreSpawnError, ValidatedPreflight,
     };
 
     pub(super) struct PlatformBackend;
@@ -2303,15 +2465,15 @@ mod platform_backend {
             containment_support(request)
         }
 
-        fn spawn(
-            &self,
+        fn spawn<'a>(
+            &'a self,
             _request: &ExecutionRequest,
-            _preflight: &ValidatedPreflight,
-        ) -> Result<ExecutionOutcome, ExecutionError> {
-            Err(ExecutionError::new(
+            _preflight: &'a ValidatedPreflight,
+        ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
+            Err(PreSpawnError::from(ExecutionError::new(
                 ExecutionErrorCategory::Internal,
                 "containment backend reported support but execution is not implemented",
-            ))
+            )))
         }
     }
 
@@ -2434,11 +2596,11 @@ mod tests {
             fn containment_support(&self, _request: &ExecutionRequest) -> ContainmentSupport {
                 self.support.clone()
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 self.spawns.set(self.spawns.get() + 1);
                 unreachable!()
             }
@@ -2743,16 +2905,16 @@ mod tests {
                 )
             }
 
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 self.spawn_attempts.set(self.spawn_attempts.get() + 1);
-                Err(ExecutionError::new(
+                Err(PreSpawnError::from(ExecutionError::new(
                     ExecutionErrorCategory::Spawn,
                     "must not be reached",
-                ))
+                )))
             }
         }
 
@@ -2783,16 +2945,16 @@ mod tests {
                 self.support.clone()
             }
 
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 self.spawn_attempts.set(self.spawn_attempts.get() + 1);
-                Err(ExecutionError::new(
+                Err(PreSpawnError::from(ExecutionError::new(
                     ExecutionErrorCategory::Spawn,
                     "must not be reached",
-                ))
+                )))
             }
         }
 
@@ -2842,16 +3004,16 @@ mod tests {
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
 
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 self.spawn_attempts.set(self.spawn_attempts.get() + 1);
-                Err(ExecutionError::new(
+                Err(PreSpawnError::from(ExecutionError::new(
                     ExecutionErrorCategory::Spawn,
                     "must not be reached",
-                ))
+                )))
             }
         }
 
@@ -2875,6 +3037,87 @@ mod tests {
         let error = execute_with_backend(&request, &backend).unwrap_err();
         assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
         assert_eq!(backend.spawn_attempts.get(), 0);
+    }
+
+    #[test]
+    fn post_spawn_failure_returns_only_after_checked_cleanup() {
+        struct Backend {
+            cleanup_checks: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+        struct Lifecycle {
+            failed_completion: Option<CompletionEvidence>,
+            cleanup_completion: Option<CompletionEvidence>,
+            cleanup_checks: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+        impl ExecutionLifecycle for Lifecycle {
+            fn finish(&mut self) -> PostSpawnCompletion {
+                PostSpawnCompletion::Failed {
+                    error: ExecutionError::new(ExecutionErrorCategory::Spawn, "wait failed"),
+                    completion: self.failed_completion.take().unwrap(),
+                }
+            }
+            fn cleanup(&mut self) -> CompletionEvidence {
+                self.cleanup_checks.set(self.cleanup_checks.get() + 1);
+                self.cleanup_completion.take().unwrap()
+            }
+        }
+        impl ExecutionBackend for Backend {
+            fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+                let requested = EnforcementDimensions::requested_by(request.policy());
+                support_with_evidence(requested.clone(), requested.clone(), requested)
+            }
+            fn spawn<'a>(
+                &'a self,
+                _request: &ExecutionRequest,
+                preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
+                let dimensions =
+                    EnforcementDimensions::completion_required(preflight.support.requested());
+                let evidence = evidence_for_dimensions(&dimensions, "cleanup observation", &[]);
+                let failed_completion = CompletionEvidence::checked(
+                    preflight,
+                    dimensions.clone(),
+                    evidence.clone(),
+                    CleanupConfidence::NotGuaranteed,
+                )
+                .unwrap();
+                let cleanup_completion = CompletionEvidence::checked(
+                    preflight,
+                    dimensions,
+                    evidence,
+                    CleanupConfidence::KernelOwnedComplete,
+                )
+                .unwrap();
+                Ok(OwnedExecutionAttempt::new(
+                    preflight,
+                    Box::new(Lifecycle {
+                        failed_completion: Some(failed_completion),
+                        cleanup_completion: Some(cleanup_completion),
+                        cleanup_checks: self.cleanup_checks.clone(),
+                    }),
+                ))
+            }
+        }
+
+        let cleanup_checks = std::rc::Rc::new(std::cell::Cell::new(0));
+        let request = ExecutionRequest::builder("node")
+            .policy(required_policy())
+            .build()
+            .unwrap();
+        let error = execute_with_backend(
+            &request,
+            &Backend {
+                cleanup_checks: cleanup_checks.clone(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.category(), ExecutionErrorCategory::Spawn);
+        assert_eq!(cleanup_checks.get(), 1);
+        assert_eq!(
+            error.completion().unwrap().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
     }
 
     #[test]
@@ -2997,13 +3240,44 @@ mod tests {
 
     fn completion_for(preflight: &ValidatedPreflight) -> CompletionEvidence {
         let requested = preflight.support.requested().clone();
+        let completion_required = EnforcementDimensions::completion_required(&requested);
         let confidence = if requested.process_tree_membership() {
             CleanupConfidence::KernelOwnedComplete
         } else {
             CleanupConfidence::NotGuaranteed
         };
-        let evidence = evidence_for_dimensions(&requested, "test completion observation", &[]);
-        CompletionEvidence::checked(preflight, requested, evidence, confidence).unwrap()
+        let evidence =
+            evidence_for_dimensions(&completion_required, "test completion observation", &[]);
+        CompletionEvidence::checked(preflight, completion_required, evidence, confidence).unwrap()
+    }
+
+    struct FinishedLifecycle {
+        result: Option<PostSpawnCompletion>,
+        cleanup: CompletionEvidence,
+    }
+
+    impl ExecutionLifecycle for FinishedLifecycle {
+        fn finish(&mut self) -> PostSpawnCompletion {
+            self.result.take().expect("test lifecycle finishes once")
+        }
+
+        fn cleanup(&mut self) -> CompletionEvidence {
+            self.cleanup.clone()
+        }
+    }
+
+    fn finished_attempt<'a>(
+        preflight: &'a ValidatedPreflight,
+        outcome: ExecutionOutcome,
+    ) -> OwnedExecutionAttempt<'a> {
+        let cleanup = outcome.completion().clone();
+        OwnedExecutionAttempt::new(
+            preflight,
+            Box::new(FinishedLifecycle {
+                result: Some(PostSpawnCompletion::Finished(Box::new(outcome))),
+                cleanup,
+            }),
+        )
     }
 
     struct OutcomeBackend {
@@ -3019,20 +3293,22 @@ mod tests {
             support_with_evidence(requested.clone(), requested.clone(), requested)
         }
 
-        fn spawn(
-            &self,
+        fn spawn<'a>(
+            &'a self,
             _request: &ExecutionRequest,
-            preflight: &ValidatedPreflight,
-        ) -> Result<ExecutionOutcome, ExecutionError> {
+            preflight: &'a ValidatedPreflight,
+        ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
             self.spawns.set(self.spawns.get() + 1);
-            let receipt = receipt_for(preflight, preflight.support.requested().clone())?;
-            ExecutionOutcome::checked(
+            let receipt = receipt_for(preflight, preflight.support.requested().clone()).unwrap();
+            let outcome = ExecutionOutcome::checked(
                 self.termination.clone(),
                 self.stdout.clone(),
                 self.stderr.clone(),
                 receipt,
                 completion_for(preflight),
             )
+            .unwrap();
+            Ok(finished_attempt(preflight, outcome))
         }
     }
 
@@ -3257,11 +3533,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 request: &ExecutionRequest,
-                preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 assert_eq!(
                     request.executable_search_paths(),
                     [
@@ -3276,14 +3552,17 @@ mod tests {
                             .expect("validated search paths must join")
                     )
                 );
-                let receipt = receipt_for(preflight, preflight.support.requested().clone())?;
-                ExecutionOutcome::checked(
+                let receipt =
+                    receipt_for(preflight, preflight.support.requested().clone()).unwrap();
+                let outcome = ExecutionOutcome::checked(
                     Termination::Exited(0),
                     vec![],
                     vec![],
                     receipt,
                     completion_for(preflight),
                 )
+                .unwrap();
+                Ok(finished_attempt(preflight, outcome))
             }
         }
 
@@ -3334,11 +3613,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 self.spawns.set(self.spawns.get() + 1);
                 unreachable!()
             }
@@ -3406,11 +3685,11 @@ mod tests {
                 FilesystemBindings::canonical_path(policy)
             }
 
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 assert_eq!(preflight.policy.read.len(), 2);
                 assert_eq!(preflight.policy.write.len(), 1);
                 assert!(matches!(
@@ -3418,14 +3697,16 @@ mod tests {
                     GrantResolution::MissingWriteDirectory { .. }
                 ));
                 let enforced = preflight.support.requested().clone();
-                let receipt = receipt_for(preflight, enforced)?;
-                ExecutionOutcome::checked(
+                let receipt = receipt_for(preflight, enforced).unwrap();
+                let outcome = ExecutionOutcome::checked(
                     Termination::Exited(0),
                     vec![],
                     vec![],
                     receipt,
                     completion_for(preflight),
                 )
+                .unwrap();
+                Ok(finished_attempt(preflight, outcome))
             }
         }
 
@@ -3539,16 +3820,16 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 self.spawn_attempts.set(self.spawn_attempts.get() + 1);
-                Err(ExecutionError::new(
+                Err(PreSpawnError::from(ExecutionError::new(
                     ExecutionErrorCategory::Spawn,
                     "must not be reached",
-                ))
+                )))
             }
         }
 
@@ -3594,19 +3875,26 @@ mod tests {
     }
 
     #[test]
-    fn checked_receipt_validates_each_required_dimension_without_rejecting_extras() {
+    fn checked_receipt_rejects_every_extra_or_missing_dimension() {
         let policy = required_policy();
         let requested = EnforcementDimensions::requested_by(&policy);
+
         let mut declared = requested.clone();
         declared.timeout = true;
         let support = support_with_evidence(requested.clone(), declared.clone(), declared);
+        let preflight = preflight_for(policy.clone(), support);
+        let mut extra_configured_by_neither_policy_nor_request = requested.clone();
+        extra_configured_by_neither_policy_nor_request.timeout = true;
+        assert!(receipt_for(&preflight, extra_configured_by_neither_policy_nor_request).is_err());
+
+        let support =
+            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
         let preflight = preflight_for(policy, support);
+        let mut extra_unsupported = requested.clone();
+        extra_unsupported.timeout = true;
+        assert!(receipt_for(&preflight, extra_unsupported).is_err());
 
-        let mut extra = requested.clone();
-        extra.timeout = true;
-        assert!(receipt_for(&preflight, extra).is_ok());
-
-        let mut missing = requested.clone();
+        let mut missing = requested;
         missing.network = false;
         assert!(receipt_for(&preflight, missing).is_err());
     }
@@ -3683,7 +3971,7 @@ mod tests {
         let receipt = receipt_for(&preflight, requested.clone()).unwrap();
         assert!(!receipt.established_evidence().is_empty());
 
-        let incomplete_dimensions = requested.clone();
+        let incomplete_dimensions = EnforcementDimensions::completion_required(&requested);
         let incomplete_evidence = evidence_for_dimensions(
             &incomplete_dimensions,
             "incomplete cleanup observation",
@@ -3707,11 +3995,12 @@ mod tests {
             .is_err()
         );
 
+        let complete_dimensions = EnforcementDimensions::completion_required(&requested);
         let complete_evidence =
-            evidence_for_dimensions(&requested, "complete cleanup observation", &[]);
+            evidence_for_dimensions(&complete_dimensions, "complete cleanup observation", &[]);
         let complete = CompletionEvidence::checked(
             &preflight,
-            requested,
+            complete_dimensions,
             complete_evidence,
             CleanupConfidence::KernelOwnedComplete,
         )
@@ -3726,17 +4015,69 @@ mod tests {
     }
 
     #[test]
+    fn restricted_completion_does_not_reconfirm_launch_dimensions() {
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::Restricted,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let requested = EnforcementDimensions::requested_by(&policy);
+        let support =
+            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+        let preflight = preflight_for(policy, support);
+
+        let completion = CompletionEvidence::checked(
+            &preflight,
+            EnforcementDimensions::none(),
+            vec![],
+            CleanupConfidence::BestEffortObserved,
+        )
+        .unwrap();
+
+        assert_eq!(completion.confirmed(), &EnforcementDimensions::none());
+        assert!(completion.evidence().is_empty());
+        assert_eq!(
+            completion.cleanup_confidence(),
+            CleanupConfidence::BestEffortObserved
+        );
+    }
+
+    #[test]
+    fn managed_completion_confirms_only_lifecycle_and_cleanup_dimensions() {
+        let policy = required_policy();
+        let requested = EnforcementDimensions::requested_by(&policy);
+        let support =
+            support_with_evidence(requested.clone(), requested.clone(), requested.clone());
+        let preflight = preflight_for(policy, support);
+        let completion = completion_for(&preflight);
+
+        assert!(completion.confirmed().descendant_lifecycle());
+        assert!(completion.confirmed().process_tree_membership());
+        assert!(completion.confirmed().complete_cleanup());
+        assert!(!completion.confirmed().filesystem_read());
+        assert!(!completion.confirmed().environment_sanitization());
+        assert!(!completion.confirmed().descriptor_hygiene());
+        assert_eq!(completion.evidence().len(), 3);
+    }
+
+    #[test]
     fn completion_keeps_backend_observation_evidence() {
         let policy = required_policy();
         let requested = EnforcementDimensions::requested_by(&policy);
         let support =
             support_with_evidence(requested.clone(), requested.clone(), requested.clone());
         let preflight = preflight_for(policy, support);
-        let observed = evidence_for_dimensions(&requested, "completion observation", &[]);
+        let confirmed = EnforcementDimensions::completion_required(&requested);
+        let observed = evidence_for_dimensions(&confirmed, "completion observation", &[]);
 
         let completion = CompletionEvidence::checked(
             &preflight,
-            requested,
+            confirmed,
             observed,
             CleanupConfidence::KernelOwnedComplete,
         )
@@ -3908,11 +4249,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 unreachable!()
             }
         }
@@ -4057,16 +4398,16 @@ mod tests {
                     "must not bind",
                 ))
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 self.spawn_attempts.set(self.spawn_attempts.get() + 1);
-                Err(ExecutionError::new(
+                Err(PreSpawnError::from(ExecutionError::new(
                     ExecutionErrorCategory::Spawn,
                     "must not spawn",
-                ))
+                )))
             }
         }
         let root = temporary_directory("missing-read");
@@ -4110,11 +4451,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 unreachable!()
             }
         }
@@ -4170,11 +4511,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 unreachable!()
             }
         }
@@ -4215,11 +4556,11 @@ mod tests {
                 self.additions.set(self.additions.get() + 1);
                 Ok(RuntimeFilesystemAdditions::default())
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 self.spawns.set(self.spawns.get() + 1);
                 unreachable!()
             }
@@ -4249,11 +4590,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 self.spawns.set(self.spawns.get() + 1);
                 unreachable!()
             }
@@ -4401,24 +4742,27 @@ mod tests {
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
 
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 assert_eq!(
                     preflight.child_environment.get(OsStr::new("PATH")),
                     Some(&OsString::new())
                 );
                 assert_eq!(preflight.child_environment.len(), 1);
-                let receipt = receipt_for(preflight, preflight.support.requested().clone())?;
-                ExecutionOutcome::checked(
+                let receipt =
+                    receipt_for(preflight, preflight.support.requested().clone()).unwrap();
+                let outcome = ExecutionOutcome::checked(
                     Termination::Exited(0),
                     vec![],
                     vec![],
                     receipt,
                     completion_for(preflight),
                 )
+                .unwrap();
+                Ok(finished_attempt(preflight, outcome))
             }
         }
 
@@ -4437,11 +4781,11 @@ mod tests {
                 let requested = EnforcementDimensions::requested_by(request.policy());
                 support_with_evidence(requested.clone(), requested.clone(), requested)
             }
-            fn spawn(
-                &self,
+            fn spawn<'a>(
+                &'a self,
                 _request: &ExecutionRequest,
-                _preflight: &ValidatedPreflight,
-            ) -> Result<ExecutionOutcome, ExecutionError> {
+                _preflight: &'a ValidatedPreflight,
+            ) -> Result<OwnedExecutionAttempt<'a>, PreSpawnError> {
                 unreachable!()
             }
         }
