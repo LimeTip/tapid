@@ -271,6 +271,23 @@ fn run_rejects_oversized_configuration_before_parsing() {
 }
 
 #[test]
+fn run_rejects_oversized_manifest_before_policy_loading() {
+    let dir = temp_dir("run-oversized-manifest");
+    fs::write(dir.join("package.json"), vec![b' '; 1_048_577]).unwrap();
+    let output = run(
+        &dir,
+        &["run", "dev", "--node-runtime", env!("CARGO_BIN_EXE_tapid")],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: manifest exceeds maximum size of 1048576 bytes\n"
+    );
+    cleanup(dir);
+}
+
+#[test]
 fn run_requires_an_exact_script_profile() {
     let dir = temp_dir("run-missing-profile");
     fs::write(
