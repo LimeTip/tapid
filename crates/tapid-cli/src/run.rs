@@ -163,6 +163,12 @@ fn discover_node_runtime(host_path: Option<&OsStr>) -> Result<PathBuf, RunPrepar
         return Err(RunPreparationError::MissingNodeRuntime);
     };
     for directory in std::env::split_paths(host_path).take(MAX_HOST_PATH_DIRECTORIES) {
+        // Empty and relative PATH entries mean the caller's current directory.
+        // That directory may be the untrusted project, so it is not a trusted
+        // source for implicit runtime discovery.
+        if !directory.is_absolute() {
+            continue;
+        }
         let candidate = directory.join(if cfg!(windows) { "node.exe" } else { "node" });
         if let Ok(runtime) = canonical_node_executable(&candidate) {
             return Ok(runtime);

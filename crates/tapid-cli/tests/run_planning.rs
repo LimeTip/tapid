@@ -144,6 +144,45 @@ fn preexisting_managed_bin_symlink_outside_project_is_rejected() {
 }
 
 #[test]
+fn relative_host_path_entry_cannot_select_a_project_controlled_node() {
+    let (project, _) = project();
+    let relative_runtime = PathBuf::from("target").join(format!(
+        "tapid-relative-runtime-{}-{}",
+        std::process::id(),
+        PROJECT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&relative_runtime).unwrap();
+    let runtime = relative_runtime.join(if cfg!(windows) { "node.exe" } else { "node" });
+    fs::write(&runtime, b"runtime").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let config = RunConfig::parse_toml("[run.scripts.dev]\n").unwrap();
+    let error = run::prepare_execution_request(
+        &project,
+        "dev",
+        &config,
+        "node server.js",
+        &[],
+        run::HostExecutionEnvironment {
+            node_runtime: None,
+            path: Some(relative_runtime.as_os_str()),
+            allowlisted: &BTreeMap::new(),
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        run::RunPreparationError::MissingNodeRuntime
+    ));
+    fs::remove_dir_all(project).unwrap();
+    fs::remove_dir_all(relative_runtime).unwrap();
+}
+
+#[test]
 fn arbitrary_executable_filename_is_not_accepted_as_node() {
     let (project, runtime) = project();
     let fake = runtime.with_file_name(if cfg!(windows) {
