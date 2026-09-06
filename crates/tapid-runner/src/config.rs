@@ -259,6 +259,11 @@ impl RunConfig {
         &self.defaults
     }
 
+    /// Returns the exact per-script profile without falling back to defaults.
+    pub fn exact_profile(&self, script: &str) -> Option<&SandboxPolicy> {
+        self.scripts.get(script)
+    }
+
     /// Returns the exact script profile, or a clone of defaults when no override exists.
     pub fn profile_for(&self, script: &str) -> SandboxPolicy {
         self.scripts
@@ -837,5 +842,14 @@ mod tests {
         assert!(!config.profile_for("a").subprocess());
         assert_eq!(config.profile_for("missing"), config.defaults().clone());
         assert_eq!(config.profile_for("A"), config.defaults().clone());
+    }
+
+    #[test]
+    fn exact_profile_lookup_never_falls_back_to_defaults() {
+        let config = RunConfig::parse_toml("[run.scripts.dev]\nnetwork = true").unwrap();
+
+        assert!(config.exact_profile("dev").unwrap().network());
+        assert!(config.exact_profile("missing").is_none());
+        assert!(config.exact_profile("Dev").is_none());
     }
 }

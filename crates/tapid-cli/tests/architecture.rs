@@ -82,6 +82,20 @@ fn commands_are_split_by_user_facing_capability() {
 }
 
 #[test]
+fn sandboxed_run_path_cannot_spawn_directly() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for relative in ["run.rs", "commands/run.rs"] {
+        let source = fs::read_to_string(root.join(relative)).expect("read run source");
+        assert!(
+            !source.contains("std::process::Command")
+                && !source.contains("process::{Command")
+                && !source.contains("Command::new"),
+            "normal run path bypasses tapid-runner in {relative}"
+        );
+    }
+}
+
+#[test]
 fn rust_file_discovery_recurses_into_nested_modules() {
     let root = std::env::temp_dir().join(format!(
         "tapid-architecture-recursion-{}-{}",

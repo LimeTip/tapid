@@ -1,339 +1,180 @@
-//! Root-package script process execution.
-//!
-//! This module only starts one requested child process. It does not resolve or run
-//! dependency lifecycle scripts, sandbox children, or make policy decisions.
-//! Process-group signal containment is intentionally not provided: portable,
-//! correct containment requires platform-specific integration outside this layer.
+//! Construction and checked execution of root-package script requests.
 
 use std::{
     collections::BTreeMap,
-    env,
     ffi::OsString,
-    fmt, io,
-    path::PathBuf,
-    process::{Command, ExitStatus, Stdio},
+    fmt, fs,
+    path::{Path, PathBuf},
 };
+use tapid_runner::{ExecutionError, ExecutionOutcome, ExecutionRequest, RunConfig};
 
-#[derive(Debug, Clone)]
-pub struct RunRequest {
-    pub project_dir: PathBuf,
-    pub script: Option<String>,
-    pub arguments: Vec<String>,
-    pub shell: ShellBackend,
-    pub environment: BTreeMap<String, String>,
-}
-
-impl RunRequest {
-    pub fn new(project_dir: PathBuf, script: Option<String>) -> Self {
-        Self {
-            project_dir,
-            script,
-            arguments: Vec::new(),
-            shell: ShellBackend::default_for_platform(),
-            environment: BTreeMap::new(),
-        }
-    }
-
-    pub fn with_arguments<I, S>(mut self, arguments: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.arguments = arguments.into_iter().map(Into::into).collect();
-        self
-    }
-
-    pub fn with_shell(mut self, shell: ShellBackend) -> Self {
-        self.shell = shell;
-        self
-    }
-
-    pub fn with_environment(mut self, environment: BTreeMap<String, String>) -> Self {
-        self.environment = environment;
-        self
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShellBackend {
-    UnixSh,
-    WindowsCmd,
-}
-
-impl ShellBackend {
-    pub fn default_for_platform() -> Self {
-        if cfg!(windows) {
-            Self::WindowsCmd
-        } else {
-            Self::UnixSh
-        }
-    }
-
-    pub fn invocation(&self, script: &str, arguments: &[String]) -> ShellInvocation {
-        let (program, mut command_arguments) = match self {
-            Self::UnixSh => {
-                let command = if arguments.is_empty() {
-                    script.to_owned()
-                } else {
-                    format!("{script} \"$@\"")
-                };
-                (
-                    PathBuf::from("/bin/sh"),
-                    vec!["-c".to_owned(), command, "tapid-script".to_owned()],
-                )
-            }
-            Self::WindowsCmd => (
-                PathBuf::from("cmd.exe"),
-                vec![
-                    "/D".to_owned(),
-                    "/S".to_owned(),
-                    "/C".to_owned(),
-                    windows_command_with_arguments(script, arguments),
-                ],
-            ),
-        };
-        if matches!(self, Self::UnixSh) {
-            command_arguments.extend(arguments.iter().cloned());
-        }
-        ShellInvocation {
-            program,
-            arguments: command_arguments,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShellInvocation {
-    pub program: PathBuf,
-    pub arguments: Vec<String>,
-}
-
+/// A validated runner request plus its explicit executable search contract.
 #[derive(Debug)]
-pub struct ChildResult {
-    status: ExitStatus,
+pub struct PreparedExecution {
+    request: ExecutionRequest,
+    // Retained for boundary tests; the runner intentionally keeps these paths private.
+    #[allow(dead_code)]
+    executable_search_directories: Vec<PathBuf>,
 }
 
-impl ChildResult {
-    pub fn status(&self) -> ExitStatus {
-        self.status
+impl PreparedExecution {
+    pub fn request(&self) -> &ExecutionRequest {
+        &self.request
     }
 
-    pub fn exit_code(&self) -> Option<i32> {
-        self.status.code()
-    }
-
-    pub fn success(&self) -> bool {
-        self.status.success()
+    #[allow(dead_code)]
+    pub fn executable_search_directories(&self) -> &[PathBuf] {
+        &self.executable_search_directories
     }
 }
 
 #[derive(Debug)]
-pub enum RunError {
-    MissingScript,
-    InvalidProjectDirectory(PathBuf),
-    Spawn(io::Error),
+pub enum RunPreparationError {
+    MissingProfile(String),
+    InvalidProjectDirectory,
+    InvalidManagedBin,
+    InvalidNodeRuntime,
+    ReservedPath,
+    InvalidRequest(ExecutionError),
 }
 
-impl fmt::Display for RunError {
+impl fmt::Display for RunPreparationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingScript => write!(f, "root package script is missing"),
-            Self::InvalidProjectDirectory(path) => {
-                write!(
-                    f,
-                    "project directory is not a directory: {}",
-                    path.display()
-                )
+            Self::MissingProfile(name) => {
+                write!(f, "run policy profile is missing for script: {name}")
             }
-            Self::Spawn(error) => write!(f, "cannot start root package script: {error}"),
+            Self::InvalidProjectDirectory => f.write_str("project directory is not canonical"),
+            Self::InvalidManagedBin => f.write_str(
+                "managed executable directory is missing or is not a directory: node_modules/.bin",
+            ),
+            Self::InvalidNodeRuntime => {
+                f.write_str("node runtime must be an existing executable file")
+            }
+            Self::ReservedPath => {
+                f.write_str("run policy cannot allowlist reserved environment variable PATH")
+            }
+            Self::InvalidRequest(error) => write!(f, "invalid runner execution request: {error}"),
         }
     }
 }
 
-impl std::error::Error for RunError {}
+impl std::error::Error for RunPreparationError {}
 
-pub fn execute(request: RunRequest) -> Result<ChildResult, RunError> {
-    let script = request.script.ok_or(RunError::MissingScript)?;
-    if !request.project_dir.is_dir() {
-        return Err(RunError::InvalidProjectDirectory(request.project_dir));
+/// Constructs the exact request accepted by `tapid-runner` without consulting ambient `PATH`.
+pub fn prepare_execution_request(
+    project_dir: &Path,
+    script_name: &str,
+    config: &RunConfig,
+    script: &str,
+    arguments: &[String],
+    node_runtime: &Path,
+    ambient_environment: &BTreeMap<String, OsString>,
+) -> Result<PreparedExecution, RunPreparationError> {
+    let project_dir =
+        fs::canonicalize(project_dir).map_err(|_| RunPreparationError::InvalidProjectDirectory)?;
+    if !project_dir.is_dir() {
+        return Err(RunPreparationError::InvalidProjectDirectory);
+    }
+    let policy = config
+        .exact_profile(script_name)
+        .cloned()
+        .ok_or_else(|| RunPreparationError::MissingProfile(script_name.to_owned()))?;
+    if policy
+        .environment()
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case("PATH"))
+    {
+        return Err(RunPreparationError::ReservedPath);
     }
 
-    let invocation = request.shell.invocation(&script, &request.arguments);
-    let mut command = Command::new(invocation.program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
+    let managed_bin = fs::canonicalize(project_dir.join("node_modules/.bin"))
+        .map_err(|_| RunPreparationError::InvalidManagedBin)?;
+    if !managed_bin.is_dir() {
+        return Err(RunPreparationError::InvalidManagedBin);
+    }
+    let node_runtime = canonical_executable(node_runtime)?;
+    let runtime_bin = node_runtime
+        .parent()
+        .ok_or(RunPreparationError::InvalidNodeRuntime)?
+        .to_owned();
+    let search_directories = vec![managed_bin, runtime_bin];
 
-        if matches!(request.shell, ShellBackend::WindowsCmd) {
-            command
-                .args(&invocation.arguments[..3])
-                .raw_arg(&invocation.arguments[3]);
-        } else {
-            command.args(&invocation.arguments);
+    let environment = policy
+        .environment()
+        .iter()
+        .filter_map(|name| {
+            ambient_environment
+                .get(name)
+                .map(|value| (name.clone(), value.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let (program, shell_arguments) = shell_invocation(script, arguments);
+    let request = ExecutionRequest::builder(program)
+        .args(shell_arguments)
+        .executable_search_paths(search_directories.iter().cloned())
+        .project_root(project_dir)
+        .policy(policy)
+        .envs(environment)
+        .build()
+        .map_err(RunPreparationError::InvalidRequest)?;
+
+    Ok(PreparedExecution {
+        request,
+        executable_search_directories: search_directories,
+    })
+}
+
+fn canonical_executable(path: &Path) -> Result<PathBuf, RunPreparationError> {
+    let canonical = fs::canonicalize(path).map_err(|_| RunPreparationError::InvalidNodeRuntime)?;
+    let metadata = fs::metadata(&canonical).map_err(|_| RunPreparationError::InvalidNodeRuntime)?;
+    if !metadata.is_file() {
+        return Err(RunPreparationError::InvalidNodeRuntime);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(RunPreparationError::InvalidNodeRuntime);
         }
     }
-    #[cfg(not(windows))]
-    command.args(&invocation.arguments);
-    command
-        .current_dir(&request.project_dir)
-        .env_clear()
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+    Ok(canonical)
+}
 
-    let mut environment: BTreeMap<OsString, OsString> = env::vars_os().collect();
-    for (key, value) in request.environment {
-        environment.insert(OsString::from(key), OsString::from(value));
-    }
-    let managed_bin = request.project_dir.join("node_modules").join(".bin");
-    let separator = if cfg!(windows) { ";" } else { ":" };
-    let path_key = environment
-        .keys()
-        .find(|key| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
-        .cloned()
-        .unwrap_or_else(|| OsString::from("PATH"));
-    let inherited_path = environment.get(&path_key).cloned().unwrap_or_default();
-    let mut path = managed_bin.into_os_string();
-    if !inherited_path.is_empty() {
-        path.push(separator);
-        path.push(inherited_path);
-    }
-    environment.insert(path_key, path);
-    command.envs(environment);
-
-    let status = command.status().map_err(RunError::Spawn)?;
-    Ok(ChildResult { status })
+#[cfg(not(windows))]
+fn shell_invocation(script: &str, arguments: &[String]) -> (PathBuf, Vec<OsString>) {
+    let command = if arguments.is_empty() {
+        script.to_owned()
+    } else {
+        format!("{script} \"$@\"")
+    };
+    let mut shell_arguments = vec![
+        OsString::from("-c"),
+        OsString::from(command),
+        OsString::from("tapid-script"),
+    ];
+    shell_arguments.extend(arguments.iter().map(OsString::from));
+    (PathBuf::from("/bin/sh"), shell_arguments)
 }
 
 #[cfg(windows)]
-fn windows_command_with_arguments(script: &str, arguments: &[String]) -> String {
+fn shell_invocation(script: &str, arguments: &[String]) -> (PathBuf, Vec<OsString>) {
     let suffix = arguments
         .iter()
         .map(|argument| format!(" \"{}\"", argument.replace('"', "\"\"")))
         .collect::<String>();
-    format!("{script}{suffix}")
+    (
+        PathBuf::from("cmd.exe"),
+        vec![
+            OsString::from("/D"),
+            OsString::from("/S"),
+            OsString::from("/C"),
+            OsString::from(format!("{script}{suffix}")),
+        ],
+    )
 }
 
-#[cfg(not(windows))]
-fn windows_command_with_arguments(script: &str, _arguments: &[String]) -> String {
-    script.to_owned()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{
-        collections::BTreeMap,
-        fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    fn project() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "tapid-run-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(path.join("node_modules/.bin")).unwrap();
-        path
-    }
-
-    #[test]
-    fn missing_script_data_is_rejected_before_spawn() {
-        let request = RunRequest::new(project(), None);
-        assert!(matches!(execute(request), Err(RunError::MissingScript)));
-    }
-
-    #[test]
-    fn default_shell_runs_opaque_script_in_project_cwd() {
-        let dir = project();
-        let mut environment = BTreeMap::new();
-        environment.insert(
-            "TAPID_EXPECTED_CWD".into(),
-            fs::canonicalize(&dir)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-        );
-        fs::write(dir.join("cwd-marker"), "").unwrap();
-        let script = if cfg!(windows) {
-            r#"if exist cwd-marker (exit /b 0) else (exit /b 1)"#.into()
-        } else {
-            r#"test "$(pwd)" = "$TAPID_EXPECTED_CWD""#.into()
-        };
-        let request = RunRequest::new(dir, Some(script)).with_environment(environment);
-        let result = execute(request).unwrap();
-        assert_eq!(result.exit_code(), Some(0));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unix_adapter_appends_ordered_arguments_to_script_command() {
-        let dir = project();
-        let output = dir.join("forwarded");
-        let request = RunRequest::new(dir, Some("printf '%s\\n' > forwarded".into()))
-            .with_arguments(["--hostname", "127.0.0.1", "--port", "3001"]);
-        assert_eq!(execute(request).unwrap().exit_code(), Some(0));
-        assert_eq!(
-            fs::read_to_string(output).unwrap(),
-            "--hostname\n127.0.0.1\n--port\n3001\n"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn managed_bin_precedes_inherited_path_and_overrides_are_inherited() {
-        let dir = project();
-        let bin = dir.join("node_modules/.bin/marker");
-        #[cfg(unix)]
-        fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let mut env = BTreeMap::new();
-        env.insert("TAPID_RUN_MARKER".into(), "present".into());
-        let request = RunRequest::new(
-            dir,
-            Some("test \"$TAPID_RUN_MARKER\" = present && command -v marker".into()),
-        )
-        .with_environment(env);
-        #[cfg(unix)]
-        assert_eq!(execute(request).unwrap().exit_code(), Some(0));
-    }
-
-    #[test]
-    fn child_failure_is_returned_with_original_exit_code() {
-        let request = RunRequest::new(project(), Some("exit 37".into()));
-        let result = execute(request).unwrap();
-        assert_eq!(result.exit_code(), Some(37));
-        assert!(!result.success());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_child_exit_code_is_not_truncated() {
-        let request = RunRequest::new(project(), Some("exit /b 256".into()));
-        assert_eq!(execute(request).unwrap().exit_code(), Some(256));
-    }
-
-    #[test]
-    fn shell_backend_selection_builds_platform_specific_invocations() {
-        let unix = ShellBackend::UnixSh.invocation("echo hi", &["a".into(), "b".into()]);
-        assert_eq!(unix.program, PathBuf::from("/bin/sh"));
-        assert_eq!(
-            unix.arguments,
-            vec!["-c", "echo hi \"$@\"", "tapid-script", "a", "b"]
-        );
-        let windows = ShellBackend::WindowsCmd.invocation("echo hi", &["a".into()]);
-        assert_eq!(windows.program, PathBuf::from("cmd.exe"));
-        #[cfg(windows)]
-        assert_eq!(windows.arguments, vec!["/D", "/S", "/C", "echo hi \"a\""]);
-        #[cfg(not(windows))]
-        assert_eq!(windows.arguments, vec!["/D", "/S", "/C", "echo hi"]);
-    }
+/// Executes only through tapid-runner's checked, fail-closed platform path.
+pub fn execute_checked(prepared: &PreparedExecution) -> Result<ExecutionOutcome, ExecutionError> {
+    tapid_runner::execute(prepared.request())
 }

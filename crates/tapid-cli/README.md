@@ -32,7 +32,7 @@ tapid init [PATH]
 tapid manifest validate [PATH]
 tapid lock verify
 tapid install [OPTIONS]
-tapid run <SCRIPT> [-- <ARGS>...]
+tapid run <SCRIPT> --node-runtime <PATH> [-- <ARGS>...]
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
@@ -64,16 +64,18 @@ Both flags require `tapid.lock` and all referenced verified trees. Replay valida
 ## Run and `.bin`
 
 ```text
-tapid run init
-tapid run dev -- --host 127.0.0.1
-tapid run --project-dir ./example test -- --runInBand
+tapid run init --node-runtime /absolute/path/to/node
+tapid run dev --node-runtime /absolute/path/to/node -- --host 127.0.0.1
+tapid run --project-dir ./example test --node-runtime /absolute/path/to/node -- --runInBand
 ```
 
-The accepted ADR 0005 command remains `tapid run <SCRIPT> -- <ARGS...>`. Values after the first `--` are forwarded in order to the selected script; the separator is not forwarded and those values are not parsed as Tapid options. Missing scripts fail with exit code `1`. Clap parsing errors use exit code `2`.
+Values after the first `--` are forwarded in order to the selected script; the separator is not forwarded and those values are not parsed as Tapid options. Missing scripts fail with exit code `1`. Clap parsing errors use exit code `2`.
 
-The target command reads checked-in `tapid.toml`, merges `[run.defaults]` with `[run.scripts.<name>]`, and starts only if a platform backend can enforce all requested filesystem, network, environment, subprocess, and resource restrictions. It constructs a minimal environment rather than preserving inherited variables: a controlled `PATH` includes the managed `.bin` directory and required runtime locations, and only environment names explicitly listed in policy may be copied from the caller when present. Unknown configuration, invalid project-relative paths, invalid environment names, unsupported combinations, and unavailable guarantees fail before the shell starts. Project configuration cannot turn containment off.
+The command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. It starts only if `tapid-runner` can enforce every requested filesystem, network, environment, subprocess, and resource restriction. It constructs a minimal environment rather than preserving inherited variables: `PATH` is reserved and cannot be allowlisted, while other declared names are copied from the caller only when present. The controlled executable search order is the canonical project `node_modules/.bin` directory followed by the canonical parent directory of the executable supplied with `--node-runtime`. Ambient `PATH` is never appended or searched. Both directories and the selected Node executable must already exist; on Unix the runtime must have an executable bit.
 
-This is the accepted target contract. The configuration parser, platform backends, enforcement receipts, and CLI wiring are pending integrated verification, so the current binary must not be described as contained. The initial macOS backend depends on deprecated, behaviorally probed `sandbox-exec`/Seatbelt and becomes unavailable if that probe fails. Linux and Windows support is unclaimed until their backends pass positive and negative runtime probes on the exact integrated commit.
+On Unix, package scripts use `/bin/sh -c <script> tapid-script <forwarded-args...>` with `"$@"` boundaries. On Windows, the request uses `cmd.exe /D /S /C`. Configuration input is bounded before parsing. Unknown configuration, invalid project-relative paths, invalid environment names, reserved `PATH`, invalid runtimes, unsupported combinations, and unavailable guarantees fail before the shell starts. Project configuration cannot turn containment off, and this CLI exposes no unsandboxed override.
+
+The CLI now uses `tapid-runner::ExecutionRequest` and checked execution exclusively for normal root scripts. A successful backend result prints captured child output and a receipt identifying requested, declared, observed, and enforced dimensions; limit terminations are reported distinctly. The current runner base has no native platform backend, so execution fails closed as `unsupported-containment` before spawn and issues no receipt. Linux and Windows runtime behavior remains unverified.
 
 Install derives executable shims from verified package `bin` metadata. Unix uses symlinks. Windows writes `.cmd` and PowerShell wrappers. The planner rejects malformed metadata, absolute or traversal targets, symlink and special-file targets, collisions, and unsupported platforms. Root scripts remain arbitrary code and can use every explicitly granted capability.
 
@@ -81,7 +83,7 @@ Install derives executable shims from verified package `bin` metadata. Unix uses
 
 - Dependency lifecycle scripts are disabled during every install path.
 - Root scripts run only after the explicit `tapid run` command.
-- Root-script containment is an accepted but not yet integrated capability; existing root-script tests do not verify ADR 0005.
+- Root-script execution is wired to the containment contract, but remains unavailable until a native backend passes its runtime probes and can issue a checked receipt.
 - Full npm semver, aliases, tags, git/file/workspace specs, peer semantics, workspaces, and complete optional-dependency and lockfile compatibility are not implemented.
 - `add`, `remove`, `update`, `prune`, script approval, private-registry authentication, and package publishing are outside this slice.
 - JSR installation remains fail-closed unless metadata provides both an HTTPS npm tarball URL and a valid SHA-512 SRI value. Live JSR integrity behavior is unsupported and unverified.

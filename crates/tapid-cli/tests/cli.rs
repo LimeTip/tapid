@@ -117,80 +117,203 @@ fn clap_rejects_unknown_commands_with_usage_error() {
 }
 
 #[test]
-fn run_executes_root_script_and_forwards_arguments() {
-    let dir = temp_dir("run");
-    #[cfg(unix)]
-    let manifest = r#"{"name":"demo","version":"1.0.0","scripts":{"init":"printf '%s' > forwarded","dev":"exit 37"}}"#;
-    #[cfg(windows)]
-    let manifest = r#"{"name":"demo","version":"1.0.0","scripts":{"init":"echo > forwarded","dev":"exit /b 37"}}"#;
-    fs::write(dir.join("package.json"), manifest).unwrap();
-    let output = run(&dir, &["run", "init", "--", "hello world"]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(dir.join("forwarded"))
-            .unwrap()
-            .trim()
-            .trim_matches('"'),
-        "hello world"
-    );
-    let child = run(&dir, &["run", "dev"]);
-    assert_eq!(child.status.code(), Some(37));
-    cleanup(dir);
-}
-
-#[cfg(windows)]
-#[test]
-fn run_preserves_windows_child_exit_code() {
-    let dir = temp_dir("run-exit-code");
+fn run_requires_checked_in_configuration_before_execution() {
+    let dir = temp_dir("run-missing-config");
     fs::write(
         dir.join("package.json"),
-        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit /b 256"}}"#,
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
     )
     .unwrap();
-    let output = run(&dir, &["run", "dev"]);
-    assert_eq!(output.status.code(), Some(256));
+    let output = run(
+        &dir,
+        &["run", "dev", "--node-runtime", env!("CARGO_BIN_EXE_tapid")],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: required run configuration is missing: tapid.toml\n"
+    );
+    assert!(output.stdout.is_empty());
     cleanup(dir);
 }
 
 #[test]
-fn run_resolves_installed_bin_and_rejects_missing_script_stably() {
-    let dir = temp_dir("run-bin");
+fn run_rejects_malformed_configuration_stably() {
+    let dir = temp_dir("run-malformed-config");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.toml"), "[run.scripts.dev\nnetwork = true").unwrap();
+    let output = run(
+        &dir,
+        &["run", "dev", "--node-runtime", env!("CARGO_BIN_EXE_tapid")],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: invalid run configuration (malformed)\n"
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn run_rejects_oversized_configuration_before_parsing() {
+    let dir = temp_dir("run-oversized-config");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        vec![b' '; tapid_runner::MAX_CONFIG_BYTES + 1],
+    )
+    .unwrap();
+    let output = run(
+        &dir,
+        &["run", "dev", "--node-runtime", env!("CARGO_BIN_EXE_tapid")],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: invalid run configuration (capacity-exceeded)\n"
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn run_requires_an_exact_script_profile() {
+    let dir = temp_dir("run-missing-profile");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.toml"), "[run.defaults]\nnetwork = false\n").unwrap();
+    let output = run(
+        &dir,
+        &["run", "dev", "--node-runtime", env!("CARGO_BIN_EXE_tapid")],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: run policy profile is missing for script: dev\n"
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn run_fails_closed_before_spawn_without_printing_secret_values() {
+    let dir = temp_dir("run-unsupported");
     fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
     fs::write(
         dir.join("package.json"),
-        r#"{"name":"demo","version":"1.0.0","scripts":{"init":"helper > bin-output"}}"#,
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"printf spawned > SHOULD_NOT_EXIST"}}"#,
     )
     .unwrap();
-    #[cfg(unix)]
-    let helper = dir.join("node_modules/.bin/helper");
-    #[cfg(windows)]
-    let helper = dir.join("node_modules/.bin/helper.cmd");
-    #[cfg(unix)]
-    fs::write(&helper, "#!/bin/sh\nprintf bin-ok\n").unwrap();
-    #[cfg(windows)]
-    fs::write(&helper, "@echo off\r\necho bin-ok\r\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let ok = run(&dir, &["run", "init"]);
-    assert!(
-        ok.status.success(),
-        "{}",
-        String::from_utf8_lossy(&ok.stderr)
+    fs::write(
+        dir.join("tapid.toml"),
+        "[run.scripts.dev]\nenvironment = [\"SECRET_TOKEN\"]\n",
+    )
+    .unwrap();
+    let secret = "tapid-super-secret-value";
+    let output = run_with_env(
+        &dir,
+        &[
+            "run",
+            "dev",
+            "--node-runtime",
+            env!("CARGO_BIN_EXE_tapid"),
+            "--",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            "4173",
+        ],
+        "SECRET_TOKEN",
+        secret,
     );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("sandbox execution failed (unsupported-containment)"));
+    assert!(stderr.contains("no process was started"));
+    assert!(stderr.contains("no enforcement receipt was issued"));
+    assert!(!stderr.contains(secret));
+    assert!(!dir.join("SHOULD_NOT_EXIST").exists());
+    cleanup(dir);
+}
+
+#[test]
+fn run_rejects_reserved_path_allowlisting_before_runner_execution() {
+    let dir = temp_dir("run-path-reserved");
+    fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[run.scripts.dev]\nenvironment = [\"PATH\"]\n",
+    )
+    .unwrap();
+    let output = run(
+        &dir,
+        &["run", "dev", "--node-runtime", env!("CARGO_BIN_EXE_tapid")],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
     assert_eq!(
-        fs::read_to_string(dir.join("bin-output"))
-            .unwrap()
-            .trim_end(),
-        "bin-ok"
+        String::from_utf8_lossy(&output.stderr),
+        "error: run policy cannot allowlist reserved environment variable PATH\n"
     );
-    let missing = run(&dir, &["run", "missing"]);
+    cleanup(dir);
+}
+
+#[test]
+fn run_rejects_a_missing_node_runtime_stably() {
+    let dir = temp_dir("run-runtime-missing");
+    fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.toml"), "[run.scripts.dev]\n").unwrap();
+    let output = run(&dir, &["run", "dev", "--node-runtime", "missing-node"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: node runtime must be an existing executable file\n"
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn run_rejects_missing_script_stably_before_policy_loading() {
+    let dir = temp_dir("run-missing-script");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{}}"#,
+    )
+    .unwrap();
+    let missing = run(
+        &dir,
+        &[
+            "run",
+            "missing",
+            "--node-runtime",
+            env!("CARGO_BIN_EXE_tapid"),
+        ],
+    );
     assert_eq!(missing.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&missing.stderr),
@@ -198,6 +321,7 @@ fn run_resolves_installed_bin_and_rejects_missing_script_stably() {
     );
     cleanup(dir);
 }
+
 #[test]
 fn install_rejects_malformed_lockfile_before_creating_output() {
     let dir = temp_dir("bad-install");
