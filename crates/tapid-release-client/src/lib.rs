@@ -326,6 +326,12 @@ pub struct ReleaseState {
     pub release_floor: String,
     pub release_sequence: u64,
     pub last_known_good: LastKnownGood,
+    #[serde(default = "unknown_verification")]
+    pub verification: String,
+}
+
+fn unknown_verification() -> String {
+    "unknown".into()
 }
 
 impl ReleaseState {
@@ -338,6 +344,7 @@ impl ReleaseState {
                 version: version.into(),
                 artifact_sha256,
             },
+            verification: unknown_verification(),
         };
         validate_state(&state)?;
         Ok(state)
@@ -368,7 +375,10 @@ pub fn accept_release(
     } else {
         &state.release_floor
     };
-    ReleaseState::new(floor, sequence, artifact_sha256)
+    let mut next = ReleaseState::new(floor, sequence, artifact_sha256)?;
+    next.verification = state.verification.clone();
+    validate_state(&next)?;
+    Ok(next)
 }
 
 pub fn write_release_state(path: &Path, state: &ReleaseState) -> Result<(), Error> {
@@ -392,6 +402,12 @@ fn validate_state(state: &ReleaseState) -> Result<(), Error> {
         return Err(Error::State(
             "unsupported or malformed release state".into(),
         ));
+    }
+    if !matches!(
+        state.verification.as_str(),
+        "signature" | "checksum" | "unknown"
+    ) {
+        return Err(Error::State("unsupported verification provenance".into()));
     }
     validate_lkg(&state.last_known_good)?;
     if compare_version(&state.last_known_good.version, &state.release_floor)?
