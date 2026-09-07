@@ -102,30 +102,7 @@ impl From<io::Error> for PublishError {
 
 impl NormalizedFileManifest {
     pub fn from_source(source: &PackageSource) -> Result<Self, PublishError> {
-        if !source.root.is_dir() {
-            return Err(PublishError::InvalidSource(
-                "package root must be a directory".into(),
-            ));
-        }
-        let mut paths = Vec::new();
-        collect_files(&source.root, &source.root, &source.exclusions, &mut paths)?;
-        paths.sort();
-        let files = paths
-            .into_iter()
-            .map(|(path, full)| {
-                let bytes = fs::read(full)?;
-                let digest = digest_bytes(&bytes);
-                Ok(ManifestFile {
-                    path,
-                    size: bytes.len() as u64,
-                    digest,
-                })
-            })
-            .collect::<Result<Vec<_>, PublishError>>()?;
-        Ok(Self {
-            version: source.version.clone(),
-            files,
-        })
+        Ok(snapshot_source(source)?.manifest)
     }
     pub fn paths(&self) -> impl Iterator<Item = &str> {
         self.files.iter().map(|f| f.path.as_str())
@@ -146,20 +123,26 @@ impl PackedArtifact {
 }
 
 pub fn pack(source: &PackageSource) -> Result<PackedArtifact, PublishError> {
-    let manifest = NormalizedFileManifest::from_source(source)?;
+    let paths = normalized_source_paths(source)?;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"TAPID-PACK-1\n");
-    append_field(&mut bytes, manifest.version.as_bytes());
-    for file in &manifest.files {
-        let data = fs::read(
-            source
-                .root
-                .join(file.path.replace('/', std::path::MAIN_SEPARATOR_STR)),
-        )?;
-        append_field(&mut bytes, file.path.as_bytes());
-        bytes.extend_from_slice(&(data.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&data);
+    append_field(&mut bytes, source.version.as_bytes());
+    let mut manifest_files = Vec::with_capacity(paths.len());
+    for (path, full) in paths {
+        let file_bytes = read_source_file(&full)?;
+        append_field(&mut bytes, path.as_bytes());
+        bytes.extend_from_slice(&(file_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&file_bytes);
+        manifest_files.push(ManifestFile {
+            path,
+            size: file_bytes.len() as u64,
+            digest: digest_bytes(&file_bytes),
+        });
     }
+    let manifest = NormalizedFileManifest {
+        version: source.version.clone(),
+        files: manifest_files,
+    };
     let digest = digest_bytes(&bytes);
     Ok(PackedArtifact {
         version: manifest.version.clone(),
@@ -178,6 +161,77 @@ fn digest_bytes(bytes: &[u8]) -> ArtifactDigest {
         .parse()
         .expect("sha256 digest is valid")
 }
+struct SourceSnapshot {
+    manifest: NormalizedFileManifest,
+}
+fn normalized_source_paths(source: &PackageSource) -> Result<Vec<(String, PathBuf)>, PublishError> {
+    if !source.root.is_dir() {
+        return Err(PublishError::InvalidSource(
+            "package root must be a directory".into(),
+        ));
+    }
+    let mut paths = Vec::new();
+    collect_files(&source.root, &source.root, &source.exclusions, &mut paths)?;
+    paths.sort();
+    let mut seen = BTreeSet::new();
+    for (path, _) in &paths {
+        if !seen.insert(path_collision_key(path)) {
+            return Err(PublishError::UnsafePath(path.clone()));
+        }
+    }
+    Ok(paths)
+}
+fn path_collision_key(path: &str) -> String {
+    path.to_lowercase()
+}
+
+fn snapshot_source(source: &PackageSource) -> Result<SourceSnapshot, PublishError> {
+    let paths = normalized_source_paths(source)?;
+    let mut manifest_files = Vec::with_capacity(paths.len());
+    for (path, full) in paths {
+        let bytes = read_source_file(&full)?;
+        manifest_files.push(ManifestFile {
+            path,
+            size: bytes.len() as u64,
+            digest: digest_bytes(&bytes),
+        });
+    }
+    Ok(SourceSnapshot {
+        manifest: NormalizedFileManifest {
+            version: source.version.clone(),
+            files: manifest_files,
+        },
+    })
+}
+
+fn read_source_file(path: &Path) -> io::Result<Vec<u8>> {
+    let bytes = fs::read(path)?;
+    #[cfg(test)]
+    maybe_mutate_test_source(path);
+    Ok(bytes)
+}
+
+#[cfg(test)]
+fn test_mutation_state() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    static STATE: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+        std::sync::OnceLock::new();
+    STATE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+fn configure_test_mutation(path: PathBuf) {
+    *test_mutation_state().lock().unwrap() = Some(path);
+}
+
+#[cfg(test)]
+fn maybe_mutate_test_source(path: &Path) {
+    let mut target = test_mutation_state().lock().unwrap();
+    if target.as_deref() == Some(path) {
+        fs::write(path, b"after").unwrap();
+        *target = None;
+    }
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -352,6 +406,77 @@ mod tests {
             assert!(normalize_path(p).is_err(), "{p}");
         }
     }
+    #[test]
+    fn packing_binds_manifest_metadata_to_packed_bytes() {
+        let p = tree(&[("x", b"before")]);
+        let artifact = pack(&PackageSource::new(&p, "1.0.0")).unwrap();
+        let mut cursor = b"TAPID-PACK-1\n".len();
+        let read_field = |bytes: &[u8], cursor: &mut usize| {
+            let end = *cursor + 8;
+            let len = u64::from_le_bytes(bytes[*cursor..end].try_into().unwrap()) as usize;
+            *cursor = end;
+            let end = *cursor + len;
+            let field = bytes[*cursor..end].to_vec();
+            *cursor = end;
+            field
+        };
+        assert_eq!(read_field(&artifact.bytes, &mut cursor), b"1.0.0");
+        assert_eq!(read_field(&artifact.bytes, &mut cursor), b"x");
+        let end = cursor + 8;
+        let packed_size = u64::from_le_bytes(artifact.bytes[cursor..end].try_into().unwrap());
+        cursor = end;
+        let packed_data = &artifact.bytes[cursor..cursor + packed_size as usize];
+
+        assert_eq!(artifact.manifest.files[0].size, packed_size);
+        assert_eq!(packed_data, b"before");
+        assert_eq!(
+            artifact.manifest.files[0].digest,
+            artifact_digest(packed_data)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalized_path_collisions_are_rejected() {
+        let p = tree(&[("a/b", b"nested"), (r"a\b", b"literal")]);
+        assert!(matches!(
+            pack(&PackageSource::new(&p, "1.0.0")),
+            Err(PublishError::UnsafePath(path)) if path == "a/b"
+        ));
+    }
+
+    #[test]
+    fn case_insensitive_path_collision_keys_match() {
+        assert_eq!(
+            path_collision_key("A/config.json"),
+            path_collision_key("a/CONFIG.JSON")
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn case_insensitive_path_collisions_are_rejected_by_pack() {
+        let p = tree(&[("A/config.json", b"upper"), ("a/CONFIG.JSON", b"lower")]);
+        assert!(matches!(
+            pack(&PackageSource::new(&p, "1.0.0")),
+            Err(PublishError::UnsafePath(_))
+        ));
+    }
+
+    #[test]
+    fn packing_uses_the_snapshot_when_source_changes_after_a_read() {
+        let p = tree(&[("x", b"before")]);
+        configure_test_mutation(p.join("x"));
+        let artifact = pack(&PackageSource::new(&p, "1.0.0")).unwrap();
+        assert_eq!(artifact.manifest.files[0].size, 6);
+        assert_eq!(
+            artifact.manifest.files[0].digest,
+            artifact_digest(b"before")
+        );
+        assert_eq!(&artifact.bytes[artifact.bytes.len() - 6..], b"before");
+        assert_eq!(fs::read(p.join("x")).unwrap(), b"after");
+    }
+
     #[test]
     fn pack_is_byte_reproducible_and_digest_binds_bytes() {
         let p = tree(&[("x", b"1")]);
