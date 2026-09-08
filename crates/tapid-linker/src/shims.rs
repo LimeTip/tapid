@@ -1,5 +1,8 @@
 use std::path::{Component, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
 use crate::{ManagedRoot, PlanError, Platform};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,10 +76,10 @@ pub fn plan_shims(
             if !managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(target_path));
             }
-            if entries
+            let collision = entries
                 .iter()
-                .any(|entry: &ShimEntry| entry.target == target_path)
-            {
+                .any(|entry: &ShimEntry| shim_paths_collide(&entry.target, &target_path, strategy));
+            if collision {
                 return Err(PlanError::ShimCollision(target_path));
             }
             entries.push(ShimEntry {
@@ -94,10 +97,97 @@ pub fn plan_shims(
     })
 }
 
+fn shim_paths_collide(
+    first: &std::path::Path,
+    second: &std::path::Path,
+    strategy: ShimStrategy,
+) -> bool {
+    match strategy {
+        ShimStrategy::UnixSymlink => first == second,
+        ShimStrategy::WindowsCmdAndPowerShell => {
+            let first_keys = shim_output_keys(first, strategy);
+            shim_output_keys(second, strategy)
+                .iter()
+                .any(|key| first_keys.iter().any(|first_key| first_key == key))
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ShimKey {
+    Bytes(Vec<u8>),
+    Utf16(Vec<u16>),
+}
+
+fn shim_output_keys(path: &std::path::Path, strategy: ShimStrategy) -> Vec<ShimKey> {
+    match strategy {
+        ShimStrategy::WindowsCmdAndPowerShell => ["cmd", "ps1"]
+            .into_iter()
+            .map(|extension| shim_target_key(&path.with_extension(extension), strategy))
+            .collect(),
+        ShimStrategy::UnixSymlink => vec![shim_target_key(path, strategy)],
+    }
+}
+
+fn shim_target_key_from_utf16(units: Vec<u16>) -> ShimKey {
+    ShimKey::Utf16(
+        units
+            .into_iter()
+            .map(|unit| {
+                let Some(character) = char::from_u32(unit as u32) else {
+                    return unit;
+                };
+                // Windows ordinal filename matching is defined over UTF-16
+                // code units. Keep surrogate code units as written.
+                let mut uppercase = character.to_uppercase();
+                match (uppercase.next(), uppercase.next()) {
+                    (Some(mapped), None) if (mapped as u32) <= u16::MAX as u32 => mapped as u16,
+                    _ => unit,
+                }
+            })
+            .collect(),
+    )
+}
+
+fn shim_target_key(path: &std::path::Path, strategy: ShimStrategy) -> ShimKey {
+    match strategy {
+        ShimStrategy::WindowsCmdAndPowerShell => {
+            #[cfg(windows)]
+            let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+            #[cfg(not(windows))]
+            let units: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
+
+            shim_target_key_from_utf16(units)
+        }
+        ShimStrategy::UnixSymlink => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                ShimKey::Bytes(path.as_os_str().as_bytes().to_vec())
+            }
+            #[cfg(not(unix))]
+            {
+                ShimKey::Bytes(path.to_string_lossy().as_bytes().to_vec())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    fn test_root(label: &str) -> PathBuf {
+        let sequence = NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "tapid-shims-{label}-{}-{sequence}",
+            std::process::id()
+        ))
+    }
 
     fn shim_package(root: &Path, name: &str, bin: &str, dir: &str) -> ShimPackage {
         let tree = root.join(dir);
@@ -112,7 +202,7 @@ mod tests {
 
     #[test]
     fn shims_are_deterministic_and_platform_strategy_is_intent_only() {
-        let root = std::env::temp_dir().join(format!("tapid-shims-{}", std::process::id()));
+        let root = test_root("basic");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let a = shim_package(
@@ -144,7 +234,7 @@ mod tests {
 
     #[test]
     fn nested_package_bin_directories_are_distinct_and_collisions_rejected() {
-        let root = std::env::temp_dir().join(format!("tapid-shims-nested-{}", std::process::id()));
+        let root = test_root("nested");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let mut a = shim_package(&root, "a", r#"{"cli":"cli.js"}"#, "a");
@@ -170,8 +260,83 @@ mod tests {
     }
 
     #[test]
+    fn windows_shims_reject_command_names_that_differ_only_by_case() {
+        let root = test_root("case");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let upper = shim_package(&root, "upper", r#"{"Tool":"cli.js"}"#, "upper");
+        let lower = shim_package(&root, "lower", r#"{"tool":"cli.js"}"#, "lower");
+        let managed_root = ManagedRoot::new(&root).unwrap();
+        let windows = plan_shims(
+            managed_root.clone(),
+            vec![upper.clone(), lower.clone()],
+            Platform::Windows,
+        );
+        println!("windows: {windows:?}");
+        assert!(matches!(windows, Err(PlanError::ShimCollision(_))));
+        assert_eq!(
+            plan_shims(managed_root, vec![upper, lower], Platform::Unix)
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+        assert_eq!(
+            shim_target_key(Path::new("Tool"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("tool"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        assert_eq!(
+            shim_target_key(Path::new("Ä"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("ä"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        assert_eq!(
+            shim_target_key(Path::new("ΟΣ"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("οσ"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        assert_eq!(
+            shim_target_key(Path::new("ς"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("σ"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        assert_ne!(
+            shim_target_key(Path::new("𐐀"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("𐐨"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        assert_ne!(
+            shim_target_key(Path::new("ß"), ShimStrategy::WindowsCmdAndPowerShell),
+            shim_target_key(Path::new("SS"), ShimStrategy::WindowsCmdAndPowerShell)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn windows_shims_reject_names_that_replace_the_output_extension() {
+        let root = test_root("extension");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let plain = shim_package(&root, "plain", r#"{"tool":"cli.js"}"#, "plain");
+        let suffixed = shim_package(&root, "suffixed", r#"{"tool.cmd":"cli.js"}"#, "suffixed");
+        let managed_root = ManagedRoot::new(&root).unwrap();
+        assert!(matches!(
+            plan_shims(
+                managed_root.clone(),
+                vec![plain.clone(), suffixed.clone()],
+                Platform::Windows,
+            ),
+            Err(PlanError::ShimCollision(_))
+        ));
+        assert_eq!(
+            plan_shims(managed_root, vec![plain, suffixed], Platform::Unix)
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn missing_bin_targets_are_skipped_and_non_regular_targets_are_rejected() {
-        let root = std::env::temp_dir().join(format!("tapid-shims-files-{}", std::process::id()));
+        let root = test_root("files");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let missing = shim_package(&root, "missing", r#""missing.js""#, "missing");
@@ -197,11 +362,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn windows_shim_collisions_preserve_unpaired_utf16_units() {
+        let first = shim_target_key_from_utf16(vec![110, 0xd800, 97]);
+        let second = shim_target_key_from_utf16(vec![110, 0xd801, 97]);
+        assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_shim_collisions_preserve_non_utf8_path_identity() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let first = PathBuf::from(OsString::from_vec(b"node-\xff/.bin/tool".to_vec()));
+        let second = PathBuf::from(OsString::from_vec(b"node-\xfe/.bin/tool".to_vec()));
+        assert!(!shim_paths_collide(
+            &first,
+            &second,
+            ShimStrategy::UnixSymlink
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlink_bin_targets_are_rejected_without_following_them() {
         use std::os::unix::fs::symlink;
-        let root = std::env::temp_dir().join(format!("tapid-shims-link-{}", std::process::id()));
+        let root = test_root("link");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let package = shim_package(&root, "linked", r#""cli.js""#, "linked");
