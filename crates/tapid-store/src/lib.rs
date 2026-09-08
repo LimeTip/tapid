@@ -157,9 +157,7 @@ impl Store {
         }
         let marker = path.join(".tapid-tree");
         let marker_meta = fs::symlink_metadata(&marker)?;
-        if !marker_meta.file_type().is_file()
-            || fs::read_to_string(&marker)?.trim() != digest.as_str()
-        {
+        if !marker_meta.file_type().is_file() || fs::read_to_string(&marker)? != digest.as_str() {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidData, "store tree is not verified").into(),
             );
@@ -1243,6 +1241,37 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("replay-tree-")
         }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verified_tree_rejects_non_exact_marker_contents() {
+        let root = root();
+        let source = root.join("source");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"original").unwrap();
+        let expected = tapid_archive::canonical_tree_digest(&source)
+            .unwrap()
+            .parse::<ArtifactDigest>()
+            .unwrap();
+        let store = Store::new(&root);
+        let destination = store.activate_verified_tree(&expected, &source).unwrap();
+
+        for marker in [
+            format!("{}\n", expected.as_str()),
+            format!(" {} ", expected.as_str()),
+            format!("{}\nextra", expected.as_str()),
+        ] {
+            fs::write(destination.join(".tapid-tree"), marker).unwrap();
+            assert!(matches!(
+                store.verified_tree_path(&expected),
+                Err(IngestError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
+            ));
+        }
+
+        fs::write(destination.join(".tapid-tree"), expected.as_str()).unwrap();
+        assert!(store.verified_tree_path(&expected).is_ok());
         let _ = fs::remove_dir_all(root);
     }
 
