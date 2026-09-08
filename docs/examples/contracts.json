@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "owner": "LimeTip/tapid maintainers",
+  "examples": [
+    {
+      "id": "quickstart",
+      "file": "docs/examples/quickstart.sh",
+      "platforms": ["linux", "darwin"],
+      "lanes": ["source", "published"],
+      "network": true,
+      "prerequisites": ["installed-tapid", "empty-parent-directory", "public-npm-access"],
+      "assertions": ["manifest", "is-char-installed", "frozen-lockfile-unchanged"],
+      "surfaces": ["homepage", "getting-started", "commands", "commands/install"]
+    },
+    {
+      "id": "init",
+      "file": "docs/examples/init.sh",
+      "platforms": ["linux", "darwin"],
+      "lanes": ["source", "published"],
+      "network": false,
+      "prerequisites": ["installed-tapid", "existing-empty-directory"],
+      "assertions": ["manifest"],
+      "surfaces": ["commands/init"]
+    },
+    {
+      "id": "upgrade",
+      "file": "docs/examples/upgrade.sh",
+      "platforms": ["linux", "darwin"],
+      "lanes": ["source"],
+      "network": true,
+      "prerequisites": ["managed-installation", "public-release-access", "explicit-target-digest-and-version"],
+      "assertions": ["upgrade-provenance"],
+      "surfaces": ["commands/upgrade"]
+    },
+    {
+      "id": "upgrade-help",
+      "file": "docs/examples/upgrade-help.sh",
+      "platforms": ["linux", "darwin"],
+      "lanes": ["source", "published"],
+      "release_expectations": {"v0.0.9": {"exit_code": 2, "output_contains": "unrecognized subcommand 'upgrade'"}},
+      "network": false,
+      "prerequisites": ["source-built-tapid"],
+      "assertions": [],
+      "surfaces": []
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "package-install",
+      "source_status": "implemented",
+      "verified_releases": ["v0.0.9"],
+      "examples": ["quickstart"],
+      "boundaries": ["One public npm package and unchanged-lock replay, not general npm compatibility.", "Dependency lifecycle scripts remain disabled; root scripts require explicit invocation."]
+    },
+    {
+      "id": "self-upgrade",
+      "source_status": "implemented",
+      "first_supported_release": null,
+      "examples": ["upgrade", "upgrade-help"],
+      "boundaries": ["v0.0.9 has no upgrade subcommand; reinstall via the documented installer.", "Published upgrade coverage requires a reviewed release capability update.", "Checksum-only fallback must not be described as signature verification."]
+    }
+  ]
+}

@@ -160,7 +160,7 @@ test("repository workflows avoid the deprecated Node.js 20 action majors", async
   assert(!ci.includes("runner: windows-11-arm"));
   assertEquals(
     ci.match(/persist-credentials: false/g)?.length,
-    ci.match(/uses: actions\/checkout@v6/g)?.length,
+    ci.match(/uses: actions\/checkout@(?:v6|d23441a48e516b6c34aea4fa41551a30e30af803)/g)?.length,
   );
 });
 
@@ -195,13 +195,46 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
 test("public smoke tests use the published installer and released version", async () => {
   const workflow = await text(".github/workflows/release-public-smoke.yml");
   assert(workflow.includes("types: [published]"));
-  assert(workflow.includes("https://tapid.dev/install.sh"));
-  assert(workflow.includes("https://tapid.dev/install.ps1"));
+  // These are the exact versioned URLs rendered by the website, not its
+  // independently deployed compatibility copies at tapid.dev/install.*.
+  assert(workflow.includes('installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$RELEASE_TAG/scripts/install.sh"'));
+  assert(workflow.includes('$installerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:RELEASE_TAG/scripts/install.ps1"'));
+  assert(!workflow.includes("https://tapid.dev/install."));
+  assert(workflow.includes('"$installer_url" -o "$RUNNER_TEMP/install.sh"'));
+  assert(workflow.includes('$installerUrl --output $installer'));
+  assert(workflow.includes('sh "$RUNNER_TEMP/install.sh" --version "$RELEASE_TAG"'));
+  assert(workflow.includes('& $installer -Version $env:RELEASE_TAG'));
   assert(workflow.includes("github.event.release.tag_name"));
   assert(workflow.includes("--version"));
   assert(workflow.includes("Install latest release through discovery"));
   assert(workflow.includes("shell: powershell"));
   assert(workflow.includes('test "$actual" = "tapid ${RELEASE_TAG#v}"'));
+});
+
+test("public smoke retains tagged installer provenance before execution on both platforms", async () => {
+  const workflow = await text(".github/workflows/release-public-smoke.yml");
+  const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
+  const windows = workflow.slice(workflow.indexOf("  windows:"));
+  for (const [job, execution, script] of [
+    [unix, 'sh "$RUNNER_TEMP/install.sh" --version', 'install.sh'],
+    [windows, '& $installer -Version', 'install.ps1'],
+  ]) {
+    const provenance = job.indexOf("installer-provenance.txt");
+    assert(provenance >= 0 && provenance < job.indexOf(execution),
+      `${script}: record provenance even if installer execution fails`);
+    for (const field of ["installer_url=", "release_tag=", "release_source_sha=", "installer_sha256="]) {
+      assert(job.includes(field), `${script}: missing ${field}`);
+    }
+    const upload = job.slice(job.indexOf("uses: actions/upload-artifact@"));
+    for (const file of ["installer-provenance.txt", "installer-sha256.txt", script]) {
+      assert(upload.includes('${{ runner.temp }}/' + file), `${script}: not retaining ${file}`);
+    }
+    assert(job.includes("if: always()"));
+    assert(job.includes("--max-time 60 --max-filesize 262144"));
+    assert(job.includes("--proto-redir '=https'"));
+  }
+  assert(unix.includes('shasum -a 256 "$RUNNER_TEMP/install.sh"'));
+  assert(windows.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $installer'));
 });
 
 test("installers use checksums without embedded release signing", async () => {
@@ -361,6 +394,6 @@ cp "$TAPID_TEST_FIXTURE/\${url##*/}" "$out"
 
 test("CI runs the TypeScript tool suite", async () => {
   const workflow = await text(".github/workflows/ci.yml");
-  assert(workflow.includes("actions/setup-node@v7"));
+  assert(workflow.includes("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"));
   assert(workflow.includes("node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts"));
 });

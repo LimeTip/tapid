@@ -1,0 +1,1 @@
+tapid upgrade --help
