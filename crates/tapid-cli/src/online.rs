@@ -48,6 +48,7 @@ struct PackageRecord {
     version: PackageVersion,
     integrity: Option<PackageIntegrity>,
     artifact: String,
+    fixture_artifact_path: Option<PathBuf>,
     dependencies: BTreeMap<String, String>,
     optional_dependencies: BTreeMap<String, String>,
     platform: PackagePlatform,
@@ -92,6 +93,21 @@ pub(crate) fn dep_parts(name: &str) -> Result<(RegistryOrigin, PackageName), Str
             .map_err(|e: tapid_core::DomainError| e.to_string())?,
     ))
 }
+fn fixture_artifact_path(fixture_path: Option<&Path>, artifact: &str) -> Option<PathBuf> {
+    if artifact.starts_with("base64:") {
+        None
+    } else if Path::new(artifact).is_absolute() {
+        Some(PathBuf::from(artifact))
+    } else {
+        Some(
+            fixture_path
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join(artifact),
+        )
+    }
+}
+
 fn fixture(path: &Path) -> Result<Fixture, String> {
     let f: Fixture = serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
         .map_err(|e| format!("invalid registry fixture: {e}"))?;
@@ -124,6 +140,7 @@ fn remote_records(
             version: a.identity.version,
             integrity: a.integrity,
             artifact: a.artifact_url,
+            fixture_artifact_path: None,
             dependencies: a
                 .dependencies
                 .into_iter()
@@ -675,6 +692,7 @@ pub fn resolve_and_fetch(
                     version,
                     integrity,
                     artifact: p.artifact.clone(),
+                    fixture_artifact_path: fixture_artifact_path(fixture_path, &p.artifact),
                     dependencies: p.dependencies.clone(),
                     optional_dependencies: BTreeMap::new(),
                     platform: PackagePlatform::unrestricted(),
@@ -771,13 +789,17 @@ pub fn resolve_and_fetch(
         )?;
         platform_contexts.insert(id.clone(), platform_context.clone());
         let bytes = if record.fixture {
-            if let Some(encoded) = record.artifact.strip_prefix("base64:") {
+            if let Some(path) = record.fixture_artifact_path.as_ref() {
+                fs::read(path)
+                    .map_err(|e| format!("cannot read artifact {}: {e}", path.display()))?
+            } else {
+                let encoded = record
+                    .artifact
+                    .strip_prefix("base64:")
+                    .ok_or("fixture artifact has no resolved path or base64 payload")?;
                 STANDARD
                     .decode(encoded)
                     .map_err(|e| format!("invalid artifact encoding: {e}"))?
-            } else {
-                fs::read(&record.artifact)
-                    .map_err(|e| format!("cannot read artifact {}: {e}", record.artifact))?
             }
         } else {
             let transport = artifact_transport
@@ -1119,6 +1141,7 @@ mod tests {
             version: version.parse().unwrap(),
             integrity: None,
             artifact: format!("https://registry.npmjs.org/{name}/-/{version}.tgz"),
+            fixture_artifact_path: None,
             dependencies: dependencies
                 .iter()
                 .map(|(name, requirement)| ((*name).into(), (*requirement).into()))
@@ -1491,5 +1514,21 @@ mod tests {
                 "https://registry.npmjs.org:debug@4.3.7",
             ]
         );
+    }
+    #[test]
+    fn fixture_artifact_paths_are_resolved_without_changing_inline_or_absolute_values() {
+        let fixture = std::env::temp_dir().join("tapid-fixture/registry.json");
+        assert_eq!(
+            fixture_artifact_path(Some(&fixture), "fixture-files/artifact.tgz"),
+            Some(fixture.parent().unwrap().join("fixture-files/artifact.tgz"))
+        );
+        assert_eq!(
+            fixture_artifact_path(
+                Some(&fixture),
+                fixture.join("artifact.tgz").to_str().unwrap()
+            ),
+            Some(fixture.join("artifact.tgz"))
+        );
+        assert_eq!(fixture_artifact_path(Some(&fixture), "base64:AAAA"), None);
     }
 }
