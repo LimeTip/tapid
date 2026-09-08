@@ -23,10 +23,13 @@ tapid-archive = { version = "0.0.4", path = "../tapid-archive" }
 tapid-registry-client = { version = "0.0.5", path = "../tapid-registry-client" }
 tapid-resolver = { version = "0.0.5", path = "../tapid-resolver" }
 tapid-runner = { version = "0.0.4", path = "../tapid-runner" }
+tapid-release-client = { version = "0.0.2", path = "../tapid-release-client" }
+tapid-signatures = { version = "0.0.3", path = "../tapid-signatures" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.23"
+time = { version = "0.3", features = ["formatting"] }
 libc = "0.2"
 fs4 = "1.1"
