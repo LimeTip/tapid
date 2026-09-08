@@ -1,3 +1,70 @@
+/// Proof that this executable installed private launcher dispatch before application work.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateLauncher {
+    executable: Option<std::path::PathBuf>,
+    #[cfg(target_os = "macos")]
+    identity: Option<(u64, u64)>,
+}
+static LAUNCHER: std::sync::OnceLock<PrivateLauncher> = std::sync::OnceLock::new();
+
+/// Call as the first operation in main. Private invocations dispatch and never return.
+/// Subsequent requests retain this opaque token; missing integration fails before spawn.
+pub fn initialize_or_dispatch_private_launcher() -> PrivateLauncher {
+    #[cfg(target_os = "macos")]
+    execution::dispatch_private_launcher();
+    LAUNCHER
+        .get_or_init(|| {
+            let executable = std::env::current_exe()
+                .ok()
+                .and_then(|p| std::fs::canonicalize(p).ok());
+            #[cfg(target_os = "macos")]
+            let identity = executable
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| {
+                    use std::os::unix::fs::MetadataExt;
+                    (m.dev(), m.ino())
+                });
+            PrivateLauncher {
+                executable,
+                #[cfg(target_os = "macos")]
+                identity,
+            }
+        })
+        .clone()
+}
+
+// The library test executable needs the same early dispatch as a consumer main.
+#[cfg(all(test, target_os = "macos"))]
+#[used]
+#[unsafe(link_section = "__DATA,__mod_init_func")]
+static TEST_LAUNCHER_INIT: extern "C" fn() = {
+    extern "C" fn init() {
+        initialize_or_dispatch_private_launcher();
+    }
+    init
+};
+
+pub mod config;
+pub mod execution;
+
+pub use config::{
+    AssuranceLevel, ConfigError, ConfigErrorCategory, ExecutionLimits, FilesystemPolicy,
+    MAX_CONFIG_BYTES, MAX_ENVIRONMENT_COUNT, MAX_GRANT_COUNT, MAX_PROFILE_COUNT, MAX_STRING_BYTES,
+    RunConfig, SandboxMode, SandboxPolicy,
+};
+pub use execution::{
+    BackendIdentity, CleanupConfidence, CompletionEvidence, ContainmentSupport, DimensionEvidence,
+    EnforcementDimension, EnforcementDimensions, EnforcementReceipt, EnforcementScope,
+    ExecutionError, ExecutionErrorCategory, ExecutionOutcome, ExecutionRequest,
+    ExecutionRequestBuilder, FilesystemAccess, FilesystemBindingMode, FilesystemGrantKind,
+    FilesystemGrantSource, MAX_ARGUMENT_COUNT, MAX_ARGUMENT_UNITS, MAX_ARGV_UNITS,
+    MAX_BACKEND_IDENTITY_BYTES, MAX_ENVIRONMENT_BLOCK_UNITS, MAX_ENVIRONMENT_VALUE_UNITS,
+    MAX_EXECUTABLE_SEARCH_PATH_COUNT, MAX_EXECUTABLE_SEARCH_PATH_UNITS,
+    MAX_EXECUTABLE_SEARCH_PATHS_UNITS, MAX_PROGRAM_UNITS, MAX_PROJECT_ROOT_UNITS,
+    ResolvedFilesystemGrant, ResolvedFilesystemGrants, Termination, execute,
+};
+
 use sha2::{Digest, Sha256};
 use std::fmt;
 use tapid_policy::{Decision, Evidence, PolicyDecision, ReasonCode};
@@ -220,6 +287,23 @@ mod tests {
                 Err(ValidationError::PolicyDenied)
             );
         }
+    }
+
+    #[test]
+    fn existing_public_api_remains_source_compatible() {
+        let request = RunnerRequest {
+            artifact_digest: "sha256-aaaa".into(),
+            script: "echo compatible".into(),
+            unattended: false,
+            os: "linux".into(),
+        };
+        let hash: ScriptHash = normalized_script_hash(&request.script);
+        let approval: Approval = Approval::for_request(&request);
+        let plan: RunnerPlan = plan(&request, vec![]);
+
+        assert_eq!(hash, request.script_hash());
+        assert_eq!(approval.script_hash, hash);
+        assert!(plan.policy().evidence().is_empty());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 name = "tapid-runner"
 readme = "README.md"
 description = "Policy-aware package execution foundations for Tapid"
-version = "0.0.3"
+version = "0.0.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,8 +10,16 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10"
 tapid-policy = { version = "0.0.3", path = "../tapid-policy" }
+toml = "1.1.5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
 
 [lib]
 path = "src/lib.rs"

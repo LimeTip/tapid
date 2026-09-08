@@ -1,37 +1,118 @@
-# Linux and Windows platform validation
+# Root-script platform validation
 
-The repository configures a `platform-consumer-validation` GitHub Actions job for `ubuntu-latest` and `windows-latest`. Each job builds the `tapid` binary, creates a Node fixture under the runner's temporary directory, and invokes the binary with the native runner shell. The workflow is configuration, not execution evidence. No CI run was available to this documentation change, so Linux and Windows remain configured but unverified here. A local macOS result cannot substitute for either platform.
+ADR 0005 CLI wiring and experimental macOS Restricted containment are integrated. Native behavioral controls gate support, and accepted executions produce checked enforcement receipts. ManagedTree, resource-limit profiles, and Linux/Windows native containment remain unsupported. Local dirty-tree results are development evidence, not the clean-commit platform acceptance record required below.
 
-## Configured validation
+A platform may be marked Restricted only after the Restricted probe set passes through `tapid run <SCRIPT> -- <ARGS...>` at the exact integrated commit. ManagedTree requires the Restricted probes plus the ManagedTree-only probes. A unit test of policy declarations, backend availability, compilation, a generated native profile, or a successful allowed operation is insufficient.
 
-The workflow is intended to run these exact checks on both platforms:
+## Evidence record
 
-```text
-cargo build --bin tapid --locked
-tapid install --project-dir "$TAPID_FIXTURE_PROJECT" --offline --frozen
-tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 0
-tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- wrong 0
-```
+For each operating system, architecture, backend, and assurance level, retain:
 
-The fixture checks that:
+- the full 40-character commit from `git rev-parse HEAD`, with a clean tracked tree and the commit containing the runner backend, configuration parser, CLI wiring, probes, and documentation;
+- the workflow URL and immutable run/job identifiers, attempt number, runner image/version, OS build or kernel version, architecture, shell/runtime versions, and Rust toolchain;
+- the built `tapid` artifact digest and logs that identify the same commit;
+- the exact checked-in `tapid.toml`, fixture scripts, commands, exit codes, stdout/stderr, checked launch and completion evidence, and pass/fail result for every probe;
+- evidence that human and machine-readable launch evidence agree about each dimension's request, mechanism, assurance level, declared/observed/enforced state, scope, and limitation, and that enforcement exactly matches the request;
+- completion evidence limited to lifecycle and cleanup results, without re-confirming launch-only authority;
+- the backend identity, native primitive versions or feature probes, and any deprecation, path-binding, broker, delegation, or best-effort lifecycle limitation.
 
-- install creates managed `node_modules`;
-- the dependency lifecycle marker remains absent;
-- the root script runs in the project directory;
-- arguments after `--` are forwarded;
-- the child exit code is propagated;
-- package executable behavior is not exercised by the current consumer fixture; linker unit tests cover shim planning and materialization separately.
+`CanonicalPath` evidence proves only fresh pathname resolution for setup and retains its documented host-race assumption. It must never be recorded as `NativeObject` unless the backend holds and revalidates a native object identity.
 
-Linux uses Bash and Unix shell behavior. Windows uses PowerShell to invoke the binary and `cmd.exe` for the child script backend, with `.cmd` and PowerShell shim formats selected by the linker.
+Do not update platform status from a run against a merge commit, rebuilt artifact, or fixture revision different from the recorded commit unless that exact revision is named as the evidence target. Re-run the applicable matrix after any change to the backend, policy compiler, process supervision, CLI wiring, fixture, probe assertion, or receipt schema.
 
-## Local evidence
+## Common Restricted probes
 
-Local macOS unit and integration tests can exercise resolver, archive, store, lockfile, linker planning, install replay, root-script execution, and Unix shim behavior. They do not verify Windows wrappers, Windows path handling, Windows junction activation, or Linux runtime behavior. Do not report those as passed based on macOS output.
+Every filesystem and network category needs a positive control proving the fixture can perform an operation when granted and a negative control proving the same operation is denied when not granted. Negative probes must also confirm a nonzero result and checked launch evidence matching the exact request; a crash, missing dependency, malformed command, or skipped test is not a containment pass.
 
-## JSR status
+### Filesystem
 
-No live JSR integrity result is claimed. Local fixtures cover the parser and fail-closed behavior only. Live JSR installation is unsupported until the service supplies an explicit HTTPS npm tarball URL and valid SHA-512 SRI that can be verified by a read-only smoke test.
+- **Positive:** read a declared project file and create, modify, and remove files in each declared `write` path.
+- **Negative:** deny writes to an undeclared project path, a sibling or parent path, the user home, and an operating-system temporary path. Deny reads outside declared project/runtime paths. Repeat escape attempts through `..`, absolute paths, symlinks, and descendants.
+- Confirm the minimal shell/runtime files are available without turning their parent trees into broad writable grants.
+- Record each path grant's declared kind and binding evidence. Exercise path replacement races where the mechanism is path-based and report residual uncertainty rather than upgrading it to native-object enforcement.
 
-## Required evidence for updating this document
+### Network
 
-After a successful workflow run, record the workflow URL or run identifier and platform-specific output before changing the status above. Until then, describe the checks as configured, not verified. The configured job must not be weakened to make unsupported behavior pass.
+- **Positive:** with `network = true`, bind and connect on loopback and attempt an external connection when the test environment permits it. The receipt must state that the current boolean grant is unrestricted networking.
+- **Negative:** with `network = false`, deny loopback bind, loopback connect, external connect, and name resolution while a local control endpoint proves the test network is otherwise reachable.
+- Pass `--hostname 127.0.0.1 --port 3001` to an application and verify those arguments do not alter the Tapid receipt. They are application behavior, not host/port policy.
+- Future declared listen/connect scopes or brokered ports need separate positive, negative, identity, bypass, and descendant probes before they can be claimed.
+
+### Environment, PATH, and inherited state
+
+- **Positive:** list one benign variable in `environment` and verify its exact caller value reaches the script when present; verify the controlled `PATH` resolves the managed project executable and required shell/runtime.
+- **Negative:** inject unique sentinel values into unlisted variables representing cloud credentials, package tokens, proxy variables, `HOME`, SSH/GPG/agent sockets, loader variables, and arbitrary secrets; verify neither the script nor descendants can observe them. Verify absent allowlisted variables are not invented.
+- Enumerate inherited descriptors or handles so removing a variable does not leave its referenced credential channel open. Verify the backend closes or explicitly supplies every child descriptor/handle.
+
+### Forwarded arguments
+
+- Pass empty strings, spaces, quotes, Unicode, leading dashes, shell metacharacters, and multiple ordered values after `--`; verify the fixture receives the exact argument vector in order and that Tapid does not parse them as its own options or containment policy.
+- Run an equivalent invocation without `--` that should be rejected by CLI parsing, proving the probe tests the documented separator contract rather than accidental shell behavior.
+
+### Descendant authority propagation
+
+- With `subprocess = true`, start the required platform shell, a child Node process, and descendants that detach, re-parent, or create a new session. Verify each retains the same filesystem, network, environment, and descriptor restrictions.
+- With `subprocess = false`, verify an attempted child does not start when the backend claims that restriction.
+- Restricted provides no cleanup guarantee. If the backend attempts best-effort lifecycle supervision or cleanup, completion evidence must identify which descendants were observed or controlled, what cleanup was attempted, and where races or escape uncertainty remain. A delayed surviving marker fails any claim of complete cleanup but does not by itself disprove launch-time authority propagation if the surviving process remains natively restricted.
+
+### Restricted limits and lifecycle reporting
+
+- Exercise each configured timeout, output, process, and memory limit and record whether it applies to the initial process, observed descendants, or a complete native tree.
+- Do not describe a process-local or best-effort aggregate limit as tree-wide. If policy requires a scope the backend cannot establish, verify failure before spawn.
+- Exercise normal completion, cancellation, timeout, and Tapid termination. Restricted completion evidence must distinguish no cleanup guarantee from best-effort cleanup actually attempted or observed, must report uncertainty, and must not claim ManagedTree or re-confirm launch-only authority.
+
+### Fail-closed startup and receipts
+
+- Corrupt or remove the required backend primitive, request an unsupported combination, and use invalid or unknown `tapid.toml` fields. Verify no script or descendant marker is created.
+- Verify failure to establish a required filesystem, network, environment, descriptor/handle, subprocess, or limit dimension aborts before untrusted code starts; partial setup must be torn down.
+- Compare human and machine-readable output for the same run. Reject launch evidence unless the exact requested enforcement is present. Reject any evidence that labels a requested, declared, or merely observed capability as enforced, reports `CanonicalPath` as `NativeObject`, omits mechanism, scope, or limitation, or uses completion results to re-confirm launch-only authority.
+
+## Additional ManagedTree probes
+
+ManagedTree must pass every common Restricted probe and all of the following:
+
+- prove every descendant is assigned before it can execute outside a kernel- or VM-owned boundary; attempt detached, double-forked, rapidly re-parented, session-changing, and Windows breakaway children;
+- verify complete cleanup and kill behavior after normal completion, cancellation, timeout, Tapid termination, and applicable supervisor crash or recovery scenarios;
+- confirm membership through authoritative namespace, cgroup, Job, or VM state rather than PID scans or process-group inference;
+- verify a delayed descendant cannot survive to write a marker after the supervisor reports completion;
+- prove timeout and output accounting covers the complete tree and terminates it according to the documented contract;
+- prove `max_processes` prevents the next process across the complete tree without an assignment race;
+- prove `max_memory_bytes` accounts for and stops the complete tree at the configured boundary;
+- request each unsupported ownership or tree-wide limit dimension and verify failure before spawn with no child marker.
+
+## Unsandboxed-path probes
+
+A future `--no-sandbox` path requires separate tests. It must be explicit and prominent, produce an unsandboxed outcome with no enforcement receipt, never replace failed Restricted or ManagedTree setup silently, and be rejected in unattended mode unless a separately approved authorization mechanism is present. The current CLI does not implement this path.
+
+## Platform-specific gates
+
+### macOS 26
+
+The Restricted backend is experimental Seatbelt installed by deprecated `sandbox-exec`, with path-based parameter grants and a current-executable private helper. Native syscall probes also use private Seatbelt APIs. Startup probes sample generated deny-default filesystem/network controls, descendant writes, explicit environment, descriptor hygiene, and exec replacement. Each negative syscall control requires permission denial and its own successful positive control. They require no Ruby, Python, compiler, or network service. These samples are support gates, not an exhaustive proof of Seatbelt behavior. Broader development tests may use system Ruby and must fail rather than skip when it is absent. Native acceptance must still be rerun at each exact commit being claimed.
+
+Native ManagedTree remains unsupported. Process groups are escapable with `setsid` and `setpgid`; Darwin has not supported recursive `EVFILT_PROC` tracking through `NOTE_TRACK`, `NOTE_TRACKERR`, or `NOTE_CHILD` since macOS 10.5; and `NOTE_FORK` plus process-table or `p_puniqueid` scans retains a rapid double-fork/intermediate-exit race. An optional strict Linux VM through Virtualization.framework is a separate future backend that changes platform, startup, filesystem-sharing, and network semantics; it must not be reported as native macOS ManagedTree.
+
+### Linux
+
+The planned Restricted design combines Landlock filesystem rules, `no_new_privs`, seccomp, and explicit environment/descriptor construction. Enhancements depend on runtime kernel and feature probes. Record the Landlock ABI and handled access rights, seccomp policy, privilege transition, network mechanism, and unavailable features. A container or hosted runner that cannot establish a required dimension must fail before spawn.
+
+ManagedTree additionally requires proven namespace ownership and cgroup delegation. Record namespace membership, cgroup version/controllers/delegation, assignment ordering, cleanup ownership, and tree-wide accounting. Running inside a container or cgroup does not itself prove Tapid owns the boundary.
+
+### Windows
+
+The planned authority design uses AppContainer or LPAC for filesystem/network isolation with explicit token, environment, and handle construction. Record the exact token capabilities, ACL or capability grants, network isolation state, and child inheritance. A brokered listen port requires native proof of endpoint scope, process identity, descendant behavior, and bypass resistance; application `--port` arguments are not proof.
+
+ManagedTree additionally requires a non-breakaway Job Object assigned before untrusted execution, with complete cleanup and configured tree-wide limits. Probes must detect breakaway children, inherited handles, path variants, broker escapes, and assignment races. Incomplete AppContainer/LPAC or Job setup must fail before spawn.
+
+## Current status
+
+| Platform/backend | Restricted status | ManagedTree status | Native evidence |
+|---|---|---|---|
+| macOS 26 native Seatbelt | Experimental Restricted support; profiles with resource limits fail closed | Native support unavailable | Native macOS 26 behavioral suite and exact CLI HTTP acceptance |
+| Linux Landlock/`no_new_privs`/seccomp | Planned; runtime capability-dependent | Planned only with proven namespaces and cgroup delegation | No integrated evidence recorded |
+| Windows AppContainer or LPAC plus Job Object | Planned; not implemented or validated | Planned only with non-breakaway pre-execution Job assignment and tree-wide limits | No integrated evidence recorded |
+| Strict Linux VM through macOS Virtualization.framework | Optional future backend with Linux VM semantics | Future investigation | No implementation or evidence recorded |
+
+Keep package-manager, installer, CLI preflight, Restricted enforcement, and ManagedTree evidence separate. A local result on one platform or assurance level is never evidence for another.
+
+The reserved-Node lifecycle regression launches a detached descendant with redirected stdio, returns a root receipt, waits for private-directory removal with a bounded retention control, then invokes bare `node` with hostile project `.bin/node` present. The hostile marker must remain absent and the byte-verified private runtime snapshot must execute. A separate benign-marker regression proves project writes cannot hard-link or mutate the snapshot or selected runtime, and that the two use distinct inodes. Subprocess-enabled receipts must disclose the retained snapshot with `cleanup_observed = false`; failed pre-exec launches must remove it, and subprocess-disabled successful cleanup requires native fork denial and observed root exit. Retained snapshots are never reused or deleted on a timer. Temporary-storage retention lasts until OS cleanup or host removal; removal during descendant survival ends the binding guarantee, and host writes or races after final validation remain outside Restricted containment.

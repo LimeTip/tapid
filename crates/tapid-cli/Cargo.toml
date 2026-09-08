@@ -2,7 +2,7 @@
 name = "tapid"
 readme = "README.md"
 description = "A deterministic JavaScript and TypeScript package manager"
-version = "0.0.9"
+version = "0.0.10"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -22,6 +22,7 @@ tapid-store = { version = "0.0.5", path = "../tapid-store" }
 tapid-archive = { version = "0.0.4", path = "../tapid-archive" }
 tapid-registry-client = { version = "0.0.5", path = "../tapid-registry-client" }
 tapid-resolver = { version = "0.0.5", path = "../tapid-resolver" }
+tapid-runner = { version = "0.0.4", path = "../tapid-runner" }
 tapid-release-client = { version = "0.0.2", path = "../tapid-release-client" }
 tapid-signatures = { version = "0.0.3", path = "../tapid-signatures" }
 serde = { version = "1", features = ["derive"] }

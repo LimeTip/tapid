@@ -1,6 +1,8 @@
 use clap::{Args as ClapArgs, Subcommand};
-use std::{fs, path::PathBuf, process::ExitCode};
+use std::{fs::File, io::Read, path::PathBuf, process::ExitCode};
 use tapid_manifest::PackageManifest;
+
+const MAX_MANIFEST_BYTES: usize = 1_048_576;
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
@@ -32,7 +34,18 @@ pub(crate) fn run(args: Args) -> ExitCode {
 }
 
 pub(crate) fn read_manifest(path: &std::path::Path) -> Result<PackageManifest, String> {
-    let input = fs::read_to_string(path)
+    let file = File::open(path)
+        .map_err(|source| format!("cannot read manifest {}: {source}", path.display()))?;
+    let mut input = Vec::with_capacity(MAX_MANIFEST_BYTES + 1);
+    file.take((MAX_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut input)
+        .map_err(|source| format!("cannot read manifest {}: {source}", path.display()))?;
+    if input.len() > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "manifest exceeds maximum size of {MAX_MANIFEST_BYTES} bytes"
+        ));
+    }
+    let input = String::from_utf8(input)
         .map_err(|source| format!("cannot read manifest {}: {source}", path.display()))?;
     PackageManifest::parse(&input).map_err(|error| error.to_string())
 }
