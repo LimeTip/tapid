@@ -107,18 +107,36 @@ pub fn prepare_execution_request(
         return Err(RunPreparationError::ReservedPath);
     }
 
+    // Validate the parent independently: an absent .bin below an unsafe parent
+    // must not make a symlink or special-file node_modules acceptable.
+    match fs::symlink_metadata(project_dir.join("node_modules")) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(RunPreparationError::InvalidManagedBin);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(RunPreparationError::InvalidManagedBin),
+    }
     let managed_bin_path = project_dir.join("node_modules/.bin");
-    let managed_bin_metadata = fs::symlink_metadata(&managed_bin_path)
-        .map_err(|_| RunPreparationError::InvalidManagedBin)?;
-    if managed_bin_metadata.file_type().is_symlink() || !managed_bin_metadata.is_dir() {
-        return Err(RunPreparationError::InvalidManagedBin);
-    }
-    let managed_bin =
-        fs::canonicalize(&managed_bin_path).map_err(|_| RunPreparationError::InvalidManagedBin)?;
-    if managed_bin == project_dir || !managed_bin.starts_with(&project_dir) || !managed_bin.is_dir()
-    {
-        return Err(RunPreparationError::InvalidManagedBin);
-    }
+    let managed_bin = match fs::symlink_metadata(&managed_bin_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(RunPreparationError::InvalidManagedBin);
+            }
+            let canonical = fs::canonicalize(&managed_bin_path)
+                .map_err(|_| RunPreparationError::InvalidManagedBin)?;
+            if canonical == project_dir
+                || !canonical.starts_with(&project_dir)
+                || !canonical.is_dir()
+            {
+                return Err(RunPreparationError::InvalidManagedBin);
+            }
+            Some(canonical)
+        }
+        // Do not add an absent directory to PATH or the runtime grants.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(RunPreparationError::InvalidManagedBin),
+    };
     let node_runtime = match host.node_runtime {
         Some(runtime) => canonical_node_executable(runtime)?,
         None => discover_node_runtime(host.path)?,
@@ -128,9 +146,14 @@ pub fn prepare_execution_request(
         .ok_or(RunPreparationError::InvalidNodeRuntime)?
         .to_owned();
     #[cfg(target_os = "macos")]
-    let search_directories = vec![managed_bin, runtime_bin];
+    let search_directories = managed_bin
+        .into_iter()
+        .chain([runtime_bin])
+        .collect::<Vec<_>>();
     #[cfg(not(target_os = "macos"))]
-    let search_directories = vec![runtime_bin, managed_bin];
+    let search_directories = std::iter::once(runtime_bin)
+        .chain(managed_bin)
+        .collect::<Vec<_>>();
 
     let environment = policy
         .environment()

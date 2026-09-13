@@ -6,10 +6,8 @@ const path = require('path');
 const projectDirectory = fs.mkdtempSync(
   path.join(os.tmpdir(), 'tapid-consumer-'),
 );
-const positional = String.fromCharCode(36);
-const testScript = process.platform === 'win32'
-  ? 'node fixture.js'
-  : `node fixture.js ${positional}1 ${positional}2`;
+// Tapid appends shell-quoted positional arguments itself; do not also add $1/$2.
+const testScript = 'node fixture.js';
 
 const packageJson = JSON.stringify(
   {
@@ -42,6 +40,9 @@ const lockfile = JSON.stringify(
 ) + '\n';
 
 const fixtureScript = [
+  // A stdout marker proves Node ran without granting any filesystem writes.
+  "console.log('TAPID_FIXTURE_STARTED=' + JSON.stringify(process.argv.slice(2)));",
+  "if (process.argv.length !== 4) process.exit(44);",
   "if (process.argv[2] !== 'forwarded') process.exit(41);",
   "if (process.env.TAPID_FIXTURE !== '1') process.exit(42);",
   "if (require('fs').existsSync('LIFECYCLE_SHOULD_NOT_RUN')) process.exit(43);",
@@ -56,8 +57,8 @@ const runPolicy = [
   'network = false',
   'environment = []',
   'subprocess = true',
-  'timeout_seconds = 30',
-  'max_output_bytes = 1048576',
+  // AssuranceLevel uses serde kebab-case, not the Rust enum spelling.
+  'assurance = "restricted"',
   '',
   '[run.scripts.test]',
   'environment = ["TAPID_FIXTURE"]',

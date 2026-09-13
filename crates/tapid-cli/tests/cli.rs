@@ -149,6 +149,34 @@ fn run_requires_checked_in_configuration_before_execution() {
     cleanup(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn run_rejects_a_non_regular_configuration_without_opening_it() {
+    let dir = temp_dir("run-special-config");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
+    )
+    .unwrap();
+    let status = Command::new("mkfifo")
+        .arg(dir.join("tapid.toml"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let output = run(
+        &dir,
+        &["run", "dev", "--node-runtime", env!("CARGO_BIN_EXE_tapid")],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("cannot read run configuration 'tapid.toml'")
+    );
+    cleanup(dir);
+}
+
 #[test]
 fn run_without_runtime_flag_discovers_node_then_reaches_sandbox_preflight() {
     let dir = temp_dir("run-discovered-runtime");

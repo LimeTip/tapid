@@ -931,15 +931,20 @@ pub(crate) fn dispatch_private_launcher() {
         if text.len() != 32 {
             return Err(ExecConfirmation::error());
         }
-        let mut nonce = [0; 16];
-        for (i, byte) in nonce.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(
-                text.get(i * 2..i * 2 + 2)
-                    .ok_or_else(ExecConfirmation::error)?,
-                16,
-            )
+        // Every nonce byte comes from the parent-supplied argument, not
+        // from a fixed initializer that could be mistaken for a generated nonce.
+        let nonce: [u8; 16] = (0..16)
+            .map(|i| {
+                u8::from_str_radix(
+                    text.get(i * 2..i * 2 + 2)
+                        .ok_or_else(ExecConfirmation::error)?,
+                    16,
+                )
+                .map_err(|_| ExecConfirmation::error())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .try_into()
             .map_err(|_| ExecConfirmation::error())?;
-        }
         let program = args.next().ok_or_else(ExecConfirmation::error)?;
         // SAFETY: private descriptors must be pipes supplied by the parent. Reject anything else.
         unsafe {
@@ -991,6 +996,17 @@ struct ExecConfirmation {
     nonce: [u8; 16],
 }
 
+fn random_nonce() -> [u8; 16] {
+    let mut nonce = std::mem::MaybeUninit::<[u8; 16]>::uninit();
+    // SAFETY: arc4random_buf fills all 16 bytes of this valid, exclusively
+    // borrowed allocation before returning and has no partial-success result.
+    // Every bit pattern is valid for [u8; 16], so the array is then initialized.
+    unsafe {
+        libc::arc4random_buf(nonce.as_mut_ptr().cast(), std::mem::size_of_val(&nonce));
+        nonce.assume_init()
+    }
+}
+
 impl ExecConfirmation {
     fn prepare(command: &mut Command) -> Result<Self, ExecutionError> {
         let (ready_read, ready_write) = launch_pipe()?;
@@ -1000,10 +1016,7 @@ impl ExecConfirmation {
             return Err(Self::error());
         }
         let queue = unsafe { OwnedFd::from_raw_fd(raw) };
-        let mut nonce = [0; 16];
-        unsafe {
-            libc::arc4random_buf(nonce.as_mut_ptr().cast(), nonce.len());
-        }
+        let nonce = random_nonce();
         command
             .arg(PRIVATE_MARKER)
             .arg(nonce.iter().map(|b| format!("{b:02x}")).collect::<String>());
@@ -1377,7 +1390,10 @@ impl MacosLifecycle<'_> {
 // The child is single-threaded here. No allocation or descriptor creation occurs
 // between enumeration and sanitation, including in Rust's post-fork pre_exec.
 fn sanitize_descriptors(close: bool) -> std::io::Result<()> {
-    const CAPACITY: usize = 16_384;
+    sanitize_descriptors_with_capacity::<16_384>(close)
+}
+
+fn sanitize_descriptors_with_capacity<const CAPACITY: usize>(close: bool) -> std::io::Result<()> {
     let mut entries = [libc::proc_fdinfo {
         proc_fd: 0,
         proc_fdtype: 0,
@@ -1766,10 +1782,7 @@ impl ReservedNode {
         // Canonical parent plus an atomic exclusive mkdir avoids traversal through generated names.
         let parent =
             fs::canonicalize(std::env::temp_dir()).map_err(|_| ExecConfirmation::error())?;
-        let mut nonce = [0_u8; 16];
-        unsafe {
-            libc::arc4random_buf(nonce.as_mut_ptr().cast(), nonce.len());
-        }
+        let nonce = random_nonce();
         let directory = parent.join(format!(
             "tapid-node-{}",
             nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -2907,7 +2920,7 @@ mod tests {
 
     #[test]
     fn private_protocol_rejects_version_nonce_kind_and_short_frames() {
-        let nonce = [7; 16];
+        let nonce = std::array::from_fn(|index| 7_u8.wrapping_add(index as u8));
         let ready = protocol_frame(1, nonce, 0);
         assert!(validate_frame(&ready, 1, nonce).is_ok());
         for index in [0, 4, 8, 24] {
@@ -3219,23 +3232,30 @@ mod tests {
                 0
             );
             let requested = match mode.as_str() {
-                "infinity" | "full" => libc::RLIM_INFINITY,
+                "infinity" => libc::RLIM_INFINITY,
+                "full" => 1024,
                 "huge" => 1_000_000_000,
                 "lowered" => 1024,
                 _ => unreachable!(),
             };
             let raised = libc::rlimit {
-                rlim_cur: requested,
+                // A process cannot raise its inherited hard limit. Exercise the
+                // largest permitted value on constrained CI runners too.
+                rlim_cur: requested.min(original.rlim_max),
                 rlim_max: original.rlim_max,
             };
             assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) }, 0);
             let code = match mode.as_str() {
                 "infinity" | "huge" => usize::from(sanitize_descriptors(false).is_err()),
                 "full" => {
-                    let files: Vec<_> = (0..16_500)
+                    // Exercise the same real enumeration/truncation path with
+                    // a smaller fixed buffer: macOS may cap open descriptors
+                    // below the production capacity even at RLIM_INFINITY.
+                    let files: Vec<_> = (0..64)
                         .map(|_| fs::File::open("/dev/null").unwrap())
                         .collect();
-                    let rejected = sanitize_descriptors(false).is_err();
+                    let rejected = sanitize_descriptors_with_capacity::<32>(false)
+                        .is_err_and(|error| error.raw_os_error() == Some(libc::EIO));
                     drop(files);
                     usize::from(!rejected)
                 }
@@ -3274,7 +3294,7 @@ mod tests {
                 ])
                 .env(CHILD, mode)
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::inherit())
                 .spawn()
                 .unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -3529,6 +3549,23 @@ mod tests {
 
     #[test]
     fn closed_live_sink_sets_the_supervisor_failure_signal() {
+        const CHILD: &str = "TAPID_TEST_CLOSED_LIVE_SINK_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Other tests fork concurrently and can briefly inherit the sink's
+            // pipe reader even with CLOEXEC. Isolate the EPIPE assertion so it
+            // observes only this test's deliberately terminated sink.
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "execution::platform_backend::tests::closed_live_sink_sets_the_supervisor_failure_signal",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "closed live sink child failed: {status}");
+            return;
+        }
         let (read, write) = launch_pipe().unwrap();
         let (mut child, mut input) = spawn_live_sink(write.as_raw_fd()).unwrap();
         drop(write);

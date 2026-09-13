@@ -159,8 +159,31 @@ enum ConfigReadError {
 }
 
 fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigReadError> {
-    let file = fs::File::open(path).map_err(ConfigReadError::Io)?;
-    if file.metadata().map_err(ConfigReadError::Io)?.len() > tapid_runner::MAX_CONFIG_BYTES as u64 {
+    let metadata = fs::symlink_metadata(path).map_err(ConfigReadError::Io)?;
+    if !metadata.file_type().is_file() {
+        return Err(ConfigReadError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "run configuration is not a regular file",
+        )));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A replaced FIFO must not block the open, nor may a replaced symlink
+        // redirect the read after the initial metadata check.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(ConfigReadError::Io)?;
+    let metadata = file.metadata().map_err(ConfigReadError::Io)?;
+    if !metadata.is_file() {
+        return Err(ConfigReadError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "run configuration is not a regular file",
+        )));
+    }
+    if metadata.len() > tapid_runner::MAX_CONFIG_BYTES as u64 {
         return Err(ConfigReadError::CapacityExceeded);
     }
     let mut bytes = Vec::new();
@@ -267,22 +290,4 @@ fn termination_exit_code(termination: &tapid_runner::Termination) -> ExitCode {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn nonzero_and_limit_terminations_map_to_stable_cli_exits() {
-        assert_eq!(
-            termination_exit_code(&tapid_runner::Termination::Exited(37)),
-            ExitCode::from(37)
-        );
-        for termination in [
-            tapid_runner::Termination::TimedOut,
-            tapid_runner::Termination::OutputLimitExceeded,
-            tapid_runner::Termination::ProcessLimitExceeded,
-            tapid_runner::Termination::MemoryLimitExceeded,
-        ] {
-            assert_eq!(termination_exit_code(&termination), ExitCode::from(1));
-        }
-    }
-}
+mod tests;

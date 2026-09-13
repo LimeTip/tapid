@@ -136,6 +136,68 @@ fn prepared_request_uses_npm_shell_exact_arguments_and_controlled_search_directo
     fs::remove_dir_all(project).unwrap();
 }
 
+#[test]
+fn dependency_free_project_without_managed_bin_is_accepted() {
+    let (project, runtime) = project();
+    fs::remove_dir(project.join("node_modules/.bin")).unwrap();
+    let config = RunConfig::parse_toml("[run.scripts.test]\n").unwrap();
+
+    let prepared = run::prepare_execution_request(
+        &project,
+        "test",
+        &config,
+        "node fixture.js",
+        &[],
+        run::HostExecutionEnvironment {
+            node_runtime: Some(&runtime),
+            path: None,
+            allowlisted: &BTreeMap::new(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        prepared.executable_search_directories(),
+        [fs::canonicalize(runtime.parent().unwrap()).unwrap()]
+    );
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_managed_bin_does_not_accept_an_unsafe_parent() {
+    use std::os::unix::fs::symlink;
+
+    let (project, runtime) = project();
+    fs::remove_dir_all(project.join("node_modules")).unwrap();
+    let outside = project.with_extension("empty-outside");
+    fs::create_dir(&outside).unwrap();
+    symlink(&outside, project.join("node_modules")).unwrap();
+    let config = RunConfig::parse_toml("[run.scripts.test]\n").unwrap();
+    for symlink_parent in [true, false] {
+        if !symlink_parent {
+            fs::remove_file(project.join("node_modules")).unwrap();
+            fs::write(project.join("node_modules"), b"not a directory").unwrap();
+        }
+        let error = run::prepare_execution_request(
+            &project,
+            "test",
+            &config,
+            "node fixture.js",
+            &[],
+            run::HostExecutionEnvironment {
+                node_runtime: Some(&runtime),
+                path: None,
+                allowlisted: &BTreeMap::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, run::RunPreparationError::InvalidManagedBin));
+    }
+    fs::remove_dir_all(project).unwrap();
+    fs::remove_dir(outside).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn preexisting_managed_bin_symlink_outside_project_is_rejected() {
