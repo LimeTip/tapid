@@ -545,6 +545,23 @@ mod upgrade_tests {
             self.calls.push(url.into());
             self.responses.remove(url).ok_or_else(|| "outage".into())
         }
+        fn fetch_metadata_with_limit(
+            &mut self,
+            url: &str,
+            max_bytes: usize,
+        ) -> Result<Vec<u8>, super::ReleaseError> {
+            self.calls.push(url.into());
+            let body = self
+                .responses
+                .remove(url)
+                .ok_or_else(|| super::ReleaseError::Fetch("outage".into()))?;
+            if body.len() > max_bytes {
+                return Err(super::ReleaseError::InvalidManifest(
+                    "response exceeds maximum size".into(),
+                ));
+            }
+            Ok(body)
+        }
     }
 
     #[test]

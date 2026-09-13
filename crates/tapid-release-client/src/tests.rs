@@ -26,6 +26,14 @@ impl Fetcher for Fake {
         }
         Ok(body)
     }
+
+    fn fetch_metadata_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error> {
+        let body = self.fetch(url).map_err(Error::Fetch)?;
+        if body.len() > max_bytes {
+            return Err(Error::InvalidManifest("response exceeds maximum size".into()));
+        }
+        Ok(body)
+    }
 }
 
 #[test]
@@ -91,6 +99,12 @@ impl Fetcher for LimitAwareFake {
     fn fetch_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
         self.calls.push((url.into(), max_bytes));
         self.responses.remove(url).unwrap_or_else(|| Err("missing".into()))
+    }
+
+    fn fetch_metadata_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error> {
+        // Deliberately return oversized fixtures to exercise discover's defensive check.
+        self.calls.push((url.into(), max_bytes));
+        self.responses.remove(url).unwrap_or_else(|| Err("missing".into())).map_err(Error::Fetch)
     }
 }
 

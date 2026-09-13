@@ -243,6 +243,24 @@ fn hex_digest(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
 }
 
+/// Caller-supplied transport with explicit metadata rejection semantics.
+///
+/// A string-only transport cannot implement this trait without providing the
+/// typed metadata method. Otherwise a size or validation rejection could be
+/// mistaken for an outage:
+///
+/// ```compile_fail,E0046
+/// use tapid_release_client::Fetcher;
+/// struct StringOnly;
+/// impl Fetcher for StringOnly {
+///     fn fetch(&mut self, _: &str) -> Result<Vec<u8>, String> {
+///         Err("unavailable".into())
+///     }
+///     fn fetch_with_limit(&mut self, _: &str, _: usize) -> Result<Vec<u8>, String> {
+///         Err("received response exceeds size limit".into())
+///     }
+/// }
+/// ```
 pub trait Fetcher {
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String>;
 
@@ -255,14 +273,13 @@ pub trait Fetcher {
 
     /// Fetch metadata without conflating response rejection with unavailability.
     ///
-    /// Only `Error::Fetch` permits discovery failover. Implementations that reject
-    /// a received response (for example, a streaming size limit) must override
-    /// this method and return `Error::InvalidManifest` for that rejection.
-    /// The default preserves existing fetchers, whose string errors are treated
-    /// as transport failures; it cannot recover classifications already lost.
-    fn fetch_metadata_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error> {
-        self.fetch_with_limit(url, max_bytes).map_err(Error::Fetch)
-    }
+    /// Only `Error::Fetch` permits discovery failover. Return a validation error
+    /// for rejected responses, including streaming size-limit violations.
+    /// Enforce `max_bytes` during reads, as for `fetch_with_limit`.
+    ///
+    /// Every implementation must classify these outcomes explicitly; there is
+    /// no string-error default that could silently weaken discovery policy.
+    fn fetch_metadata_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error>;
 }
 /// Try stable discovery candidates in order, retrying only unavailable fetches.
 ///
