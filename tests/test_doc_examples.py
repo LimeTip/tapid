@@ -179,6 +179,47 @@ if [ "$1" = i ]; then mkdir -p node_modules/is-char; printf '{"name":"is-char"}'
             self.assertEqual(len(evidence['commands']), 5)
 
     @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell runtime not installed')
+    def test_native_powershell_temp_root_collision_preserves_existing_data(self):
+        # Pin only the random path in a copied runner; execute its real setup and
+        # finally block. No Unix executable is needed: allocation must fail first.
+        runner = self.load()
+        source = (ROOT / 'scripts/check-doc-examples.ps1').read_text()
+        root_line = next(line for line in source.splitlines() if line.startswith('$root = '))
+        for kind in ('directory', 'file'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp)
+                root = base / 'collision'
+                if kind == 'directory':
+                    root.mkdir()
+                    sentinel = root / 'keep.txt'
+                else:
+                    sentinel = root
+                sentinel.write_text('pre-existing data')
+                scripts = base / 'scripts'
+                scripts.mkdir()
+                examples = base / 'docs/examples'
+                examples.mkdir(parents=True)
+                shutil.copyfile(ROOT / 'docs/examples/quickstart.ps1', examples / 'quickstart.ps1')
+                script = scripts / 'check-doc-examples.ps1'
+                quoted_root = str(root).replace("'", "''")
+                script.write_text(source.replace(root_line, "$root = '" + quoted_root + "'", 1))
+                binary = base / 'unused-binary'
+                binary.write_bytes(b'allocation must fail before execution')
+                report = base / 'report.json'
+                result = subprocess.run(['pwsh', '-NoProfile', '-File', str(script),
+                                         '-Binary', str(binary), '-ExpectedSha256', runner.digest(binary),
+                                         '-ExpectedVersion', 'tapid 1.2.3', '-ReleaseTag', 'v1.2.3',
+                                         '-ReportPath', str(report)], capture_output=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                evidence = json.loads(report.read_text())
+                self.assertEqual(evidence['status'], 'failed', evidence)
+                self.assertEqual(evidence['commands'], [])
+                self.assertTrue(sentinel.exists(), 'cleanup deleted an unowned temp root')
+                self.assertEqual(sentinel.read_text(), 'pre-existing data')
+                if kind == 'directory':
+                    self.assertEqual(list(root.iterdir()), [sentinel], 'collision root was modified')
+
+    @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell runtime not installed')
     def test_native_powershell_runner_rejects_wrong_digest_with_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

@@ -213,8 +213,13 @@ test("public smoke tests use the published installer and released version", asyn
 
 test("public smoke retains tagged installer provenance before execution on both platforms", async () => {
   const workflow = await text(".github/workflows/release-public-smoke.yml");
-  const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
-  const windows = workflow.slice(workflow.indexOf("  windows:"));
+  const unixStart = workflow.indexOf("  unix:");
+  const windowsStart = workflow.indexOf("  windows:");
+  assert(unixStart >= 0, "missing Unix job section");
+  assert(windowsStart >= 0, "missing Windows job section");
+  assert(windowsStart > unixStart, "Windows job section must follow Unix job section");
+  const unix = workflow.slice(unixStart, windowsStart);
+  const windows = workflow.slice(windowsStart);
   for (const [job, execution, script] of [
     [unix, 'sh "$RUNNER_TEMP/install.sh" --version', 'install.sh'],
     [windows, '& $installer -Version', 'install.ps1'],

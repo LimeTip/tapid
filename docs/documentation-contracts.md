@@ -110,8 +110,9 @@ tag selector, and declares daily **Linux-only** checks. Release/manual runs reta
 macOS and Windows. The resolver captures latest tag, selected release target and
 trusted main runner SHA once; all jobs check out that exact runner SHA. Historical
 selected-version installation and current latest discovery have separate expected
-versions. Third-party actions are commit-pinned, permissions stay `contents: read`,
-and JSON/script-digest artifacts have 30-day retention. Merging activates the
+versions. Third-party actions in the public installer smoke workflow are
+commit-pinned, its permissions stay `contents: read`, and its JSON/script-digest
+artifacts have 30-day retention. Merging activates the
 schedule; this local change has not run hosted CI or changed repository settings.
 
 The public lane tests real package installation before reusing the existing empty

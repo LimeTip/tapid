@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 $report = @{schema_version=1; lane='published'; platform=[Environment]::OSVersion.Platform.ToString(); release_tag=$ReleaseTag; status='failed'; commands=@(); assertions=@()}
 $root = Join-Path ([IO.Path]::GetTempPath()) ('tapid-doc-native-' + [guid]::NewGuid().ToString('N'))
 $originalLocation = Get-Location
+$rootCreated = $false
 
 function Invoke-BoundedTapid([string[]]$Arguments) {
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash.ToLowerInvariant() -cne $ExpectedSha256) {
@@ -71,6 +72,9 @@ try {
     foreach ($line in $lines) {
         if ($line -cnotmatch '^(New-Item -ItemType Directory [a-z][a-z0-9-]*|Set-Location [a-z][a-z0-9-]*|tapid (init|i is-char|install --offline --frozen))$') { throw 'unsupported native command vocabulary' }
     }
+    # Allocate explicitly without -Force: never reuse or clean up a collision.
+    $null = New-Item -ItemType Directory -Path $root
+    $rootCreated = $true
     $binDir = Join-Path $root 'bin'
     $homeDir = Join-Path $root 'home'
     $project = Join-Path $root 'project'
@@ -111,7 +115,7 @@ try {
     if (-not $report.failure_class) { $report.failure_class = 'execution' }
 } finally {
     Set-Location $originalLocation
-    if (Test-Path -LiteralPath $root) { Remove-Item -Recurse -Force -LiteralPath $root }
+    if ($rootCreated -and (Test-Path -LiteralPath $root)) { Remove-Item -Recurse -Force -LiteralPath $root }
     $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $ReportPath -Encoding utf8
 }
 if ($report.status -ne 'passed') { exit 1 }
