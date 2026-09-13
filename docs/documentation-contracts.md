@@ -23,15 +23,17 @@ and non-overwrite contracts have not changed.
 inventory until the website supports native platform rendering. It is not a
 translation performed by the Unix runner.
 
-Capability `verified_releases` lists versions actually checked; it does not claim
-to identify the first implementing version. `first_supported_release: null` on
-self-upgrade means there is no verified published implementation. v0.0.9 lacks
-`upgrade`; stable docs must retain reinstall guidance. `upgrade-help` has an
-explicit v0.0.9 negative expectation (exit 2 plus the unrecognized-subcommand
-message), distinct from source's positive exit-0 contract. Other release tags
-require a reviewed capability expectation before that probe can pass. A new
-release containing self-upgrade must update this record and release coverage,
-not simply promote source-only instructions.
+Capability `verified_releases` lists versions actually checked. Self-upgrade's
+`first_supported_release: "v0.0.10"` and `expected_releases: ["v0.0.10"]` are
+reviewed implementation expectations, **not published execution evidence**;
+its `verified_releases` remains empty until actual published verification is
+reviewed. v0.0.9 lacks `upgrade` and retains reinstall guidance. `upgrade-help`
+expects exit 2 plus the unrecognized-subcommand message for v0.0.9, and exit 0
+for v0.0.10. The published `upgrade` journey explicitly skips v0.0.9 as unsupported
+without executing it; the negative help probe still runs separately. Only the
+exact v0.0.10 source tag is currently expected to support the journey; unknown
+tags (including newer versions) fail closed pending reviewed expectations.
+Do not interpret `first_supported_release` as an open-ended semver allowlist.
 
 A staged local checkout is development input, not a fabricated published pin.
 A local commit can unblock clean pinned builds without authorizing a push.
@@ -60,15 +62,26 @@ of the public installer script. It never builds a replacement if installation
 fails. `--release-source-sha` records the separately resolved release tag target;
 `source_sha` identifies the runner/docs checkout, not the release binary's source.
 
-The source-only `upgrade` journey additionally requires
+The Unix `upgrade` journey in both lanes additionally requires
 `--upgrade-target-sha256` and `--upgrade-target-version` identifying the expected
 published destination executable. Only the explicit upgrade command may change
 the digest. The runner checks the destination digest **before executing** its
 version probe and records persisted signature/checksum verification state.
 The disposable copy receives its own managed marker; this does not claim an
-unmanaged user installation is upgradeable. Same-version source-to-published
-replacement is not previous-stable-to-current upgrade evidence. v0.0.9 cannot
-perform the latter; use reinstall instructions until a suitable release exists.
+unmanaged user installation is upgradeable. The published smoke uses the selected
+installed release as its source, and independently installs current latest through
+discovery to obtain the exact destination executable digest and version. A latest
+release changing during the run fails these checks rather than relaxing them.
+The upgrade step has a five-minute ceiling and retains its JSON report with
+`always()` after execution, including failure or unsupported-skip reports.
+
+When selected and latest tags match, this tests **same-release replacement**, not
+a previous-version upgrade. A historical supported selected tag targeting a newer
+latest can test the latter; v0.0.9 cannot. Same-version source-to-published runs
+also are not previous-stable-to-current evidence. Published upgrade coverage here
+is **Unix only** (Linux daily; Linux/macOS on release/manual runs). The Windows
+job covers installation and its native quickstart, not the upgrade journey.
+No published v0.0.10 execution is claimed by these configuration changes.
 
 ## Execution and evidence boundaries
 
@@ -92,7 +105,10 @@ code with secrets or privileged tokens.
 
 JSON reports use `schema_version: 1`, explicit lane, platform, release identity,
 binary path/digest/version, literal command exit codes, bounded output and
-assertions. Unix reports group results under `examples`; native reports contain
+assertions. A reviewed unsupported release produces `status: "skipped"`, an
+explicit reason and no commands; it exits zero but is never reported as passed
+upgrade evidence. Any failed selected example still fails the overall report.
+Unix reports group results under `examples`; native reports contain
 one journey's `commands` directly. Reports also bind script bytes by SHA-256.
 `failure_class` distinguishes contract, provenance, command, assertion, timeout,
 output-limit and execution failures. A command/network failure is **not** silently

@@ -32,10 +32,17 @@ tapid init [PATH]
 tapid manifest validate [PATH]
 tapid lock verify
 tapid install [OPTIONS]
+tapid upgrade [OPTIONS]
 tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
+
+## Upgrade Tapid
+
+Starting with 0.0.10, `tapid upgrade` discovers and installs the latest stable release. `tapid upgrade --dry-run` inspects the selected release without replacing the binary. Older clients can be upgraded by rerunning the public installer.
+
+The command prefers signed stable-channel discovery. If the default discovery endpoints are unavailable, it uses the canonical GitHub Releases API and verifies the platform archive against `SHA256SUMS`. Explicit custom endpoints do not enable the GitHub fallback. The published GitHub path provides checksum integrity, not independent release authentication. The command validates the archive, stages executable replacement, and records verification provenance for last-known-good recovery.
 
 ## Install packages
 

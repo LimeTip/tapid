@@ -24,7 +24,7 @@ The checksum detects corruption, truncation, and accidental asset substitution. 
 
 The installers accept only stable `vX.Y.Z` versions and HTTPS release endpoints. They select a platform-specific archive, enforce conservative checksum, archive, and executable size limits, verify its SHA-256 checksum, require exactly one expected regular executable in the archive, extract into a temporary directory, and stage the destination before replacement.
 
-`tapid upgrade` is intentionally unavailable. Reinstall through the public installer when upgrading. Authenticated self-update metadata can be reconsidered if Tapid later needs mirrors, independent update authorization, or provider migration.
+Starting with Tapid 0.0.10, `tapid upgrade` supports the published GitHub release format. It first attempts signed stable-channel discovery; when the default discovery endpoints are unavailable, it falls back to the canonical GitHub Releases API and verifies the selected platform archive against `SHA256SUMS`. This fallback is checksum-based integrity checking within the same GitHub trust boundary, not independent release authentication. Explicit custom discovery endpoints do not enable that GitHub fallback. The command validates archive structure, stages executable replacement, and records verification provenance for last-known-good recovery. Use `tapid upgrade --dry-run` to inspect the selected release without replacing the binary. Older installations can be upgraded by rerunning the public installer.
 
 ## Versioning policy
 

@@ -291,6 +291,10 @@ def main(argv=None):
                     if args.release_tag not in entry['release_expectations']:
                         raise ValueError('release capability expectation needs review: ' + args.release_tag)
                     outcome = entry['release_expectations'][args.release_tag]
+                if 'skip' in outcome:
+                    report['examples'].append({'example': entry['id'], 'status': 'skipped',
+                                               'reason': outcome['skip'], 'commands': [], 'assertions': []})
+                    continue
                 result = run_example(script, binary, expected_digest, expected_version,
                                      assertions=entry['assertions'], upgrade_target=upgrade_target,
                                      expected_exit=outcome['exit_code'], expected_output=outcome.get('output_contains'))
@@ -298,13 +302,15 @@ def main(argv=None):
                 if result['status'] != 'passed':
                     break
             report['status'] = 'passed' if (len(report['examples']) == len(selected) and
-                                           all(e['status'] == 'passed' for e in report['examples'])) else 'failed'
+                                           all(e['status'] in ('passed', 'skipped') for e in report['examples'])) else 'failed'
+            if report['status'] == 'passed' and any(e['status'] == 'skipped' for e in report['examples']):
+                report['status'] = 'skipped'
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         report.update(status='failed', failure_class='execution', error=str(error)[:2000])
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({'status': report['status'], 'report': str(args.report)}))
-    return 0 if report['status'] == 'passed' else 1
+    return 0 if report['status'] in ('passed', 'skipped') else 1
 
 
 if __name__ == '__main__':
