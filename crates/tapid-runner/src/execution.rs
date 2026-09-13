@@ -2824,7 +2824,9 @@ mod tests {
             request.trusted_node_runtime(),
             fs::canonicalize(&runtime).unwrap()
         );
-        fs::remove_file(&runtime).unwrap();
+        // Keep the original inode allocated so delete/recreate inode reuse on
+        // Linux cannot accidentally turn this replacement test into an identity match.
+        fs::rename(&runtime, root.join("original-node")).unwrap();
         fs::write(&runtime, b"replacement").unwrap();
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -3709,9 +3711,7 @@ mod tests {
         fs::write(&file, b"not a directory").unwrap();
         let canonical_root = fs::canonicalize(&root).unwrap();
         let canonical_directory = fs::canonicalize(&directory).unwrap();
-        let noncanonical = canonical_directory
-            .join("..")
-            .join(canonical_directory.file_name().unwrap());
+        let noncanonical = noncanonical_parent_alias(&canonical_directory);
         let invalid = [
             PathBuf::from("relative"),
             canonical_root.join("missing"),
@@ -4011,6 +4011,19 @@ mod tests {
         preflight.bindings.grants.push(original);
     }
 
+    fn noncanonical_parent_alias(canonical: &std::path::Path) -> PathBuf {
+        // PathBuf::push/join normalizes parent components in Windows verbatim
+        // paths. Append native text instead so the fixture remains noncanonical.
+        let mut alias = canonical.as_os_str().to_owned();
+        alias.push(std::path::MAIN_SEPARATOR_STR);
+        alias.push("..");
+        alias.push(std::path::MAIN_SEPARATOR_STR);
+        alias.push(canonical.file_name().unwrap());
+        let alias = PathBuf::from(alias);
+        assert_ne!(alias.as_os_str(), canonical.as_os_str());
+        alias
+    }
+
     #[test]
     fn noncanonical_runtime_additions_fail_before_spawn() {
         assert!(
@@ -4019,7 +4032,7 @@ mod tests {
 
         let root = temporary_directory("runtime-canonical");
         let canonical = fs::canonicalize(&root).unwrap();
-        let noncanonical = canonical.join("..").join(canonical.file_name().unwrap());
+        let noncanonical = noncanonical_parent_alias(&canonical);
         assert!(RuntimeFilesystemAdditions::checked(vec![noncanonical], vec![]).is_err());
         fs::remove_dir_all(root).unwrap();
     }
