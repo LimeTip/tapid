@@ -13,4 +13,6 @@ Provider-neutral verified release discovery and artifact validation for Tapid.
 
 The durable release-state helpers use validated, atomically replaced JSON state. They reject replayed release sequences and versions below the recorded release floor. Version 1 release manifests intentionally contain no sequence field; monotonic sequence policy is maintained separately in the version 2 client state.
 
+Version 0.0.3 adds release-state verification provenance: `signature`, `checksum`, or `unknown`. Older state without this field reads as `unknown`; accepting a subsequent release preserves the recorded provenance until the caller updates it. This field records the caller's verification result and does not itself verify a signature or checksum.
+
 This crate does not install or execute downloaded artifacts, choose trusted signing keys, provide independent release transparency, or turn same-provider checksums into an independent authenticity proof.
