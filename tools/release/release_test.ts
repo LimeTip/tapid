@@ -225,7 +225,9 @@ test("public smoke retains tagged installer provenance before execution on both 
     for (const field of ["installer_url=", "release_tag=", "release_source_sha=", "installer_sha256="]) {
       assert(job.includes(field), `${script}: missing ${field}`);
     }
-    const upload = job.slice(job.indexOf("uses: actions/upload-artifact@"));
+    const uploadStart = job.indexOf("uses: actions/upload-artifact@");
+    assert(uploadStart >= 0, `${script}: missing upload-artifact step`);
+    const upload = job.slice(uploadStart);
     for (const file of ["installer-provenance.txt", "installer-sha256.txt", script]) {
       assert(upload.includes('${{ runner.temp }}/' + file), `${script}: not retaining ${file}`);
     }

@@ -71,10 +71,19 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-          ref: ${{ needs.resolve.outputs.runner_sha }} # trusted current runner, not historical release code
+          # Keep the checkout ref static. The resolver output is verified below,
+          # but must not control a privileged checkout ref.
+          ref: main
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+      - name: Verify trusted runner revision
+        shell: bash
+        env:
+          EXPECTED_RUNNER_SHA: ${{ needs.resolve.outputs.runner_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_RUNNER_SHA"
       - name: Install the published release
         shell: bash
         env:
@@ -160,7 +169,16 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-          ref: ${{ needs.resolve.outputs.runner_sha }}
+          # Keep the checkout ref static. The resolver output is verified below,
+          # but must not control a privileged checkout ref.
+          ref: main
+      - name: Verify trusted runner revision
+        shell: pwsh
+        env:
+          EXPECTED_RUNNER_SHA: ${{ needs.resolve.outputs.runner_sha }}
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -cne $env:EXPECTED_RUNNER_SHA) { throw "Unexpected runner revision: $actual" }
       - name: Install the published release
         shell: powershell
         env:
