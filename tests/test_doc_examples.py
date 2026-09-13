@@ -39,6 +39,85 @@ class RunnerTests(unittest.TestCase):
             script.write_text(commands)
             return runner.run_example(script, binary, kwargs.pop('expected_digest', runner.digest(binary)), kwargs.pop('expected_version', 'tapid 1.2.3'), **kwargs)
 
+    def published_fixture(self, tag, example, body='exit 0', extra=()):
+        runner = self.load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / 'tapid'
+            binary.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo "tapid ' + tag[1:] + '"; exit; fi\n' + body + '\n')
+            binary.chmod(0o755)
+            report = root / 'report.json'
+            result = subprocess.run([sys.executable, SPEC.origin, '--lane', 'published',
+                                     '--example', example, '--binary', str(binary),
+                                     '--expected-sha256', runner.digest(binary),
+                                     '--expected-version', 'tapid ' + tag[1:], '--release-tag', tag,
+                                     '--allow-network', '--report', str(report), *extra],
+                                    capture_output=True, timeout=10)
+            return result.returncode, json.loads(report.read_text())
+
+    def test_reviewed_0010_help_is_expected_not_verified_release_evidence(self):
+        code, report = self.published_fixture('v0.0.10', 'upgrade-help')
+        self.assertEqual(code, 0, report)
+        inventory = json.loads((ROOT / 'docs/examples/contracts.json').read_text())
+        capability = next(c for c in inventory['capabilities'] if c['id'] == 'self-upgrade')
+        self.assertEqual(capability['first_supported_release'], 'v0.0.10')
+        self.assertEqual(capability['expected_releases'], ['v0.0.10'])
+        self.assertEqual(capability['verified_releases'], [])
+
+    def test_published_upgrade_skips_only_reviewed_unsupported_release(self):
+        code, report = self.published_fixture('v0.0.9', 'upgrade', 'exit 99')
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report['status'], 'skipped')
+        self.assertEqual(report['examples'][0]['status'], 'skipped')
+        self.assertEqual(report['examples'][0]['commands'], [])
+        self.assertIn('no upgrade subcommand', report['examples'][0]['reason'])
+
+    def test_published_upgrade_unknown_tags_require_review(self):
+        for tag in ('v0.0.8', 'v0.0.11', 'v1.0.0'):
+            code, report = self.published_fixture(tag, 'upgrade')
+            self.assertNotEqual(code, 0)
+            self.assertIn('needs review', report['error'])
+            self.assertEqual(report['examples'], [])
+
+    def test_published_upgrade_supported_release_requires_destination(self):
+        code, report = self.published_fixture('v0.0.10', 'upgrade')
+        self.assertNotEqual(code, 0)
+        self.assertIn('explicit expected target', report['examples'][0]['error'])
+
+    def test_published_0010_upgrade_fixture_checks_exact_destination_and_state(self):
+        # Offline harness regression only: this shell fixture is not a release.
+        import hashlib
+        import shlex
+        replacement = '#!/bin/sh\necho "tapid 0.0.10"\n'
+        state = json.dumps({'schema': 'tapid-release-state-v2', 'verification': 'checksum',
+                            'last_known_good': {'version': '0.0.10', 'artifact_sha256': 'a' * 64}})
+        body = ('[ "$2" = --dry-run ] && exit 0\n'
+                'test -f "$(dirname "$0")/.tapid-managed" || exit 1\n'
+                'printf %s ' + shlex.quote(state) + ' > "$(dirname "$0")/.tapid-release-state.json"\n'
+                'printf %s ' + shlex.quote(replacement) + ' > "$0"')
+        expected_digest = hashlib.sha256(replacement.encode()).hexdigest()
+        for digest, version, expected_error in (
+                (expected_digest, 'tapid 0.0.10', None),
+                ('0' * 64, 'tapid 0.0.10', 'upgrade target digest mismatch'),
+                (expected_digest, 'tapid 0.0.11', 'upgrade target version mismatch')):
+            code, report = self.published_fixture('v0.0.10', 'upgrade', body,
+                ('--upgrade-target-sha256', digest, '--upgrade-target-version', version))
+            if expected_error:
+                self.assertNotEqual(code, 0, report)
+                self.assertEqual(report['examples'][0]['error'], expected_error)
+            else:
+                self.assertEqual(code, 0, report)
+                self.assertEqual(report['examples'][0]['binary_after'],
+                                 {'sha256': expected_digest, 'version': version})
+                self.assertEqual(report['examples'][0]['upgrade_state']['verification'], 'checksum')
+
+    def test_published_009_help_still_enforces_negative_outcome(self):
+        code, report = self.published_fixture('v0.0.9', 'upgrade-help',
+            "printf \"unrecognized subcommand 'upgrade'\\n\"; exit 2")
+        self.assertEqual(code, 0, report)
+        code, report = self.published_fixture('v0.0.9', 'upgrade-help')
+        self.assertNotEqual(code, 0, report)
+
     def test_wrong_digest_rejected_before_commands(self):
         report = self.fixture_run('tapid init\n', expected_digest='0' * 64)
         self.assertEqual(report['status'], 'failed')

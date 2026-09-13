@@ -170,46 +170,7 @@ pub(crate) fn run(
     let target = release::release_target();
     let mut fetcher = release::CurlFetcher;
 
-    let downloaded = match fetch_verified_release(&mut fetcher, &endpoints, &keyring, target) {
-        Ok(value) => {
-            let name = value
-                .0
-                .artifact()
-                .map(|a| a.name.clone())
-                .unwrap_or_default();
-            (value.0.version, name, value.1, true, true)
-        }
-        Err(ReleaseError::AllEndpointsFailed { .. })
-            if endpoints
-                == DEFAULT_STABLE_ENDPOINTS
-                    .iter()
-                    .map(|endpoint| (*endpoint).to_owned())
-                    .collect::<Vec<_>>() =>
-        {
-            match fetch_latest_github_release(&mut fetcher, target) {
-                Ok(value) => (value.0, value.1, value.2, false, true),
-                Err(fallback) => match recover_last_known_good(&destination, target) {
-                    Ok(value) => value,
-                    Err(recovery) => {
-                        return Err(format!(
-                            "stable discovery unavailable, GitHub release fallback failed ({fallback}), and recovery failed: {recovery}"
-                        ));
-                    }
-                },
-            }
-        }
-        Err(ReleaseError::AllEndpointsFailed { .. }) => {
-            match recover_last_known_good(&destination, target) {
-                Ok(value) => value,
-                Err(recovery) => {
-                    return Err(format!(
-                        "stable discovery unavailable and recovery failed: {recovery}"
-                    ));
-                }
-            }
-        }
-        Err(error) => return Err(error.to_string()),
-    };
+    let downloaded = download_release(&mut fetcher, &endpoints, &keyring, target, &destination)?;
     let (manifest_version, artifact_name, bytes, signature_verified, verification_known) =
         downloaded;
     let digest = format!("{:x}", Sha256::digest(&bytes));
@@ -279,6 +240,58 @@ pub(crate) fn run(
         }),
         Err(error) => Err(error),
     }
+}
+
+/// Select signed discovery, outage fallback, or recovery without masking validation errors.
+fn download_release<F: Fetcher>(
+    fetcher: &mut F,
+    endpoints: &[String],
+    keyring: &KeyRing,
+    target: &str,
+    destination: &Path,
+) -> Result<(String, String, Vec<u8>, bool, bool), String> {
+    Ok(
+        match fetch_verified_release(fetcher, endpoints, keyring, target) {
+            Ok(value) => {
+                let name = value
+                    .0
+                    .artifact()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default();
+                (value.0.version, name, value.1, true, true)
+            }
+            Err(ReleaseError::AllEndpointsFailed { .. })
+                if endpoints
+                    == DEFAULT_STABLE_ENDPOINTS
+                        .iter()
+                        .map(|endpoint| (*endpoint).to_owned())
+                        .collect::<Vec<_>>() =>
+            {
+                match fetch_latest_github_release(fetcher, target) {
+                    Ok(value) => (value.0, value.1, value.2, false, true),
+                    Err(fallback) => match recover_last_known_good(destination, target) {
+                        Ok(value) => value,
+                        Err(recovery) => {
+                            return Err(format!(
+                                "stable discovery unavailable, GitHub release fallback failed ({fallback}), and recovery failed: {recovery}"
+                            ));
+                        }
+                    },
+                }
+            }
+            Err(ReleaseError::AllEndpointsFailed { .. }) => {
+                match recover_last_known_good(destination, target) {
+                    Ok(value) => value,
+                    Err(recovery) => {
+                        return Err(format!(
+                            "stable discovery unavailable and recovery failed: {recovery}"
+                        ));
+                    }
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        },
+    )
 }
 
 pub(crate) struct UpgradeReport {
@@ -518,6 +531,149 @@ mod upgrade_tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     use tapid_release_client::{ReleaseState, read_release_state};
+
+    struct DiscoveryFetcher {
+        responses: std::collections::BTreeMap<String, Vec<u8>>,
+        calls: Vec<String>,
+    }
+
+    impl super::Fetcher for DiscoveryFetcher {
+        fn fetch(&mut self, _: &str) -> Result<Vec<u8>, String> {
+            panic!("unbounded fetch");
+        }
+        fn fetch_with_limit(&mut self, url: &str, _: usize) -> Result<Vec<u8>, String> {
+            self.calls.push(url.into());
+            self.responses.remove(url).ok_or_else(|| "outage".into())
+        }
+    }
+
+    #[test]
+    fn invalid_signed_discovery_never_uses_checksum_or_cached_recovery() {
+        let root = temp("invalid-discovery");
+        let destination = root.join("tapid");
+        let bytes = b"cached artifact";
+        let digest = format!("{:x}", sha2::Sha256::digest(bytes));
+        let state = ReleaseState::new("0.0.9", 1, digest.clone()).unwrap();
+        persist_activated_release(
+            &destination,
+            &super::release_state_path(&destination),
+            &state,
+            &digest,
+            bytes,
+        )
+        .unwrap();
+        // A working cache must not turn rejection into a successful recovery.
+        assert!(super::recover_last_known_good(&destination, "test-target").is_ok());
+        let now = time::OffsetDateTime::now_utc();
+        let timestamp = |value: time::OffsetDateTime| {
+            value
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        let manifest = serde_json::json!({
+            "schema": "tapid-release-manifest-v1", "product": "tapid",
+            "version": "0.0.10", "tag": "v0.0.10", "commit": "a".repeat(40),
+            "created_at": timestamp(now - time::Duration::HOUR),
+            "expires_at": timestamp(now + time::Duration::DAY),
+            "artifacts": [{"name": "tapid-0.0.10-test-target.tar.gz", "target": "test-target",
+                "url": "https://example.test/artifact", "sha256": "a".repeat(64), "size": 5}],
+            "signature": {"algorithm": "ed25519", "key_id": "untrusted",
+                "signed_digest": format!("sha256-{}", "a".repeat(64)),
+                "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}
+        });
+        let mut stale = manifest.clone();
+        stale["expires_at"] = serde_json::json!(timestamp(now - time::Duration::MINUTE));
+        let mut wrong_target = manifest.clone();
+        wrong_target["artifacts"][0]["target"] = serde_json::json!("other-target");
+        for (invalid_index, body, expected) in [
+            (true, vec![], "InvalidManifest"),
+            (
+                false,
+                b"invalid signed manifest".to_vec(),
+                "InvalidManifest",
+            ),
+            (false, serde_json::to_vec(&manifest).unwrap(), "Signature"),
+            (false, serde_json::to_vec(&stale).unwrap(), "StaleMetadata"),
+            (
+                false,
+                serde_json::to_vec(&wrong_target).unwrap(),
+                "TargetNotFound",
+            ),
+        ] {
+            let mut fetcher = DiscoveryFetcher {
+                responses: [
+                    (
+                        DEFAULT_STABLE_ENDPOINTS[1].into(),
+                        if invalid_index {
+                            b"invalid JSON".to_vec()
+                        } else {
+                            br#"{"channel":"stable","manifests":["https://example.test/manifest"]}"#
+                                .to_vec()
+                        },
+                    ),
+                    ("https://example.test/manifest".into(), body),
+                ]
+                .into_iter()
+                .collect(),
+                calls: vec![],
+            };
+            let result = super::download_release(
+                &mut fetcher,
+                &stable_discovery_endpoints(&[], None),
+                &super::KeyRing::new(),
+                "test-target",
+                &destination,
+            );
+            let error = result.unwrap_err();
+            assert!(error.starts_with(expected), "{expected}: {error}");
+            assert!(
+                !fetcher
+                    .calls
+                    .iter()
+                    .any(|url| url.contains("api.github.com"))
+            );
+            assert_eq!(
+                read_release_state(&super::release_state_path(&destination)).unwrap(),
+                state
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovery_outage_retains_default_github_checksum_fallback() {
+        let root = temp("github-outage-fallback");
+        let bytes = b"downloaded artifact";
+        let digest = format!("{:x}", sha2::Sha256::digest(bytes));
+        let name = "tapid-0.0.10-test-target.tar.gz";
+        let mut fetcher = DiscoveryFetcher {
+            responses: [
+                ("https://api.github.com/repos/LimeTip/tapid/releases/latest".into(), serde_json::to_vec(&serde_json::json!({
+                    "tag_name": "v0.0.10", "assets": [
+                        {"name": name, "browser_download_url": "https://example.test/artifact"},
+                        {"name": "SHA256SUMS", "browser_download_url": "https://example.test/checksums"}
+                    ]
+                })).unwrap()),
+                ("https://example.test/checksums".into(), format!("{digest}  {name}\n").into_bytes()),
+                ("https://example.test/artifact".into(), bytes.to_vec()),
+            ].into_iter().collect(),
+            calls: vec![],
+        };
+        let result = super::download_release(
+            &mut fetcher,
+            &stable_discovery_endpoints(&[], None),
+            &super::KeyRing::new(),
+            "test-target",
+            &root.join("tapid"),
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            ("0.0.10".into(), name.into(), bytes.to_vec(), false, true)
+        );
+        assert_eq!(&fetcher.calls[..2], &DEFAULT_STABLE_ENDPOINTS);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parses_live_github_release_checksum_for_exact_archive() {

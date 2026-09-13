@@ -15,4 +15,8 @@ The durable release-state helpers use validated, atomically replaced JSON state.
 
 Version 0.0.3 adds release-state verification provenance: `signature`, `checksum`, or `unknown`. Older state without this field reads as `unknown`; accepting a subsequent release preserves the recorded provenance until the caller updates it. This field records the caller's verification result and does not itself verify a signature or checksum.
 
+Discovery tries another endpoint or manifest URL only after a fetch outage. Invalid received indexes or signed manifests, including stale metadata, missing targets, invalid signatures, and oversized responses, return their validation error immediately. Callers must not treat those errors as permission to use a weaker verification path or cached recovery.
+
+`Fetcher::fetch_metadata_with_limit` preserves this distinction for streaming transports. Implementations must return `Error::Fetch` only for unavailability and a validation error for rejected responses. Its compatibility default maps the existing string errors to `Error::Fetch`, so transports that reject bodies while reading must override it. The CLI's curl transport does so.
+
 This crate does not install or execute downloaded artifacts, choose trusted signing keys, provide independent release transparency, or turn same-provider checksums into an independent authenticity proof.

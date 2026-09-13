@@ -29,6 +29,41 @@ impl Fetcher for Fake {
 }
 
 #[test]
+fn discovery_preserves_manifest_rejections_before_later_valid_candidates() {
+    let mut stale = manifest();
+    stale["expires_at"] = json!("2026-08-27T11:59:59Z");
+    let stale = serde_json::to_vec(&release::sign(stale, "release-key-1", &SECRET).unwrap()).unwrap();
+    let mut tampered: serde_json::Value = serde_json::from_slice(&signed()).unwrap();
+    tampered["commit"] = json!("a".repeat(40));
+    let cases = [
+        (b"not JSON".to_vec(), TARGET, "malformed"),
+        (stale, TARGET, "stale"),
+        (signed(), "aarch64-unknown-linux-gnu", "target"),
+        (serde_json::to_vec(&tampered).unwrap(), TARGET, "signature"),
+    ];
+    for (body, target, case) in cases {
+        let mut f = Fake {
+            responses: [
+                ("https://one.test/index".into(), Ok(channel(&["https://one.test/bad", "https://one.test/good"]))),
+                ("https://one.test/bad".into(), Ok(body)),
+                ("https://one.test/good".into(), Ok(signed())),
+                ("https://two.test/index".into(), Ok(channel(&["https://two.test/good"]))),
+                ("https://two.test/good".into(), Ok(signed())),
+            ].into_iter().collect(),
+            calls: vec![],
+        };
+        let result = discover(&mut f, &["https://one.test/index", "https://two.test/index"], &keyring(), target, NOW, None);
+        assert!(matches!((&result, case),
+            (Err(Error::InvalidManifest(_)), "malformed")
+            | (Err(Error::StaleMetadata), "stale")
+            | (Err(Error::TargetNotFound(_)), "target")
+            | (Err(Error::Signature(_)), "signature")
+        ), "{case}: {result:?}");
+        assert_eq!(f.calls, ["https://one.test/index", "https://one.test/bad"]);
+    }
+}
+
+#[test]
 fn verifies_signed_manifest_and_matching_artifact() { let bytes = b"hello"; let mut v = manifest(); v["artifacts"][0]["sha256"] = json!(digest(bytes)); let body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); let r = ReleaseManifest::parse_and_verify(&body, &keyring(), TARGET, NOW, None).unwrap(); assert_eq!(r.artifact().unwrap().size, 5); }
 #[test]
 fn rejects_invalid_signature_unknown_key_and_stale_metadata() { let mut v = serde_json::from_slice::<serde_json::Value>(&signed()).unwrap(); v["signature"]["value"] = json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="); assert!(matches!(ReleaseManifest::parse_and_verify(&serde_json::to_vec(&v).unwrap(), &keyring(), TARGET, NOW, None), Err(Error::Signature(_)))); let mut v = serde_json::from_slice::<serde_json::Value>(&signed()).unwrap(); v["signature"]["key_id"] = json!("unknown"); assert!(matches!(ReleaseManifest::parse_and_verify(&serde_json::to_vec(&v).unwrap(), &keyring(), TARGET, NOW, None), Err(Error::Signature(_)))); let mut v = manifest(); v["expires_at"] = json!("2026-08-27T11:59:59Z"); let body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); assert!(matches!(ReleaseManifest::parse_and_verify(&body, &keyring(), TARGET, NOW, None), Err(Error::StaleMetadata))); }
@@ -40,7 +75,7 @@ fn verifies_artifact_hash_and_size() { let mut v = manifest(); v["artifacts"][0]
 fn follows_channel_index_and_falls_back_in_order() { let mut v = manifest(); v["artifacts"][0]["sha256"] = json!(digest(b"hello")); let body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); let mut f = Fake { responses: [("https://one.test/stable.json".into(), Ok(channel(&["https://one.test/manifest"]))), ("https://one.test/manifest".into(), Err("outage".into())), ("https://two.test/stable.json".into(), Ok(channel(&["https://two.test/manifest"]))), ("https://two.test/manifest".into(), Ok(body))].into_iter().collect(), calls: vec![] }; let r = discover(&mut f, &["https://one.test/stable.json", "https://two.test/stable.json"], &keyring(), TARGET, NOW, None).unwrap(); assert_eq!(r.artifact().unwrap().url, "https://example.test/tapid.tar.gz"); assert_eq!(f.calls, vec!["https://one.test/stable.json", "https://one.test/manifest", "https://two.test/stable.json", "https://two.test/manifest"]); }
 
 #[test]
-fn rejects_invalid_channel_index() { let mut f = Fake { responses: [("https://example.test/stable.json".into(), Ok(serde_json::to_vec(&json!({"channel": "beta", "manifests": ["https://example.test/manifest"]})).unwrap()))].into_iter().collect(), calls: vec![] }; let err = discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).unwrap_err(); assert!(matches!(err, Error::AllEndpointsFailed { attempts: 1 })); }
+fn rejects_invalid_channel_index() { let mut f = Fake { responses: [("https://example.test/stable.json".into(), Ok(serde_json::to_vec(&json!({"channel": "beta", "manifests": ["https://example.test/manifest"]})).unwrap()))].into_iter().collect(), calls: vec![] }; let err = discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).unwrap_err(); assert!(matches!(err, Error::InvalidManifest(_))); }
 
 #[test]
 fn tries_manifest_urls_in_index_order_and_bounds_fan_out() { let mut v = manifest(); v["artifacts"][0]["sha256"] = json!(digest(b"hello")); let body = serde_json::to_vec(&release::sign(v, "release-key-1", &SECRET).unwrap()).unwrap(); let mut responses = BTreeMap::new(); responses.insert("https://example.test/stable.json".into(), Ok(channel(&["https://example.test/first", "https://example.test/second"]))); responses.insert("https://example.test/first".into(), Err("invalid".into())); responses.insert("https://example.test/second".into(), Ok(body)); let mut f = Fake { responses, calls: vec![] }; assert!(discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).is_ok()); assert_eq!(f.calls, vec!["https://example.test/stable.json", "https://example.test/first", "https://example.test/second"]); let too_many: Vec<_> = (0..17).map(|_| "https://example.test/manifest").collect(); let mut f = Fake { responses: [("https://example.test/stable.json".into(), Ok(channel(&too_many)))].into_iter().collect(), calls: vec![] }; assert!(discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None).is_err()); assert_eq!(f.calls, vec!["https://example.test/stable.json"]); }
@@ -56,6 +91,39 @@ impl Fetcher for LimitAwareFake {
     fn fetch_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
         self.calls.push((url.into(), max_bytes));
         self.responses.remove(url).unwrap_or_else(|| Err("missing".into()))
+    }
+}
+
+#[test]
+fn typed_response_rejection_is_not_an_outage() {
+    struct Rejected;
+    impl Fetcher for Rejected {
+        fn fetch(&mut self, _: &str) -> Result<Vec<u8>, String> { panic!("unbounded fetch") }
+        fn fetch_with_limit(&mut self, _: &str, _: usize) -> Result<Vec<u8>, String> { panic!("untyped fetch") }
+        fn fetch_metadata_with_limit(&mut self, _: &str, _: usize) -> Result<Vec<u8>, Error> {
+            Err(Error::InvalidManifest("response exceeds maximum size".into()))
+        }
+    }
+    let result = discover(&mut Rejected, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None);
+    assert!(matches!(result, Err(Error::InvalidManifest(_))), "{result:?}");
+}
+
+#[test]
+fn oversized_received_metadata_is_not_an_outage() {
+    for oversized_index in [true, false] {
+        let mut f = LimitAwareFake {
+            responses: [
+                ("https://example.test/stable.json".into(), Ok(if oversized_index {
+                    vec![b' '; MAX_CHANNEL_INDEX_BYTES + 1]
+                } else {
+                    channel(&["https://example.test/manifest"])
+                })),
+                ("https://example.test/manifest".into(), Ok(vec![b' '; MAX_MANIFEST_BYTES + 1])),
+            ].into_iter().collect(),
+            calls: vec![],
+        };
+        let result = discover(&mut f, &["https://example.test/stable.json"], &keyring(), TARGET, NOW, None);
+        assert!(matches!(result, Err(Error::InvalidManifest(_))), "{result:?}");
     }
 }
 

@@ -163,6 +163,35 @@ jobs:
           install_dir="$RUNNER_TEMP/tapid-latest"
           env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh sh "$RUNNER_TEMP/install.sh" --install-dir "$install_dir"
           test "$("$install_dir/tapid" --version)" = "tapid ${RELEASE_TAG#v}"
+      - name: Run canonical published upgrade
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+          LATEST_TAG: ${{ needs.resolve.outputs.latest_tag }}
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/tapid/tapid"
+          target="$RUNNER_TEMP/tapid-latest/tapid"
+          digest="$(shasum -a 256 "$binary" | cut -d ' ' -f 1)"
+          target_digest="$(shasum -a 256 "$target" | cut -d ' ' -f 1)"
+          # Exact reviewed source tags only; v0.0.9 records an unsupported skip.
+          # Matching tags test same-release replacement, not a previous-version upgrade.
+          # A latest-release race must fail the destination digest/version checks.
+          python3 scripts/check-doc-examples.py --lane published --example upgrade \
+            --allow-network --binary "$binary" --expected-sha256 "$digest" \
+            --expected-version "tapid ${RELEASE_TAG#v}" --release-tag "$RELEASE_TAG" --release-source-sha "$RELEASE_SHA" \
+            --upgrade-target-sha256 "$target_digest" --upgrade-target-version "tapid ${LATEST_TAG#v}" \
+            --report "$RUNNER_TEMP/doc-contract-upgrade.json"
+      - name: Retain published upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: doc-contract-upgrade-${{ runner.os }}
+          path: ${{ runner.temp }}/doc-contract-upgrade.json
+          retention-days: 30
+          if-no-files-found: error
 
   windows:
     name: Windows installer

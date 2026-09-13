@@ -211,6 +211,33 @@ test("public smoke tests use the published installer and released version", asyn
   assert(workflow.includes('test "$actual" = "tapid ${RELEASE_TAG#v}"'));
 });
 
+test("public Unix upgrade binds selected source and independent latest destination and retains failures", async () => {
+  const workflow = await text(".github/workflows/release-public-smoke.yml");
+  const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
+  const latest = unix.indexOf("- name: Install latest release through discovery");
+  const upgrade = unix.indexOf("- name: Run canonical published upgrade");
+  const retention = unix.indexOf("- name: Retain published upgrade evidence");
+  assert(upgrade > latest && latest >= 0, "upgrade must follow independent latest installation");
+  assert(retention > upgrade, "upgrade report must be retained after execution");
+  const step = unix.slice(upgrade, retention);
+  assert(step.includes('timeout-minutes: 5'));
+  assert(step.includes('--lane published --example upgrade'));
+  assert(step.includes('binary="$RUNNER_TEMP/tapid/tapid"'));
+  assert(step.includes('target="$RUNNER_TEMP/tapid-latest/tapid"'));
+  assert(step.includes('--upgrade-target-sha256 "$target_digest"'));
+  assert(step.includes('--upgrade-target-version "tapid ${LATEST_TAG#v}"'));
+  assert(step.includes('--expected-sha256 "$digest"'));
+  assert(step.includes('--expected-version "tapid ${RELEASE_TAG#v}"'));
+  assert(step.includes('--release-tag "$RELEASE_TAG" --release-source-sha "$RELEASE_SHA"'));
+  assert(step.includes('--allow-network'));
+  assert(step.includes('--report "$RUNNER_TEMP/doc-contract-upgrade.json"'));
+  assertMatch(unix.slice(retention), /if: always\(\)/);
+  assert(unix.slice(retention).includes('${{ runner.temp }}/doc-contract-upgrade.json'));
+  assert(!workflow.includes('contents: write'));
+  assert(!workflow.includes('id-token: write'));
+  assert(!workflow.includes('continue-on-error: true'));
+});
+
 test("public smoke validates ancestry before detaching the resolved trusted runner", async () => {
   const workflow = await text(".github/workflows/release-public-smoke.yml");
   const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
