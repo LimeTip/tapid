@@ -39,7 +39,7 @@
       "lanes": ["source", "published"],
       "release_expectations": {"v0.0.9": {"exit_code": 2, "output_contains": "unrecognized subcommand 'upgrade'"}},
       "network": false,
-      "prerequisites": ["source-built-tapid"],
+      "prerequisites": ["installed-tapid"],
       "assertions": [],
       "surfaces": []
     }

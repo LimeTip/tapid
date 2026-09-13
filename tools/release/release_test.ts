@@ -160,7 +160,7 @@ test("repository workflows avoid the deprecated Node.js 20 action majors", async
   assert(!ci.includes("runner: windows-11-arm"));
   assertEquals(
     ci.match(/persist-credentials: false/g)?.length,
-    ci.match(/uses: actions\/checkout@(?:v6|d23441a48e516b6c34aea4fa41551a30e30af803)/g)?.length,
+    ci.match(/uses: actions\/checkout@d23441a48e516b6c34aea4fa41551a30e30af803/g)?.length,
   );
 });
 
@@ -209,6 +209,47 @@ test("public smoke tests use the published installer and released version", asyn
   assert(workflow.includes("Install latest release through discovery"));
   assert(workflow.includes("shell: powershell"));
   assert(workflow.includes('test "$actual" = "tapid ${RELEASE_TAG#v}"'));
+});
+
+test("public smoke validates ancestry before detaching the resolved trusted runner", async () => {
+  const workflow = await text(".github/workflows/release-public-smoke.yml");
+  const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
+  const windows = workflow.slice(workflow.indexOf("  windows:"));
+  for (const job of [unix, windows]) {
+    const checkouts = [...job.matchAll(/uses: actions\/checkout@(\S+)/g)];
+    assertEquals(checkouts.length, 1);
+    assertEquals(checkouts[0][1], "d23441a48e516b6c34aea4fa41551a30e30af803");
+    assertMatch(job, /ref: main\n\s+fetch-depth: 0/);
+    assert(job.includes("persist-credentials: false"));
+    assert(!job.includes("ref: ${{"));
+  }
+  const bashValidation = '[[ "$EXPECTED_RUNNER_SHA" =~ ^[a-f0-9]{40}$ ]]';
+  const bashAncestry = 'git merge-base --is-ancestor "$EXPECTED_RUNNER_SHA" HEAD';
+  const bashDetach = 'git checkout --detach "$EXPECTED_RUNNER_SHA"';
+  const psValidation = "if ($env:EXPECTED_RUNNER_SHA -cnotmatch '\\A[a-f0-9]{40}\\z')";
+  const psAncestry = 'git merge-base --is-ancestor $env:EXPECTED_RUNNER_SHA HEAD';
+  const psDetach = 'git checkout --detach $env:EXPECTED_RUNNER_SHA';
+  for (const [job, validation, ancestry, detach, execution] of [
+    [unix, bashValidation, bashAncestry, bashDetach, 'sh "$RUNNER_TEMP/install.sh"'],
+    [windows, psValidation, psAncestry, psDetach, '& $installer -Version'],
+  ]) {
+    assert(job.indexOf(validation) >= 0);
+    assert(job.indexOf(validation) < job.indexOf(ancestry));
+    assert(job.indexOf(ancestry) < job.indexOf(detach));
+    assert(job.indexOf(detach) < job.indexOf(execution));
+  }
+  for (const command of [psAncestry, psDetach]) {
+    assert(windows.includes(`${command}\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`));
+  }
+});
+
+test("published documentation invocation opts into network and uses an installed binary prerequisite", async () => {
+  const workflow = await text(".github/workflows/release-public-smoke.yml");
+  assertMatch(workflow, /& \.\/scripts\/check-doc-examples\.ps1 -AllowNetwork -Binary /);
+  const contracts = JSON.parse(await text("docs/examples/contracts.json"));
+  const help = contracts.examples.find((example: { id: string }) => example.id === "upgrade-help");
+  assert(help.prerequisites.includes("installed-tapid"));
+  assert(!help.prerequisites.includes("source-built-tapid"));
 });
 
 test("public smoke retains tagged installer provenance before execution on both platforms", async () => {

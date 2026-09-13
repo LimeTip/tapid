@@ -160,6 +160,28 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn('cargo build', workflow)
 
     @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell runtime not installed')
+    def test_native_powershell_requires_network_opt_in_before_execution(self):
+        import shlex
+        runner = self.load()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            marker = base / 'executed'
+            binary = base / 'tapid.exe'
+            binary.write_text('#!/bin/sh\ntouch ' + shlex.quote(str(marker)) + '\necho "tapid 1.2.3"\n')
+            binary.chmod(0o755)
+            report = base / 'report.json'
+            result = subprocess.run(['pwsh', '-NoProfile', '-File', str(ROOT / 'scripts/check-doc-examples.ps1'),
+                                     '-Binary', str(binary), '-ExpectedSha256', runner.digest(binary),
+                                     '-ExpectedVersion', 'tapid 1.2.3', '-ReleaseTag', 'v1.2.3',
+                                     '-ReportPath', str(report)], capture_output=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            evidence = json.loads(report.read_text())
+            self.assertEqual(evidence['status'], 'failed', evidence)
+            self.assertIn('-AllowNetwork', evidence['error'])
+            self.assertEqual(evidence['commands'], [])
+            self.assertFalse(marker.exists(), 'runner executed a binary without network opt-in')
+
+    @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell runtime not installed')
     def test_native_powershell_quickstart_executes_maintained_file(self):
         runner = self.load()
         with tempfile.TemporaryDirectory() as tmp:
@@ -172,7 +194,7 @@ if [ "$1" = i ]; then mkdir -p node_modules/is-char; printf '{"name":"is-char"}'
 ''')
             binary.chmod(0o755)
             report = base / 'report.json'
-            result = subprocess.run(['pwsh', '-NoProfile', '-File', str(ROOT / 'scripts/check-doc-examples.ps1'), '-Binary', str(binary), '-ExpectedSha256', runner.digest(binary), '-ExpectedVersion', 'tapid 1.2.3', '-ReleaseTag', 'v1.2.3', '-ReportPath', str(report)], capture_output=True, timeout=30)
+            result = subprocess.run(['pwsh', '-NoProfile', '-File', str(ROOT / 'scripts/check-doc-examples.ps1'), '-Binary', str(binary), '-ExpectedSha256', runner.digest(binary), '-AllowNetwork', '-ExpectedVersion', 'tapid 1.2.3', '-ReleaseTag', 'v1.2.3', '-ReportPath', str(report)], capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             evidence = json.loads(report.read_text())
             self.assertEqual(evidence['status'], 'passed', evidence)
@@ -206,18 +228,43 @@ if [ "$1" = i ]; then mkdir -p node_modules/is-char; printf '{"name":"is-char"}'
                 binary = base / 'unused-binary'
                 binary.write_bytes(b'allocation must fail before execution')
                 report = base / 'report.json'
-                result = subprocess.run(['pwsh', '-NoProfile', '-File', str(script),
+                result = subprocess.run(['pwsh', '-NoProfile', '-File', str(script), '-AllowNetwork',
                                          '-Binary', str(binary), '-ExpectedSha256', runner.digest(binary),
                                          '-ExpectedVersion', 'tapid 1.2.3', '-ReleaseTag', 'v1.2.3',
                                          '-ReportPath', str(report)], capture_output=True, timeout=30)
                 self.assertNotEqual(result.returncode, 0)
                 evidence = json.loads(report.read_text())
                 self.assertEqual(evidence['status'], 'failed', evidence)
+                self.assertEqual(evidence['failure_class'], 'execution')
+                self.assertIn(str(root), evidence['error'], 'failure must identify the allocation collision')
                 self.assertEqual(evidence['commands'], [])
                 self.assertTrue(sentinel.exists(), 'cleanup deleted an unowned temp root')
                 self.assertEqual(sentinel.read_text(), 'pre-existing data')
                 if kind == 'directory':
                     self.assertEqual(list(root.iterdir()), [sentinel], 'collision root was modified')
+
+    @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell runtime not installed')
+    def test_native_powershell_version_mismatch_retains_observed_probe(self):
+        runner = self.load()
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp)
+                binary = base / 'tapid.exe'
+                binary.write_text('#!/bin/sh\necho "tapid 9.9.9"\nexit ' + str(exit_code) + '\n')
+                binary.chmod(0o755)
+                report = base / 'report.json'
+                result = subprocess.run(['pwsh', '-NoProfile', '-File', str(ROOT / 'scripts/check-doc-examples.ps1'),
+                                         '-AllowNetwork', '-Binary', str(binary), '-ExpectedSha256', runner.digest(binary),
+                                         '-ExpectedVersion', 'tapid 1.2.3', '-ReleaseTag', 'v1.2.3',
+                                         '-ReportPath', str(report)], capture_output=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                evidence = json.loads(report.read_text())
+                self.assertEqual(evidence['status'], 'failed', evidence)
+                self.assertEqual(evidence['failure_class'], 'provenance')
+                self.assertEqual(evidence['error'], 'binary version mismatch')
+                self.assertEqual(evidence['commands'], [])
+                self.assertEqual(evidence.get('version_probe'), {
+                    'exit_code': exit_code, 'output': 'tapid 9.9.9\n'})
 
     @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell runtime not installed')
     def test_native_powershell_runner_rejects_wrong_digest_with_report(self):
@@ -227,7 +274,7 @@ if [ "$1" = i ]; then mkdir -p node_modules/is-char; printf '{"name":"is-char"}'
             binary.write_text('#!/bin/sh\necho "tapid 1.2.3"\n')
             binary.chmod(0o755)
             report = base / 'report.json'
-            result = subprocess.run(['pwsh', '-NoProfile', '-File', str(ROOT / 'scripts/check-doc-examples.ps1'), '-Binary', str(binary), '-ExpectedSha256', '0' * 64, '-ExpectedVersion', 'tapid 1.2.3', '-ReleaseTag', 'v1.2.3', '-ReportPath', str(report)], capture_output=True, timeout=30)
+            result = subprocess.run(['pwsh', '-NoProfile', '-File', str(ROOT / 'scripts/check-doc-examples.ps1'), '-Binary', str(binary), '-ExpectedSha256', '0' * 64, '-AllowNetwork', '-ExpectedVersion', 'tapid 1.2.3', '-ReleaseTag', 'v1.2.3', '-ReportPath', str(report)], capture_output=True, timeout=30)
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue(report.is_file(), 'native runner must persist failure evidence')
             self.assertEqual(json.loads(report.read_text())['failure_class'], 'provenance')

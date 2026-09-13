@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory)][string]$ExpectedSha256,
     [Parameter(Mandatory)][string]$ExpectedVersion,
     [Parameter(Mandatory)][string]$ReleaseTag,
-    [Parameter(Mandatory)][string]$ReportPath
+    [Parameter(Mandatory)][string]$ReportPath,
+    [switch]$AllowNetwork
 )
 $ErrorActionPreference = 'Stop'
 $report = @{schema_version=1; lane='published'; platform=[Environment]::OSVersion.Platform.ToString(); release_tag=$ReleaseTag; status='failed'; commands=@(); assertions=@()}
@@ -61,6 +62,7 @@ function Invoke-BoundedTapid([string[]]$Arguments) {
 }
 
 try {
+    if (-not $AllowNetwork) { $report.failure_class = 'contract'; throw 'network example requires -AllowNetwork: quickstart' }
     if ($ReleaseTag -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or $ExpectedVersion -cne ('tapid ' + $ReleaseTag.Substring(1))) { throw 'release identity mismatch' }
     if ($ExpectedSha256 -cnotmatch '^[a-f0-9]{64}$' -or (Get-FileHash -Algorithm SHA256 -LiteralPath $Binary).Hash.ToLowerInvariant() -cne $ExpectedSha256) {
         $report.failure_class = 'provenance'; throw 'binary digest mismatch'
@@ -83,6 +85,7 @@ try {
     Copy-Item -LiteralPath $Binary -Destination $installed
     Set-Location $project
     $version = Invoke-BoundedTapid @('--version')
+    $report.version_probe = $version
     if ($version.exit_code -ne 0 -or $version.output.Trim() -cne $ExpectedVersion) { $report.failure_class='provenance'; throw 'binary version mismatch' }
     $report.binary = @{path=$Binary; sha256=$ExpectedSha256; version=$version.output.Trim()}
     $report.script_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $example).Hash.ToLowerInvariant()

@@ -74,6 +74,7 @@ jobs:
           # Keep the checkout ref static. The resolver output is verified below,
           # but must not control a privileged checkout ref.
           ref: main
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
@@ -83,6 +84,10 @@ jobs:
           EXPECTED_RUNNER_SHA: ${{ needs.resolve.outputs.runner_sha }}
         run: |
           set -euo pipefail
+          [[ "$EXPECTED_RUNNER_SHA" =~ ^[a-f0-9]{40}$ ]]
+          # main may have advanced since resolution; accept only its trusted history.
+          git merge-base --is-ancestor "$EXPECTED_RUNNER_SHA" HEAD
+          git checkout --detach "$EXPECTED_RUNNER_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNNER_SHA"
       - name: Install the published release
         shell: bash
@@ -172,12 +177,20 @@ jobs:
           # Keep the checkout ref static. The resolver output is verified below,
           # but must not control a privileged checkout ref.
           ref: main
+          fetch-depth: 0
       - name: Verify trusted runner revision
         shell: pwsh
         env:
           EXPECTED_RUNNER_SHA: ${{ needs.resolve.outputs.runner_sha }}
         run: |
-          $actual = (git rev-parse HEAD).Trim()
+          if ($env:EXPECTED_RUNNER_SHA -cnotmatch '\A[a-f0-9]{40}\z') { throw 'Invalid runner revision' }
+          # Check against the static main checkout before changing HEAD.
+          git merge-base --is-ancestor $env:EXPECTED_RUNNER_SHA HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git checkout --detach $env:EXPECTED_RUNNER_SHA
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $actual = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($actual -cne $env:EXPECTED_RUNNER_SHA) { throw "Unexpected runner revision: $actual" }
       - name: Install the published release
         shell: powershell
@@ -215,7 +228,7 @@ jobs:
         run: |
           $binary = Join-Path $env:RUNNER_TEMP 'tapid/tapid.exe'
           $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
-          & ./scripts/check-doc-examples.ps1 -Binary $binary -ExpectedSha256 $digest -ExpectedVersion ('tapid ' + $env:RELEASE_TAG.Substring(1)) -ReleaseTag $env:RELEASE_TAG -ReportPath (Join-Path $env:RUNNER_TEMP 'doc-contract-published.json')
+          & ./scripts/check-doc-examples.ps1 -AllowNetwork -Binary $binary -ExpectedSha256 $digest -ExpectedVersion ('tapid ' + $env:RELEASE_TAG.Substring(1)) -ReleaseTag $env:RELEASE_TAG -ReportPath (Join-Path $env:RUNNER_TEMP 'doc-contract-published.json')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
