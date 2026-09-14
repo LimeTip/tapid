@@ -225,7 +225,7 @@ Immediately verify through an unauthenticated API request that:
 
 ### 7. Verify public installation
 
-Publication triggers `.github/workflows/release-public-smoke.yml` at the tagged commit. Require exactly three successful jobs:
+Publication triggers `.github/workflows/release-public-smoke.yml` at the tagged commit. Require three successful installer jobs in addition to the resolver:
 
 - `Unix installer (ubuntu-latest)`;
 - `Unix installer (macos-latest)`;
@@ -233,7 +233,7 @@ Publication triggers `.github/workflows/release-public-smoke.yml` at the tagged 
 
 Each platform must:
 
-1. download the installer from `tapid.dev`;
+1. download the tagged installer URL rendered by the website;
 2. install the explicit published version;
 3. execute the installed binary and require `tapid <version>`;
 4. execute `--help` where configured;
@@ -241,6 +241,23 @@ Each platform must:
 6. execute that binary and require the same version.
 
 Read the job steps and logs. Do not infer real installation from workflow success alone.
+
+The supplemental root-script fixture uses `tests/fixtures/validate_consumer_project.js`
+against the installed binary, not a source build. Before tagging, review its
+`releaseContracts` capability table alongside `docs/examples/contracts.json`.
+Unknown published tags fail until reviewed; never infer support from an arbitrary
+command failure. The native Restricted contract requires macOS child execution,
+exact arguments, environment/exit-code checks and receipts. Linux and Windows
+must instead return the specific unsupported-containment rejection with no child
+marker or receipt. The historical uncontained contract retains forwarding checks
+without claiming containment. These expected contracts are not public execution
+evidence.
+
+Latest discovery and the configured Unix upgrade checks depend on their explicit
+installation prerequisites, not on successful supplemental script checks. An
+earlier failure still fails the job. Upgrade reports remain required for attempted
+upgrades; a skipped upgrade does not trigger a misleading missing-artifact failure.
+Inspect skipped prerequisites separately and do not count them as verified.
 
 Do not start crates.io publication until the public release and all three installer jobs are verified against the exact tag commit.
 
