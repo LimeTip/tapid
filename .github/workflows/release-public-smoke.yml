@@ -106,6 +106,7 @@ jobs:
           git checkout --detach "$EXPECTED_RUNNER_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_RUNNER_SHA"
       - name: Install the published release
+        id: install_published
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
@@ -144,19 +145,17 @@ jobs:
           node-version: 22
       - name: Create supplemental root-script fixture (not package evidence)
         run: node tests/fixtures/create_consumer_project.js
-      - name: Check published root-script forwarding and exit code
+      - name: Check published root-script containment contract
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
           binary="$RUNNER_TEMP/tapid/tapid"
-          env -i HOME="$RUNNER_TEMP/tapid-home" PATH="$PATH" TAPID_FIXTURE=1 "$binary" install --project-dir "$TAPID_FIXTURE_PROJECT" --offline --frozen
-          test ! -e "$TAPID_FIXTURE_PROJECT/LIFECYCLE_SHOULD_NOT_RUN"
-          env -i HOME="$RUNNER_TEMP/tapid-home" PATH="$PATH" TAPID_FIXTURE=1 "$binary" run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 0
-          set +e
-          env -i HOME="$RUNNER_TEMP/tapid-home" PATH="$PATH" TAPID_FIXTURE=1 "$binary" run --project-dir "$TAPID_FIXTURE_PROJECT" test -- wrong 0
-          status=$?
-          set -e
-          test "$status" -eq 41
+          # Reviewed native contract: macOS executes; Linux fails closed.
+          # Historical uncontained releases retain forwarding checks, not containment claims.
+          env -i HOME="$RUNNER_TEMP/tapid-home" PATH="$PATH" TAPID_FIXTURE_PROJECT="$TAPID_FIXTURE_PROJECT" \
+            node tests/fixtures/validate_consumer_project.js --binary "$binary" --release-tag "$RELEASE_TAG"
       - name: Retain published documentation evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -188,6 +187,9 @@ jobs:
           test "$("$RUNNER_TEMP/tapid-public/tapid" --version)" = "tapid ${RELEASE_TAG#v}"
           cmp "$RUNNER_TEMP/tapid-public/tapid" "$RUNNER_TEMP/tapid/tapid"
       - name: Install latest release through discovery
+        id: install_latest
+        # Keep discovery evidence independent of documentation/root-script failures.
+        if: ${{ !cancelled() && steps.install_published.outcome == 'success' }}
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.latest_tag }}
@@ -198,6 +200,8 @@ jobs:
           env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh sh "$RUNNER_TEMP/public-install.sh" --install-dir "$install_dir"
           test "$("$install_dir/tapid" --version)" = "tapid ${RELEASE_TAG#v}"
       - name: Run canonical published upgrade
+        id: upgrade
+        if: ${{ !cancelled() && steps.install_published.outcome == 'success' && steps.install_latest.outcome == 'success' }}
         timeout-minutes: 5
         shell: bash
         env:
@@ -219,7 +223,8 @@ jobs:
             --upgrade-target-sha256 "$target_digest" --upgrade-target-version "tapid ${LATEST_TAG#v}" \
             --report "$RUNNER_TEMP/doc-contract-upgrade.json"
       - name: Retain published upgrade evidence
-        if: always()
+        # A skipped prerequisite cannot produce a report; attempted runs must.
+        if: ${{ always() && steps.upgrade.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: doc-contract-upgrade-${{ runner.os }}
@@ -299,6 +304,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($actual -cne $env:EXPECTED_RUNNER_SHA) { throw "Unexpected runner revision: $actual" }
       - name: Install the published release
+        id: install_published
         shell: powershell
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
@@ -341,21 +347,17 @@ jobs:
           node-version: 22
       - name: Create supplemental root-script fixture (not package evidence)
         run: node tests/fixtures/create_consumer_project.js
-      - name: Check published native root-script forwarding and exit code
+      - name: Check published native root-script containment contract
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: |
-          $env:TAPID_FIXTURE = '1'
           $env:USERPROFILE = Join-Path $env:RUNNER_TEMP 'tapid-home'
           $env:LOCALAPPDATA = $env:USERPROFILE
           $binary = Join-Path $env:RUNNER_TEMP 'tapid/tapid.exe'
-          & $binary install --project-dir $env:TAPID_FIXTURE_PROJECT --offline --frozen
+          # Reviewed native contract rejects unsupported containment without a child or receipt.
+          node tests/fixtures/validate_consumer_project.js --binary $binary --release-tag $env:RELEASE_TAG
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (Test-Path (Join-Path $env:TAPID_FIXTURE_PROJECT 'LIFECYCLE_SHOULD_NOT_RUN')) { throw 'lifecycle script ran' }
-          & $binary run --project-dir $env:TAPID_FIXTURE_PROJECT test -- forwarded 0
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $binary run --project-dir $env:TAPID_FIXTURE_PROJECT test -- wrong 0
-          if ($LASTEXITCODE -ne 41) { throw 'unexpected child exit code' }
-          exit 0
       - name: Retain native documentation evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -395,6 +397,9 @@ jobs:
           $tagged = Join-Path $env:RUNNER_TEMP 'tapid/tapid.exe'
           if ((Get-FileHash $binary).Hash -cne (Get-FileHash $tagged).Hash) { throw 'Public and tagged installer outputs differ' }
       - name: Install latest release through discovery
+        id: install_latest
+        # Keep discovery evidence independent of documentation/root-script failures.
+        if: ${{ !cancelled() && steps.install_published.outcome == 'success' }}
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.latest_tag }}
