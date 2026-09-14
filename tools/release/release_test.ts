@@ -312,7 +312,9 @@ test("public Unix upgrade binds selected source and independent latest destinati
   assert(step.includes('--release-tag "$RELEASE_TAG" --release-source-sha "$RELEASE_SHA"'));
   assert(step.includes('--allow-network'));
   assert(step.includes('--report "$RUNNER_TEMP/doc-contract-upgrade.json"'));
-  assertMatch(unix.slice(retention), /if: always\(\)/);
+  assert(step.includes('id: upgrade'));
+  assert(unix.slice(retention).includes("if: ${{ always() && steps.upgrade.outcome != 'skipped' }}"));
+  assert(unix.slice(retention).includes('if-no-files-found: error'));
   assert(unix.slice(retention).includes('${{ runner.temp }}/doc-contract-upgrade.json'));
   assert(!workflow.includes('contents: write'));
   assert(!workflow.includes('id-token: write'));
