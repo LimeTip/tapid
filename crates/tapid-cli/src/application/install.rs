@@ -152,6 +152,17 @@ pub(crate) fn run(
             ));
         }
     };
+    if offline || frozen {
+        let lock_path = project_dir.join("tapid.lock");
+        if lock_path.is_file() {
+            // Reject incompatible persisted identities before activation recovery can
+            // mutate project state. Read and validate again under the lock below.
+            fs::read_to_string(&lock_path)
+                .map_err(|error| error.to_string())
+                .and_then(|input| Lockfile::from_json(&input).map_err(|error| error.to_string()))
+                .map_err(|error| format!("invalid lockfile {}: {error}", lock_path.display()))?;
+        }
+    }
     let activation_lock = ActivationLock::acquire(&project_dir)?;
     let manifest = read_manifest(&project_dir.join("package.json"))?;
     let manifest_path = project_dir.join("package.json");
