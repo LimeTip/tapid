@@ -807,6 +807,114 @@ mod copy_tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// Exercise the native planner/materializer boundary, not just casing keys.
+    /// The control proves both shim formats are written; rejected plans must
+    /// leave existing outputs untouched and never write even a noncolliding bin.
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_shim_materialization_rejects_collisions_before_writes() {
+        use super::materialize_stage;
+        use std::{collections::BTreeMap, fs};
+        use tapid_core::{PackageInstanceId, PeerContext, PlatformContext};
+        use tapid_linker::{
+            InstanceKey, LayoutInput, ManagedRoot, PackageInstance, Platform,
+            VerifiedTreeReference, plan_layout,
+        };
+
+        for (first, second, collision) in [
+            ("tool", "other", false),
+            ("Tool", "tool", true),
+            ("tool", "tool.cmd", true),
+            ("tool.cmd", "tool.ps1", true),
+            ("σ", "ς", true),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "tapid-native-shim-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let root = fs::canonicalize(root).unwrap();
+            let source = root.join("store-tree");
+            let project = root.join("project");
+            let stage = root.join("stage");
+            fs::create_dir_all(&source).unwrap();
+            fs::create_dir_all(&project).unwrap();
+            let manifest = serde_json::json!({
+                "name": "example", "version": "1.0.0",
+                "bin": {first: "first.js", second: "second.js", "aaa": "first.js"}
+            });
+            fs::write(source.join("package.json"), manifest.to_string()).unwrap();
+            fs::write(source.join("first.js"), "first payload").unwrap();
+            fs::write(source.join("second.js"), "second payload").unwrap();
+            let digest = tapid_archive::canonical_tree_digest(&source).unwrap();
+            let instance = PackageInstance {
+                id: PackageInstanceId::new(
+                    "https://registry.example".parse().unwrap(),
+                    "example".parse().unwrap(),
+                    "1.0.0".parse().unwrap(),
+                ),
+                peer_context: PeerContext::default(),
+                platform_context: PlatformContext::new(None, None, None).unwrap(),
+                tree: VerifiedTreeReference::new(&digest, &source).unwrap(),
+            };
+            let input = LayoutInput {
+                root_dependencies: vec![InstanceKey::from(&instance)],
+                instances: vec![instance],
+                dependency_edges: Vec::new(),
+            };
+            let plan = plan_layout(
+                ManagedRoot::new(&project).unwrap(),
+                input.clone(),
+                Platform::Windows,
+            )
+            .unwrap();
+            let bin = stage.join("node_modules/.bin");
+            fs::create_dir_all(&bin).unwrap();
+            for extension in ["cmd", "ps1"] {
+                fs::write(bin.join(first).with_extension(extension), "sentinel").unwrap();
+            }
+            let result = materialize_stage(
+                &stage,
+                &plan,
+                &input,
+                &BTreeMap::from([("example".to_owned(), source)]),
+                false,
+            );
+            if collision {
+                let error = result.expect_err("colliding outputs must be rejected");
+                assert!(error.contains("collision"), "{error}");
+                for extension in ["cmd", "ps1"] {
+                    assert_eq!(
+                        fs::read_to_string(bin.join(first).with_extension(extension)).unwrap(),
+                        "sentinel"
+                    );
+                    assert!(!bin.join("aaa").with_extension(extension).exists());
+                }
+                assert_eq!(fs::read_dir(&bin).unwrap().count(), 2);
+            } else {
+                result.unwrap();
+                for (command, source) in [
+                    (first, "first.js"),
+                    (second, "second.js"),
+                    ("aaa", "first.js"),
+                ] {
+                    for extension in ["cmd", "ps1"] {
+                        let contents =
+                            fs::read_to_string(bin.join(command).with_extension(extension))
+                                .unwrap();
+                        assert!(contents.contains(source), "{contents}");
+                    }
+                }
+                assert_eq!(fs::read_dir(&bin).unwrap().count(), 6);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn generated_unix_package_bin_executes_from_an_initially_non_executable_target() {

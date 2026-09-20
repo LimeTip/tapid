@@ -32,6 +32,12 @@ pub struct ShimPlan {
     pub entries: Vec<ShimEntry>,
 }
 
+/// Plan all package-bin outputs before materialization writes any shim.
+///
+/// Windows identity uses the generated `.cmd`/`.ps1` paths, with non-expanding
+/// BMP uppercase mapping over UTF-16 units. This is a deterministic collision
+/// guard, not an exact model of every filesystem's case table or alias rules.
+/// Unix targets retain exact `Path` equality, including non-UTF-8 names.
 pub fn plan_shims(
     managed_root: ManagedRoot,
     packages: Vec<ShimPackage>,
@@ -137,8 +143,9 @@ fn shim_target_key_from_utf16(units: Vec<u16>) -> ShimKey {
                 let Some(character) = char::from_u32(unit as u32) else {
                     return unit;
                 };
-                // Windows ordinal filename matching is defined over UTF-16
-                // code units. Keep surrogate code units as written.
+                // Preserve raw surrogate units; only one-to-one BMP uppercase
+                // mappings participate. Rust's Unicode table is not a queried
+                // Windows volume upcase table, so this is not universal NTFS identity.
                 let mut uppercase = character.to_uppercase();
                 match (uppercase.next(), uppercase.next()) {
                     (Some(mapped), None) if (mapped as u32) <= u16::MAX as u32 => mapped as u16,
