@@ -1,5 +1,98 @@
 use super::{LockedPackage, Lockfile, VERSION};
 
+#[test]
+fn old_main_registry_identity_requires_explicit_recovery() {
+    // Produced and round-tripped by pre-canonicalization main (3d5f97c).
+    let input = include_str!("../tests/fixtures/legacy-registry.lock");
+    let error = Lockfile::from_json(input).unwrap_err().to_string();
+    assert!(
+        error.contains("noncanonical persisted registry identity"),
+        "{error}"
+    );
+    assert!(error.contains("backup"), "{error}");
+    assert!(error.contains("online"), "{error}");
+    assert!(error.contains("--offline"), "{error}");
+    assert!(error.contains("--frozen"), "{error}");
+}
+
+#[test]
+fn persisted_registry_spellings_fail_closed_at_every_identity_boundary() {
+    let old = include_str!("../tests/fixtures/legacy-registry.lock");
+    let canonical = old.replace(
+        "https://REGISTRY.example.test:443",
+        "https://registry.example.test",
+    );
+    let base: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+    let key = base["roots"][0].as_str().unwrap();
+    assert!(Lockfile::from_json(&canonical).is_ok());
+    for origin in [
+        "https://REGISTRY.example.test",
+        "https://registry.example.test:443",
+        "https://registry.example.test/",
+        "https://REGISTRY.example.test:443",
+    ] {
+        let alternate = key.replacen("https://registry.example.test", origin, 1);
+        for boundary in ["package", "key", "root", "edge", "collision", "schema4"] {
+            let mut value = base.clone();
+            match boundary {
+                "package" => value["packages"][key]["registry"] = origin.into(),
+                "key" | "schema4" => {
+                    let mut package = value["packages"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(key)
+                        .unwrap();
+                    if boundary == "schema4" {
+                        package["registry"] = origin.into();
+                    }
+                    value["packages"][&alternate] = package;
+                    value["roots"] = serde_json::json!([]);
+                    value["lockfileVersion"] = 4.into();
+                }
+                "root" => value["roots"] = serde_json::json!([alternate]),
+                "edge" => value["packages"][key]["dependencies"]["demo"] = alternate.clone().into(),
+                "collision" => {
+                    let mut package = value["packages"][key].clone();
+                    package["registry"] = origin.into();
+                    package["treeDigest"] = format!("sha256-{}", "c".repeat(64)).into();
+                    value["packages"][&alternate] = package;
+                }
+                _ => unreachable!(),
+            }
+            let error = Lockfile::from_json(&value.to_string()).unwrap_err();
+            assert!(
+                matches!(error, super::LockfileError::NonCanonicalRegistryIdentity),
+                "{origin} {boundary}: {error}"
+            );
+        }
+        assert!(matches!(
+            alternate.parse::<super::LockfilePackageKey>(),
+            Err(super::LockfileError::NonCanonicalRegistryIdentity)
+        ));
+    }
+}
+
+#[test]
+fn legacy_registry_recovery_does_not_accept_credentials_or_paths() {
+    let old = include_str!("../tests/fixtures/legacy-registry.lock");
+    for origin in [
+        "https://user:secret@registry.example.test",
+        "https://@registry.example.test",
+        "https://registry.example.test/private",
+        "https://registry.example.test?token=secret",
+        "https://registry.example.test#secret",
+    ] {
+        let input = old.replace("https://REGISTRY.example.test:443", origin);
+        assert!(
+            matches!(
+                Lockfile::from_json(&input),
+                Err(super::LockfileError::Domain(_))
+            ),
+            "{origin}"
+        );
+    }
+}
+
 fn declared_package(
     registry: &str,
     name: &str,

@@ -12,6 +12,8 @@ pub enum LockfileError {
     RegenerationRequired(u32),
     DuplicatePackage(String),
     PackageKeyMismatch(String),
+    /// Persisted registry spelling would change identity when parsed.
+    NonCanonicalRegistryIdentity,
     InvalidPackageKey(String),
     DanglingDependency {
         package: String,
@@ -54,6 +56,10 @@ impl fmt::Display for LockfileError {
             Self::PackageKeyMismatch(key) => {
                 write!(f, "lockfile package key does not match package: {key}")
             }
+            Self::NonCanonicalRegistryIdentity => write!(
+                f,
+                "noncanonical persisted registry identity; replay is refused without rekeying; preserve a backup of tapid.lock, then deliberately re-resolve online with `tapid install` (without --offline or --frozen) and review the new graph; see docs/compatibility.md"
+            ),
             Self::InvalidPackageKey(key) => {
                 write!(f, "invalid canonical lockfile package key: {key}")
             }

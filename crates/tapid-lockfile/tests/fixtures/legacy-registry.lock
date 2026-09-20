@@ -1,0 +1,22 @@
+{
+  "lockfileVersion": 6,
+  "rootManifestDigest": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "resolverVersion": "0",
+  "linkerVersion": "0",
+  "roots": [
+    "https://REGISTRY.example.test:443|demo@1.0.0|peer=-|platform=os=;cpu=;libc="
+  ],
+  "packages": {
+    "https://REGISTRY.example.test:443|demo@1.0.0|peer=-|platform=os=;cpu=;libc=": {
+      "registry": "https://REGISTRY.example.test:443",
+      "name": "demo",
+      "version": "1.0.0",
+      "artifactIntegrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "registryIntegrityDeclared": true,
+      "unpackedDigest": "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "treeDigest": "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "platformContext": "os=;cpu=;libc=",
+      "dependencies": {}
+    }
+  }
+}
