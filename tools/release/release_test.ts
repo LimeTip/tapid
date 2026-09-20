@@ -1,0 +1,474 @@
+import {
+  match as assertMatch,
+  ok as assert,
+  rejects as assertRejects,
+  strictEqual as assertEquals,
+  throws as assertThrows,
+} from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { arch, platform } from "node:process";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+import { promisify } from "node:util";
+import { checksumLines, releaseVersion } from "./release.ts";
+
+const root = fileURLToPath(new URL("../../", import.meta.url));
+const text = (path: string) => readFile(join(root, path), "utf8");
+const execFileAsync = promisify(execFile);
+
+test("release tag must be stable semver and match tapid", () => {
+  assertEquals(releaseVersion("v1.2.3", "1.2.3"), "1.2.3");
+  for (const tag of ["1.2.3", "v1.2", "v1.2.3-rc.1", "main"]) {
+    assertThrows(() => releaseVersion(tag, "1.2.3"));
+  }
+  assertThrows(() => releaseVersion("v1.2.3", "1.2.4"));
+});
+
+test("checksum output requires exactly six release archives", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tapid-release-"));
+  try {
+    const targets = [
+      "aarch64-apple-darwin",
+      "aarch64-pc-windows-msvc",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+    ];
+    for (const target of targets) {
+      await writeFile(join(directory, `tapid-1.2.3-${target}.tar.gz`), target);
+    }
+    const output = await checksumLines(directory, "1.2.3");
+    assertEquals(output.trimEnd().split("\n").length, 6);
+    assertMatch(output, /^[0-9a-f]{64}  tapid-1\.2\.3-aarch64-apple-darwin\.tar\.gz/m);
+    await writeFile(join(directory, "unexpected.tar.gz"), "unexpected");
+    await assertRejects(() => checksumLines(directory, "1.2.3"));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("checksum generation streams archives sequentially", async () => {
+  const helper = await text("tools/release/release.ts");
+  assert(helper.includes("createReadStream"));
+  assert(!helper.includes("Promise.all("));
+  assert(!helper.includes("update(await readFile(path))"));
+});
+
+test("binary release follows the small draft release flow", async () => {
+  const workflow = await text(".github/workflows/release-publication.yml");
+  for (const target of [
+    "aarch64-apple-darwin",
+    "aarch64-pc-windows-msvc",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+  ]) assert(workflow.includes(`target: ${target}`));
+  assert(workflow.includes("tags:"));
+  assert(workflow.includes('"v*.*.*"'));
+  assert(!workflow.includes("softprops/action-gh-release"));
+  assert(workflow.includes('gh api --paginate "repos/$GITHUB_REPOSITORY/releases"'));
+  assert(workflow.includes('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"'));
+  const createRelease = workflow.indexOf('release_fields="$(gh api --method POST');
+  const boundedReleaseReadback = workflow.indexOf("for attempt in 1 2 3 4 5; do", createRelease);
+  const exactReleaseCount = workflow.indexOf(')" = 1 &&', boundedReleaseReadback);
+  const exactReleaseId = workflow.indexOf(')" = "$release_id"; then', exactReleaseCount);
+  assert(createRelease >= 0 && boundedReleaseReadback > createRelease);
+  assert(boundedReleaseReadback < exactReleaseCount && exactReleaseCount < exactReleaseId);
+  assert(workflow.includes('[ "$attempt" = 5 ] || sleep 2'));
+  assert(workflow.includes("release read-back did not converge"));
+  assert(workflow.includes('expected_upload_url="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets{?name,label}"'));
+  assert(workflow.includes('UPLOAD_URL: ${{ steps.release.outputs.upload_url }}'));
+  assert(workflow.includes('"$UPLOAD_URL?name=$name"'));
+  assert(workflow.includes('gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft'));
+  assert(workflow.includes("-F draft=true"));
+  assert(!workflow.includes('gh release upload "$GITHUB_REF_NAME"'));
+  assert(!workflow.includes("--clobber"));
+  const deriveTag = workflow.indexOf('RELEASE_TAG="v$(node --experimental-strip-types tools/release/release.ts current-version)"');
+  assert(workflow.includes("set -euo pipefail"));
+  const validateTagInput = workflow.indexOf('[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)');
+  const deleteCheckoutTag = workflow.indexOf('git tag -d "$RELEASE_TAG"');
+  const fetchAnnotatedTag = workflow.indexOf('refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG');
+  const validateAnnotatedTag = workflow.indexOf('git cat-file -t "refs/tags/$RELEASE_TAG"');
+  const fetchMain = workflow.indexOf("refs/heads/main:refs/remotes/origin/main");
+  const ancestry = workflow.indexOf("merge-base --is-ancestor");
+  const checkoutVerifiedTag = workflow.indexOf('git checkout --detach "$tag_commit"');
+  const checkTag = workflow.indexOf('version="$(node --experimental-strip-types tools/release/release.ts check-tag "$RELEASE_TAG")"');
+  assert(deriveTag >= 0 && deriveTag < validateTagInput);
+  assert(validateTagInput < deleteCheckoutTag);
+  assert(deleteCheckoutTag < fetchAnnotatedTag && fetchAnnotatedTag < validateAnnotatedTag);
+  assert(validateAnnotatedTag < fetchMain && fetchMain < ancestry);
+  assert(ancestry < checkoutVerifiedTag && checkoutVerifiedTag < checkTag);
+  assert(workflow.includes('tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"'));
+  assert(workflow.includes('version="$(node --experimental-strip-types tools/release/release.ts check-tag "$RELEASE_TAG")"'));
+  assert(!workflow.includes('ref: ${{ needs.prepare.outputs.tag_commit }}'));
+  assertEquals(workflow.match(/git checkout --detach "\$TAG_COMMIT"/g)?.length, 2);
+  assertEquals(workflow.match(/test "\$\(git rev-parse HEAD\)" = "\$TAG_COMMIT"/g)?.length, 2);
+  assert(workflow.includes("unexpected draft release assets"));
+  assert(workflow.includes("actions/download-artifact@v8"));
+  assert(workflow.includes("workflow_dispatch:"));
+  assert(workflow.includes("if: github.event_name == 'workflow_dispatch'"));
+  assert(workflow.includes("ref: main"));
+  assert(!workflow.includes("inputs:"));
+  assert(!workflow.includes("${{ inputs."));
+  assert(workflow.includes("group: release-publication"));
+  assert(!workflow.includes("release-manifest"));
+  assert(!workflow.includes("python"));
+  assert(!workflow.includes("gh release edit"));
+});
+
+test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM runner", async () => {
+  const workflow = await text(".github/workflows/release-publication.yml");
+  for (const action of [
+    "actions/checkout@v6",
+    "actions/setup-node@v7",
+    "actions/upload-artifact@v7",
+    "actions/download-artifact@v8",
+  ]) assert(workflow.includes(action));
+  for (const legacyAction of [
+    "actions/checkout@v4",
+    "actions/setup-node@v4",
+    "actions/upload-artifact@v4",
+    "actions/download-artifact@v4",
+  ]) assert(!workflow.includes(legacyAction));
+  assert(workflow.includes("runner: windows-11-vs2026-arm"));
+  assert(!workflow.includes("runner: windows-11-arm"));
+});
+
+test("repository workflows avoid the deprecated Node.js 20 action majors", async () => {
+  for (const path of [
+    ".github/workflows/ci.yml",
+    ".github/workflows/crates-publication.yml",
+    ".github/workflows/release-publication.yml",
+    ".github/workflows/website-installer-sync.yml",
+  ]) {
+    const workflow = await text(path);
+    for (const legacyAction of [
+      "actions/checkout@v4",
+      "actions/setup-node@v4",
+      "actions/upload-artifact@v4",
+      "actions/download-artifact@v4",
+    ]) assert(!workflow.includes(legacyAction), `${path} still uses ${legacyAction}`);
+  }
+  const ci = await text(".github/workflows/ci.yml");
+  assert(ci.includes("runner: windows-11-vs2026-arm"));
+  assert(!ci.includes("runner: windows-11-arm"));
+  assertEquals(
+    ci.match(/persist-credentials: false/g)?.length,
+    ci.match(/uses: actions\/checkout@d23441a48e516b6c34aea4fa41551a30e30af803/g)?.length,
+  );
+});
+
+test("crates publication uses trusted publishing and native Cargo", async () => {
+  const workflow = await text(".github/workflows/crates-publication.yml");
+  assert(workflow.includes("workflow_dispatch:"));
+  assert(workflow.includes("tag:"));
+  assert(!workflow.includes("types: [published]"));
+  assert(workflow.includes("id-token: write"));
+  assert(workflow.includes("environment: crates-io-release"));
+  assert(workflow.includes("rust-lang/crates-io-auth-action@v1"));
+  assert(workflow.includes("cargo package --workspace --locked"));
+  assert(workflow.includes("node --experimental-strip-types tools/release/publish.ts"));
+  assert(workflow.includes('check-tag "$TAG"'));
+  assert(!workflow.includes('check-tag "${{ inputs.tag }}"'));
+  const ancestry = workflow.indexOf('merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main');
+  const setupNode = workflow.indexOf("actions/setup-node@v7");
+  const repositoryCode = workflow.indexOf("tools/release/release.ts");
+  assert(ancestry >= 0 && ancestry < setupNode && ancestry < repositoryCode);
+  assert(workflow.includes("git cat-file -t \"refs/tags/$TAG\""));
+  assert(workflow.includes(".head_sha == env.TAG_COMMIT"));
+  assert(workflow.includes("isDraft,isPrerelease"));
+  assert(workflow.includes("release-public-smoke.yml"));
+  assert(workflow.includes('.display_title == ("Public installer smoke " + env.TAG)'));
+  assert(!workflow.includes(".head_branch == env.TAG"));
+  assert(workflow.includes('actions/runs/$run_id/jobs'));
+  assert(workflow.includes('test "$successful_jobs" -eq 3'));
+  assert(!workflow.includes("python"));
+  assert(!workflow.includes("CARGO_REGISTRY_TOKEN: ${{ secrets."));
+});
+
+test("public smoke tests use the published installer and released version", async () => {
+  const workflow = await text(".github/workflows/release-public-smoke.yml");
+  assert(workflow.includes("types: [published]"));
+  // These are the exact versioned URLs rendered by the website, not its
+  // independently deployed compatibility copies at tapid.dev/install.*.
+  assert(workflow.includes('installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$RELEASE_TAG/scripts/install.sh"'));
+  assert(workflow.includes('$installerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:RELEASE_TAG/scripts/install.ps1"'));
+  assert(!workflow.includes("https://tapid.dev/install."));
+  assert(workflow.includes('"$installer_url" -o "$RUNNER_TEMP/install.sh"'));
+  assert(workflow.includes('$installerUrl --output $installer'));
+  assert(workflow.includes('sh "$RUNNER_TEMP/install.sh" --version "$RELEASE_TAG"'));
+  assert(workflow.includes('& $installer -Version $env:RELEASE_TAG'));
+  assert(workflow.includes("github.event.release.tag_name"));
+  assert(workflow.includes("--version"));
+  assert(workflow.includes("Install latest release through discovery"));
+  assert(workflow.includes("shell: powershell"));
+  assert(workflow.includes('test "$actual" = "tapid ${RELEASE_TAG#v}"'));
+});
+
+test("public Unix upgrade binds selected source and independent latest destination and retains failures", async () => {
+  const workflow = await text(".github/workflows/release-public-smoke.yml");
+  const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
+  const latest = unix.indexOf("- name: Install latest release through discovery");
+  const upgrade = unix.indexOf("- name: Run canonical published upgrade");
+  const retention = unix.indexOf("- name: Retain published upgrade evidence");
+  assert(upgrade > latest && latest >= 0, "upgrade must follow independent latest installation");
+  assert(retention > upgrade, "upgrade report must be retained after execution");
+  const step = unix.slice(upgrade, retention);
+  assert(step.includes('timeout-minutes: 5'));
+  assert(step.includes('--lane published --example upgrade'));
+  assert(step.includes('binary="$RUNNER_TEMP/tapid/tapid"'));
+  assert(step.includes('target="$RUNNER_TEMP/tapid-latest/tapid"'));
+  assert(step.includes('--upgrade-target-sha256 "$target_digest"'));
+  assert(step.includes('--upgrade-target-version "tapid ${LATEST_TAG#v}"'));
+  assert(step.includes('--expected-sha256 "$digest"'));
+  assert(step.includes('--expected-version "tapid ${RELEASE_TAG#v}"'));
+  assert(step.includes('--release-tag "$RELEASE_TAG" --release-source-sha "$RELEASE_SHA"'));
+  assert(step.includes('--allow-network'));
+  assert(step.includes('--report "$RUNNER_TEMP/doc-contract-upgrade.json"'));
+  assertMatch(unix.slice(retention), /if: always\(\)/);
+  assert(unix.slice(retention).includes('${{ runner.temp }}/doc-contract-upgrade.json'));
+  assert(!workflow.includes('contents: write'));
+  assert(!workflow.includes('id-token: write'));
+  assert(!workflow.includes('continue-on-error: true'));
+});
+
+test("public smoke validates ancestry before detaching the resolved trusted runner", async () => {
+  const workflow = await text(".github/workflows/release-public-smoke.yml");
+  const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
+  const windows = workflow.slice(workflow.indexOf("  windows:"));
+  for (const job of [unix, windows]) {
+    const checkouts = [...job.matchAll(/uses: actions\/checkout@(\S+)/g)];
+    assertEquals(checkouts.length, 1);
+    assertEquals(checkouts[0][1], "d23441a48e516b6c34aea4fa41551a30e30af803");
+    assertMatch(job, /ref: main\n\s+fetch-depth: 0/);
+    assert(job.includes("persist-credentials: false"));
+    assert(!job.includes("ref: ${{"));
+  }
+  const bashValidation = '[[ "$EXPECTED_RUNNER_SHA" =~ ^[a-f0-9]{40}$ ]]';
+  const bashAncestry = 'git merge-base --is-ancestor "$EXPECTED_RUNNER_SHA" HEAD';
+  const bashDetach = 'git checkout --detach "$EXPECTED_RUNNER_SHA"';
+  const psValidation = "if ($env:EXPECTED_RUNNER_SHA -cnotmatch '\\A[a-f0-9]{40}\\z')";
+  const psAncestry = 'git merge-base --is-ancestor $env:EXPECTED_RUNNER_SHA HEAD';
+  const psDetach = 'git checkout --detach $env:EXPECTED_RUNNER_SHA';
+  for (const [job, validation, ancestry, detach, execution] of [
+    [unix, bashValidation, bashAncestry, bashDetach, 'sh "$RUNNER_TEMP/install.sh"'],
+    [windows, psValidation, psAncestry, psDetach, '& $installer -Version'],
+  ]) {
+    assert(job.indexOf(validation) >= 0);
+    assert(job.indexOf(validation) < job.indexOf(ancestry));
+    assert(job.indexOf(ancestry) < job.indexOf(detach));
+    assert(job.indexOf(detach) < job.indexOf(execution));
+  }
+  for (const command of [psAncestry, psDetach]) {
+    assert(windows.includes(`${command}\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`));
+  }
+});
+
+test("published documentation invocation opts into network and uses an installed binary prerequisite", async () => {
+  const workflow = await text(".github/workflows/release-public-smoke.yml");
+  assertMatch(workflow, /& \.\/scripts\/check-doc-examples\.ps1 -AllowNetwork -Binary /);
+  const contracts = JSON.parse(await text("docs/examples/contracts.json"));
+  const help = contracts.examples.find((example: { id: string }) => example.id === "upgrade-help");
+  assert(help.prerequisites.includes("installed-tapid"));
+  assert(!help.prerequisites.includes("source-built-tapid"));
+});
+
+test("public smoke retains tagged installer provenance before execution on both platforms", async () => {
+  const workflow = await text(".github/workflows/release-public-smoke.yml");
+  const unixStart = workflow.indexOf("  unix:");
+  const windowsStart = workflow.indexOf("  windows:");
+  assert(unixStart >= 0, "missing Unix job section");
+  assert(windowsStart >= 0, "missing Windows job section");
+  assert(windowsStart > unixStart, "Windows job section must follow Unix job section");
+  const unix = workflow.slice(unixStart, windowsStart);
+  const windows = workflow.slice(windowsStart);
+  for (const [job, execution, script] of [
+    [unix, 'sh "$RUNNER_TEMP/install.sh" --version', 'install.sh'],
+    [windows, '& $installer -Version', 'install.ps1'],
+  ]) {
+    const provenance = job.indexOf("installer-provenance.txt");
+    assert(provenance >= 0 && provenance < job.indexOf(execution),
+      `${script}: record provenance even if installer execution fails`);
+    for (const field of ["installer_url=", "release_tag=", "release_source_sha=", "installer_sha256="]) {
+      assert(job.includes(field), `${script}: missing ${field}`);
+    }
+    const uploadStart = job.indexOf("uses: actions/upload-artifact@");
+    assert(uploadStart >= 0, `${script}: missing upload-artifact step`);
+    const upload = job.slice(uploadStart);
+    for (const file of ["installer-provenance.txt", "installer-sha256.txt", script]) {
+      assert(upload.includes('${{ runner.temp }}/' + file), `${script}: not retaining ${file}`);
+    }
+    assert(job.includes("if: always()"));
+    assert(job.includes("--max-time 60 --max-filesize 262144"));
+    assert(job.includes("--proto-redir '=https'"));
+  }
+  assert(unix.includes('shasum -a 256 "$RUNNER_TEMP/install.sh"'));
+  assert(windows.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $installer'));
+});
+
+test("installers use checksums without embedded release signing", async () => {
+  for (const path of ["scripts/install.sh", "scripts/install.ps1"]) {
+    const installer = await text(path);
+    const checksum = installer.indexOf("SHA256SUMS");
+    const archiveDownload = path.endsWith(".sh")
+      ? installer.indexOf('"$base/$archive" -o')
+      : installer.indexOf('Save-BoundedHttpsFile "$base/$archive"');
+    assert(checksum >= 0 && archiveDownload > checksum);
+    assert(!installer.includes("release-manifest.json"));
+    assert(!installer.includes("python"));
+    assert(!installer.includes("Ed25519"));
+  }
+  const shell = await text("scripts/install.sh");
+  assert(shell.includes("release archive must contain exactly one member named tapid"));
+  assert(shell.includes("MAX_ARCHIVE_BYTES="));
+  assert(shell.includes("MAX_BINARY_BYTES="));
+  assert(shell.includes("tar -xOzf"));
+  assert(shell.includes('[ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0'));
+  assert(shell.includes("configure_path || printf 'Tapid was installed, but PATH could not be updated."));
+  assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\n  mv -f "$STAGED_MARKER"'));
+  assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\nmv -f "$STAGED_MARKER"'));
+  const powershell = await text("scripts/install.ps1");
+  assert(powershell.includes("RuntimeInformation]::OSArchitecture"));
+  assert(powershell.includes("$members.Count -ne 1"));
+  assert(powershell.includes("$MAX_ARCHIVE_BYTES"));
+  assert(powershell.includes("$MAX_BINARY_BYTES"));
+  assert(powershell.includes("Save-BoundedHttpsFile"));
+  assert(powershell.includes("Add-Type -AssemblyName System.Net.Http"));
+  assert(powershell.includes("$handler.AllowAutoRedirect = $false"));
+  assert(powershell.includes("redirect target must use HTTPS"));
+  assert(powershell.includes("too many redirects"));
+  const destinationDispose = powershell.indexOf("$destinationStream.Dispose()");
+  const failedDownloadCleanup = powershell.indexOf("if ($downloadError -or $cleanupError) { Remove-Item -LiteralPath $Path");
+  const primaryRethrow = powershell.indexOf("if ($downloadError) { throw $downloadError }");
+  assert(destinationDispose >= 0 && failedDownloadCleanup > destinationDispose && primaryRethrow > failedDownloadCleanup);
+  assert(powershell.includes("uncompressed size"));
+  assert(powershell.includes("tar.exe -tvzf"));
+  assert(!powershell.includes("TAPID_TEST_FIXTURE"));
+  assert(!powershell.includes("IsPathFullyQualified"));
+  assert(powershell.includes("Test-AbsolutePath"));
+  assert(powershell.includes('Write-Warning "Tapid was installed, but the user PATH could not be updated'));
+  assert(!powershell.includes('Move-Item -LiteralPath $staged -Destination $destination -Force\n        Move-Item -LiteralPath $stagedMarker'));
+  assert(!powershell.includes('Move-Item -LiteralPath $staged -Destination $destination -Force\n    Move-Item -LiteralPath $stagedMarker'));
+  const discoveryCatch = powershell.indexOf('catch { Fail "could not contact the stable release discovery endpoint" }');
+  const resolvedUri = powershell.indexOf("$resolvedUri = $discovery.BaseResponse.ResponseUri");
+  assert(discoveryCatch >= 0 && discoveryCatch < resolvedUri);
+  assert(powershell.includes("$discovery.BaseResponse.RequestMessage.RequestUri"));
+  const powershellUninstaller = await text("scripts/uninstall.ps1");
+  assert(powershellUninstaller.includes("Test-AbsolutePath"));
+  assert(!powershellUninstaller.includes("IsPathRooted"));
+});
+
+test("Unix installer rejects multiline repository and version values", async () => {
+  const installer = join(root, "scripts/install.sh");
+  const installDir = await mkdtemp(join(tmpdir(), "tapid-installer-input-"));
+  try {
+    await assertRejects(
+      () => execFileAsync("sh", [installer, "--repo", "LimeTip/tapid\nother", "--version", "invalid", "--install-dir", installDir]),
+      (error: any) => error.stderr.includes("repository must be OWNER/REPO"),
+    );
+    await assertRejects(
+      () => execFileAsync("sh", [installer, "--repo", "not-a-repository", "--version", "invalid", "--install-dir", installDir]),
+      (error: any) => error.stderr.includes("repository must be OWNER/REPO"),
+    );
+    await assertRejects(
+      () => execFileAsync("sh", [installer, "--version", "v1.2.3\nother", "--install-dir", installDir]),
+      (error: any) => error.stderr.includes("version must be a stable release"),
+    );
+  } finally {
+    await rm(installDir, { recursive: true, force: true });
+  }
+});
+
+test("PowerShell installer rejects multiline repository and version values", async (context) => {
+  try {
+    await execFileAsync("pwsh", ["-NoProfile", "-Command", "$null"]);
+  } catch {
+    context.skip("PowerShell is unavailable");
+    return;
+  }
+  const installer = join(root, "scripts/install.ps1");
+  const installDir = await mkdtemp(join(tmpdir(), "tapid-powershell-input-"));
+  try {
+    await assertRejects(
+      () => execFileAsync("pwsh", ["-NoProfile", "-File", installer, "-Repo", "LimeTip/tapid\nother", "-Version", "invalid", "-InstallDir", installDir]),
+      (error: any) => error.stderr.includes("repository must be OWNER/REPO"),
+    );
+    await assertRejects(
+      () => execFileAsync("pwsh", ["-NoProfile", "-File", installer, "-Version", "v1.2.3\n", "-InstallDir", installDir]),
+      (error: any) => error.stderr.includes("version must be a stable release"),
+    );
+    await assertRejects(
+      () => execFileAsync("pwsh", ["-NoProfile", "-File", installer, "-Version", "v1.2.3", "-InstallDir", "relative-path"]),
+      (error: any) => error.stderr.includes("install directory must be an absolute path"),
+    );
+  } finally {
+    await rm(installDir, { recursive: true, force: true });
+  }
+});
+
+test("Unix installer preserves a valid install when an unsafe archive is rejected", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "tapid-installer-fixture-"));
+  const installDir = join(fixture, "installed");
+  const payload = join(fixture, "payload");
+  const fakeBin = join(fixture, "bin");
+  const version = "1.2.3";
+  const target = platform === "darwin"
+    ? (arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin")
+    : (arch === "arm64" ? "aarch64-unknown-linux-gnu" : "x86_64-unknown-linux-gnu");
+  const archive = `tapid-${version}-${target}.tar.gz`;
+  try {
+    await mkdir(payload);
+    await mkdir(fakeBin);
+    await writeFile(join(payload, "tapid"), "#!/bin/sh\nprintf 'tapid 1.2.3\\n'\n");
+    await chmod(join(payload, "tapid"), 0o755);
+    await execFileAsync("tar", ["-czf", join(fixture, archive), "-C", payload, "tapid"]);
+    const writeChecksums = async () => {
+      const digest = createHash("sha256").update(await readFile(join(fixture, archive))).digest("hex");
+      await writeFile(join(fixture, "SHA256SUMS"), `${digest}  ${archive}\n`);
+    };
+    await writeChecksums();
+    const fakeCurl = join(fakeBin, "curl");
+    await writeFile(fakeCurl, `#!/bin/sh
+set -eu
+out=''
+url=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    https://*) url="$1"; shift ;;
+    --max-filesize) shift 2 ;;
+    *) shift ;;
+  esac
+done
+cp "$TAPID_TEST_FIXTURE/\${url##*/}" "$out"
+`);
+    await chmod(fakeCurl, 0o755);
+    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, TAPID_TEST_FIXTURE: fixture };
+    const installer = join(root, "scripts/install.sh");
+    await execFileAsync("sh", [installer, "--version", version, "--install-dir", installDir], { env });
+    assertEquals((await execFileAsync(join(installDir, "tapid"), ["--version"])).stdout.trim(), "tapid 1.2.3");
+
+    await writeFile(join(payload, "extra"), "unsafe");
+    await execFileAsync("tar", ["-czf", join(fixture, archive), "-C", payload, "tapid", "extra"]);
+    await writeChecksums();
+    await assertRejects(
+      () => execFileAsync("sh", [installer, "--version", version, "--install-dir", installDir], { env }),
+      (error: any) => error.stderr.includes("exactly one member named tapid"),
+    );
+    assertEquals((await execFileAsync(join(installDir, "tapid"), ["--version"])).stdout.trim(), "tapid 1.2.3");
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("CI runs the TypeScript tool suite", async () => {
+  const workflow = await text(".github/workflows/ci.yml");
+  assert(workflow.includes("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"));
+  assert(workflow.includes("node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts"));
+});

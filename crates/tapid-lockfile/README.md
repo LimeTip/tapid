@@ -1,7 +1,11 @@
 # tapid-lockfile
 
-
-[Crates.io](https://crates.io/crates/tapid-lockfile) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-lockfile)
+[![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/tapid-lockfile)](https://crates.io/crates/tapid-lockfile)
+[![Crates.io downloads](https://img.shields.io/crates/d/tapid-lockfile)](https://crates.io/crates/tapid-lockfile)
+[![Docs.rs](https://docs.rs/tapid-lockfile/badge.svg)](https://docs.rs/tapid-lockfile)
+[![License](https://img.shields.io/crates/l/tapid-lockfile)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Deterministic lockfile models and canonical JSON serialization for Tapid.
 

@@ -14,4 +14,4 @@ path = "src/lib.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-tapid-core = { version = "0.0.4", path = "../tapid-core" }
+tapid-core = { version = "0.0.5", path = "../tapid-core" }

@@ -1,29 +1,29 @@
 # Tapid
 
 [![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/tapid)](https://crates.io/crates/tapid)
+[![Crates.io downloads](https://img.shields.io/crates/d/tapid)](https://crates.io/crates/tapid)
+[![Docs.rs](https://docs.rs/tapid/badge.svg)](https://docs.rs/tapid)
+[![License](https://img.shields.io/crates/l/tapid)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
-Tapid is a JavaScript and TypeScript package manager written in Rust. It provides deterministic dependency installation, verified package storage, Node-compatible `node_modules` materialization, lockfile replay, and explicit root-script execution. The current implementation targets a small, explicit npm-compatible subset. Version 0.0.7 is the current development target. No asset-backed stable release is currently available, and production support is not yet available.
+Tapid is a JavaScript and TypeScript package manager written in Rust. It provides deterministic dependency installation, verified package storage, Node-compatible `node_modules` materialization, lockfile replay, and explicit root-script execution. The current implementation targets a small, explicit npm-compatible subset. Development releases are available from GitHub Releases; production support is not yet available.
 
 ## Install Tapid
 
-Source installation is the supported contributor-development path. The public installer endpoints exist, but their no-argument stable path cannot complete until a signed release manifest and platform archives are published.
+**macOS and Linux**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh | sh -s -- --source-ref main
+curl -fsSL https://tapid.dev/install.sh | bash
 ```
-
-The default command builds Tapid from the `main` source branch locally. This is the contributor-development path; use the immutable public release installer below when evaluating a published build.
 
 **Windows PowerShell**
 
 ```powershell
-$installer = Join-Path $env:TEMP "tapid-install.ps1"
-Invoke-WebRequest https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.ps1 -OutFile $installer
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SourceRef main
-Remove-Item $installer
+iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
-See [installation details](#installation-details) for release selection, alternate repositories, and uninstall instructions.
+These commands install the latest published Tapid release from the immutable GitHub release assets published by `LimeTip/tapid` and verify the selected archive against its `SHA256SUMS` entry. See [installation details](#installation-details) for release selection, contributor source builds, alternate repositories, and uninstall instructions.
 
 ## Quick start
 
@@ -36,7 +36,7 @@ tapid init
 tapid i is-char
 ```
 
-To run a development script, add a `dev` entry to `package.json`, then run:
+The desired flow for a development script is to add a `dev` entry to `package.json`, check in its permissions in `tapid.toml`, then run:
 
 ```bash
 tapid run dev
@@ -44,11 +44,49 @@ tapid run dev
 
 `tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`.
 
-`tapid run dev` runs the root `dev` script from `package.json`. It is a compatibility-oriented process runner, not a sandbox.
+ADR 0005 separates authority containment from lifecycle ownership. The implemented schema requires compatible profiles to select **Restricted** explicitly with `assurance = "restricted"`: requested filesystem and network restrictions must be installed before spawn, descendants retain those restrictions, and the child receives explicit environment, `PATH`, and descriptor state. Omitting `assurance` preserves the legacy-safe **ManagedTree** contract rather than silently weakening an existing strict profile. ManagedTree additionally requires race-free kernel- or VM-owned descendants, a complete cleanup/kill boundary, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before spawn.
+
+macOS 26 has an experimental Restricted backend implemented with Apple's deprecated/private native Seatbelt APIs. It runs behavioral Seatbelt probes before project spawn and fails closed when a requested dimension is unavailable. Linux, Windows, and native macOS ManagedTree remain unsupported. No `--no-sandbox` escape exists.
+
+For example, a Next.js development server needs project writes and network access but does not need ambient credentials:
+
+```toml
+[run.defaults]
+read = ["."]
+write = []
+network = false
+environment = []
+subprocess = true
+
+[run.scripts.dev]
+assurance = "restricted"
+write = ["."]
+network = true
+environment = ["NODE_ENV"]
+```
+
+This profile is runnable on the experimental macOS 26 Restricted backend. It intentionally requests no timeout, output, process-count, or memory limit because that backend rejects those unenforceable dimensions. `write = ["."]` permits project-local generated files; narrow it after observing actual writes. `network = true` is unrestricted networking under the portable boolean schema, including listen and connect behavior. `--hostname` and `--port` below are application arguments, not Tapid policy. `environment` names variables that may be copied from the caller when present; it does not import the rest of the caller's environment:
+
+```bash
+tapid run dev -- --hostname 127.0.0.1 --port 3001
+```
+
+An existing strict profile that omits `assurance` remains ManagedTree. Such a profile may request tree-wide limits separately:
+
+```toml
+[run.scripts.ci]
+# assurance omitted intentionally: legacy-safe ManagedTree
+timeout_seconds = 900
+max_output_bytes = 67108864
+max_processes = 64
+max_memory_bytes = 2147483648
+```
+
+Native macOS 26 cannot run that ManagedTree profile. The backend rejects it before spawn rather than silently downgrading it to Restricted.
 
 ## Current consumer workflow
 
-The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, root-script execution, argument forwarding, and lifecycle suppression.
+The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, root-script policy selection, argument forwarding, and lifecycle suppression. Experimental native macOS 26 Restricted execution is available; ManagedTree and non-macOS native containment remain unavailable.
 
 For a clean checkout, build Tapid and create the readable consumer fixture through the same helper used by CI:
 
@@ -70,7 +108,7 @@ target/debug/tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 
 
 The non-fixture online path requests abbreviated npm install metadata and requires registry-declared SHA-512 integrity by default. Unsupported npm range syntax and malformed historical metadata are filtered or rejected fail-closed according to their scope. Live JSR installation remains unverified. Do not treat fixture replay or one successful npm project as evidence of complete npm compatibility.
 
-`tapid run <script>` reads a root `package.json` script, runs it in the project directory, prepends the managed `node_modules/.bin` directory to `PATH`, forwards arguments after `--`, and returns the child exit status. Root scripts execute arbitrary project code. This is compatibility-oriented process execution, not a sandbox.
+The accepted invocation remains `tapid run <SCRIPT> -- <ARGS...>`. Values after the first `--` are forwarded in order to the selected script; the separator itself is not forwarded, and Tapid does not reinterpret forwarded values as Tapid options or policy. The integrated ADR 0005 path reads the merged policy, constructs a minimal environment with a controlled `PATH`, and calls a backend only after preflight proves every requested restriction. Restricted profiles run on the experimental macOS 26 backend; omitted `assurance` remains fail-closed ManagedTree.
 
 Use a project directory explicitly when running outside the project directory:
 
@@ -81,31 +119,33 @@ tapid run --project-dir ./example test -- --runInBand
 
 ## Installation details
 
-After an asset-backed stable release is published, the public installer at `tapid.dev` will install it and verify its signed release metadata:
+The public installers at `tapid.dev` install the latest published release:
 
 ```bash
-curl -fsSL https://tapid.dev/install.sh | sh
+curl -fsSL https://tapid.dev/install.sh | bash
+```
+
+```powershell
+iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
 For contributor development, install a specific source ref instead:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \
-  | sh -s -- --source-ref main
+curl -fsSL https://tapid.dev/install.sh | bash -s -- --source-ref main
 ```
 
-Select a specific release explicitly:
+Select a specific published release explicitly, for example:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.sh \
-  | sh -s -- --version v0.1.0
+curl -fsSL https://tapid.dev/install.sh | bash -s -- --version v0.0.8
 ```
 
-On Windows, download and review the PowerShell installer before running it:
+On Windows, download the public installer when you need to review it or pass options such as `-SourceRef`:
 
 ```powershell
 $installer = Join-Path $env:TEMP "tapid-install.ps1"
-Invoke-WebRequest https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/install.ps1 -OutFile $installer
+Invoke-WebRequest https://tapid.dev/install.ps1 -OutFile $installer
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SourceRef main
 Remove-Item $installer
 ```
@@ -124,7 +164,7 @@ Windows uninstall:
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
 ```
 
-The installers use the canonical `LimeTip/tapid` repository by default. Alternate repositories are explicit through `--repo` or `TAPID_REPO`. The uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Source installation remains the explicit development path. Stable installation and `tapid upgrade` are designed to use signed release manifests, the embedded production public key, artifact hash and size verification, safe archive validation, endpoint fallback, and managed atomic replacement. This path remains unavailable until the required release assets are published and clean macOS, Linux, and Windows release exercises pass.
+The installers use the canonical `LimeTip/tapid` repository by default. Its release installation uses immutable GitHub release assets over HTTPS, verifies the archive against `SHA256SUMS`, validates that the archive contains only the expected regular executable, and stages the destination before replacement. Alternate repositories are explicit through `--repo` or `TAPID_REPO`; the installers do not establish whether an alternate repository provides equivalent release immutability. The uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data. Source installation remains the explicit development path. The checksum and archive share the same GitHub trust boundary, so this is integrity checking rather than independent release authentication. Starting with Tapid 0.0.10, `tapid upgrade` supports the published GitHub release format; use `tapid upgrade --dry-run` to inspect the selected release without replacing the binary. It prefers signed stable-channel discovery and falls back to GitHub Releases with checksum verification when the default discovery endpoints are unavailable. This fallback does not provide independent release authentication. For older clients, rerun the installer to upgrade.
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
 
@@ -146,19 +186,21 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - Lifecycle scripts from dependencies never run during install. There is no approval workflow yet.
 - `add`, `remove`, `update`, `prune`, workspaces, full npm lockfile compatibility, and private-registry authentication are not implemented.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
-- Linux and Windows consumer checks are configured in GitHub Actions. A local macOS run is not evidence for those platforms, and the repository does not claim CI execution until a workflow run is available.
-- Tapid does not yet provide package-level malware scanning, package provenance verification, an OS sandbox, or process capability enforcement. Stable client release manifests are separately authenticated with Ed25519.
+- CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
+- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; ManagedTree, resource-limit profiles, and Linux/Windows native backends remain unavailable. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
 
 ## Development
 
+Node.js 22.6.0 or later is required for the TypeScript commands.
+
 ```text
-python3 scripts/check_architecture.py
-python3 -m unittest tests.test_check_architecture
+node --experimental-strip-types tools/check_architecture.ts
+node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
-cargo test --manifest-path tests/integration/Cargo.toml --tests
-cargo diff --check
+cargo test --manifest-path tests/integration/Cargo.toml --tests --locked
+git diff --check
 ```
 
 The workspace is under active development. Do not treat the current binary or registry behavior as a production package-management guarantee. Do not push, publish, or release from a documentation-only checkout.

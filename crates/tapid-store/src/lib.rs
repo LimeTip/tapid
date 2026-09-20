@@ -147,6 +147,8 @@ impl Store {
         Ok(path)
     }
 
+    /// Checks the directory and exact marker without hashing package contents.
+    /// Callers must separately verify the tree digest before trusting its bytes.
     fn marked_tree_path(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
         let path = self.root.join("trees").join(digest.as_str());
         let metadata = fs::symlink_metadata(&path)?;

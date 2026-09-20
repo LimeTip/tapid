@@ -1,6 +1,6 @@
 # ADR 0001: Provider-neutral stable updates
 
-Status: Accepted
+Status: Superseded by ADR 0004 for current client releases
 Date: 2026-08-27
 
 ## Decision

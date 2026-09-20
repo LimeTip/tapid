@@ -1,7 +1,11 @@
 # tapid-registry-client
 
-
-[Crates.io](https://crates.io/crates/tapid-registry-client) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-registry-client)
+[![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/tapid-registry-client)](https://crates.io/crates/tapid-registry-client)
+[![Crates.io downloads](https://img.shields.io/crates/d/tapid-registry-client)](https://crates.io/crates/tapid-registry-client)
+[![Docs.rs](https://docs.rs/tapid-registry-client/badge.svg)](https://docs.rs/tapid-registry-client)
+[![License](https://img.shields.io/crates/l/tapid-registry-client)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Read-only, validated registry metadata and artifact-download boundary for Tapid.
 

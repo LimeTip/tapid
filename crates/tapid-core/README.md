@@ -1,7 +1,11 @@
 # tapid-core
 
-
-[Crates.io](https://crates.io/crates/tapid-core) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-core)
+[![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/tapid-core)](https://crates.io/crates/tapid-core)
+[![Crates.io downloads](https://img.shields.io/crates/d/tapid-core)](https://crates.io/crates/tapid-core)
+[![Docs.rs](https://docs.rs/tapid-core/badge.svg)](https://docs.rs/tapid-core)
+[![License](https://img.shields.io/crates/l/tapid-core)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Core domain types and deterministic validation for Tapid.
 

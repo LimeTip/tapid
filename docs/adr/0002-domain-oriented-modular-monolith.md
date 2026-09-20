@@ -23,7 +23,7 @@ Consequential and difficult-to-reverse decisions use ADRs. New ADRs supersede ol
 
 Eight hundred physical lines in a tracked production Rust file is an architecture review threshold, not an absolute Rust language rule. A file above it must be split or listed with a concrete rationale in the committed `docs/architecture-exceptions.txt` file. The `tapid-cli` `main.rs` entrypoint has a stricter 100 physical line threshold because it should contain only argument dispatch and process exit conversion. Temporary documented exceptions expose current migration debt.
 
-The executable guard is `scripts/check_architecture.py`. It scans Git-tracked production Rust files, excludes tests and generated or build trees, validates exception rationales, and reports violations deterministically.
+The executable guard is `tools/check_architecture.ts`. It scans Git-tracked production Rust files, excludes tests and generated or build trees, validates exception rationales, and reports violations deterministically.
 
 ## Alternatives considered
 
@@ -55,11 +55,11 @@ Rejected because speculative traits create shallow interfaces and indirection. P
 
 ## Enforcement
 
-Run:
+Node.js 22.6.0 or later is required. Run:
 
 ```text
-python3 -m unittest tests.test_check_architecture -v
-python3 scripts/check_architecture.py
+node --experimental-strip-types --test tools/check_architecture_test.ts
+node --experimental-strip-types tools/check_architecture.ts
 ```
 
 Review changes to `docs/architecture-exceptions.txt` as architecture decisions. An exception must identify an exact tracked production Rust path and explain why cohesion currently outweighs splitting or why migration must be incremental.

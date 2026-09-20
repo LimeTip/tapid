@@ -39,10 +39,12 @@ Tests use runtime-derived temporary paths. Preserve existing user files. Malform
 
 ## Source size review
 
+The TypeScript architecture commands require Node.js 22.6.0 or later.
+
 Run:
 
 ```text
-python3 scripts/check_architecture.py
+node --experimental-strip-types tools/check_architecture.ts
 ```
 
 The checker scans Git-tracked production Rust files and excludes tests plus top-level generated or build output trees. Ordinary production modules remain in scope even when their directory is named `build` or `generated`. Eight hundred physical lines is an advisory review recommendation, not a validation failure. Crossing it prompts review of cohesion, interface depth, change locality, and navigability. Split only when that review identifies clearer responsibility or a better seam; a cohesive deep module may remain larger without an exception.
@@ -54,8 +56,8 @@ The checker scans Git-tracked production Rust files and excludes tests plus top-
 Run the narrow test during each TDD cycle, then the relevant checks:
 
 ```text
-python3 -m unittest tests.test_check_architecture -v
-python3 scripts/check_architecture.py
+node --experimental-strip-types --test tools/check_architecture_test.ts
+node --experimental-strip-types tools/check_architecture.ts
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked

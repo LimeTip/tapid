@@ -1,0 +1,9 @@
+# actionlint v1.7.12 predates GitHub's windows-11-vs2026-arm label.
+# Remove these exact exceptions after actionlint adds the hosted runner.
+paths:
+  .github/workflows/ci.yml:
+    ignore:
+      - 'label "windows-11-vs2026-arm" is unknown\.'
+  .github/workflows/release-publication.yml:
+    ignore:
+      - 'label "windows-11-vs2026-arm" is unknown\.'
