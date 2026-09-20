@@ -182,6 +182,90 @@ jobs:
         if: runner.os == 'macOS'
         run: node tests/fixtures/validate_consumer_project.js
 
+  pr-published-binary-smoke:
+    # Exact PR runner + immutable published binary: pre-merge regression evidence only.
+    # No release readiness, installer promotion, or website evidence is produced here.
+    name: PR published-binary regression (${{ matrix.os }})
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      RELEASE_TAG: v0.0.10
+      RELEASE_SOURCE_SHA: 3d5f97c91f08b64a5ace26c2004081d57b88fee2
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Verify exact PR runner and isolate directories
+        shell: pwsh
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $actual = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($actual -cne $env:EXPECTED_HEAD) { throw 'Unexpected PR runner revision' }
+          $root = Join-Path $env:RUNNER_TEMP 'pr-published'
+          $homeDir = Join-Path $root 'home'
+          $tmpDir = Join-Path $root 'tmp'
+          New-Item -ItemType Directory -Force -Path $homeDir, $tmpDir, (Join-Path $root 'bin') | Out-Null
+          @("HOME=$homeDir", "USERPROFILE=$homeDir", "LOCALAPPDATA=$homeDir", "XDG_CACHE_HOME=$homeDir",
+            "TMPDIR=$tmpDir", "TEMP=$tmpDir", "TMP=$tmpDir") | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Write-Host "PR runner: $actual; published binary: $env:RELEASE_TAG ($env:RELEASE_SOURCE_SHA)"
+      - name: Install pinned published binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$RELEASE_SOURCE_SHA/scripts/install.sh"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL "$installer_url" -o "$RUNNER_TEMP/pr-published/install.sh"
+          env -i HOME="$HOME" TMPDIR="$TMPDIR" PATH=/usr/bin:/bin SHELL=/bin/sh \
+            sh "$RUNNER_TEMP/pr-published/install.sh" --version "$RELEASE_TAG" --repo LimeTip/tapid --install-dir "$RUNNER_TEMP/pr-published/bin"
+      - name: Install pinned published binary (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'pr-published/install.ps1'
+          $installDir = Join-Path $env:RUNNER_TEMP 'pr-published/bin'
+          $installerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:RELEASE_SOURCE_SHA/scripts/install.ps1"
+          curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL $installerUrl --output $installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          try {
+            & $installer -Version $env:RELEASE_TAG -Repo LimeTip/tapid -InstallDir $installDir
+            if ($LASTEXITCODE -ne 0) { throw 'Published installer failed' }
+          } finally {
+            [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')
+          }
+      - name: Verify published identity and create isolated fixture
+        shell: pwsh
+        run: |
+          $exe = if ($IsWindows) { 'tapid.exe' } else { 'tapid' }
+          $binary = Join-Path $env:RUNNER_TEMP "pr-published/bin/$exe"
+          $actual = & $binary --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($actual -cne 'tapid 0.0.10') { throw "Unexpected published version: $actual" }
+          Get-FileHash -Algorithm SHA256 -LiteralPath $binary | Format-List
+          node tests/fixtures/create_consumer_project.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Validate published containment with exact PR source (not release approval)
+        shell: pwsh
+        run: |
+          $exe = if ($IsWindows) { 'tapid.exe' } else { 'tapid' }
+          $binary = Join-Path $env:RUNNER_TEMP "pr-published/bin/$exe"
+          # Reuse the reviewed platform contract; do not infer support from failures.
+          node tests/fixtures/validate_consumer_project.js --binary $binary --release-tag $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   release-contract:
     name: Release workflow contracts
     runs-on: ubuntu-latest

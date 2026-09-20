@@ -273,6 +273,38 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(!workflow.includes("CARGO_REGISTRY_TOKEN: ${{ secrets."));
 });
 
+test("PR published-binary smoke is exact-head, read-only and separate from release approval", async () => {
+  const ci = await text(".github/workflows/ci.yml");
+  const job = ci.match(/^  pr-published-binary-smoke:\n[\s\S]*?(?=^  [a-z][a-z-]*:|$(?![\s\S]))/m)?.[0];
+  assert(job, "missing unprivileged PR published-binary job");
+  assertMatch(ci, /\n  pull_request:\n/);
+  assert(!ci.includes("pull_request_target:"));
+  assert(job.includes("if: github.event_name == 'pull_request'"));
+  assert(job.includes("contents: read"));
+  assert(job.includes("os: [ubuntu-latest, macos-latest, windows-latest]"));
+  assert(job.includes("ref: ${{ github.event.pull_request.head.sha }}"));
+  assert(job.includes("persist-credentials: false"));
+  assert(job.includes("EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}"));
+  assert(job.includes("$actual -cne $env:EXPECTED_HEAD"));
+  assert(job.includes("RELEASE_TAG: v0.0.10"));
+  assert(job.includes("RELEASE_SOURCE_SHA: 3d5f97c91f08b64a5ace26c2004081d57b88fee2"));
+  for (const forbidden of ["secrets.", "github.token", ": write", "upload-artifact", "download-artifact", "environment:", "continue-on-error", "cargo build", "releases/latest"]) {
+    assert(!job.includes(forbidden), `PR smoke must not contain ${forbidden}`);
+  }
+  for (const variable of ["HOME", "USERPROFILE", "LOCALAPPDATA", "XDG_CACHE_HOME", "TMPDIR", "TEMP", "TMP"]) {
+    assert(job.includes(`\"${variable}=`), `missing isolated ${variable}`);
+  }
+  assert(job.includes("--proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144"));
+  assert(job.includes('sh "$RUNNER_TEMP/pr-published/install.sh" --version "$RELEASE_TAG"'));
+  assert(job.includes("& $installer -Version $env:RELEASE_TAG -Repo LimeTip/tapid -InstallDir $installDir"));
+  assert(job.includes("finally {"));
+  assert(job.includes("SetEnvironmentVariable('Path', $originalUserPath, 'User')"));
+  assert(job.includes("if ($actual -cne 'tapid 0.0.10')"));
+  assert(job.includes("node tests/fixtures/create_consumer_project.js"));
+  assert(job.includes("node tests/fixtures/validate_consumer_project.js --binary $binary --release-tag $env:RELEASE_TAG"));
+  assert(job.includes("pre-merge regression evidence only"));
+});
+
 test("public smoke tests use the published installer and released version", async () => {
   const workflow = await text(".github/workflows/release-public-smoke.yml");
   assert(workflow.includes("types: [published]"));
