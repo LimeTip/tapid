@@ -69,6 +69,8 @@ run online `tapid install` and review changed versions, artifacts and edges. The
 online path replaces the lock after re-resolution, not identity migration. See
 [compatibility and recovery](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#persisted-registry-identity-compatibility).
 
+Fixture `artifact` paths are resolved relative to the directory containing the registry fixture file, not the project directory or the invoking working directory. Absolute artifact paths remain absolute; `base64:` artifacts are decoded inline. For example, an `artifact` value of `archives/foo.tgz` in `fixtures/registry.json` loads `fixtures/archives/foo.tgz`.
+
 ## Offline and frozen
 
 ```text
