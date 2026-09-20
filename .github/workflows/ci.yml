@@ -52,6 +52,13 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+      - name: Verify generated release record end to end (Unix, offline)
+        if: runner.os != 'Windows'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          cargo build --locked --bin tapid
+          python3 scripts/check-release-record.py --binary target/debug/tapid
       - name: Test executable documentation runner (Unix)
         if: runner.os != 'Windows'
         run: python3 -m unittest discover -s tests -p test_doc_examples.py -v
@@ -188,7 +195,7 @@ jobs:
         with:
           node-version: 22
       - name: Test release helpers and workflows
-        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts
+        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts tools/release/installers_test.ts
       - name: Check source architecture
         run: node --experimental-strip-types tools/check_architecture.ts
       - name: Validate Unix installer syntax and help
@@ -255,12 +262,18 @@ jobs:
           $archive = Join-Path $fixture $archiveName
           & tar.exe -czf $archive -C $payload tapid.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          Set-Content -NoNewline -Path (Join-Path $fixture 'SHA256SUMS') -Value "$digest  $archiveName`n"
+          function Write-FixtureReleaseRecord {
+            $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+            $size = (Get-Item -LiteralPath $archive).Length
+            $record = "tapid-release-v1`t1.2.3`n$target`t$archiveName`t$size`t$digest`thttps://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName`n"
+            Set-Content -Encoding ascii -NoNewline -Path (Join-Path $fixture 'v1.2.3.tsv') -Value $record
+          }
+          Write-FixtureReleaseRecord
           $installerUnderTest = Join-Path $fixture 'install.ps1'
           $installerText = Get-Content -Raw scripts/install.ps1
           $fixtureDownloader = @'
           function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
+              Add-Content -LiteralPath (Join-Path $env:TAPID_FIXTURE_ROOT 'requests.txt') -Value $Uri
               Copy-Item -LiteralPath (Join-Path $env:TAPID_FIXTURE_ROOT ([IO.Path]::GetFileName($Uri))) -Destination $Path
               if ((Get-Item -LiteralPath $Path).Length -gt $MaxBytes) { Fail "download exceeds the size limit" }
           }
@@ -273,6 +286,7 @@ jobs:
           if ($fixtureInstallerText -eq $installerText) { throw 'failed to create isolated installer fixture' }
           Set-Content -NoNewline -Path $installerUnderTest -Value $fixtureInstallerText
           $env:TAPID_FIXTURE_ROOT = $fixture
+          Set-Content -NoNewline -Path (Join-Path $fixture 'requests.txt') -Value ''
           & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $installed = Join-Path $installDir 'tapid.exe'
@@ -280,8 +294,9 @@ jobs:
           $before = (Get-FileHash -Algorithm SHA256 $installed).Hash
           [IO.File]::WriteAllBytes((Join-Path $payload 'extra'), [byte[]](5))
           & tar.exe -czf $archive -C $payload tapid.exe extra
-          $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          Set-Content -NoNewline -Path (Join-Path $fixture 'SHA256SUMS') -Value "$digest  $archiveName`n"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Refresh both size and hash so this fails at archive validation, not metadata verification.
+          Write-FixtureReleaseRecord
           try {
             & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
             throw 'unsafe fixture was accepted'
@@ -289,6 +304,14 @@ jobs:
             if ($_.Exception.Message -notlike '*exactly one member named tapid.exe*') { throw }
           }
           if ((Get-FileHash -Algorithm SHA256 $installed).Hash -ne $before) { throw 'rejected fixture changed the installed binary' }
+          $requests = @(Get-Content -LiteralPath (Join-Path $fixture 'requests.txt'))
+          $expectedRequests = @(
+            'https://tapid.dev/releases/v1/v1.2.3.tsv'
+            "https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName"
+            'https://tapid.dev/releases/v1/v1.2.3.tsv'
+            "https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName"
+          )
+          if (($requests -join "`n") -cne ($expectedRequests -join "`n")) { throw 'fixture did not use release record discovery and artifact URLs' }
           } finally {
             Remove-Item Env:TAPID_FIXTURE_ROOT -ErrorAction SilentlyContinue
             [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')

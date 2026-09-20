@@ -24,15 +24,15 @@ inventory until the website supports native platform rendering. It is not a
 translation performed by the Unix runner.
 
 Capability `verified_releases` lists versions actually checked. Self-upgrade's
-`first_supported_release: "v0.0.10"` and `expected_releases: ["v0.0.10"]` are
+`first_supported_release: "v0.0.10"` and `expected_releases: ["v0.0.10", "v0.0.11"]` are
 reviewed implementation expectations, **not published execution evidence**;
 its `verified_releases` remains empty until actual published verification is
 reviewed. v0.0.9 lacks `upgrade` and retains reinstall guidance. `upgrade-help`
 expects exit 2 plus the unrecognized-subcommand message for v0.0.9, and exit 0
-for v0.0.10. The published `upgrade` journey explicitly skips v0.0.9 as unsupported
+for v0.0.10 and v0.0.11. The published `upgrade` journey explicitly skips v0.0.9 as unsupported
 without executing it; the negative help probe still runs separately. Only the
-exact v0.0.10 source tag is currently expected to support the journey; unknown
-tags (including newer versions) fail closed pending reviewed expectations.
+exact v0.0.10 and v0.0.11 source tags have reviewed expectations for the journey;
+unknown tags, including newer versions, fail closed pending review.
 Do not interpret `first_supported_release` as an open-ended semver allowlist.
 
 A staged local checkout is development input, not a fabricated published pin.
@@ -75,13 +75,26 @@ release changing during the run fails these checks rather than relaxing them.
 The upgrade step has a five-minute ceiling and retains its JSON report with
 `always()` after execution, including failure or unsupported-skip reports.
 
-When selected and latest tags match, this tests **same-release replacement**, not
-a previous-version upgrade. A historical supported selected tag targeting a newer
-latest can test the latter; v0.0.9 cannot. Same-version source-to-published runs
-also are not previous-stable-to-current evidence. Published upgrade coverage here
-is **Unix only** (Linux daily; Linux/macOS on release/manual runs). The Windows
-job covers installation and its native quickstart, not the upgrade journey.
-No published v0.0.10 execution is claimed by these configuration changes.
+When selected and latest tags match, the canonical journey checks a same-release
+upgrade. The public smoke also installs the highest earlier supported stable
+release from a bounded list of 100 releases and upgrades it to latest. Releases
+before v0.0.10 cannot perform that transition. For latest versions newer than
+v0.0.10, the smoke then repeats the upgrade and requires an "already up to date"
+message and unchanged executable bytes. Historical versions through v0.0.10 skip
+this output assertion because they always reported reinstallation as an upgrade.
+
+These public installation and upgrade checks run on Linux daily, and on Linux,
+macOS and Windows for release/manual runs. Both tagged installers and the actual
+`https://tapid.dev/install.sh` and `.ps1` paths are tested. Before execution, each
+public script must match its separately downloaded latest-tag script exactly,
+even when testing an older selected release. Public installers must also produce
+the same selected-version binary as the tagged installers; latest
+discovery also runs through the public scripts. The canonical documentation
+upgrade runner remains Unix-only. Windows has separate native workflow upgrade
+checks and its native quickstart.
+
+These configuration changes do not prove published execution of v0.0.10 or
+v0.0.11. Self-upgrade's verified-release list remains empty.
 
 ## Execution and evidence boundaries
 
@@ -119,8 +132,15 @@ ordinary CI evidence, not cryptographic publisher attestations.
 ## CI integration and remaining gates
 
 Existing required Unix `Test (...)` jobs run unit tests and source init/upgrade
-capability contracts without making PRs depend on npm. Existing Rust consumer
-and upgrade tests remain authoritative for deterministic rollback/tamper checks.
+capability contracts without making PRs depend on npm. The Unix jobs also run
+`scripts/check-release-record.py --binary target/debug/tapid` after building the
+CLI. That offline check sends the real generator's six-platform release record
+through the Unix installer and compiled updater, checks repeat upgrades, changes
+the artifact host while keeping discovery fixed, and rejects malformed metadata
+even with a valid recovery cache. It uses temporary shell fixture executables and
+an exact local URL mapping for curl, with no public network requests. This checks
+agreement between the implementations; it is not published binary evidence.
+Existing Rust consumer and upgrade tests cover deterministic rollback/tamper checks.
 The public installer smoke workflow retains release events, adds a manual stable
 tag selector, and declares daily **Linux-only** checks. Release/manual runs retain
 macOS and Windows. The resolver captures latest tag, selected release target and

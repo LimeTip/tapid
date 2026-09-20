@@ -232,3 +232,14 @@ fn all_endpoints_fail_with_deterministic_error() {
 }
 
 fn tempfile_dir() -> std::path::PathBuf { let d = std::env::temp_dir().join(format!("tapid-release-test-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())); std::fs::create_dir_all(&d).unwrap(); d }
+
+#[test]
+fn release_state_accepts_stable_major_versions_and_rejects_downgrades() {
+    let previous = ReleaseState::new("0.0.10", 1, "a".repeat(64)).unwrap();
+    let next = accept_release(&previous, "1.0.0", 2, "b".repeat(64)).unwrap();
+    assert_eq!(next.release_floor, "1.0.0");
+    assert!(matches!(accept_release(&next, "0.9.9", 3, "c".repeat(64)), Err(Error::ReleaseDowngrade { .. })));
+    for invalid in ["01.0.0", "1.00.0", "1.0.00", "1.0.0-beta", "1.0.0+build", "18446744073709551616.0.0"] {
+        assert!(ReleaseState::new(invalid, 1, "a".repeat(64)).is_err(), "{invalid}");
+    }
+}

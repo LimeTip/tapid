@@ -31,7 +31,7 @@ pub(crate) enum Command {
     /// Install dependencies, optionally adding one package first.
     #[command(alias = "i")]
     Install(install::Args),
-    /// Upgrade Tapid from a verified stable release.
+    /// Upgrade Tapid to the latest stable release with checksum verification.
     Upgrade(upgrade::Args),
 }
 
