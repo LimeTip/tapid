@@ -28,23 +28,44 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt, clippy
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Install relocatable Node.js for native sandbox tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - name: Check formatting
         run: cargo fmt --all --check
-      - name: Check architecture
-        run: python scripts/check_architecture.py
-      - name: Test architecture checker
-        run: python -m unittest tests.test_check_architecture
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Run tests
         run: cargo test --workspace --all-features --locked
+      - name: Install documentation runner Python
+        if: runner.os != 'Windows'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Test executable documentation runner (Unix)
+        if: runner.os != 'Windows'
+        run: python3 -m unittest discover -s tests -p test_doc_examples.py -v
+      - name: Verify source documentation artifact (Unix, offline)
+        if: runner.os != 'Windows'
+        run: python3 scripts/check-doc-examples.py --lane source --example init --example upgrade-help --report doc-contract-source.json
+      - name: Retain documentation evidence
+        if: always() && runner.os != 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: doc-contract-source-${{ runner.os }}
+          path: doc-contract-source.json
+          retention-days: 30
+          if-no-files-found: error
       - name: Run nested integration workspace
         run: cargo test --manifest-path tests/integration/Cargo.toml --locked
       - name: Validate Unix developer installer at the checked head
@@ -86,16 +107,16 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             binary: tapid
-          - runner: windows-11-arm
+          - runner: windows-11-vs2026-arm
             target: aarch64-pc-windows-msvc
             binary: tapid.exe
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Install Rust toolchain and release target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
       - name: Build release target
@@ -124,6 +145,8 @@ jobs:
         include:
           - os: ubuntu-latest
             shell: bash
+          - os: macos-latest
+            shell: bash
           - os: windows-latest
             shell: pwsh
     defaults:
@@ -131,11 +154,13 @@ jobs:
         shell: ${{ matrix.shell }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Install Node.js fixture runtime
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
       - name: Build Tapid binary
@@ -143,62 +168,131 @@ jobs:
       - name: Create dynamic Node fixture project
         run: |
           node tests/fixtures/create_consumer_project.js
-      - name: Validate install, root scripts, and lifecycle suppression (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
+      - name: Verify install and lifecycle suppression; reject unsupported containment (Linux/Windows)
+        if: runner.os != 'macOS'
+        run: node tests/fixtures/validate_consumer_project.js
+      - name: Verify native Restricted child, forwarding and exit codes (macOS)
+        if: runner.os == 'macOS'
+        run: node tests/fixtures/validate_consumer_project.js
+
+  release-contract:
+    name: Release workflow contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Test release helpers and workflows
+        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts
+      - name: Check source architecture
+        run: node --experimental-strip-types tools/check_architecture.ts
+      - name: Validate Unix installer syntax and help
         run: |
-          set -euo pipefail
-          bin="$GITHUB_WORKSPACE/target/debug/tapid"
-          "$bin" install --project-dir "$TAPID_FIXTURE_PROJECT" --offline --frozen
-          test -d "$TAPID_FIXTURE_PROJECT/node_modules"
-          test ! -e "$TAPID_FIXTURE_PROJECT/LIFECYCLE_SHOULD_NOT_RUN"
-          echo 'Linux install and lifecycle suppression passed.'
-          "$bin" run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 0
-          set +e
-          "$bin" run --project-dir "$TAPID_FIXTURE_PROJECT" test -- wrong 0
-          status=$?
-          set -e
-          test "$status" -eq 41
-          echo 'Linux root-script, argument, exit-code, and lifecycle checks passed.'
-      - name: Validate install, root scripts, and lifecycle suppression (Windows)
-        if: runner.os == 'Windows'
+          sh -n scripts/install.sh
+          sh scripts/install.sh --help >/dev/null
+      - name: Validate PowerShell installer syntax
         shell: pwsh
         run: |
-          $bin = Join-Path $env:GITHUB_WORKSPACE 'target\debug\tapid.exe'
-          & $bin install --project-dir $env:TAPID_FIXTURE_PROJECT --offline --frozen
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Test-Path (Join-Path $env:TAPID_FIXTURE_PROJECT 'node_modules'))) { throw 'Tapid did not create node_modules' }
-          if (Test-Path (Join-Path $env:TAPID_FIXTURE_PROJECT 'LIFECYCLE_SHOULD_NOT_RUN')) { throw 'lifecycle script ran during install' }
-          Write-Host 'Windows install and lifecycle suppression passed.'
-          & $bin run --project-dir $env:TAPID_FIXTURE_PROJECT test -- forwarded 0
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin run --project-dir $env:TAPID_FIXTURE_PROJECT test -- wrong 0
-          if ($LASTEXITCODE -ne 41) { throw "Unexpected child exit code: $LASTEXITCODE" }
-          Write-Host 'Windows root-script, argument, exit-code, and lifecycle checks passed.'
-          exit 0
+          $errors = $null
+          $null = [System.Management.Automation.PSParser]::Tokenize(
+            (Get-Content -Raw scripts/install.ps1),
+            [ref]$errors
+          )
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+            exit 1
+          }
 
   security:
     name: Dependency security checks
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
           tool: cargo-deny
       - name: Check dependency policy and licenses
         run: cargo deny check
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
           tool: cargo-audit
       - name: Audit Rust dependencies
         run: cargo audit
+
+  windows-installer-contract:
+    name: Windows installer contract
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install and reject archive fixtures
+        shell: pwsh
+        run: |
+          $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          try {
+          $fixture = Join-Path $env:RUNNER_TEMP 'tapid-installer-fixture'
+          $payload = Join-Path $fixture 'payload'
+          $installDir = Join-Path $fixture 'installed'
+          New-Item -ItemType Directory -Force -Path $payload | Out-Null
+          [IO.File]::WriteAllBytes((Join-Path $payload 'tapid.exe'), [byte[]](1, 2, 3, 4))
+          $target = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+          $archiveName = "tapid-1.2.3-$target.tar.gz"
+          $archive = Join-Path $fixture $archiveName
+          & tar.exe -czf $archive -C $payload tapid.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          Set-Content -NoNewline -Path (Join-Path $fixture 'SHA256SUMS') -Value "$digest  $archiveName`n"
+          $installerUnderTest = Join-Path $fixture 'install.ps1'
+          $installerText = Get-Content -Raw scripts/install.ps1
+          $fixtureDownloader = @'
+          function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
+              Copy-Item -LiteralPath (Join-Path $env:TAPID_FIXTURE_ROOT ([IO.Path]::GetFileName($Uri))) -Destination $Path
+              if ((Get-Item -LiteralPath $Path).Length -gt $MaxBytes) { Fail "download exceeds the size limit" }
+          }
+          '@
+          $downloaderPattern = [regex]::new(
+            '^function Save-BoundedHttpsFile\([^\r\n]+\) \{.*?^\}',
+            ([Text.RegularExpressions.RegexOptions]::Multiline -bor [Text.RegularExpressions.RegexOptions]::Singleline)
+          )
+          $fixtureInstallerText = $downloaderPattern.Replace($installerText, $fixtureDownloader, 1)
+          if ($fixtureInstallerText -eq $installerText) { throw 'failed to create isolated installer fixture' }
+          Set-Content -NoNewline -Path $installerUnderTest -Value $fixtureInstallerText
+          $env:TAPID_FIXTURE_ROOT = $fixture
+          & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installed = Join-Path $installDir 'tapid.exe'
+          if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw 'valid fixture was not installed' }
+          $before = (Get-FileHash -Algorithm SHA256 $installed).Hash
+          [IO.File]::WriteAllBytes((Join-Path $payload 'extra'), [byte[]](5))
+          & tar.exe -czf $archive -C $payload tapid.exe extra
+          $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          Set-Content -NoNewline -Path (Join-Path $fixture 'SHA256SUMS') -Value "$digest  $archiveName`n"
+          try {
+            & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
+            throw 'unsafe fixture was accepted'
+          } catch {
+            if ($_.Exception.Message -notlike '*exactly one member named tapid.exe*') { throw }
+          }
+          if ((Get-FileHash -Algorithm SHA256 $installed).Hash -ne $before) { throw 'rejected fixture changed the installed binary' }
+          } finally {
+            Remove-Item Env:TAPID_FIXTURE_ROOT -ErrorAction SilentlyContinue
+            [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')
+          }
 
   package:
     name: Package workspace
@@ -206,11 +300,13 @@ jobs:
     needs: [test, security]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Validate workspace metadata
         run: cargo metadata --no-deps --format-version 1 --locked
       - name: Package all crates

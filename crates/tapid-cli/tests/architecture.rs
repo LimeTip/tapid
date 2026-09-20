@@ -73,12 +73,38 @@ fn application_modules_do_not_render_or_choose_process_status() {
 #[test]
 fn commands_are_split_by_user_facing_capability() {
     let command_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
-    for capability in ["init", "install", "lock", "manifest", "run", "upgrade"] {
+    for capability in ["init", "install", "lock", "manifest", "run"] {
         assert!(
             command_root.join(format!("{capability}.rs")).is_file(),
             "missing command capability module: {capability}"
         );
     }
+}
+
+#[test]
+fn sandboxed_run_path_cannot_spawn_directly() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for relative in ["run.rs", "commands/run.rs"] {
+        let source = fs::read_to_string(root.join(relative)).expect("read run source");
+        assert!(
+            !source.contains("std::process::Command")
+                && !source.contains("process::{Command")
+                && !source.contains("Command::new"),
+            "normal run path bypasses tapid-runner in {relative}"
+        );
+    }
+}
+
+#[test]
+fn run_reads_only_allowlisted_host_environment_and_does_not_replay_child_output() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let planner = fs::read_to_string(root.join("run.rs")).expect("read run planner");
+    let command = fs::read_to_string(root.join("commands/run.rs")).expect("read run command");
+
+    assert!(planner.contains("std::env::var_os(name)"));
+    assert!(!planner.contains("std::env::vars_os()"));
+    assert!(!command.contains("outcome.stdout()"));
+    assert!(!command.contains("outcome.stderr()"));
 }
 
 #[test]

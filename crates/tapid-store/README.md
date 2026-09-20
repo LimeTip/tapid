@@ -1,7 +1,11 @@
 # tapid-store
 
-
-[Crates.io](https://crates.io/crates/tapid-store) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-store)
+[![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/tapid-store)](https://crates.io/crates/tapid-store)
+[![Crates.io downloads](https://img.shields.io/crates/d/tapid-store)](https://crates.io/crates/tapid-store)
+[![Docs.rs](https://docs.rs/tapid-store/badge.svg)](https://docs.rs/tapid-store)
+[![License](https://img.shields.io/crates/l/tapid-store)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 `tapid-store` is a filesystem-authoritative content-addressed store. `Store::ingest` accepts any `std::io::Read`, streams bytes through SHA-256 into a private staging file, calls `sync_all`, verifies the requested `ArtifactDigest`, and atomically activates the staged file under the dynamic store root. Digest paths are never overwritten. An existing regular file is authoritative and ingestion is idempotent. Failed reads and digest mismatches are cleaned up without activating partial bytes.
 

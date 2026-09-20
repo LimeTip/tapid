@@ -1,7 +1,11 @@
 # tapid-resolver
 
-
-[Crates.io](https://crates.io/crates/tapid-resolver) | [GitHub](https://github.com/LimeTip/tapid/tree/main/crates/tapid-resolver)
+[![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/tapid-resolver)](https://crates.io/crates/tapid-resolver)
+[![Crates.io downloads](https://img.shields.io/crates/d/tapid-resolver)](https://crates.io/crates/tapid-resolver)
+[![Docs.rs](https://docs.rs/tapid-resolver/badge.svg)](https://docs.rs/tapid-resolver)
+[![License](https://img.shields.io/crates/l/tapid-resolver)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Pure deterministic resolution for normalized npm- and JSR-compatible registry metadata.
 
