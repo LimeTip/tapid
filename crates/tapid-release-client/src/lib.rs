@@ -243,6 +243,24 @@ fn hex_digest(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
 }
 
+/// Caller-supplied transport with explicit metadata rejection semantics.
+///
+/// A string-only transport cannot implement this trait without providing the
+/// typed metadata method. Otherwise a size or validation rejection could be
+/// mistaken for an outage:
+///
+/// ```compile_fail,E0046
+/// use tapid_release_client::Fetcher;
+/// struct StringOnly;
+/// impl Fetcher for StringOnly {
+///     fn fetch(&mut self, _: &str) -> Result<Vec<u8>, String> {
+///         Err("unavailable".into())
+///     }
+///     fn fetch_with_limit(&mut self, _: &str, _: usize) -> Result<Vec<u8>, String> {
+///         Err("received response exceeds size limit".into())
+///     }
+/// }
+/// ```
 pub trait Fetcher {
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String>;
 
@@ -252,7 +270,21 @@ pub trait Fetcher {
     /// `max_bytes`; a post-read length check is insufficient for untrusted
     /// network responses.
     fn fetch_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String>;
+
+    /// Fetch metadata without conflating response rejection with unavailability.
+    ///
+    /// Only `Error::Fetch` permits discovery failover. Return a validation error
+    /// for rejected responses, including streaming size-limit violations.
+    /// Enforce `max_bytes` during reads, as for `fetch_with_limit`.
+    ///
+    /// Every implementation must classify these outcomes explicitly; there is
+    /// no string-error default that could silently weaken discovery policy.
+    fn fetch_metadata_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error>;
 }
+/// Try stable discovery candidates in order, retrying only unavailable fetches.
+///
+/// Invalid received metadata returns its validation error immediately so callers
+/// cannot mistake a verification failure for an outage and weaken verification.
 pub fn discover<F: Fetcher>(
     fetcher: &mut F,
     endpoints: &[&str],
@@ -265,30 +297,31 @@ pub fn discover<F: Fetcher>(
         if !https(endpoint) {
             continue;
         }
-        let body = match fetcher.fetch_with_limit(endpoint, MAX_CHANNEL_INDEX_BYTES) {
+        let body = match fetcher.fetch_metadata_with_limit(endpoint, MAX_CHANNEL_INDEX_BYTES) {
             Ok(body) => body,
-            Err(_) => continue,
+            Err(Error::Fetch(_)) => continue,
+            Err(error) => return Err(error),
         };
         if body.len() > MAX_CHANNEL_INDEX_BYTES {
-            continue;
+            return Err(Error::InvalidManifest(
+                "channel index exceeds maximum size".into(),
+            ));
         }
-        let index = match ChannelIndex::parse(&body) {
-            Ok(index) => index,
-            Err(_) => continue,
-        };
+        let index = ChannelIndex::parse(&body)?;
         for manifest_url in &index.manifests {
-            let body = match fetcher.fetch_with_limit(manifest_url, MAX_MANIFEST_BYTES) {
+            let body = match fetcher.fetch_metadata_with_limit(manifest_url, MAX_MANIFEST_BYTES) {
                 Ok(body) => body,
-                Err(_) => continue,
+                Err(Error::Fetch(_)) => continue,
+                Err(error) => return Err(error),
             };
             if body.len() > MAX_MANIFEST_BYTES {
-                continue;
+                return Err(Error::InvalidManifest(
+                    "manifest exceeds maximum size".into(),
+                ));
             }
-            if let Ok(manifest) =
-                ReleaseManifest::parse_and_verify(&body, keyring, target, now, max_age)
-            {
-                return Ok(manifest);
-            }
+            // A received rejection is not an outage: do not hide it behind
+            // another candidate, checksum-only fallback, or cached recovery.
+            return ReleaseManifest::parse_and_verify(&body, keyring, target, now, max_age);
         }
     }
     Err(Error::AllEndpointsFailed {
@@ -326,6 +359,12 @@ pub struct ReleaseState {
     pub release_floor: String,
     pub release_sequence: u64,
     pub last_known_good: LastKnownGood,
+    #[serde(default = "unknown_verification")]
+    pub verification: String,
+}
+
+fn unknown_verification() -> String {
+    "unknown".into()
 }
 
 impl ReleaseState {
@@ -338,6 +377,7 @@ impl ReleaseState {
                 version: version.into(),
                 artifact_sha256,
             },
+            verification: unknown_verification(),
         };
         validate_state(&state)?;
         Ok(state)
@@ -368,7 +408,10 @@ pub fn accept_release(
     } else {
         &state.release_floor
     };
-    ReleaseState::new(floor, sequence, artifact_sha256)
+    let mut next = ReleaseState::new(floor, sequence, artifact_sha256)?;
+    next.verification = state.verification.clone();
+    validate_state(&next)?;
+    Ok(next)
 }
 
 pub fn write_release_state(path: &Path, state: &ReleaseState) -> Result<(), Error> {
@@ -392,6 +435,12 @@ fn validate_state(state: &ReleaseState) -> Result<(), Error> {
         return Err(Error::State(
             "unsupported or malformed release state".into(),
         ));
+    }
+    if !matches!(
+        state.verification.as_str(),
+        "signature" | "checksum" | "unknown"
+    ) {
+        return Err(Error::State("unsupported verification provenance".into()));
     }
     validate_lkg(&state.last_known_good)?;
     if compare_version(&state.last_known_good.version, &state.release_floor)?

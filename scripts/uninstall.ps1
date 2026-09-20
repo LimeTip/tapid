@@ -9,7 +9,15 @@ function Fail([string]$Message) {
     throw "tapid uninstaller: $Message"
 }
 
-if (-not [IO.Path]::IsPathRooted($InstallDir)) {
+function Test-AbsolutePath([string]$Path) {
+    if ([string]::IsNullOrEmpty($Path) -or $Path -match '[\r\n]') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\') {
+        return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/].*)?\z)'
+    }
+    return $Path.StartsWith('/')
+}
+
+if (-not (Test-AbsolutePath $InstallDir)) {
     Fail "install directory must be an absolute path"
 }
 

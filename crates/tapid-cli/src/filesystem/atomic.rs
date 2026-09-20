@@ -88,7 +88,13 @@ pub(crate) fn validate_upgrade_destination(path: &Path) -> Result<(), String> {
     if !marker_metadata.file_type().is_file() {
         return Err("Tapid ownership marker must be a regular file".into());
     }
-    if fs::read(&marker).map_or(true, |bytes| bytes != b"tapid-managed-v1\n") {
+    let marker_bytes = fs::read(&marker).map_err(|e| {
+        format!(
+            "cannot read Tapid ownership marker '{}': {e}",
+            marker.display()
+        )
+    })?;
+    if marker_bytes != b"tapid-managed-v1\n" {
         return Err(format!(
             "refusing to replace unmarked non-Tapid-managed destination '{}'; expected {}",
             path.display(),
@@ -111,7 +117,8 @@ pub(crate) fn replace_executable(path: &Path, bytes: &[u8]) -> Result<(), String
         let mode = fs::metadata(path)
             .map_err(|e| e.to_string())?
             .permissions()
-            .mode();
+            .mode()
+            | 0o111;
         if let Err(error) = fs::set_permissions(&temp, fs::Permissions::from_mode(mode)) {
             let _ = fs::remove_file(&temp);
             return Err(error.to_string());
@@ -228,6 +235,29 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[cfg(unix)]
+    #[test]
+    fn executable_replacement_adds_execute_bits_to_a_non_executable_destination() {
+        use super::replace_executable;
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "tapid-replace-executable-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
+
+        replace_executable(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_ne!(fs::metadata(&path).unwrap().permissions().mode() & 0o111, 0);
+        fs::remove_file(path).unwrap();
+    }
     #[test]
     fn synced_file_write_preserves_a_preexisting_file() {
         let path = std::env::temp_dir().join(format!(

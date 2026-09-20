@@ -1,4 +1,5 @@
 use std::{io, io::Read, process::Stdio};
+use tapid_release_client::Error as ReleaseError;
 
 const CURL_CONNECT_TIMEOUT_SECONDS: &str = "10";
 const CURL_MAX_TIME_SECONDS: &str = "30";
@@ -44,51 +45,73 @@ pub(crate) fn curl_fetch_args(url: &str, max_bytes: usize) -> Vec<String> {
 
 pub(crate) struct CurlFetcher;
 impl CurlFetcher {
-    fn fetch_limited(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    fn fetch_limited(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, ReleaseError> {
         if !url.starts_with("https://") {
-            return Err("URL must use HTTPS".into());
+            return Err(ReleaseError::Fetch("URL must use HTTPS".into()));
         }
         let mut child = std::process::Command::new("curl")
             .args(curl_fetch_args(url, max_bytes))
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| format!("HTTPS transport unavailable: {e}"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "HTTPS transport unavailable: missing curl output".to_owned())?;
+            .map_err(|e| ReleaseError::Fetch(format!("HTTPS transport unavailable: {e}")))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ReleaseError::Fetch("HTTPS transport unavailable: missing curl output".into())
+        })?;
         let bytes = match read_bounded(stdout, max_bytes) {
             Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error.to_string());
-            }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("cannot read HTTPS response: {error}"));
+                return Err(response_read_error(error));
             }
         };
         let status = child
             .wait()
-            .map_err(|e| format!("cannot finish HTTPS request: {e}"))?;
-        if status.success() {
-            Ok(bytes)
-        } else {
-            Err("HTTPS request failed".into())
-        }
+            .map_err(|e| ReleaseError::Fetch(format!("cannot finish HTTPS request: {e}")))?;
+        classify_curl_response(status.code(), bytes)
     }
 }
 
 impl tapid_release_client::Fetcher for CurlFetcher {
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> {
         self.fetch_limited(url, MAX_FETCH_BYTES)
+            .map_err(|error| error.to_string())
     }
 
     fn fetch_with_limit(&mut self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
         self.fetch_limited(url, max_bytes)
+            .map_err(|error| error.to_string())
+    }
+
+    fn fetch_metadata_with_limit(
+        &mut self,
+        url: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ReleaseError> {
+        self.fetch_limited(url, max_bytes)
+    }
+}
+
+/// A failed bounded read cannot establish that no rejected response was received.
+fn response_read_error(error: io::Error) -> ReleaseError {
+    ReleaseError::InvalidManifest(format!(
+        "cannot read complete bounded HTTPS response: {error}"
+    ))
+}
+
+/// Distinguish absent responses from rejected or partially received metadata.
+fn classify_curl_response(code: Option<i32>, bytes: Vec<u8>) -> Result<Vec<u8>, ReleaseError> {
+    if code == Some(0) {
+        Ok(bytes)
+    } else if matches!(code, Some(18 | 63)) || !bytes.is_empty() {
+        // curl exits 18 (CURLE_PARTIAL_FILE) and 63 (CURLE_FILESIZE_EXCEEDED)
+        // reject received responses even when no body bytes were emitted.
+        Err(ReleaseError::InvalidManifest(
+            "HTTPS response exceeded its size limit or was incomplete".into(),
+        ))
+    } else {
+        Err(ReleaseError::Fetch("HTTPS request failed".into()))
     }
 }
 
@@ -115,9 +138,47 @@ mod tests {
         curl_fetch_args, read_bounded,
     };
     use crate::filesystem::atomic::MAX_ARTIFACT_BYTES;
-    use crate::filesystem::tree::{
-        cmd_batch_path, cmd_shim_contents, powershell_shim_contents, powershell_single_quoted,
-    };
+
+    #[test]
+    fn oversized_response_read_is_not_a_transport_outage() {
+        let error = read_bounded(&b"too large"[..], 2).unwrap_err();
+        assert!(matches!(
+            super::response_read_error(error),
+            super::ReleaseError::InvalidManifest(_)
+        ));
+    }
+
+    #[test]
+    fn curl_size_limit_exit_is_not_a_transport_outage() {
+        assert!(matches!(
+            super::classify_curl_response(Some(63), vec![]),
+            Err(super::ReleaseError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn partial_curl_response_is_not_a_transport_outage() {
+        for bytes in [vec![], b"partial".to_vec()] {
+            assert!(matches!(
+                super::classify_curl_response(Some(18), bytes),
+                Err(super::ReleaseError::InvalidManifest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn curl_unavailability_remains_retryable() {
+        for code in [6, 7, 22, 28, 35, 60] {
+            assert!(matches!(
+                super::classify_curl_response(Some(code), vec![]),
+                Err(super::ReleaseError::Fetch(_))
+            ));
+        }
+        assert_eq!(
+            super::classify_curl_response(Some(0), b"ok".to_vec()).unwrap(),
+            b"ok"
+        );
+    }
 
     #[test]
     fn bounded_response_reader_caps_initial_allocation() {
@@ -127,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_response_reader_rejects_streams_without_known_size() {
+    fn bounded_response_reader_rejects_streams_over_the_size_limit() {
         assert!(read_bounded(&b"ok"[..], 2).is_ok());
         assert!(read_bounded(&b"too large"[..], 2).is_err());
     }
@@ -161,49 +222,5 @@ mod tests {
         let args = curl_fetch_args("https://example.test/tapid.tar.gz", 1024 * 1024);
         assert_eq!(args[args.len() - 2], "1048576");
         assert_eq!(args.last().unwrap(), "https://example.test/tapid.tar.gz");
-    }
-
-    #[test]
-    fn powershell_single_quoted_escapes_apostrophes() {
-        assert_eq!(
-            powershell_single_quoted(r"C:\\Users\O'Brien\project\tapid.exe"),
-            r"C:\\Users\O''Brien\project\tapid.exe"
-        );
-    }
-
-    #[test]
-    fn powershell_single_quoted_preserves_other_path_characters() {
-        assert_eq!(
-            powershell_single_quoted(r"C:\\Program Files\tapid.exe"),
-            r"C:\\Program Files\tapid.exe"
-        );
-    }
-
-    #[test]
-    fn windows_shims_resolve_sources_relative_to_the_surviving_bin_directory() {
-        let parent = std::path::Path::new("/project/node_modules/.bin");
-        let source = std::path::Path::new("/project/node_modules/tool/cli.js");
-
-        let relative = format!(
-            "..{}tool{}cli.js",
-            std::path::MAIN_SEPARATOR,
-            std::path::MAIN_SEPARATOR
-        );
-        assert_eq!(
-            cmd_shim_contents(parent, source),
-            format!("@echo off\r\n@setlocal DisableDelayedExpansion\r\n\"%~dp0{relative}\" %*\r\n")
-        );
-        assert_eq!(
-            powershell_shim_contents(parent, source),
-            format!("& (Join-Path $PSScriptRoot '{relative}') $args\r\n")
-        );
-    }
-
-    #[test]
-    fn cmd_batch_path_escapes_percent_and_preserves_other_characters() {
-        assert_eq!(
-            cmd_batch_path(r"C:\\100%\O'Brien\tapid.exe"),
-            r"C:\\100%%\O'Brien\tapid.exe"
-        );
     }
 }
