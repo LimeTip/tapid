@@ -11,4 +11,10 @@ Core domain types and deterministic validation for Tapid.
 
 This crate contains package names, canonical SemVer identities including prereleases, SHA-256 artifact digests, canonical padded SHA-512 package integrity values, peer/platform contexts, and shared domain errors. It is intentionally independent of the CLI, network, and filesystem.
 
+`RegistryOrigin` canonicalizes HTTPS origins (host casing/IDNA, IP spelling,
+default port removal and slash-only roots), and rejects credentials, query,
+fragment and non-root paths. Non-default ports remain distinct. Persisted identity
+consumers must not silently apply this normalization to existing graph keys;
+`tapid-lockfile` rejects noncanonical persisted origins with explicit recovery.
+
 The API is experimental and may change before the first stable release.

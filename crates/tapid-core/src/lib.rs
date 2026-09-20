@@ -138,6 +138,10 @@ impl fmt::Display for ArtifactDigest {
     }
 }
 
+/// A canonical, credential-free HTTPS origin for newly resolved identities.
+/// Parsing normalizes host spelling, the default port and slash-only root paths.
+/// Persisted graph readers must reject spelling changes instead of silently
+/// rekeying distinct legacy identities.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RegistryOrigin(String);
 

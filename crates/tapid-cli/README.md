@@ -56,6 +56,15 @@ tapid install --registry-fixture ./fixture.json --project-dir ./example
 
 The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 6 locks, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
 
+## Legacy registry identities
+
+Locks containing noncanonical persisted registry origins (such as uppercase hosts
+or explicit `:443`) fail closed before activation/store mutation in offline and
+frozen modes. Preserve a separate verified backup of `tapid.lock`, then deliberately
+run online `tapid install` and review changed versions, artifacts and edges. The
+online path replaces the lock after re-resolution, not identity migration. See
+[compatibility and recovery](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#persisted-registry-identity-compatibility).
+
 ## Offline and frozen
 
 ```text

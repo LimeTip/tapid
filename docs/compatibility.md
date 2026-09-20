@@ -16,6 +16,47 @@ This matrix distinguishes current implemented behavior from accepted target cont
 | Store and lockfile | SHA-256 content-addressed staging, executable-aware tree identity, exact tree replay, advisory replay leases, canonical lockfile schema 6 with exact direct roots and integrity provenance, controlled schema 4 read compatibility, and recoverable atomic managed activation | Schema 5 requires online regeneration, schema versions earlier than 4 are rejected, and no remote cache, garbage collection, or full npm lockfile graph exists |
 | Platforms | Experimental macOS Restricted is implemented using deprecated/private native Seatbelt APIs and path bindings. Support is gated by generated-policy sampled positive/negative controls on the running OS | Native ManagedTree and Linux/Windows native containment remain unsupported. Local tests on a dirty worktree are not release or cross-platform certification. Exact integrated-revision acceptance remains required by platform-validation.md |
 
+## Persisted registry identity compatibility
+
+New registry inputs are canonicalized as HTTPS origins: lowercase/IDNA hosts,
+canonical IP literals, no default `:443`, and no trailing root slash. Userinfo,
+queries, fragments, and non-root paths are rejected. Non-default ports remain
+part of identity.
+
+Persisted registries must already have that canonical spelling in package records,
+map keys, roots, and dependency references, including schema 4 locks. Older builds
+could emit uppercase hosts or explicit default ports (for example
+`https://REGISTRY.example.test:443`). Those locks now fail with
+`NonCanonicalRegistryIdentity`, rather than being silently rekeyed. Distinct legacy
+entries can normalize to one identity with different artifacts or graph edges;
+normalizing only the keys also disconnects exact roots and dependencies. No
+byte-preserving legacy replay or automatic lockfile migration is provided.
+
+### Deliberate recovery
+
+1. Stop concurrent project installs. Preserve a separate, byte-for-byte backup of
+   `tapid.lock` in a new, non-existing backup location; verify the copy before
+   continuing. Keep it until the replacement graph is approved. Do not rely on
+   Tapid's temporary transactional backup, which is discarded after success.
+2. Review the manifest and registry routing. Run `tapid install --project-dir PATH`
+   **without** `--offline` or `--frozen` (and with the intended `--store-dir` when
+   applicable). Ordinary online install already re-resolves without reading the
+   old lock; no deletion or manual string replacement is necessary. This requires
+   available metadata/artifacts and can select different versions, digests, roots,
+   and dependency edges. It is re-resolution, not identity-preserving migration.
+3. Compare the replacement lock against the preserved backup, review all identity,
+   artifact and graph changes, and run `tapid lock verify` from the project plus
+   frozen replay against the verified store before adopting it.
+
+If the original registry cannot be reached through supported routing, or the old
+exact graph must be retained, stop: this release cannot safely migrate that lock.
+Do not alias origins, drop colliding entries, or bypass integrity checks. Invalid
+credential-bearing origins remain rejected, not treated as recoverable aliases.
+Offline/frozen rejection performs no network work and leaves the lock, manifest,
+store, layout and activation state untouched for an unchanged incompatible lock.
+The CLI checks before acquiring activation state and checks again under the lock;
+this is not a transaction against arbitrary concurrent external file writers.
+
 Package keys encode empty contexts as `peer=-|platform=-`. Peer contexts use canonical `name=...;version=...` fields. Platform contexts preserve independent OS, CPU, and libc fields using named fields, for example `platform=os=linux;cpu=;libc=` for OS-only, `platform=os=;cpu=x86_64;libc=` for CPU-only, or `platform=os=linux;cpu=x86_64;libc=gnu` when all are present. Reserved characters are percent-encoded. Duplicate, unordered, malformed, and noncanonical context representations are rejected.
 
 Schema 6 requires sorted, unique, canonical roots for every nonempty package graph and explicit registry-integrity provenance for every package. During replay, each root must satisfy a direct manifest identity and all requirements contributed by the supported manifest maps, and every direct identity must have exactly one root. Schema 5 locks require online regeneration. Rootless schema 4 compatibility reconstructs the highest matching locked version per direct identity and rejects incomplete or context-ambiguous reconstruction.
