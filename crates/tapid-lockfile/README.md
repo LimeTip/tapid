@@ -21,6 +21,14 @@ The current contract provides:
 
 Schema `4` remains readable for controlled compatibility when package keys use canonical or empty contexts and SHA-512 integrity is padded canonically. When such a schema 4 lockfile has no explicit roots, CLI replay reconstructs one root per direct manifest identity by applying all requirements from dependencies, development dependencies, and optional dependencies, then selecting the highest matching locked version. Replay rejects missing candidates, ambiguous package contexts, and legacy values that cannot be normalized safely. Schema versions earlier than 4 are not accepted implicitly.
 
+Persisted registry identities must be canonical in package records, keys, roots
+and edges. `NonCanonicalRegistryIdentity` rejects older uppercase/default-port
+spellings, including schema 4, without rekeying or collapsing identities. Preserve
+a separate backup, deliberately re-resolve using online `tapid install` without
+`--offline`/`--frozen`, then review the new graph. This may change versions and
+artifacts; it is not a byte-preserving migration. See the repository
+[compatibility and recovery contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#persisted-registry-identity-compatibility).
+
 Package keys encode empty contexts as `peer=-|platform=-`. Non-empty peer contexts use canonical `name=...;version=...` fields. Platform contexts use fixed canonical fields such as `os=linux;cpu=x86_64;libc=gnu`. Reserved context characters are percent-encoded, and noncanonical wire representations are rejected.
 
 Consumer replay uses `STORE/trees/<digest>/` and a regular `.tapid-tree` marker containing the exact digest. Before reading store trees, the CLI rejects schema 5 locks that lack the schema 6 provenance contract and packages marked as lacking registry-declared integrity, validates every explicit schema 6 root against direct manifest identity and version requirements, and requires exactly one root per direct identity. It then validates every referenced tree and stages the managed layout before atomically replacing `node_modules`; dependency lifecycle scripts never run. `tapid install --store-dir PATH` supplies a dynamic store root.

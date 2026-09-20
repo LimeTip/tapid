@@ -13,3 +13,4 @@ autoexamples = false
 [dependencies]
 base64 = "0.22"
 semver = "1.0.28"
+url = "2"
