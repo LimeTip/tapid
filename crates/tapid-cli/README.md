@@ -23,7 +23,7 @@ curl -fsSL https://tapid.dev/install.sh | bash
 iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
-The installers select the latest published release from the immutable GitHub release assets published by `LimeTip/tapid`, verify the platform archive against its `SHA256SUMS` entry, and install Tapid without administrator privileges. Alternate repositories must provide their own equivalent release controls. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
+The next-release installers, expected for 0.0.11, select archives through `https://tapid.dev/releases/v1/latest.tsv`, check their recorded size and SHA-256, and install Tapid without administrator privileges. GitHub remains the initial archive host. Explicit versions through 0.0.10 use their historical GitHub archives and `SHA256SUMS` unless `TAPID_RELEASE_RECORD_URL` is supplied. The new public routes and installer copies require the coordinated release cutover; this source README does not establish their deployed state. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
 
 ## Commands
 
@@ -42,7 +42,11 @@ tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 
 Starting with 0.0.10, `tapid upgrade` discovers and installs the latest stable release. `tapid upgrade --dry-run` inspects the selected release without replacing the binary. Older clients can be upgraded by rerunning the public installer.
 
-The command prefers signed stable-channel discovery. If the default discovery endpoints are unavailable, it uses the canonical GitHub Releases API and verifies the platform archive against `SHA256SUMS`. Explicit custom endpoints do not enable the GitHub fallback. The published GitHub path provides checksum integrity, not independent release authentication. The command validates the archive, stages executable replacement, and records verification provenance for last-known-good recovery.
+When the installed executable matches the verified release bytes, the command reports that Tapid is already up to date and leaves the executable unchanged. It still downloads and verifies the release before comparing. If network discovery fails and the command uses its recovery cache, it reports that the latest release could not be checked. Cached recovery is reported as a restore or an unchanged executable.
+
+The next-release command, expected for 0.0.11, reads the same `tapid.dev` release record as the installers. Use `--release-url` or `TAPID_RELEASE_RECORD_URL` to select another record address. It validates metadata, archive size, checksum, and archive contents before staging executable replacement. Invalid received metadata or mismatched downloads fail. Default discovery does not fall back to the GitHub API. HTTPS and checksums do not provide independent release authentication.
+
+Explicit `--endpoint` retains the historical signed-discovery protocol and is separate from `--release-url`. Released Tapid 0.0.10 still probes signed metadata first and uses its GitHub checksum fallback when those endpoints are unavailable. It can use that path to install the next release after publication.
 
 ## Install packages
 

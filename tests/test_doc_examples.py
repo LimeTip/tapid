@@ -61,8 +61,13 @@ class RunnerTests(unittest.TestCase):
         inventory = json.loads((ROOT / 'docs/examples/contracts.json').read_text())
         capability = next(c for c in inventory['capabilities'] if c['id'] == 'self-upgrade')
         self.assertEqual(capability['first_supported_release'], 'v0.0.10')
-        self.assertEqual(capability['expected_releases'], ['v0.0.10'])
+        self.assertEqual(capability['expected_releases'], ['v0.0.10', 'v0.0.11'])
         self.assertEqual(capability['verified_releases'], [])
+
+    def test_published_0011_upgrade_help_has_reviewed_expectation(self):
+        code, report = self.published_fixture('v0.0.11', 'upgrade-help')
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report['status'], 'passed')
 
     def test_published_upgrade_skips_only_reviewed_unsupported_release(self):
         code, report = self.published_fixture('v0.0.9', 'upgrade', 'exit 99')
@@ -73,7 +78,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('no upgrade subcommand', report['examples'][0]['reason'])
 
     def test_published_upgrade_unknown_tags_require_review(self):
-        for tag in ('v0.0.8', 'v0.0.11', 'v1.0.0'):
+        for tag in ('v0.0.8', 'v0.0.12', 'v1.0.0'):
             code, report = self.published_fixture(tag, 'upgrade')
             self.assertNotEqual(code, 0)
             self.assertIn('needs review', report['error'])
@@ -231,12 +236,21 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('python3 -m unittest discover -s tests -p test_doc_examples.py', ci)
         self.assertIn('--lane source --example init --example upgrade-help', ci)
         self.assertNotIn('--allow-network', ci)
+        self.assertIn('python3 scripts/check-release-record.py --binary target/debug/tapid', ci)
+        integration = ci.index('Verify generated release record end to end')
+        self.assertGreater(integration, ci.index('cargo test --workspace --all-features --locked'))
+        self.assertIn('cargo build --locked --bin tapid', ci[integration:])
 
     def test_public_smoke_uses_published_binary_not_source_build(self):
         workflow = (ROOT / '.github/workflows/release-public-smoke.yml').read_text()
         self.assertTrue('--lane published' in workflow)
         self.assertTrue('--example quickstart' in workflow)
         self.assertNotIn('cargo build', workflow)
+        for script in ('install.sh', 'install.ps1'):
+            self.assertIn('https://tapid.dev/' + script, workflow)
+            self.assertIn('scripts/' + script, workflow)
+        self.assertIn('Check previous-version upgrade and repeat upgrade through the public service', workflow)
+        self.assertIn('is already up to date', workflow)
 
     @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell runtime not installed')
     def test_native_powershell_requires_network_opt_in_before_execution(self):

@@ -31,6 +31,8 @@ pub(crate) fn curl_fetch_args(url: &str, max_bytes: usize) -> Vec<String> {
         "--location".to_owned(),
         "--proto".to_owned(),
         "=https".to_owned(),
+        "--proto-redir".to_owned(),
+        "=https".to_owned(),
         "--tlsv1.2".to_owned(),
         "--connect-timeout".to_owned(),
         CURL_CONNECT_TIMEOUT_SECONDS.to_owned(),
@@ -52,7 +54,9 @@ impl CurlFetcher {
         let mut child = std::process::Command::new("curl")
             .args(curl_fetch_args(url, max_bytes))
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            // Discovery failures may be handled by a later endpoint or fallback.
+            // Surface terminal failures through the typed error below instead.
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| ReleaseError::Fetch(format!("HTTPS transport unavailable: {e}")))?;
         let stdout = child.stdout.take().ok_or_else(|| {
@@ -111,7 +115,9 @@ fn classify_curl_response(code: Option<i32>, bytes: Vec<u8>) -> Result<Vec<u8>, 
             "HTTPS response exceeded its size limit or was incomplete".into(),
         ))
     } else {
-        Err(ReleaseError::Fetch("HTTPS request failed".into()))
+        Err(ReleaseError::Fetch(format!(
+            "HTTPS request failed with curl exit status {code:?}"
+        )))
     }
 }
 
@@ -126,6 +132,8 @@ pub(crate) fn release_target() -> &'static str {
         "x86_64-unknown-linux-gnu"
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         "x86_64-pc-windows-msvc"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "aarch64-pc-windows-msvc"
     } else {
         "unsupported-target"
     }
@@ -204,6 +212,8 @@ mod tests {
                 "--show-error",
                 "--location",
                 "--proto",
+                "=https",
+                "--proto-redir",
                 "=https",
                 "--tlsv1.2",
                 "--connect-timeout",

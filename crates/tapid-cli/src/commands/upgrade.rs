@@ -3,9 +3,12 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
-    /// Stable discovery endpoint(s), tried in the given order.
+    /// Explicit legacy signed discovery endpoint(s), tried in the given order.
     #[arg(long = "endpoint", value_name = "HTTPS_URL")]
     pub(crate) endpoints: Vec<String>,
+    /// Release record URL (defaults to tapid.dev, or TAPID_RELEASE_RECORD_URL).
+    #[arg(long, value_name = "HTTPS_URL", conflicts_with_all = ["endpoints", "keyring"])]
+    pub(crate) release_url: Option<String>,
     /// Optional trusted release keyring JSON. Uses the embedded production trust root by default.
     #[arg(long)]
     pub(crate) keyring: Option<PathBuf>,
@@ -20,11 +23,17 @@ pub(crate) struct Args {
 pub(crate) fn run(args: Args) -> ExitCode {
     match crate::application::upgrade::run(
         &args.endpoints,
+        args.release_url.as_deref(),
         args.keyring.as_deref(),
         args.destination.as_deref(),
         args.dry_run,
     ) {
         Ok(report) => {
+            if report.recovered {
+                println!(
+                    "Warning: using the cached release; could not check the latest stable release"
+                );
+            }
             if report.dry_run {
                 println!(
                     "{} Tapid {} for {}; dry-run did not replace {}",
@@ -46,10 +55,23 @@ pub(crate) fn run(args: Args) -> ExitCode {
                     );
                 } else if !report.signature_verified {
                     println!(
-                        "Warning: signature verification was not performed for the GitHub fallback; release checksum matched"
+                        "Release checksum verified; independent signature verification was not performed"
                     );
                 }
-                println!("Upgraded Tapid to {}", report.version);
+                if report.recovered {
+                    if report.already_current {
+                        println!(
+                            "Tapid {} already matches the cached release; executable unchanged",
+                            report.version
+                        );
+                    } else {
+                        println!("Restored Tapid {} from the cached release", report.version);
+                    }
+                } else if report.already_current {
+                    println!("Tapid {} is already up to date", report.version);
+                } else {
+                    println!("Upgraded Tapid to {}", report.version);
+                }
             }
             ExitCode::SUCCESS
         }

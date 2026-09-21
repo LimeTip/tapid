@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "tapid"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -1433,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-release-client"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "ed25519-dalek",
  "serde",

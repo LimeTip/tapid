@@ -15,90 +15,6 @@ const DEFAULT_STABLE_ENDPOINTS: [&str; 2] = [
     "https://tapid.dev/stable.json",
     "https://github.com/LimeTip/tapid/releases/latest/download/stable.json",
 ];
-const DEFAULT_REPOSITORY: &str = "LimeTip/tapid";
-const MAX_RELEASE_API_BYTES: usize = 256 * 1024;
-
-fn parse_release_checksum(bytes: &[u8], archive_name: &str) -> Result<String, String> {
-    let text = std::str::from_utf8(bytes).map_err(|_| "checksum file is not UTF-8".to_owned())?;
-    let mut found = None;
-    for line in text.lines() {
-        let mut fields = line.splitn(2, "  ");
-        let Some(hash) = fields.next() else { continue };
-        let Some(name) = fields.next() else { continue };
-        if name == archive_name {
-            if found.is_some() {
-                return Err(format!(
-                    "checksum file contains multiple entries for {archive_name}"
-                ));
-            }
-            if hash.len() != 64
-                || !hash
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-            {
-                return Err(format!("checksum for {archive_name} is invalid"));
-            }
-            found = Some(hash.to_owned());
-        }
-    }
-    found.ok_or_else(|| format!("checksum file does not contain {archive_name}"))
-}
-
-fn fetch_latest_github_release<F: Fetcher>(
-    fetcher: &mut F,
-    target: &str,
-) -> Result<(String, String, Vec<u8>), ReleaseError> {
-    let api_url = format!("https://api.github.com/repos/{DEFAULT_REPOSITORY}/releases/latest");
-    let bytes = fetcher
-        .fetch_with_limit(&api_url, MAX_RELEASE_API_BYTES)
-        .map_err(ReleaseError::Fetch)?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| ReleaseError::Fetch(format!("invalid GitHub release metadata: {e}")))?;
-    let tag = value
-        .get("tag_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let version = tag.strip_prefix('v').unwrap_or(tag);
-    if !version.starts_with("0.") || version.split('.').count() != 3 {
-        return Err(ReleaseError::Fetch(
-            "GitHub release has an invalid stable version".into(),
-        ));
-    }
-    let archive_name = format!("tapid-{version}-{target}.tar.gz");
-    let assets = value
-        .get("assets")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| ReleaseError::Fetch("GitHub release metadata has no assets".into()))?;
-    let asset_url = assets
-        .iter()
-        .find_map(|asset| {
-            (asset.get("name").and_then(|v| v.as_str()) == Some(archive_name.as_str()))
-                .then(|| asset.get("browser_download_url").and_then(|v| v.as_str()))
-                .flatten()
-        })
-        .ok_or_else(|| ReleaseError::TargetNotFound(target.into()))?;
-    let checksum_url = assets
-        .iter()
-        .find_map(|asset| {
-            (asset.get("name").and_then(|v| v.as_str()) == Some("SHA256SUMS"))
-                .then(|| asset.get("browser_download_url").and_then(|v| v.as_str()))
-                .flatten()
-        })
-        .ok_or_else(|| ReleaseError::Fetch("GitHub release has no SHA256SUMS asset".into()))?;
-    let checksums = fetcher
-        .fetch_with_limit(checksum_url, MAX_RELEASE_API_BYTES)
-        .map_err(ReleaseError::Fetch)?;
-    let expected =
-        parse_release_checksum(&checksums, &archive_name).map_err(ReleaseError::Fetch)?;
-    let artifact = fetcher
-        .fetch_with_limit(asset_url, crate::filesystem::atomic::MAX_ARTIFACT_BYTES)
-        .map_err(ReleaseError::Fetch)?;
-    let actual = format!("{:x}", Sha256::digest(&artifact));
-    if actual != expected {
-        return Err(ReleaseError::ArtifactDigestMismatch);
-    }
-    Ok((version.to_owned(), archive_name, artifact))
-}
 
 fn stable_discovery_endpoints(endpoint_args: &[String], env_value: Option<&str>) -> Vec<String> {
     if !endpoint_args.is_empty() {
@@ -123,42 +39,33 @@ fn stable_discovery_endpoints(endpoint_args: &[String], env_value: Option<&str>)
 
 pub(crate) fn run(
     endpoint_args: &[String],
+    release_url_arg: Option<&str>,
     keyring_arg: Option<&Path>,
     destination_arg: Option<&Path>,
     dry_run: bool,
 ) -> Result<UpgradeReport, String> {
-    let keyring = match keyring_arg
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TAPID_RELEASE_KEYRING").map(PathBuf::from))
-    {
-        Some(keyring_path) => {
-            let keyring_bytes = match fs::read(&keyring_path) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    return Err(format!(
-                        "cannot read trusted release keyring '{}': {error}",
-                        keyring_path.display()
-                    ));
-                }
-            };
-            match KeyRing::from_embedded_json(&keyring_bytes) {
-                Ok(value) => value,
-                Err(error) => return Err(format!("invalid trusted release keyring: {error}")),
-            }
-        }
-        None => match KeyRing::production() {
-            Ok(value) => value,
-            Err(error) => {
-                return Err(format!(
-                    "embedded production release keyring is invalid: {error}"
-                ));
-            }
-        },
+    let env_endpoints = std::env::var("TAPID_STABLE_ENDPOINTS").ok();
+    let explicitly_configured_endpoints = !endpoint_args.is_empty()
+        || env_endpoints
+            .as_deref()
+            .is_some_and(|value| value.split(',').any(|endpoint| !endpoint.trim().is_empty()));
+    let release_url = release_url_arg
+        .map(str::to_owned)
+        .or_else(|| std::env::var("TAPID_RELEASE_RECORD_URL").ok());
+    let endpoints = if release_url.is_some() && !explicitly_configured_endpoints {
+        Vec::new()
+    } else {
+        stable_discovery_endpoints(endpoint_args, env_endpoints.as_deref())
     };
-    let endpoints = stable_discovery_endpoints(
-        endpoint_args,
-        std::env::var("TAPID_STABLE_ENDPOINTS").ok().as_deref(),
-    );
+    let keyring_path = keyring_arg
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TAPID_RELEASE_KEYRING").map(PathBuf::from));
+    if !endpoints.is_empty() && release_url.is_some() {
+        return Err("choose either a release record URL or legacy signed endpoints".into());
+    }
+    if endpoints.is_empty() && keyring_path.is_some() {
+        return Err("a release keyring requires explicit legacy signed endpoints".into());
+    }
     let destination = match destination_arg {
         Some(path) => path.to_owned(),
         None => match std::env::current_exe() {
@@ -170,49 +77,91 @@ pub(crate) fn run(
     let target = release::release_target();
     let mut fetcher = release::CurlFetcher;
 
-    let downloaded = download_release(&mut fetcher, &endpoints, &keyring, target, &destination)?;
-    let (manifest_version, artifact_name, bytes, signature_verified, verification_known) =
-        downloaded;
+    let DownloadedRelease {
+        version: manifest_version,
+        artifact_name,
+        bytes,
+        signature_verified,
+        verification_known,
+        recovered,
+    } = if endpoints.is_empty() {
+        download_record_release(
+            &mut fetcher,
+            release_url
+                .as_deref()
+                .unwrap_or(super::release_record::DEFAULT_URL),
+            target,
+            &destination,
+        )?
+    } else {
+        let keyring = match keyring_path {
+            Some(path) => KeyRing::from_embedded_json(&fs::read(&path).map_err(|error| {
+                format!(
+                    "cannot read trusted release keyring '{}': {error}",
+                    path.display()
+                )
+            })?)
+            .map_err(|error| format!("invalid trusted release keyring: {error}"))?,
+            None => KeyRing::production()
+                .map_err(|error| format!("invalid embedded keyring: {error}"))?,
+        };
+        download_release(&mut fetcher, &endpoints, &keyring, target, &destination)?
+    };
+    // Fresh installs have no recovery state yet. The running binary is still a
+    // version floor when replacing itself, including an explicit self destination.
+    let current_executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    if fs::canonicalize(&destination).ok() == fs::canonicalize(&current_executable).ok() {
+        let running: tapid_core::PackageVersion = env!("CARGO_PKG_VERSION")
+            .parse()
+            .map_err(|error| format!("invalid running version: {error}"))?;
+        let selected: tapid_core::PackageVersion = manifest_version
+            .parse()
+            .map_err(|error| format!("invalid release version: {error}"))?;
+        if selected < running {
+            return Err(format!(
+                "refusing to downgrade running Tapid {running} to {selected}"
+            ));
+        }
+    }
     let digest = format!("{:x}", Sha256::digest(&bytes));
     let state_path = release_state_path(&destination);
-    let pending_state = if state_path.exists() {
-        let previous = read_release_state(&state_path)
-            .map_err(|error| format!("cannot read release state: {error}"))?;
-        let mut state = accept_release(
-            &previous,
+    let previous_state = if state_path.exists() {
+        Some(
+            read_release_state(&state_path)
+                .map_err(|error| format!("cannot read release state: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let mut state = match &previous_state {
+        Some(previous) => accept_release(
+            previous,
             &manifest_version,
             previous.release_sequence.saturating_add(1),
             digest.clone(),
-        )
-        .map_err(|error| format!("cannot accept verified release state: {error}"))?;
-        state.verification = if verification_known {
-            if signature_verified {
-                "signature"
-            } else {
-                "checksum"
-            }
-        } else {
-            "unknown"
-        }
-        .into();
-        Some((state_path, state, digest))
+        ),
+        None => ReleaseState::new(&manifest_version, 1, digest.clone()),
+    }
+    .map_err(|error| format!("cannot accept verified release state: {error}"))?;
+    state.verification = if !verification_known {
+        "unknown"
+    } else if signature_verified {
+        "signature"
     } else {
-        let mut state = ReleaseState::new(&manifest_version, 1, digest.clone())
-            .map_err(|error| format!("cannot create release state: {error}"))?;
-        state.verification = if verification_known {
-            if signature_verified {
-                "signature"
-            } else {
-                "checksum"
-            }
-        } else {
-            "unknown"
-        }
-        .into();
-        Some((state_path, state, digest))
-    };
+        "checksum"
+    }
+    .into();
+    let state_changed = previous_state.as_ref().is_none_or(|previous| {
+        previous.last_known_good != state.last_known_good
+            || previous.release_floor != state.release_floor
+            || previous.verification != state.verification
+    });
+    let pending_state = Some((state_path, state, digest));
 
     let executable = crate::filesystem::atomic::materialize_artifact(&artifact_name, &bytes)?;
+    let already_current = fs::read(&destination)
+        .map_err(|error| format!("cannot read installed executable: {error}"))?
+        == executable;
     if dry_run {
         return Ok(UpgradeReport {
             version: manifest_version,
@@ -221,6 +170,30 @@ pub(crate) fn run(
             dry_run: true,
             signature_verified,
             verification_known,
+            already_current,
+            recovered,
+        });
+    }
+    if already_current {
+        // A separate installer may have replaced the binary since the last
+        // upgrade. Refresh its recovery state without replacing matching bytes.
+        if let Some((state_path, state, digest)) = pending_state {
+            if state_changed {
+                persist_activated_release(&destination, &state_path, &state, &digest, &bytes)?;
+            } else {
+                // Repair a missing cache while preserving the repeated-check state.
+                write_cached_artifact(&destination, &digest, &bytes)?;
+            }
+        }
+        return Ok(UpgradeReport {
+            version: manifest_version,
+            target: target.to_owned(),
+            destination,
+            dry_run: false,
+            signature_verified,
+            verification_known,
+            already_current,
+            recovered,
         });
     }
     match activate_and_persist(
@@ -237,9 +210,75 @@ pub(crate) fn run(
             dry_run: false,
             signature_verified,
             verification_known,
+            already_current,
+            recovered,
         }),
         Err(error) => Err(error),
     }
+}
+
+#[derive(Debug)]
+struct DownloadedRelease {
+    version: String,
+    artifact_name: String,
+    bytes: Vec<u8>,
+    signature_verified: bool,
+    verification_known: bool,
+    recovered: bool,
+}
+
+fn download_record_release<F: Fetcher>(
+    fetcher: &mut F,
+    url: &str,
+    target: &str,
+    destination: &Path,
+) -> Result<DownloadedRelease, String> {
+    if !super::release_record::https_url(url) {
+        return Err(
+            "release record URL must be HTTPS without credentials, query, or fragment".into(),
+        );
+    }
+    let body = match fetcher.fetch_metadata_with_limit(url, super::release_record::MAX_BYTES) {
+        Ok(body) => body,
+        Err(ReleaseError::Fetch(error)) => {
+            let (version, artifact_name, bytes, signature_verified, verification_known) =
+                recover_last_known_good(destination, target).map_err(|recovery| {
+                    format!("release discovery unavailable ({error}); recovery failed: {recovery}")
+                })?;
+            return Ok(DownloadedRelease {
+                version,
+                artifact_name,
+                bytes,
+                signature_verified,
+                verification_known,
+                recovered: true,
+            });
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let record = super::release_record::parse(&body, target).map_err(|error| error.to_string())?;
+    // A rejected record or download must never become a successful cached upgrade.
+    let bytes = fetcher
+        .fetch_with_limit(&record.url, record.size)
+        .map_err(|error| format!("cannot download release artifact: {error}"))?;
+    if bytes.len() != record.size {
+        return Err(ReleaseError::ArtifactSizeMismatch {
+            expected: record.size as u64,
+            actual: bytes.len() as u64,
+        }
+        .to_string());
+    }
+    if format!("{:x}", Sha256::digest(&bytes)) != record.sha256 {
+        return Err(ReleaseError::ArtifactDigestMismatch.to_string());
+    }
+    Ok(DownloadedRelease {
+        version: record.version,
+        artifact_name: record.name,
+        bytes,
+        signature_verified: false,
+        verification_known: true,
+        recovered: false,
+    })
 }
 
 /// Select signed discovery, outage fallback, or recovery without masking validation errors.
@@ -249,8 +288,9 @@ fn download_release<F: Fetcher>(
     keyring: &KeyRing,
     target: &str,
     destination: &Path,
-) -> Result<(String, String, Vec<u8>, bool, bool), String> {
-    Ok(
+) -> Result<DownloadedRelease, String> {
+    let mut recovered = false;
+    let (version, artifact_name, bytes, signature_verified, verification_known) =
         match fetch_verified_release(fetcher, endpoints, keyring, target) {
             Ok(value) => {
                 let name = value
@@ -260,28 +300,12 @@ fn download_release<F: Fetcher>(
                     .unwrap_or_default();
                 (value.0.version, name, value.1, true, true)
             }
-            Err(ReleaseError::AllEndpointsFailed { .. })
-                if endpoints
-                    == DEFAULT_STABLE_ENDPOINTS
-                        .iter()
-                        .map(|endpoint| (*endpoint).to_owned())
-                        .collect::<Vec<_>>() =>
-            {
-                match fetch_latest_github_release(fetcher, target) {
-                    Ok(value) => (value.0, value.1, value.2, false, true),
-                    Err(fallback) => match recover_last_known_good(destination, target) {
-                        Ok(value) => value,
-                        Err(recovery) => {
-                            return Err(format!(
-                                "stable discovery unavailable, GitHub release fallback failed ({fallback}), and recovery failed: {recovery}"
-                            ));
-                        }
-                    },
-                }
-            }
             Err(ReleaseError::AllEndpointsFailed { .. }) => {
                 match recover_last_known_good(destination, target) {
-                    Ok(value) => value,
+                    Ok(value) => {
+                        recovered = true;
+                        value
+                    }
                     Err(recovery) => {
                         return Err(format!(
                             "stable discovery unavailable and recovery failed: {recovery}"
@@ -290,8 +314,15 @@ fn download_release<F: Fetcher>(
                 }
             }
             Err(error) => return Err(error.to_string()),
-        },
-    )
+        };
+    Ok(DownloadedRelease {
+        version,
+        artifact_name,
+        bytes,
+        signature_verified,
+        verification_known,
+        recovered,
+    })
 }
 
 pub(crate) struct UpgradeReport {
@@ -301,6 +332,8 @@ pub(crate) struct UpgradeReport {
     pub(crate) dry_run: bool,
     pub(crate) signature_verified: bool,
     pub(crate) verification_known: bool,
+    pub(crate) already_current: bool,
+    pub(crate) recovered: bool,
 }
 
 #[allow(clippy::collapsible_if)]
@@ -519,10 +552,7 @@ fn fetch_verified_release<F: Fetcher>(
 
 #[cfg(test)]
 mod upgrade_tests {
-    use super::{
-        DEFAULT_STABLE_ENDPOINTS, parse_release_checksum, persist_activated_release,
-        stable_discovery_endpoints,
-    };
+    use super::{persist_activated_release, stable_discovery_endpoints};
     use crate::filesystem::atomic::materialize_artifact;
     use sha2::Digest;
     use std::{
@@ -620,7 +650,7 @@ mod upgrade_tests {
             let mut fetcher = DiscoveryFetcher {
                 responses: [
                     (
-                        DEFAULT_STABLE_ENDPOINTS[1].into(),
+                        "https://example.test/stable.json".into(),
                         if invalid_index {
                             b"invalid JSON".to_vec()
                         } else {
@@ -636,7 +666,7 @@ mod upgrade_tests {
             };
             let result = super::download_release(
                 &mut fetcher,
-                &stable_discovery_endpoints(&[], None),
+                &["https://example.test/stable.json".into()],
                 &super::KeyRing::new(),
                 "test-target",
                 &destination,
@@ -655,54 +685,6 @@ mod upgrade_tests {
             );
         }
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn discovery_outage_retains_default_github_checksum_fallback() {
-        let root = temp("github-outage-fallback");
-        let bytes = b"downloaded artifact";
-        let digest = format!("{:x}", sha2::Sha256::digest(bytes));
-        let name = "tapid-0.0.10-test-target.tar.gz";
-        let mut fetcher = DiscoveryFetcher {
-            responses: [
-                ("https://api.github.com/repos/LimeTip/tapid/releases/latest".into(), serde_json::to_vec(&serde_json::json!({
-                    "tag_name": "v0.0.10", "assets": [
-                        {"name": name, "browser_download_url": "https://example.test/artifact"},
-                        {"name": "SHA256SUMS", "browser_download_url": "https://example.test/checksums"}
-                    ]
-                })).unwrap()),
-                ("https://example.test/checksums".into(), format!("{digest}  {name}\n").into_bytes()),
-                ("https://example.test/artifact".into(), bytes.to_vec()),
-            ].into_iter().collect(),
-            calls: vec![],
-        };
-        let result = super::download_release(
-            &mut fetcher,
-            &stable_discovery_endpoints(&[], None),
-            &super::KeyRing::new(),
-            "test-target",
-            &root.join("tapid"),
-        )
-        .unwrap();
-        assert_eq!(
-            result,
-            ("0.0.10".into(), name.into(), bytes.to_vec(), false, true)
-        );
-        assert_eq!(&fetcher.calls[..2], &DEFAULT_STABLE_ENDPOINTS);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn parses_live_github_release_checksum_for_exact_archive() {
-        let checksums = "e3b9810f0e4c2a41638dc95edfb1566a03919378f722287b09c0b9d47d5a2dd0  tapid-0.0.9-aarch64-apple-darwin.tar.gz\n";
-        assert_eq!(
-            parse_release_checksum(
-                checksums.as_bytes(),
-                "tapid-0.0.9-aarch64-apple-darwin.tar.gz"
-            )
-            .unwrap(),
-            "e3b9810f0e4c2a41638dc95edfb1566a03919378f722287b09c0b9d47d5a2dd0"
-        );
     }
 
     fn temp(label: &str) -> std::path::PathBuf {
@@ -889,9 +871,14 @@ mod upgrade_tests {
     }
 
     #[test]
-    fn default_stable_endpoints_are_ordered_with_tapid_dev_first() {
-        let endpoints = stable_discovery_endpoints(&[], None);
-        assert_eq!(endpoints, DEFAULT_STABLE_ENDPOINTS);
+    fn signed_discovery_is_the_default() {
+        assert_eq!(
+            stable_discovery_endpoints(&[], None),
+            vec![
+                "https://tapid.dev/stable.json".to_owned(),
+                "https://github.com/LimeTip/tapid/releases/latest/download/stable.json".to_owned(),
+            ]
+        );
     }
 
     #[test]
@@ -910,7 +897,10 @@ mod upgrade_tests {
         );
         assert_eq!(
             stable_discovery_endpoints(&[], Some(" , ")),
-            DEFAULT_STABLE_ENDPOINTS
+            vec![
+                "https://tapid.dev/stable.json".to_owned(),
+                "https://github.com/LimeTip/tapid/releases/latest/download/stable.json".to_owned(),
+            ]
         );
     }
 
