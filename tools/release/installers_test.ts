@@ -114,9 +114,10 @@ test("Unix installer rejects malformed records without fallback or replacing an 
       await rejects(() => f.installShell());
       equal(await readFile(join(f.install, "tapid"), "utf8"), "preserve installed binary");
     }
-    equal((await f.requests()).trim().split("\n").length, malformed.length);
-    const requestHosts = (await f.requests()).trim().split("\n").map(url => new URL(url).hostname);
-    ok(!requestHosts.includes("github.com"));
+    equal(
+      await f.requests(),
+      "https://tapid.dev/releases/v1/latest.tsv\n".repeat(malformed.length),
+    );
   } finally { await f.cleanup(); }
 });
 
