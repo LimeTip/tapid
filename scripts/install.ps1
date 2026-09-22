@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$MAX_RECORD_BYTES = 256KB
 $MAX_CHECKSUM_BYTES = 1MB
 $MAX_ARCHIVE_BYTES = 512MB
 $MAX_BINARY_BYTES = 512MB
@@ -68,6 +69,54 @@ function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
     }
     if ($downloadError) { throw $downloadError }
     if ($cleanupError) { throw $cleanupError }
+}
+
+function Test-ReleaseVersion([string]$Value) {
+    if ($Value -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z') { return $false }
+    foreach ($part in $Value.Split('.')) {
+        if ($part.Length -gt 20 -or ($part.Length -eq 20 -and [string]::CompareOrdinal($part, '18446744073709551615') -gt 0)) { return $false }
+    }
+    return $true
+}
+
+function Assert-ReleaseHttpsUrl([string]$Url) {
+    if ($Url -cnotmatch '^https://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(/.*)?\z' -or $Url -match '[^\x21-\x7e]|[@?#\\]') {
+        Fail "release record URL must be a safe HTTPS URL"
+    }
+}
+
+function Read-ReleaseRecord([string]$Path, [string]$RequestedVersion, [string]$Target) {
+    if ((Get-Item -LiteralPath $Path).Length -gt $MAX_RECORD_BYTES) { Fail "release record exceeds the size limit" }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -eq 0 -or $bytes[-1] -ne 10) { Fail "release record must end with a newline" }
+    foreach ($byte in $bytes) {
+        if ($byte -gt 126 -or ($byte -lt 32 -and $byte -ne 9 -and $byte -ne 10)) { Fail "release record must contain ASCII fields and LF lines" }
+    }
+    $lines = [Text.Encoding]::ASCII.GetString($bytes).Split([char]10)
+    if ($lines[-1] -eq '') { $lines = $lines[0..($lines.Length - 2)] }
+    $header = $lines[0].Split([char]9)
+    if ($header.Length -ne 2 -or $header[0] -cne 'tapid-release-v1' -or -not (Test-ReleaseVersion $header[1])) {
+        Fail "invalid release record header"
+    }
+    $recordVersion = $header[1]
+    if ($RequestedVersion -ne 'latest' -and $RequestedVersion -cne $recordVersion) { Fail "release record version does not match requested version" }
+    $targets = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $selected = $null
+    for ($index = 1; $index -lt $lines.Length; $index++) {
+        $fields = $lines[$index].Split([char]9)
+        if ($fields.Length -ne 5 -or $fields[0] -cnotmatch '^[A-Za-z0-9_-]+\z') { Fail "invalid release record artifact" }
+        if (-not $targets.Add($fields[0]) -or -not $names.Add($fields[1])) { Fail "duplicate release record artifact" }
+        if ($fields[1] -cne "tapid-$recordVersion-$($fields[0]).tar.gz") { Fail "invalid release record archive name" }
+        if ($fields[2] -cnotmatch '^[1-9][0-9]{0,8}\z' -or [long]$fields[2] -gt $MAX_ARCHIVE_BYTES) { Fail "invalid release record archive size" }
+        if ($fields[3] -cnotmatch '^[0-9a-f]{64}\z') { Fail "invalid release record checksum" }
+        Assert-ReleaseHttpsUrl $fields[4]
+        if ($fields[0] -ceq $Target) {
+            $selected = [pscustomobject]@{ Version = $recordVersion; Archive = $fields[1]; Size = [long]$fields[2]; Sha256 = $fields[3]; Url = $fields[4] }
+        }
+    }
+    if (-not $selected) { Fail "release record is missing this platform" }
+    return $selected
 }
 
 function Test-AbsolutePath([string]$Path) {
@@ -155,25 +204,14 @@ if (-not [string]::IsNullOrEmpty($SourceRef)) {
     }
 }
 
-$ReleaseBaseUrl = if ($env:TAPID_RELEASE_BASE_URL) { $env:TAPID_RELEASE_BASE_URL.TrimEnd('/') } else { "https://github.com/$Repo/releases/download" }
-$ReleaseDiscoveryUrl = if ($env:TAPID_RELEASE_DISCOVERY_URL) { $env:TAPID_RELEASE_DISCOVERY_URL } else { "https://github.com/$Repo/releases/latest" }
-if ($ReleaseBaseUrl -notmatch '^https://') { Fail "stable release base URL must use HTTPS" }
-if ($ReleaseDiscoveryUrl -notmatch '^https://') { Fail "stable release discovery URL must use HTTPS" }
-if ($Version -eq "latest") {
-    try {
-        $discovery = Invoke-WebRequest -Method Head -UseBasicParsing -MaximumRedirection 10 $ReleaseDiscoveryUrl
-    } catch { Fail "could not contact the stable release discovery endpoint" }
-    $resolvedUri = $discovery.BaseResponse.ResponseUri
-    if (-not $resolvedUri -and $discovery.BaseResponse.RequestMessage) {
-        $resolvedUri = $discovery.BaseResponse.RequestMessage.RequestUri
-    }
-    if (-not $resolvedUri) { Fail "stable release discovery endpoint did not expose its final URL" }
-    $resolvedPath = $resolvedUri.AbsolutePath
-    if ($resolvedPath -notmatch '/releases/tag/(v?[0-9]+\.[0-9]+\.[0-9]+)\z') { Fail "stable release discovery endpoint did not resolve a release tag" }
-    $Version = $Matches[1]
+$legacyRelease = $PSBoundParameters.ContainsKey('Repo') -or $env:TAPID_RELEASE_BASE_URL -or $env:TAPID_RELEASE_DISCOVERY_URL
+if ($Version -ne 'latest') {
+    if (-not (Test-ReleaseVersion ($Version -creplace '^v', ''))) { Fail "version must be a stable release such as v0.1.0" }
+    $Version = $Version -creplace '^v', ''
+    # These versions predate release records. Request failures never select this path.
+    if (-not $env:TAPID_RELEASE_RECORD_URL -and $Version -match '^0\.0\.([0-9]|10)\z') { $legacyRelease = $true }
 }
-if ($Version -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+\z') { Fail "version must be a stable release such as v0.1.0" }
-if (-not $Version.StartsWith("v")) { $Version = "v$Version" }
+if ($env:TAPID_RELEASE_RECORD_URL -and $legacyRelease) { Fail "release record URL cannot be combined with legacy release overrides" }
 
 $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 $target = switch ($architecture) {
@@ -183,26 +221,59 @@ $target = switch ($architecture) {
 }
 if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) { Fail "tar.exe is required for Windows release installation" }
 
-$versionWithoutV = $Version.Substring(1)
-$archive = "tapid-$versionWithoutV-$target.tar.gz"
-$base = "$ReleaseBaseUrl/$Version"
+$expectedSize = $null
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("tapid-install-" + [guid]::NewGuid().ToString("N"))
-$archivePath = Join-Path $tempRoot $archive
 $checksumsPath = Join-Path $tempRoot "SHA256SUMS"
 $extractRoot = Join-Path $tempRoot "extracted"
 $staged = Join-Path $InstallDir (".tapid.tmp." + [guid]::NewGuid().ToString("N") + ".exe")
 $stagedMarker = Join-Path $InstallDir (".tapid-marker.tmp." + [guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
-    Save-BoundedHttpsFile "$base/SHA256SUMS" $checksumsPath $MAX_CHECKSUM_BYTES
-    if ((Get-Item -LiteralPath $checksumsPath).Length -gt $MAX_CHECKSUM_BYTES) { Fail "SHA256SUMS exceeds the size limit" }
-    $pattern = '^([0-9a-fA-F]{64})\s{2}' + [regex]::Escape($archive) + '$'
-    $matches = @(Get-Content -LiteralPath $checksumsPath | Where-Object { $_ -match $pattern })
-    if ($matches.Count -ne 1) { Fail "SHA256SUMS does not contain exactly one checksum for $archive" }
-    $null = $matches[0] -match $pattern
-    $expected = $Matches[1].ToLowerInvariant()
-    Save-BoundedHttpsFile "$base/$archive" $archivePath $MAX_ARCHIVE_BYTES
-    if ((Get-Item -LiteralPath $archivePath).Length -gt $MAX_ARCHIVE_BYTES) { Fail "release archive exceeds the size limit" }
+    if ($legacyRelease) {
+        $ReleaseBaseUrl = if ($env:TAPID_RELEASE_BASE_URL) { $env:TAPID_RELEASE_BASE_URL.TrimEnd('/') } else { "https://github.com/$Repo/releases/download" }
+        $ReleaseDiscoveryUrl = if ($env:TAPID_RELEASE_DISCOVERY_URL) { $env:TAPID_RELEASE_DISCOVERY_URL } else { "https://github.com/$Repo/releases/latest" }
+        if ($ReleaseBaseUrl -notmatch '^https://') { Fail "stable release base URL must use HTTPS" }
+        if ($ReleaseDiscoveryUrl -notmatch '^https://') { Fail "stable release discovery URL must use HTTPS" }
+        if ($Version -eq 'latest') {
+            try {
+                $discovery = Invoke-WebRequest -Method Head -UseBasicParsing -MaximumRedirection 10 $ReleaseDiscoveryUrl
+            } catch { Fail "could not contact the stable release discovery endpoint" }
+            $resolvedUri = $discovery.BaseResponse.ResponseUri
+            if (-not $resolvedUri -and $discovery.BaseResponse.RequestMessage) {
+                $resolvedUri = $discovery.BaseResponse.RequestMessage.RequestUri
+            }
+            if (-not $resolvedUri) { Fail "stable release discovery endpoint did not expose its final URL" }
+            if ($resolvedUri.AbsolutePath -cnotmatch '/releases/tag/(v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))\z') { Fail "stable release discovery endpoint did not resolve a release tag" }
+            $Version = $Matches[1] -creplace '^v', ''
+            if (-not (Test-ReleaseVersion $Version)) { Fail "version must be a stable release such as v0.1.0" }
+        }
+        $archive = "tapid-$Version-$target.tar.gz"
+        $base = "$ReleaseBaseUrl/v$Version"
+        Save-BoundedHttpsFile "$base/SHA256SUMS" $checksumsPath $MAX_CHECKSUM_BYTES
+        if ((Get-Item -LiteralPath $checksumsPath).Length -gt $MAX_CHECKSUM_BYTES) { Fail "SHA256SUMS exceeds the size limit" }
+        $pattern = '^([0-9a-fA-F]{64})\s{2}' + [regex]::Escape($archive) + '$'
+        $checksumLines = @(Get-Content -LiteralPath $checksumsPath | Where-Object { $_ -match $pattern })
+        if ($checksumLines.Count -ne 1) { Fail "SHA256SUMS does not contain exactly one checksum for $archive" }
+        $null = $checksumLines[0] -match $pattern
+        $expected = $Matches[1].ToLowerInvariant()
+        $archiveUrl = "$base/$archive"
+    } else {
+        $recordUrl = if ($env:TAPID_RELEASE_RECORD_URL) { $env:TAPID_RELEASE_RECORD_URL } elseif ($Version -eq 'latest') { 'https://tapid.dev/releases/v1/latest.tsv' } else { "https://tapid.dev/releases/v1/v$Version.tsv" }
+        Assert-ReleaseHttpsUrl $recordUrl
+        $recordPath = Join-Path $tempRoot 'release.tsv'
+        Save-BoundedHttpsFile $recordUrl $recordPath $MAX_RECORD_BYTES
+        $record = Read-ReleaseRecord $recordPath $Version $target
+        $Version = $record.Version
+        $archive = $record.Archive
+        $expected = $record.Sha256
+        $expectedSize = $record.Size
+        $archiveUrl = $record.Url
+    }
+    $archivePath = Join-Path $tempRoot $archive
+    Save-BoundedHttpsFile $archiveUrl $archivePath $MAX_ARCHIVE_BYTES
+    $actualSize = (Get-Item -LiteralPath $archivePath).Length
+    if ($actualSize -gt $MAX_ARCHIVE_BYTES) { Fail "release archive exceeds the size limit" }
+    if ($null -ne $expectedSize -and $actualSize -ne $expectedSize) { Fail "release archive size does not match release record" }
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
     if ($actual -ne $expected) { Fail "checksum verification failed for $archive" }
     $members = @(& tar.exe -tzf $archivePath)
@@ -225,7 +296,7 @@ try {
     } catch {
         Write-Warning "Tapid was installed, but the user PATH could not be updated: $($_.Exception.Message)"
     }
-    Write-Output "Installed Tapid $Version into $destination"
+    Write-Output "Installed Tapid v$Version into $destination"
     Print-PathGuidance
 } finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

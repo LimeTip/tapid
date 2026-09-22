@@ -27,7 +27,7 @@
       "file": "docs/examples/upgrade.sh",
       "platforms": ["linux", "darwin"],
       "lanes": ["source", "published"],
-      "release_expectations": {"v0.0.9": {"skip": "v0.0.9 has no upgrade subcommand; reinstall instead."}, "v0.0.10": {"exit_code": 0}},
+      "release_expectations": {"v0.0.9": {"skip": "v0.0.9 has no upgrade subcommand; reinstall instead."}, "v0.0.10": {"exit_code": 0}, "v0.0.11": {"exit_code": 0}},
       "network": true,
       "prerequisites": ["managed-installation", "public-release-access", "explicit-target-digest-and-version"],
       "assertions": ["upgrade-provenance"],
@@ -38,7 +38,7 @@
       "file": "docs/examples/upgrade-help.sh",
       "platforms": ["linux", "darwin"],
       "lanes": ["source", "published"],
-      "release_expectations": {"v0.0.9": {"exit_code": 2, "output_contains": "unrecognized subcommand 'upgrade'"}, "v0.0.10": {"exit_code": 0}},
+      "release_expectations": {"v0.0.9": {"exit_code": 2, "output_contains": "unrecognized subcommand 'upgrade'"}, "v0.0.10": {"exit_code": 0}, "v0.0.11": {"exit_code": 0}},
       "network": false,
       "prerequisites": ["installed-tapid"],
       "assertions": [],
@@ -57,10 +57,10 @@
       "id": "self-upgrade",
       "source_status": "implemented",
       "first_supported_release": "v0.0.10",
-      "expected_releases": ["v0.0.10"],
+      "expected_releases": ["v0.0.10", "v0.0.11"],
       "verified_releases": [],
       "examples": ["upgrade", "upgrade-help"],
-      "boundaries": ["v0.0.9 has no upgrade subcommand; reinstall via the documented installer.", "v0.0.10 is an expected Unix capability, not yet verified published execution; unknown source tags require review.", "Same-release replacement is not previous-version upgrade evidence; Windows upgrade is not covered.", "Checksum-only fallback must not be described as signature verification."]
+      "boundaries": ["v0.0.9 has no upgrade subcommand; reinstall via the documented installer.", "v0.0.10 and v0.0.11 have reviewed upgrade expectations; published verification remains pending and unknown source tags require review.", "Public smoke separately checks a previous supported release upgrading to latest and a repeat upgrade on Unix and Windows; v0.0.10 cannot assert truthful repeat output.", "Checksum-only fallback must not be described as signature verification."]
     }
   ]
 }
