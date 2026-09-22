@@ -148,6 +148,8 @@ fn validate_platform_context(value: &str, original: &str) -> Result<(), Lockfile
     Ok(())
 }
 
+/// Exact persisted package identity. Parsing requires an already canonical
+/// registry origin; unlike new registry inputs, legacy graph keys are not rekeyed.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LockfilePackageKey {
     pub registry: RegistryOrigin,
@@ -206,6 +208,9 @@ impl std::str::FromStr for LockfilePackageKey {
             peer_context: parse_context(p[2], "peer=", value)?,
             platform_context: parse_context(p[3], "platform=", value)?,
         };
+        if key.registry.as_str() != p[0] {
+            return Err(LockfileError::NonCanonicalRegistryIdentity);
+        }
         validate_peer_context(&key.peer_context, value)?;
         validate_platform_context(&key.platform_context, value)?;
         Ok(key)
@@ -416,6 +421,7 @@ impl Lockfile {
             }
         }
         for (key, package) in &lockfile.packages {
+            key.parse::<LockfilePackageKey>()?;
             package.validate()?;
             if key != &package.key() {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));
@@ -564,9 +570,13 @@ impl LockedPackage {
     }
 
     fn validate(&self) -> Result<(), LockfileError> {
-        self.registry
+        let registry = self
+            .registry
             .parse::<RegistryOrigin>()
             .map_err(LockfileError::Domain)?;
+        if registry.as_str() != self.registry {
+            return Err(LockfileError::NonCanonicalRegistryIdentity);
+        }
         self.name
             .parse::<PackageName>()
             .map_err(LockfileError::Domain)?;

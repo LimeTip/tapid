@@ -58,6 +58,15 @@ The fixture option is for local tests and air-gapped development. It is not a re
 
 Fixture `artifact` paths are resolved relative to the directory containing the registry fixture file, not the project directory or the invoking working directory. Absolute artifact paths remain absolute; `base64:` artifacts are decoded inline. For example, an `artifact` value of `archives/foo.tgz` in `fixtures/registry.json` loads `fixtures/archives/foo.tgz`.
 
+## Legacy registry identities
+
+Locks containing noncanonical persisted registry origins (such as uppercase hosts
+or explicit `:443`) fail closed before activation/store mutation in offline and
+frozen modes. Preserve a separate verified backup of `tapid.lock`, then deliberately
+run online `tapid install` and review changed versions, artifacts and edges. The
+online path replaces the lock after re-resolution, not identity migration. See
+[compatibility and recovery](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#persisted-registry-identity-compatibility).
+
 ## Offline and frozen
 
 ```text

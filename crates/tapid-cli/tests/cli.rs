@@ -585,6 +585,74 @@ fn install_allows_missing_integrity_only_with_explicit_warning() {
 }
 
 #[test]
+fn legacy_registry_replay_rejects_without_mutation() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+    for mode in ["--offline", "--frozen"] {
+        let dir = temp_dir("legacy-registry");
+        let manifest = r#"{"name":"app","version":"1.0.0","dependencies":{"demo":"1.0.0"}}"#;
+        fs::write(dir.join("package.json"), manifest).unwrap();
+        let mut lock = lock_for_manifest(manifest);
+        let package = LockedPackage::new_with_provenance(
+            "https://registry.example.test",
+            "demo",
+            "1.0.0",
+            &format!("sha512-{}==", "A".repeat(86)),
+            &format!("sha256-{}", "b".repeat(64)),
+            RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        let key = package.key();
+        lock.insert_package(package).unwrap();
+        lock.set_roots([key]).unwrap();
+        let old = lock.to_json().unwrap().replace(
+            "https://registry.example.test",
+            "https://REGISTRY.example.test:443",
+        );
+        fs::write(dir.join("tapid.lock"), &old).unwrap();
+        let store = dir.join("store");
+        fs::create_dir(&store).unwrap();
+        fs::write(store.join("sentinel"), "store unchanged").unwrap();
+        fs::create_dir(dir.join("node_modules")).unwrap();
+        fs::write(dir.join("node_modules/sentinel"), "layout unchanged").unwrap();
+        let output = run(
+            &dir,
+            &["install", mode, "--store-dir", store.to_str().unwrap()],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("noncanonical persisted registry identity"),
+            "{error}"
+        );
+        assert!(
+            error.contains("backup") && error.contains("online"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(dir.join("tapid.lock")).unwrap(), old);
+        assert_eq!(
+            fs::read_to_string(dir.join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read_to_string(store.join("sentinel")).unwrap(),
+            "store unchanged"
+        );
+        assert_eq!(fs::read_dir(&store).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/sentinel")).unwrap(),
+            "layout unchanged"
+        );
+        assert_eq!(fs::read_dir(dir.join("node_modules")).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            4,
+            "rejection must not acquire activation state"
+        );
+        cleanup(dir);
+    }
+}
+
+#[test]
 fn install_requires_lockfile_in_offline_and_frozen_modes() {
     for mode in ["offline", "frozen"] {
         let dir = temp_dir(mode);
@@ -696,6 +764,39 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
         "{}",
         String::from_utf8_lossy(&online.stderr)
     );
+    // Exercise the documented explicit recovery using a graph with exact roots
+    // and transitive edges, preserving the incompatible lock independently.
+    let canonical_lock = fs::read_to_string(dir.join("tapid.lock")).unwrap();
+    let legacy_lock = canonical_lock.replace(
+        "https://registry.npmjs.org",
+        "https://REGISTRY.npmjs.org:443",
+    );
+    fs::write(dir.join("tapid.lock"), &legacy_lock).unwrap();
+    fs::copy(dir.join("tapid.lock"), dir.join("tapid.lock.preserved")).unwrap();
+    let rejected = run(&dir, &["install", "--frozen"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("noncanonical persisted registry identity")
+    );
+    let recovered = run(
+        &dir,
+        &["install", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("tapid.lock.preserved")).unwrap(),
+        legacy_lock
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("tapid.lock")).unwrap(),
+        canonical_lock
+    );
+    assert!(run(&dir, &["lock", "verify"]).status.success());
     fs::remove_dir_all(dir.join("node_modules")).unwrap();
 
     let replay = run(&dir, &["install", "--offline", "--frozen"]);
