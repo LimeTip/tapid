@@ -31,6 +31,8 @@ jobs:
       sha: ${{ steps.release.outputs.sha }}
       runner_sha: ${{ steps.release.outputs.runner_sha }}
       latest_tag: ${{ steps.release.outputs.latest_tag }}
+      previous_tag: ${{ steps.release.outputs.previous_tag }}
+      record_aware: ${{ steps.release.outputs.record_aware }}
       unix_matrix: ${{ steps.release.outputs.unix_matrix }}
     steps:
       - id: release
@@ -47,6 +49,20 @@ jobs:
           runner_sha="$(gh api repos/LimeTip/tapid/commits/main --jq .sha)"
           [[ "$runner_sha" =~ ^[a-f0-9]{40}$ ]]
           printf 'latest_tag=%s\nrunner_sha=%s\n' "$latest_tag" "$runner_sha" >> "$GITHUB_OUTPUT"
+          # Bound discovery to the latest 100 releases. Never select 0.0.9, which has no upgrader.
+          gh release list --repo LimeTip/tapid --limit 100 --json tagName,isDraft,isPrerelease > "$RUNNER_TEMP/releases.json"
+          LATEST_TAG="$latest_tag" python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
+          import json, os, re
+          def version(tag):
+              return tuple(map(int, tag[1:].split('.')))
+          latest = version(os.environ['LATEST_TAG'])
+          releases = json.load(open(os.path.join(os.environ['RUNNER_TEMP'], 'releases.json')))
+          candidates = [r['tagName'] for r in releases if not r['isDraft'] and not r['isPrerelease']
+                        and re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', r['tagName'])
+                        and (0, 0, 10) <= version(r['tagName']) < latest]
+          print('previous_tag=' + (max(candidates, key=version) if candidates else ''))
+          print('record_aware=' + str(latest > (0, 0, 10)).lower())
+          PYTHON
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           stable="$(gh api "repos/LimeTip/tapid/releases/tags/$tag" --jq '(.draft == false) and (.prerelease == false)')"
           test "$stable" = true
@@ -153,6 +169,24 @@ jobs:
             ${{ runner.temp }}/install.sh
           retention-days: 30
           if-no-files-found: error
+      - name: Check the public website installer with an explicit version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          LATEST_TAG: ${{ needs.resolve.outputs.latest_tag }}
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL https://tapid.dev/install.sh -o "$RUNNER_TEMP/public-install.sh"
+          shasum -a 256 "$RUNNER_TEMP/public-install.sh" > "$RUNNER_TEMP/public-installer-sha256.txt"
+          # The public script must match latest, even when explicitly testing an older release.
+          latest_installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$LATEST_TAG/scripts/install.sh"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL "$latest_installer_url" -o "$RUNNER_TEMP/latest-tag-install.sh"
+          shasum -a 256 "$RUNNER_TEMP/latest-tag-install.sh" >> "$RUNNER_TEMP/public-installer-sha256.txt"
+          cmp "$RUNNER_TEMP/public-install.sh" "$RUNNER_TEMP/latest-tag-install.sh"
+          env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh \
+            sh "$RUNNER_TEMP/public-install.sh" --version "$RELEASE_TAG" --install-dir "$RUNNER_TEMP/tapid-public"
+          test "$("$RUNNER_TEMP/tapid-public/tapid" --version)" = "tapid ${RELEASE_TAG#v}"
+          cmp "$RUNNER_TEMP/tapid-public/tapid" "$RUNNER_TEMP/tapid/tapid"
       - name: Install latest release through discovery
         shell: bash
         env:
@@ -161,7 +195,7 @@ jobs:
         run: |
           set -euo pipefail
           install_dir="$RUNNER_TEMP/tapid-latest"
-          env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh sh "$RUNNER_TEMP/install.sh" --install-dir "$install_dir"
+          env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh sh "$RUNNER_TEMP/public-install.sh" --install-dir "$install_dir"
           test "$("$install_dir/tapid" --version)" = "tapid ${RELEASE_TAG#v}"
       - name: Run canonical published upgrade
         timeout-minutes: 5
@@ -192,6 +226,49 @@ jobs:
           path: ${{ runner.temp }}/doc-contract-upgrade.json
           retention-days: 30
           if-no-files-found: error
+
+      - name: Check previous-version upgrade and repeat upgrade through the public service
+        timeout-minutes: 5
+        shell: bash
+        env:
+          PREVIOUS_TAG: ${{ needs.resolve.outputs.previous_tag }}
+          LATEST_TAG: ${{ needs.resolve.outputs.latest_tag }}
+          RECORD_AWARE: ${{ needs.resolve.outputs.record_aware }}
+        run: |
+          set -euo pipefail
+          if [ "$RECORD_AWARE" != true ]; then
+            echo 'Skip truthful repeat assertion: releases through 0.0.10 report every reinstall as an upgrade.' | tee "$RUNNER_TEMP/public-upgrade.txt"
+            exit 0
+          fi
+          binary="$RUNNER_TEMP/tapid-latest/tapid"
+          expected_digest="$(shasum -a 256 "$binary" | cut -d ' ' -f 1)"
+          if [ -n "$PREVIOUS_TAG" ]; then
+            env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh \
+              sh "$RUNNER_TEMP/public-install.sh" --version "$PREVIOUS_TAG" --install-dir "$RUNNER_TEMP/tapid-previous"
+            binary="$RUNNER_TEMP/tapid-previous/tapid"
+            test "$("$binary" --version)" = "tapid ${PREVIOUS_TAG#v}"
+            "$binary" upgrade 2>&1 | tee "$RUNNER_TEMP/public-upgrade.txt"
+            test "$("$binary" --version)" = "tapid ${LATEST_TAG#v}"
+            test "$(shasum -a 256 "$binary" | cut -d ' ' -f 1)" = "$expected_digest"
+          else
+            echo 'Skip previous-version transition: no supported earlier release in the latest 100 releases.' | tee "$RUNNER_TEMP/public-upgrade.txt"
+          fi
+          "$binary" upgrade 2>&1 | tee "$RUNNER_TEMP/public-repeat-upgrade.txt"
+          grep -Fx "Tapid ${LATEST_TAG#v} is already up to date" "$RUNNER_TEMP/public-repeat-upgrade.txt"
+          test "$(shasum -a 256 "$binary" | cut -d ' ' -f 1)" = "$expected_digest"
+      - name: Retain public website installer evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: public-installer-${{ runner.os }}
+          path: |
+            ${{ runner.temp }}/public-install.sh
+            ${{ runner.temp }}/latest-tag-install.sh
+            ${{ runner.temp }}/public-installer-sha256.txt
+            ${{ runner.temp }}/public-upgrade.txt
+            ${{ runner.temp }}/public-repeat-upgrade.txt
+          retention-days: 30
+          if-no-files-found: warn
 
   windows:
     name: Windows installer
@@ -291,16 +368,89 @@ jobs:
             ${{ runner.temp }}/install.ps1
           retention-days: 30
           if-no-files-found: error
+      - name: Check the public website installer with an explicit version
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          LATEST_TAG: ${{ needs.resolve.outputs.latest_tag }}
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'public-install.ps1'
+          curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL https://tapid.dev/install.ps1 --output $installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installerDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+          "$installerDigest  public-install.ps1" | Set-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'public-installer-sha256.txt')
+          # Compare against latest, not the selected historical release.
+          $latestInstaller = Join-Path $env:RUNNER_TEMP 'latest-tag-install.ps1'
+          $latestInstallerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:LATEST_TAG/scripts/install.ps1"
+          curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL $latestInstallerUrl --output $latestInstaller
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $latestInstallerDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $latestInstaller).Hash.ToLowerInvariant()
+          "$latestInstallerDigest  latest-tag-install.ps1" | Add-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'public-installer-sha256.txt')
+          if ($installerDigest -cne $latestInstallerDigest) { throw 'Public installer differs from latest tagged installer' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'tapid-public'
+          & $installer -Version $env:RELEASE_TAG -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $installDir 'tapid.exe'
+          if ((& $binary --version) -cne ('tapid ' + $env:RELEASE_TAG.Substring(1))) { throw 'Unexpected public installation version' }
+          $tagged = Join-Path $env:RUNNER_TEMP 'tapid/tapid.exe'
+          if ((Get-FileHash $binary).Hash -cne (Get-FileHash $tagged).Hash) { throw 'Public and tagged installer outputs differ' }
       - name: Install latest release through discovery
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.latest_tag }}
           RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
-          $installer = Join-Path $env:RUNNER_TEMP 'install.ps1'
+          $installer = Join-Path $env:RUNNER_TEMP 'public-install.ps1'
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid-latest'
           & $installer -InstallDir $installDir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $actual = & (Join-Path $installDir 'tapid.exe') --version
           $expected = "tapid " + $env:RELEASE_TAG.TrimStart('v')
           if ($actual -ne $expected) { throw "Expected '$expected', got '$actual'" }
+      - name: Check previous-version upgrade and repeat upgrade through the public service
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          PREVIOUS_TAG: ${{ needs.resolve.outputs.previous_tag }}
+          LATEST_TAG: ${{ needs.resolve.outputs.latest_tag }}
+          RECORD_AWARE: ${{ needs.resolve.outputs.record_aware }}
+        run: |
+          if ($env:RECORD_AWARE -ne 'true') {
+            'Skip truthful repeat assertion: releases through 0.0.10 report every reinstall as an upgrade.' | Set-Content (Join-Path $env:RUNNER_TEMP 'public-upgrade.txt')
+            exit 0
+          }
+          $binary = Join-Path $env:RUNNER_TEMP 'tapid-latest/tapid.exe'
+          $expectedDigest = (Get-FileHash $binary).Hash
+          if ($env:PREVIOUS_TAG) {
+            $installer = Join-Path $env:RUNNER_TEMP 'public-install.ps1'
+            $installDir = Join-Path $env:RUNNER_TEMP 'tapid-previous'
+            & $installer -Version $env:PREVIOUS_TAG -InstallDir $installDir
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $binary = Join-Path $installDir 'tapid.exe'
+            if ((& $binary --version) -cne ('tapid ' + $env:PREVIOUS_TAG.Substring(1))) { throw 'Unexpected previous version' }
+            & $binary upgrade 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'public-upgrade.txt')
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ((& $binary --version) -cne ('tapid ' + $env:LATEST_TAG.Substring(1))) { throw 'Upgrade did not reach latest version' }
+            if ((Get-FileHash $binary).Hash -cne $expectedDigest) { throw 'Upgrade destination digest mismatch' }
+          } else {
+            'Skip previous-version transition: no supported earlier release in the latest 100 releases.' | Set-Content (Join-Path $env:RUNNER_TEMP 'public-upgrade.txt')
+          }
+          $output = & $binary upgrade 2>&1
+          $upgradeExit = $LASTEXITCODE
+          $output | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'public-repeat-upgrade.txt')
+          if ($upgradeExit -ne 0) { exit $upgradeExit }
+          if ($output -cnotcontains ('Tapid ' + $env:LATEST_TAG.Substring(1) + ' is already up to date')) { throw 'Repeat upgrade must report already up to date' }
+          if ((Get-FileHash $binary).Hash -cne $expectedDigest) { throw 'Repeat upgrade changed installed bytes' }
+      - name: Retain public website installer evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: public-installer-Windows
+          path: |
+            ${{ runner.temp }}/public-install.ps1
+            ${{ runner.temp }}/latest-tag-install.ps1
+            ${{ runner.temp }}/public-installer-sha256.txt
+            ${{ runner.temp }}/public-upgrade.txt
+            ${{ runner.temp }}/public-repeat-upgrade.txt
+          retention-days: 30
+          if-no-files-found: warn

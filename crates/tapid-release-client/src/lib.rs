@@ -431,7 +431,7 @@ pub fn read_release_state(path: &Path) -> Result<ReleaseState, Error> {
 }
 
 fn validate_state(state: &ReleaseState) -> Result<(), Error> {
-    if state.schema != "tapid-release-state-v2" || !version(&state.release_floor) {
+    if state.schema != "tapid-release-state-v2" || !stable_state_version(&state.release_floor) {
         return Err(Error::State(
             "unsupported or malformed release state".into(),
         ));
@@ -454,20 +454,32 @@ fn validate_state(state: &ReleaseState) -> Result<(), Error> {
 }
 
 fn validate_lkg(state: &LastKnownGood) -> Result<(), Error> {
-    if !version(&state.version) || !hex64(&state.artifact_sha256) {
+    if !stable_state_version(&state.version) || !hex64(&state.artifact_sha256) {
         return Err(Error::State("malformed last-known-good state".into()));
     }
     Ok(())
 }
 
+fn stable_state_version(value: &str) -> bool {
+    let parts: Vec<_> = value.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && (part.len() == 1 || !part.starts_with('0'))
+                && part.bytes().all(|b| b.is_ascii_digit())
+                && part.parse::<u64>().is_ok()
+        })
+}
+
 fn compare_version(left: &str, right: &str) -> Result<std::cmp::Ordering, Error> {
     let parse = |s: &str| -> Result<[u64; 3], Error> {
         let p: Vec<_> = s.split('.').collect();
-        if p.len() != 3 || p[0] != "0" {
+        if !stable_state_version(s) {
             return Err(Error::State("invalid release version".into()));
         }
         Ok([
-            0,
+            p[0].parse()
+                .map_err(|_| Error::State("invalid release version".into()))?,
             p[1].parse()
                 .map_err(|_| Error::State("invalid release version".into()))?,
             p[2].parse()

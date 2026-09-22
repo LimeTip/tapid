@@ -5,6 +5,8 @@ REPO="${TAPID_REPO:-LimeTip/tapid}"
 INSTALL_DIR="${TAPID_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="latest"
 VERSION_SET=0
+LEGACY_RELEASE=0
+[ -z "${TAPID_REPO-}${TAPID_RELEASE_BASE_URL-}${TAPID_RELEASE_DISCOVERY_URL-}" ] || LEGACY_RELEASE=1
 SOURCE_REF=""
 SOURCE_REF_SET=0
 STAGED_BINARY=""
@@ -12,6 +14,7 @@ STAGED_MARKER=""
 PATH_UPDATED=0
 PATH_RC=""
 PATH_COMMAND=""
+MAX_RECORD_BYTES=262144
 MAX_CHECKSUM_BYTES=1048576
 MAX_ARCHIVE_BYTES=536870912
 MAX_BINARY_BYTES=536870912
@@ -26,19 +29,33 @@ Options:
   --version VERSION     Install a specific stable release tag, e.g. v0.1.0
   --source-ref REF      Build from a source branch, tag, or commit (development)
   --install-dir DIR     Install the binary into DIR (default: ~/.local/bin)
-  --repo OWNER/REPO     GitHub repository (default: LimeTip/tapid)
+  --repo OWNER/REPO     Use the legacy GitHub release layout for this repository
   -h, --help            Show this help
 
 Environment:
   TAPID_REPO, TAPID_INSTALL_DIR
-  TAPID_RELEASE_BASE_URL, TAPID_RELEASE_DISCOVERY_URL
+  TAPID_RELEASE_RECORD_URL overrides the release record endpoint
+  TAPID_RELEASE_BASE_URL, TAPID_RELEASE_DISCOVERY_URL select the legacy layout
 
-Release assets are expected to include platform archives and SHA256SUMS.
+Default installs use the release record at tapid.dev.
+Explicit versions through 0.0.10 use historical GitHub assets and SHA256SUMS.
 Release tags use the v0.1.0 form; --version accepts either v0.1.0 or 0.1.0.
 USAGE
 }
 
 fail() { printf 'tapid installer: %s\n' "$*" >&2; exit 1; }
+
+valid_version() {
+  printf '%s\n' "$1" | LC_ALL=C awk '
+    NR != 1 { bad=1 }
+    {
+      if ($0 !~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) bad=1
+      split($0, parts, ".")
+      for (i=1; i<=3; i++) if (length(parts[i]) > 20 || (length(parts[i]) == 20 && "x" parts[i] > "x18446744073709551615")) bad=1
+    }
+    END { exit (bad || NR != 1) }
+  '
+}
 
 configure_path() {
   case ":${PATH:-}:" in *:"$INSTALL_DIR":*) return ;; esac
@@ -76,7 +93,7 @@ while [ "$#" -gt 0 ]; do
     --version) [ "$#" -ge 2 ] || fail "--version requires a value"; VERSION="$2"; VERSION_SET=1; shift 2 ;;
     --source-ref) [ "$#" -ge 2 ] || fail "--source-ref requires a value"; SOURCE_REF="$2"; SOURCE_REF_SET=1; shift 2 ;;
     --install-dir) [ "$#" -ge 2 ] || fail "--install-dir requires a value"; INSTALL_DIR="$2"; shift 2 ;;
-    --repo) [ "$#" -ge 2 ] || fail "--repo requires a value"; REPO="$2"; shift 2 ;;
+    --repo) [ "$#" -ge 2 ] || fail "--repo requires a value"; REPO="$2"; LEGACY_RELEASE=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown option: $1" ;;
   esac
@@ -119,18 +136,18 @@ fi
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
-RELEASE_BASE_URL="${TAPID_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
-RELEASE_DISCOVERY_URL="${TAPID_RELEASE_DISCOVERY_URL:-https://github.com/$REPO/releases/latest}"
-case "$RELEASE_BASE_URL" in https://*) ;; *) fail "stable release base URL must use HTTPS" ;; esac
-case "$RELEASE_DISCOVERY_URL" in https://*) ;; *) fail "stable release discovery URL must use HTTPS" ;; esac
-
-if [ "$VERSION" = latest ]; then
-  resolved_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$RELEASE_DISCOVERY_URL" 2>/dev/null)" || fail "could not contact the stable release discovery endpoint"
-  case "$resolved_url" in */releases/tag/*) VERSION="${resolved_url##*/tag/}" ;; *) fail "stable release discovery endpoint did not resolve a release tag" ;; esac
+if [ "$VERSION" != latest ]; then
+  case "$VERSION" in ''|*[!v0-9.]*) fail "version must be a stable release such as v0.1.0" ;; esac
+  valid_version "${VERSION#v}" || fail "version must be a stable release such as v0.1.0"
+  VERSION="${VERSION#v}"
+  # These published versions predate release records. Never infer fallback from a failed request.
+  if [ -z "${TAPID_RELEASE_RECORD_URL-}" ]; then
+    case "$VERSION" in 0.0.[0-9]|0.0.10) LEGACY_RELEASE=1 ;; esac
+  fi
 fi
-case "$VERSION" in ''|*[!v0-9.]*) fail "version must be a stable release such as v0.1.0" ;; esac
-printf '%s' "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$' || fail "version must be a stable release such as v0.1.0"
-case "$VERSION" in v*) ;; *) VERSION="v$VERSION" ;; esac
+if [ -n "${TAPID_RELEASE_RECORD_URL-}" ] && [ "$LEGACY_RELEASE" -eq 1 ]; then
+  fail "release record URL cannot be combined with legacy release overrides"
+fi
 
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64|Darwin:aarch64) target="aarch64-apple-darwin" ;;
@@ -140,18 +157,74 @@ case "$(uname -s):$(uname -m)" in
   *) fail "unsupported platform: $(uname -s) $(uname -m)" ;;
 esac
 
-version_without_v="${VERSION#v}"
-archive="tapid-$version_without_v-$target.tar.gz"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/tapid-install.XXXXXX")"
 cleanup() { rm -rf "$tmp_dir"; [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"; [ -z "$STAGED_MARKER" ] || rm -f "$STAGED_MARKER"; }
 trap cleanup 0 1 2 15
-base="$RELEASE_BASE_URL/$VERSION"
-curl -fsSL --max-filesize "$MAX_CHECKSUM_BYTES" "$base/SHA256SUMS" -o "$tmp_dir/SHA256SUMS" 2>/dev/null || fail "could not download SHA256SUMS"
-[ "$(wc -c < "$tmp_dir/SHA256SUMS" | tr -d '[:space:]')" -le "$MAX_CHECKSUM_BYTES" ] || fail "SHA256SUMS exceeds the size limit"
-expected="$(awk -v name="$archive" '{ hash=substr($0,1,64); separator=substr($0,65,2); file=substr($0,67); if (length(hash)==64 && hash !~ /[^0-9a-f]/ && separator=="  " && file==name) { print hash; count++ } } END { if (count != 1) exit 1 }' "$tmp_dir/SHA256SUMS")" || fail "SHA256SUMS does not contain exactly one checksum for $archive"
-printf '%s' "$expected" | grep -Eq '^[0-9a-f]{64}$' || fail "invalid SHA-256 checksum for $archive"
-curl -fsSL --max-filesize "$MAX_ARCHIVE_BYTES" "$base/$archive" -o "$tmp_dir/$archive" 2>/dev/null || fail "could not download $archive"
-[ "$(wc -c < "$tmp_dir/$archive" | tr -d '[:space:]')" -le "$MAX_ARCHIVE_BYTES" ] || fail "release archive exceeds the size limit"
+expected_size=""
+if [ "$LEGACY_RELEASE" -eq 1 ]; then
+  RELEASE_BASE_URL="${TAPID_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
+  RELEASE_DISCOVERY_URL="${TAPID_RELEASE_DISCOVERY_URL:-https://github.com/$REPO/releases/latest}"
+  case "$RELEASE_BASE_URL" in https://*) ;; *) fail "stable release base URL must use HTTPS" ;; esac
+  case "$RELEASE_DISCOVERY_URL" in https://*) ;; *) fail "stable release discovery URL must use HTTPS" ;; esac
+  if [ "$VERSION" = latest ]; then
+    resolved_url="$(curl -fsSIL --connect-timeout 10 --max-time 30 -o /dev/null -w '%{url_effective}' "$RELEASE_DISCOVERY_URL" 2>/dev/null)" || fail "could not contact the stable release discovery endpoint"
+    case "$resolved_url" in */releases/tag/*) VERSION="${resolved_url##*/tag/}" ;; *) fail "stable release discovery endpoint did not resolve a release tag" ;; esac
+  fi
+  case "$VERSION" in ''|*[!v0-9.]*) fail "version must be a stable release such as v0.1.0" ;; esac
+  valid_version "${VERSION#v}" || fail "version must be a stable release such as v0.1.0"
+  VERSION="${VERSION#v}"
+  archive="tapid-$VERSION-$target.tar.gz"
+  base="$RELEASE_BASE_URL/v$VERSION"
+  curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize "$MAX_CHECKSUM_BYTES" "$base/SHA256SUMS" -o "$tmp_dir/SHA256SUMS" 2>/dev/null || fail "could not download SHA256SUMS"
+  [ "$(wc -c < "$tmp_dir/SHA256SUMS" | tr -d '[:space:]')" -le "$MAX_CHECKSUM_BYTES" ] || fail "SHA256SUMS exceeds the size limit"
+  expected="$(awk -v name="$archive" '{ hash=substr($0,1,64); separator=substr($0,65,2); file=substr($0,67); if (length(hash)==64 && hash !~ /[^0-9a-f]/ && separator=="  " && file==name) { print hash; count++ } } END { if (count != 1) exit 1 }' "$tmp_dir/SHA256SUMS")" || fail "SHA256SUMS does not contain exactly one checksum for $archive"
+  printf '%s' "$expected" | grep -Eq '^[0-9a-f]{64}$' || fail "invalid SHA-256 checksum for $archive"
+  archive_url="$base/$archive"
+else
+  record_url="${TAPID_RELEASE_RECORD_URL:-https://tapid.dev/releases/v1/latest.tsv}"
+  if [ -z "${TAPID_RELEASE_RECORD_URL-}" ] && [ "$VERSION" != latest ]; then
+    record_url="https://tapid.dev/releases/v1/v$VERSION.tsv"
+  fi
+  # Keep the shell installer dependency-free. Validate before using any record fields.
+  printf '%s\n' "$record_url" | LC_ALL=C awk '
+    NR != 1 || $0 !~ /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(\/.*)?$/ || /[^!-~]/ || /[@?#\\]/ { bad=1 }
+    END { exit bad }
+  ' || fail "release record URL must be a safe HTTPS URL"
+  curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize "$MAX_RECORD_BYTES" "$record_url" -o "$tmp_dir/release.tsv" 2>/dev/null || fail "could not download release record"
+  [ "$(wc -c < "$tmp_dir/release.tsv" | tr -d '[:space:]')" -le "$MAX_RECORD_BYTES" ] || fail "release record exceeds the size limit"
+  [ "$(tail -c 1 "$tmp_dir/release.tsv" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || fail "release record must end with a newline"
+  # Some awk implementations truncate strings at NUL. Check raw bytes first.
+  [ "$(LC_ALL=C tr -d '\011\012\040-\176' < "$tmp_dir/release.tsv" | wc -c | tr -d '[:space:]')" = 0 ] || fail "release record must contain ASCII fields and LF lines"
+  LC_ALL=C awk -F '\t' -v target="$target" -v requested="$VERSION" -v limit="$MAX_ARCHIVE_BYTES" '
+    function invalid() { bad=1; exit 1 }
+    NR == 1 {
+      if (NF != 2 || $1 != "tapid-release-v1" || $2 !~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) invalid()
+      version=$2
+      split(version, parts, ".")
+      for (i=1; i<=3; i++) if (length(parts[i]) > 20 || (length(parts[i]) == 20 && "x" parts[i] > "x18446744073709551615")) invalid()
+      if (requested != "latest" && requested != version) invalid()
+      next
+    }
+    {
+      if (NF != 5 || $1 !~ /^[A-Za-z0-9_-]+$/ || seen_target[$1]++ || seen_name[$2]++) invalid()
+      if ($2 != "tapid-" version "-" $1 ".tar.gz") invalid()
+      if ($3 !~ /^[1-9][0-9]*$/ || length($3) > 9 || $3+0 > limit) invalid()
+      if (length($4) != 64 || $4 ~ /[^0-9a-f]/) invalid()
+      if ($5 !~ /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(\/.*)?$/ || $5 ~ /[^!-~]/ || $5 ~ /[@?#\\]/) invalid()
+      if ($1 == target) { selected=$0; found=1 }
+    }
+    END { if (bad || !found) exit 1; print version; print selected }
+  ' "$tmp_dir/release.tsv" > "$tmp_dir/selected" || fail "invalid release record or missing platform"
+  VERSION="$(sed -n '1p' "$tmp_dir/selected")"
+  archive="$(awk -F '\t' 'NR == 2 { print $2 }' "$tmp_dir/selected")"
+  expected_size="$(awk -F '\t' 'NR == 2 { print $3 }' "$tmp_dir/selected")"
+  expected="$(awk -F '\t' 'NR == 2 { print $4 }' "$tmp_dir/selected")"
+  archive_url="$(awk -F '\t' 'NR == 2 { print $5 }' "$tmp_dir/selected")"
+fi
+curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize "$MAX_ARCHIVE_BYTES" "$archive_url" -o "$tmp_dir/$archive" 2>/dev/null || fail "could not download $archive"
+actual_size="$(wc -c < "$tmp_dir/$archive" | tr -d '[:space:]')"
+[ "$actual_size" -le "$MAX_ARCHIVE_BYTES" ] || fail "release archive exceeds the size limit"
+[ -z "$expected_size" ] || [ "$actual_size" = "$expected_size" ] || fail "release archive size does not match release record"
 if command -v shasum >/dev/null 2>&1; then
   actual="$(shasum -a 256 "$tmp_dir/$archive" | awk '{print $1}')"
 elif command -v sha256sum >/dev/null 2>&1; then
@@ -179,5 +252,5 @@ printf 'tapid-managed-v1\n' > "$STAGED_MARKER"
 mv -f "$STAGED_MARKER" "$INSTALL_DIR/.tapid-managed"; STAGED_MARKER=""
 mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""
 configure_path || printf 'Tapid was installed, but PATH could not be updated.\n' >&2
-printf 'Installed Tapid %s into %s/tapid\n' "$VERSION" "$INSTALL_DIR"
+printf 'Installed Tapid v%s into %s/tapid\n' "$VERSION" "$INSTALL_DIR"
 print_path_guidance
