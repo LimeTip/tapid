@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 DISCOVERY = 'https://tapid.dev/releases/v1/latest.tsv'
@@ -159,7 +160,8 @@ else:
         require('https://tapid.dev/releases/v1/v1.2.3.tsv' in requests, 'explicit installer bypassed versioned discovery')
         require(any(url.startswith('https://gitlab.example/') for url in requests), 'first provider was unused')
         require(any(url.startswith('https://downloads.example.net/') for url in requests), 'second provider was unused')
-        require(not any('github.com' in url for url in requests), 'unexpected GitHub fallback')
+        require(not any(urlsplit(url).hostname == 'github.com' for url in requests),
+                'unexpected GitHub fallback')
         print('Generated release record passed installer, upgrade, repeat, provider migration, and cached rejection checks.')
 
 

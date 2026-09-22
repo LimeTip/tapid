@@ -115,7 +115,8 @@ test("Unix installer rejects malformed records without fallback or replacing an 
       equal(await readFile(join(f.install, "tapid"), "utf8"), "preserve installed binary");
     }
     equal((await f.requests()).trim().split("\n").length, malformed.length);
-    ok(!(await f.requests()).includes("github.com"));
+    const requestHosts = (await f.requests()).trim().split("\n").map(url => new URL(url).hostname);
+    ok(!requestHosts.includes("github.com"));
   } finally { await f.cleanup(); }
 });
 
