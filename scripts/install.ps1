@@ -252,9 +252,9 @@ try {
         Save-BoundedHttpsFile "$base/SHA256SUMS" $checksumsPath $MAX_CHECKSUM_BYTES
         if ((Get-Item -LiteralPath $checksumsPath).Length -gt $MAX_CHECKSUM_BYTES) { Fail "SHA256SUMS exceeds the size limit" }
         $pattern = '^([0-9a-fA-F]{64})\s{2}' + [regex]::Escape($archive) + '$'
-        $matches = @(Get-Content -LiteralPath $checksumsPath | Where-Object { $_ -match $pattern })
-        if ($matches.Count -ne 1) { Fail "SHA256SUMS does not contain exactly one checksum for $archive" }
-        $null = $matches[0] -match $pattern
+        $checksumLines = @(Get-Content -LiteralPath $checksumsPath | Where-Object { $_ -match $pattern })
+        if ($checksumLines.Count -ne 1) { Fail "SHA256SUMS does not contain exactly one checksum for $archive" }
+        $null = $checksumLines[0] -match $pattern
         $expected = $Matches[1].ToLowerInvariant()
         $archiveUrl = "$base/$archive"
     } else {
