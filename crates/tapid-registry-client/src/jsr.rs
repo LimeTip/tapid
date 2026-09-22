@@ -115,14 +115,14 @@ fn parse_jsr(
         })?;
     let mut artifacts = Vec::new();
     for (key, value) in versions {
+        let Ok(version) = key.parse::<PackageVersion>() else {
+            continue;
+        };
         if value.as_object().is_none() {
             return Err(RegistryClientError::Metadata(MetadataError::InvalidJson(
                 "version entry must be an object".into(),
             )));
         }
-        let version: PackageVersion = key.parse().map_err(|_| {
-            RegistryClientError::Metadata(MetadataError::InvalidVersion(key.clone()))
-        })?;
         let version_object = value.as_object().expect("checked above");
         let npm = version_object
             .get("npm")
@@ -284,6 +284,20 @@ mod tests {
             "https://npm.jsr.io/~/@std__path/1.0.0.tgz"
         );
         assert_eq!(artifacts[0].dependencies.len(), 1);
+    }
+
+    #[test]
+    fn jsr_skips_malformed_version_keys_without_hiding_usable_versions() {
+        let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
+        let body = br#"{"scope":"std","name":"path","versions":{"not-a-version":{"npm":{"tarball":"https://npm.jsr.io/bad.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}},"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/good.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+
+        let artifacts = JsrRegistry::new(fake(body, "https://jsr.io/@std/path/meta.json"), origin)
+            .fetch("@std/path")
+            .unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].identity.version.to_string(), "1.0.0");
+        assert_eq!(artifacts[0].artifact_url, "https://npm.jsr.io/good.tgz");
     }
 
     #[test]

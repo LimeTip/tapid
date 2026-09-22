@@ -3,6 +3,19 @@
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
+fn run_executable_with_retry(command: &mut Command) -> std::process::Output {
+    for attempt in 0..5 {
+        match command.output() {
+            Ok(output) => return output,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 4 => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => panic!("failed to execute test binary: {error}"),
+        }
+    }
+    unreachable!("the retry loop always returns or panics");
+}
+
 struct Fixture {
     root: PathBuf,
 }
@@ -346,15 +359,15 @@ fn fresh_self_upgrade_rejects_an_older_release_without_state() {
         record.replace("0.0.11", "0.0.10"),
     )
     .unwrap();
-    let output = Command::new(&executable)
-        .arg("upgrade")
-        .env_remove("TAPID_RELEASE_RECORD_URL")
-        .env_remove("TAPID_STABLE_ENDPOINTS")
-        .env_remove("TAPID_RELEASE_KEYRING")
-        .env("PATH", fixture.root.join("bin"))
-        .env("FIXTURE", &fixture.root)
-        .output()
-        .unwrap();
+    let output = run_executable_with_retry(
+        Command::new(&executable)
+            .arg("upgrade")
+            .env_remove("TAPID_RELEASE_RECORD_URL")
+            .env_remove("TAPID_STABLE_ENDPOINTS")
+            .env_remove("TAPID_RELEASE_KEYRING")
+            .env("PATH", fixture.root.join("bin"))
+            .env("FIXTURE", &fixture.root),
+    );
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("refusing to downgrade running Tapid")
