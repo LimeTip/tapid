@@ -60,6 +60,8 @@ tapid install --registry-fixture ./fixture.json --project-dir ./example
 
 The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 6 locks, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
 
+Fixture `artifact` paths are resolved relative to the directory containing the registry fixture file, not the project directory or the invoking working directory. Absolute artifact paths remain absolute; `base64:` artifacts are decoded inline. For example, an `artifact` value of `archives/foo.tgz` in `fixtures/registry.json` loads `fixtures/archives/foo.tgz`.
+
 ## Legacy registry identities
 
 Locks containing noncanonical persisted registry origins (such as uppercase hosts
