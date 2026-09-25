@@ -2,7 +2,7 @@ import { ok as assert, rejects as assertRejects } from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { validateReleaseEvidence } from "./evidence.ts";
+import { validateReleaseEvidence, validateReleaseEvidenceTemplate } from "./evidence.ts";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const templatePath = `${root}.github/ISSUE_TEMPLATE/release-operation.md`;
@@ -13,7 +13,7 @@ async function template(): Promise<string> {
 
 test("release evidence template satisfies the complete operator contract", async () => {
   const markdown = await template();
-  validateReleaseEvidence(markdown);
+  validateReleaseEvidenceTemplate(markdown);
   assert(markdown.includes("docs/release-distribution.md"));
   assert(markdown.includes("docs/releases/0.0.8-operations.md"));
   assert(markdown.includes("Evidence only"));
@@ -23,10 +23,20 @@ test("release evidence template satisfies the complete operator contract", async
 test("release evidence template points to the complete v0.0.8 worked example", async () => {
   const recordPath = `${root}docs/releases/0.0.8-operations.md`;
   const record = await readFile(recordPath, "utf8");
+  validateReleaseEvidence(record);
   assert(record.includes("# Tapid v0.0.8 release operations record"));
   assert(record.includes("Annotated tag"));
   assert(record.includes("Public smoke"));
   assert(record.includes("crates.io"));
+});
+
+test("release evidence contract rejects blank populated fields", async () => {
+  const recordPath = `${root}docs/releases/0.0.8-operations.md`;
+  const record = await readFile(recordPath, "utf8");
+  await assertRejects(
+    async () => validateReleaseEvidence(record.replace("- Public release ID: `383262465`", "- Public release ID:")),
+    /blank or placeholder/,
+  );
 });
 
 test("release evidence contract rejects missing immutable references", async () => {
@@ -58,5 +68,13 @@ test("release evidence contract rejects publication triggers and secret values",
   const markdown = await template();
   await assertRejects(async () => validateReleaseEvidence(`${markdown}\ncargo publish tapid`), /publication trigger/);
   await assertRejects(async () => validateReleaseEvidence(`${markdown}\ngh workflow dispatch release.yml`), /publication trigger/);
+  await assertRejects(
+    async () => validateReleaseEvidence(`${markdown}\ngh api --method POST repos/LimeTip/tapid/actions/workflows/release-publication.yml/dispatches`),
+    /publication trigger/,
+  );
+  await assertRejects(
+    async () => validateReleaseEvidence(`${markdown}\ncurl -X POST https://api.github.com/repos/LimeTip/tapid/actions/workflows/release-publication.yml/dispatches`),
+    /publication trigger/,
+  );
   await assertRejects(async () => validateReleaseEvidence(`${markdown}\npassword: hunter2`), /publication trigger/);
 });

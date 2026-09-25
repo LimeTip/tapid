@@ -31,12 +31,31 @@ const requiredEvidence = [
 
 const forbiddenEvidence = [
   /gh\s+(workflow\s+(run|dispatch)|release\s+(create|publish|edit))/i,
+  /\bgh\s+api\b(?=[^\n]*(?:--method(?:=|\s+)POST)\b)(?=[^\n]*\/actions\/workflows\/[^/\s"'`]+\/dispatches\b)[^\n]*/i,
+  /\bcurl\b(?=[^\n]*(?:-X|--request)(?:=|\s*)POST\b)(?=[^\n]*\/actions\/workflows\/[^/\s"'`]+\/dispatches\b)[^\n]*/i,
   /\bcargo\s+publish\b/i,
   /workflow_dispatch:/i,
   /(?:^|\s)(?:password|passphrase|secret|token|cookie|private key|signing key)\s*[:=]\s*[^\s`[]+/i,
 ];
 
 export function validateReleaseEvidence(markdown: string): void {
+  validateEvidenceContract(markdown);
+
+  const placeholders = [
+    /\bvX\.Y\.Z\b/i,
+    /\b(?:URL|commit SHA)\b/i,
+    /^-\s+[^\n:]+:\s*$/m,
+  ];
+  if (placeholders.some((pattern) => pattern.test(markdown))) {
+    throw new Error("release evidence contains a blank or placeholder value");
+  }
+}
+
+export function validateReleaseEvidenceTemplate(markdown: string): void {
+  validateEvidenceContract(markdown);
+}
+
+function validateEvidenceContract(markdown: string): void {
   const missing = requiredEvidence.filter((entry) => !markdown.includes(entry));
   if (missing.length > 0) throw new Error(`release evidence is missing: ${missing.join(", ")}`);
 
