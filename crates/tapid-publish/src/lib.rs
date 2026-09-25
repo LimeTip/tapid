@@ -10,8 +10,11 @@ use std::{
 };
 use tapid_core::ArtifactDigest;
 
+/// Version of this library, not the `TAPID-PACK-1` encoding version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Filesystem input to a pack operation; callers must keep the tree stable.
+/// The version is an opaque label, not a parsed or registry-validated version.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageSource {
     pub root: PathBuf,
@@ -19,6 +22,7 @@ pub struct PackageSource {
     pub exclusions: ExclusionRules,
 }
 impl PackageSource {
+    /// Select a root and version, with only the built-in `.git`/`target` exclusions.
     pub fn new(root: impl Into<PathBuf>, version: impl Into<String>) -> Self {
         Self {
             root: root.into(),
@@ -26,25 +30,31 @@ impl PackageSource {
             exclusions: ExclusionRules::default(),
         }
     }
+    /// Replace explicit path exclusions without reading the filesystem.
     pub fn with_exclusions(mut self, exclusions: ExclusionRules) -> Self {
         self.exclusions = exclusions;
         self
     }
 }
+/// Case-sensitive rules applied to normalized relative paths before collision checks.
+/// Invalid rule strings are retained literally; they do not bypass source validation.
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct ExclusionRules {
     exact: BTreeSet<String>,
     prefixes: BTreeSet<String>,
 }
 impl ExclusionRules {
+    /// Start with no explicit exclusions; built-in exclusions still apply.
     pub fn new() -> Self {
         Self::default()
     }
+    /// Exclude exactly this normalized relative path (file or directory).
     pub fn exclude(mut self, path: impl AsRef<str>) -> Self {
         self.exact
             .insert(normalize_path(path.as_ref()).unwrap_or_else(|_| path.as_ref().to_owned()));
         self
     }
+    /// Exclude a normalized path and its descendants at separator boundaries.
     pub fn exclude_prefix(mut self, path: impl AsRef<str>) -> Self {
         self.prefixes.insert(
             normalize_path(path.as_ref())
@@ -63,17 +73,21 @@ impl ExclusionRules {
     }
 }
 
+/// Size and SHA-256 digest derived from the same bytes read for one file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestFile {
     pub path: String,
     pub size: u64,
     pub digest: ArtifactDigest,
 }
+/// Lexicographically sorted file metadata produced by source inspection or packing.
+/// Public fields are caller-editable and do not themselves certify validity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizedFileManifest {
     pub version: String,
     pub files: Vec<ManifestFile>,
 }
+/// Filesystem, path-policy, or publication-state failure.
 #[derive(Debug)]
 pub enum PublishError {
     Io(io::Error),
@@ -101,37 +115,22 @@ impl From<io::Error> for PublishError {
 }
 
 impl NormalizedFileManifest {
+    /// Read each included file once and discard its content after hashing.
+    ///
+    /// This is an independent inspection, not a reusable atomic tree snapshot.
+    /// A subsequent [`pack`] reads again; use its returned manifest for byte binding.
+    /// Applies the same collision policy and errors as [`pack`].
     pub fn from_source(source: &PackageSource) -> Result<Self, PublishError> {
-        if !source.root.is_dir() {
-            return Err(PublishError::InvalidSource(
-                "package root must be a directory".into(),
-            ));
-        }
-        let mut paths = Vec::new();
-        collect_files(&source.root, &source.root, &source.exclusions, &mut paths)?;
-        paths.sort();
-        let files = paths
-            .into_iter()
-            .map(|(path, full)| {
-                let bytes = fs::read(full)?;
-                let digest = digest_bytes(&bytes);
-                Ok(ManifestFile {
-                    path,
-                    size: bytes.len() as u64,
-                    digest,
-                })
-            })
-            .collect::<Result<Vec<_>, PublishError>>()?;
-        Ok(Self {
-            version: source.version.clone(),
-            files,
-        })
+        Ok(snapshot_source(source)?.manifest)
     }
+    /// Iterate normalized paths in manifest order (sorted for generated manifests).
     pub fn paths(&self) -> impl Iterator<Item = &str> {
         self.files.iter().map(|f| f.path.as_str())
     }
 }
 
+/// In-memory pack output whose generated manifest describes its encoded file bytes.
+/// Public fields can be modified; consumers must verify untrusted artifacts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackedArtifact {
     pub version: String,
@@ -140,26 +139,53 @@ pub struct PackedArtifact {
     pub manifest: NormalizedFileManifest,
 }
 impl PackedArtifact {
+    /// Return the stored digest without recomputing it after caller modifications.
     pub fn digest(&self) -> &ArtifactDigest {
         &self.digest
     }
 }
 
+/// Encode included files in sorted order using `TAPID-PACK-1`.
+///
+/// Each file is read once: its encoded content, size, and digest use that same
+/// buffer. This is not an atomic directory snapshot; callers must prevent source
+/// mutation, including symlink replacement during traversal and reads.
+///
+/// # Path policy and errors
+///
+/// After exclusions and separator normalization, equal Rust Unicode
+/// `to_uppercase().to_lowercase()` keys are rejected as [`PublishError::UnsafePath`].
+/// This conservative policy includes ASCII case pairs and Greek sigma variants,
+/// but is not full Unicode case folding or a universal filesystem alias check.
+/// It can reject distinct names (e.g. `ß` and `ss`), does not normalize Unicode,
+/// and does not cover platform-specific aliases, reserved names, or directory
+/// component collisions unless complete normalized file paths collide.
+/// Casing follows the Unicode tables of the Rust toolchain.
+///
+/// Also rejects invalid roots, unsafe paths and observed symlinks/special files;
+/// filesystem failures return [`PublishError::Io`]. No files are written and no
+/// transport is invoked. Memory grows with the resulting artifact.
 pub fn pack(source: &PackageSource) -> Result<PackedArtifact, PublishError> {
-    let manifest = NormalizedFileManifest::from_source(source)?;
+    let paths = normalized_source_paths(source)?;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"TAPID-PACK-1\n");
-    append_field(&mut bytes, manifest.version.as_bytes());
-    for file in &manifest.files {
-        let data = fs::read(
-            source
-                .root
-                .join(file.path.replace('/', std::path::MAIN_SEPARATOR_STR)),
-        )?;
-        append_field(&mut bytes, file.path.as_bytes());
-        bytes.extend_from_slice(&(data.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&data);
+    append_field(&mut bytes, source.version.as_bytes());
+    let mut manifest_files = Vec::with_capacity(paths.len());
+    for (path, full) in paths {
+        let file_bytes = read_source_file(&full)?;
+        append_field(&mut bytes, path.as_bytes());
+        bytes.extend_from_slice(&(file_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&file_bytes);
+        manifest_files.push(ManifestFile {
+            path,
+            size: file_bytes.len() as u64,
+            digest: digest_bytes(&file_bytes),
+        });
     }
+    let manifest = NormalizedFileManifest {
+        version: source.version.clone(),
+        files: manifest_files,
+    };
     let digest = digest_bytes(&bytes);
     Ok(PackedArtifact {
         version: manifest.version.clone(),
@@ -168,6 +194,7 @@ pub fn pack(source: &PackageSource) -> Result<PackedArtifact, PublishError> {
         manifest,
     })
 }
+/// Compute the SHA-256 artifact identity of exactly these bytes.
 pub fn artifact_digest(bytes: &[u8]) -> ArtifactDigest {
     digest_bytes(bytes)
 }
@@ -178,6 +205,79 @@ fn digest_bytes(bytes: &[u8]) -> ArtifactDigest {
         .parse()
         .expect("sha256 digest is valid")
 }
+struct SourceSnapshot {
+    manifest: NormalizedFileManifest,
+}
+fn normalized_source_paths(source: &PackageSource) -> Result<Vec<(String, PathBuf)>, PublishError> {
+    if !source.root.is_dir() {
+        return Err(PublishError::InvalidSource(
+            "package root must be a directory".into(),
+        ));
+    }
+    let mut paths = Vec::new();
+    collect_files(&source.root, &source.root, &source.exclusions, &mut paths)?;
+    paths.sort();
+    let mut seen = BTreeSet::new();
+    for (path, _) in &paths {
+        if !seen.insert(path_collision_key(path)) {
+            return Err(PublishError::UnsafePath(path.clone()));
+        }
+    }
+    Ok(paths)
+}
+// A conservative casing policy, not Unicode case folding or a filesystem
+// equivalence oracle. Uppercasing first also groups ordinary and final sigma.
+fn path_collision_key(path: &str) -> String {
+    path.to_uppercase().to_lowercase()
+}
+
+fn snapshot_source(source: &PackageSource) -> Result<SourceSnapshot, PublishError> {
+    let paths = normalized_source_paths(source)?;
+    let mut manifest_files = Vec::with_capacity(paths.len());
+    for (path, full) in paths {
+        let bytes = read_source_file(&full)?;
+        manifest_files.push(ManifestFile {
+            path,
+            size: bytes.len() as u64,
+            digest: digest_bytes(&bytes),
+        });
+    }
+    Ok(SourceSnapshot {
+        manifest: NormalizedFileManifest {
+            version: source.version.clone(),
+            files: manifest_files,
+        },
+    })
+}
+
+fn read_source_file(path: &Path) -> io::Result<Vec<u8>> {
+    let bytes = fs::read(path)?;
+    #[cfg(test)]
+    maybe_mutate_test_source(path);
+    Ok(bytes)
+}
+
+#[cfg(test)]
+fn test_mutation_state() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    static STATE: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+        std::sync::OnceLock::new();
+    STATE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+fn configure_test_mutation(path: PathBuf) {
+    *test_mutation_state().lock().unwrap() = Some(path);
+}
+
+#[cfg(test)]
+fn maybe_mutate_test_source(path: &Path) {
+    let mut target = test_mutation_state().lock().unwrap();
+    if target.as_deref() == Some(path) {
+        fs::write(path, b"after").unwrap();
+        *target = None;
+    }
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -250,15 +350,21 @@ fn collect_files(
     Ok(())
 }
 
+/// Injected publication boundary; implementations own registry authentication
+/// and durable server-side version immutability.
 pub trait PublicationTransport {
+    /// Transport-specific failure, hidden by [`Publisher::promote`].
     type Error;
+    /// Publish the supplied bytes under a version, enforcing remote invariants.
     fn publish(&mut self, version: &str, artifact: &PackedArtifact) -> Result<(), Self::Error>;
 }
+/// Prepared artifact for explicit promotion; construction does not contact a registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Preview {
     pub version: String,
     pub artifact: PackedArtifact,
 }
+/// Local preview/promotion result, not a signed registry receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PublicationState {
     Previewed(Preview),
@@ -267,17 +373,21 @@ pub enum PublicationState {
         digest: ArtifactDigest,
     },
 }
+/// Preview/promote coordinator with in-memory, per-instance version tracking.
+/// This is a native publishing foundation, not an operational registry client.
 pub struct Publisher<T> {
     transport: T,
     promoted: BTreeMap<String, ArtifactDigest>,
 }
 impl<T> Publisher<T> {
+    /// Wrap a transport with an empty, non-persistent promotion history.
     pub fn new(transport: T) -> Self {
         Self {
             transport,
             promoted: BTreeMap::new(),
         }
     }
+    /// Pack locally without calling the transport; inherits [`pack`] limitations.
     pub fn preview(&self, source: &PackageSource) -> Result<Preview, PublishError> {
         Ok(Preview {
             version: source.version.clone(),
@@ -286,6 +396,9 @@ impl<T> Publisher<T> {
     }
 }
 impl<T: PublicationTransport> Publisher<T> {
+    /// Send a prepared artifact and record its version only after transport success.
+    /// Rejects versions already promoted by this instance; does not re-read source
+    /// files or validate caller-modified public preview fields.
     pub fn promote(&mut self, preview: Preview) -> Result<PublicationState, PublishError> {
         if self.promoted.contains_key(&preview.version) {
             return Err(PublishError::ImmutableVersion(preview.version));
@@ -352,6 +465,103 @@ mod tests {
             assert!(normalize_path(p).is_err(), "{p}");
         }
     }
+    #[test]
+    fn packing_binds_manifest_metadata_to_packed_bytes() {
+        let p = tree(&[("x", b"before")]);
+        let artifact = pack(&PackageSource::new(&p, "1.0.0")).unwrap();
+        let mut cursor = b"TAPID-PACK-1\n".len();
+        let read_field = |bytes: &[u8], cursor: &mut usize| {
+            let end = *cursor + 8;
+            let len = u64::from_le_bytes(bytes[*cursor..end].try_into().unwrap()) as usize;
+            *cursor = end;
+            let end = *cursor + len;
+            let field = bytes[*cursor..end].to_vec();
+            *cursor = end;
+            field
+        };
+        assert_eq!(read_field(&artifact.bytes, &mut cursor), b"1.0.0");
+        assert_eq!(read_field(&artifact.bytes, &mut cursor), b"x");
+        let end = cursor + 8;
+        let packed_size = u64::from_le_bytes(artifact.bytes[cursor..end].try_into().unwrap());
+        cursor = end;
+        let packed_data = &artifact.bytes[cursor..cursor + packed_size as usize];
+
+        assert_eq!(artifact.manifest.files[0].size, packed_size);
+        assert_eq!(packed_data, b"before");
+        assert_eq!(
+            artifact.manifest.files[0].digest,
+            artifact_digest(packed_data)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalized_path_collisions_are_rejected() {
+        let p = tree(&[("a/b", b"nested"), (r"a\b", b"literal")]);
+        assert!(matches!(
+            pack(&PackageSource::new(&p, "1.0.0")),
+            Err(PublishError::UnsafePath(path)) if path == "a/b"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unicode_sigma_collisions_are_rejected_by_pack() {
+        // A literal backslash keeps both source files distinct even on a
+        // case-insensitive host; packing normalizes it to a separator.
+        let p = tree(&[("σ/config.json", b"ordinary"), (r"ς\CONFIG.JSON", b"final")]);
+        assert_eq!(fs::read(p.join("σ/config.json")).unwrap(), b"ordinary");
+        assert_eq!(fs::read(p.join(r"ς\CONFIG.JSON")).unwrap(), b"final");
+        let source = PackageSource::new(&p, "1.0.0");
+        assert!(matches!(pack(&source), Err(PublishError::UnsafePath(_))));
+        assert!(matches!(
+            NormalizedFileManifest::from_source(&source),
+            Err(PublishError::UnsafePath(_))
+        ));
+        let allowed =
+            pack(&source.with_exclusions(ExclusionRules::new().exclude("ς/CONFIG.JSON"))).unwrap();
+        assert_eq!(
+            allowed.manifest.paths().collect::<Vec<_>>(),
+            ["σ/config.json"]
+        );
+        assert_eq!(
+            allowed.manifest.files[0].digest,
+            artifact_digest(b"ordinary")
+        );
+    }
+
+    #[test]
+    fn case_insensitive_path_collision_keys_match() {
+        assert_eq!(
+            path_collision_key("A/config.json"),
+            path_collision_key("a/CONFIG.JSON")
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn case_insensitive_path_collisions_are_rejected_by_pack() {
+        let p = tree(&[("A/config.json", b"upper"), ("a/CONFIG.JSON", b"lower")]);
+        assert!(matches!(
+            pack(&PackageSource::new(&p, "1.0.0")),
+            Err(PublishError::UnsafePath(_))
+        ));
+    }
+
+    #[test]
+    fn packing_uses_the_snapshot_when_source_changes_after_a_read() {
+        let p = tree(&[("x", b"before")]);
+        configure_test_mutation(p.join("x"));
+        let artifact = pack(&PackageSource::new(&p, "1.0.0")).unwrap();
+        assert_eq!(artifact.manifest.files[0].size, 6);
+        assert_eq!(
+            artifact.manifest.files[0].digest,
+            artifact_digest(b"before")
+        );
+        assert_eq!(&artifact.bytes[artifact.bytes.len() - 6..], b"before");
+        assert_eq!(fs::read(p.join("x")).unwrap(), b"after");
+    }
+
     #[test]
     fn pack_is_byte_reproducible_and_digest_binds_bytes() {
         let p = tree(&[("x", b"1")]);
