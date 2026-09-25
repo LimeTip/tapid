@@ -57,5 +57,6 @@ test("release evidence contract rejects combined approval boundaries", async () 
 test("release evidence contract rejects publication triggers and secret values", async () => {
   const markdown = await template();
   await assertRejects(async () => validateReleaseEvidence(`${markdown}\ncargo publish tapid`), /publication trigger/);
+  await assertRejects(async () => validateReleaseEvidence(`${markdown}\ngh workflow dispatch release.yml`), /publication trigger/);
   await assertRejects(async () => validateReleaseEvidence(`${markdown}\npassword: hunter2`), /publication trigger/);
 });

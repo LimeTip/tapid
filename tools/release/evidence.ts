@@ -30,7 +30,7 @@ const requiredEvidence = [
 ];
 
 const forbiddenEvidence = [
-  /gh\s+(workflow\s+run|release\s+(create|publish|edit))/i,
+  /gh\s+(workflow\s+(run|dispatch)|release\s+(create|publish|edit))/i,
   /\bcargo\s+publish\b/i,
   /workflow_dispatch:/i,
   /(?:^|\s)(?:password|passphrase|secret|token|cookie|private key|signing key)\s*[:=]\s*[^\s`[]+/i,
