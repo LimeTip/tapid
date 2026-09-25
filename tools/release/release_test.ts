@@ -7,14 +7,14 @@ import {
 } from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { arch, platform } from "node:process";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { checksumLines, releaseVersion } from "./release.ts";
+import { checksumLines, releaseRecord, releaseVersion } from "./release.ts";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const text = (path: string) => readFile(join(root, path), "utf8");
@@ -22,10 +22,86 @@ const execFileAsync = promisify(execFile);
 
 test("release tag must be stable semver and match tapid", () => {
   assertEquals(releaseVersion("v1.2.3", "1.2.3"), "1.2.3");
-  for (const tag of ["1.2.3", "v1.2", "v1.2.3-rc.1", "main"]) {
+  for (const tag of ["1.2.3", "v1.2", "v1.2.3-rc.1", "v01.2.3", "v1.02.3", "v1.2.03", "main"]) {
     assertThrows(() => releaseVersion(tag, "1.2.3"));
   }
   assertThrows(() => releaseVersion("v1.2.3", "1.2.4"));
+  assertThrows(() => releaseVersion("v18446744073709551616.2.3", "18446744073709551616.2.3"));
+});
+
+test("release metadata binds all six archives to actual bytes and provider-neutral URLs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tapid-release-record-"));
+  const targets = [
+    "aarch64-apple-darwin", "aarch64-pc-windows-msvc", "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu",
+  ];
+  try {
+    const version = "2.3.4";
+    for (const target of targets) {
+      await writeFile(join(directory, `tapid-${version}-${target}.tar.gz`), Buffer.from(`archive\0${target}\n`));
+    }
+    const checksums = await checksumLines(directory, version);
+    for (const base of [
+      "https://github.com/LimeTip/tapid/releases/download/v2.3.4",
+      "https://downloads.example.test/tapid/2.3.4/",
+    ]) {
+      const record = await releaseRecord(directory, version, base);
+      const rows = record.split("\n");
+      assertEquals(rows.shift(), "tapid-release-v1\t2.3.4");
+      assertEquals(rows.pop(), "", "record ends with a newline");
+      assertEquals(rows.length, 6);
+      for (const [index, row] of rows.entries()) {
+        const [target, name, size, digest, url, extra] = row.split("\t");
+        assertEquals(extra, undefined);
+        assertEquals(target, targets[index]);
+        assertEquals(name, `tapid-${version}-${target}.tar.gz`);
+        const bytes = await readFile(join(directory, name));
+        assertEquals(size, `${bytes.length}`);
+        assertEquals(digest, createHash("sha256").update(bytes).digest("hex"));
+        assert(checksums.includes(`${digest}  ${name}\n`));
+        assertEquals(url, `${base.replace(/\/+$/, "")}/${name}`);
+      }
+    }
+    await writeFile(join(directory, `tapid-${version}-${targets[0]}.tar.gz`), "");
+    await assertRejects(() => releaseRecord(directory, version, "https://example.test/2.3.4"), /archive size/);
+    await truncate(join(directory, `tapid-${version}-${targets[0]}.tar.gz`), 512 * 1024 * 1024 + 1);
+    await assertRejects(() => releaseRecord(directory, version, "https://example.test/2.3.4"), /archive size/);
+    await rm(join(directory, `tapid-${version}-${targets[0]}.tar.gz`));
+    await assertRejects(() => releaseRecord(directory, version, "https://example.test/2.3.4"), /exactly these archives/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("release metadata rejects unsafe or ambiguous URL directories before reading archives", async () => {
+  for (const base of [
+    "http://example.test/v1.2.3", "https://", "https://user:password@example.test/v1.2.3",
+    "https://user@example.test/v1.2.3", "https://example.test/v1.2.3#fragment",
+    "https://example.test/v1.2.3?query", "https://example.test/v1.2.3\\extra",
+    "https://example.test/v1.2.3\tmore", "https://example.test/v1.2.3\nmore",
+    "https://example.test/v1.2.3 more", "https://example.test/v1.2.3\0more",
+    "https://example.test/caf\u00e9",
+    "https://[::1]/v1.2.3", "https://example.test:/v1.2.3",
+  ]) await assertRejects(() => releaseRecord("/missing-directory", "1.2.3", base), /URL/);
+  await assertRejects(() => releaseRecord("/missing-directory", "01.2.3", "https://example.test/v01.2.3"), /stable semver|vX.Y.Z/);
+});
+
+test("metadata CLI writes the record beside checksums without replacing existing release files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tapid-release-cli-"));
+  try {
+    for (const target of [
+      "aarch64-apple-darwin", "aarch64-pc-windows-msvc", "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu",
+    ]) await writeFile(join(directory, `tapid-1.2.3-${target}.tar.gz`), target);
+    const checksums = await checksumLines(directory, "1.2.3");
+    await writeFile(join(directory, "SHA256SUMS"), checksums);
+    const base = "https://storage.example.test/tapid/1.2.3";
+    await execFileAsync(process.execPath, ["--experimental-strip-types", join(root, "tools/release/release.ts"), "metadata", directory, "1.2.3", base]);
+    assertEquals(await readFile(join(directory, "tapid-release-v1.tsv"), "utf8"), await releaseRecord(directory, "1.2.3", base));
+    assertEquals(await readFile(join(directory, "SHA256SUMS"), "utf8"), checksums);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("checksum output requires exactly six release archives", async () => {
@@ -120,6 +196,11 @@ test("binary release follows the small draft release flow", async () => {
   assert(!workflow.includes("release-manifest"));
   assert(!workflow.includes("python"));
   assert(!workflow.includes("gh release edit"));
+  const metadata = workflow.indexOf('tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"');
+  assert(metadata > workflow.indexOf("tools/release/release.ts checksums release"));
+  assert(metadata < createRelease, "the complete metadata asset must exist before draft creation");
+  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv; do"));
+  assert(workflow.includes("find release -maxdepth 1 -type f -exec basename {}"), "draft readback must include the metadata asset");
 });
 
 test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM runner", async () => {
@@ -195,11 +276,11 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
 test("public smoke tests use the published installer and released version", async () => {
   const workflow = await text(".github/workflows/release-public-smoke.yml");
   assert(workflow.includes("types: [published]"));
-  // These are the exact versioned URLs rendered by the website, not its
-  // independently deployed compatibility copies at tapid.dev/install.*.
+  // Keep the tagged installer evidence while checking the live website copies too.
   assert(workflow.includes('installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$RELEASE_TAG/scripts/install.sh"'));
   assert(workflow.includes('$installerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:RELEASE_TAG/scripts/install.ps1"'));
-  assert(!workflow.includes("https://tapid.dev/install."));
+  assert(workflow.includes("https://tapid.dev/install.sh"));
+  assert(workflow.includes("https://tapid.dev/install.ps1"));
   assert(workflow.includes('"$installer_url" -o "$RUNNER_TEMP/install.sh"'));
   assert(workflow.includes('$installerUrl --output $installer'));
   assert(workflow.includes('sh "$RUNNER_TEMP/install.sh" --version "$RELEASE_TAG"'));
@@ -236,6 +317,38 @@ test("public Unix upgrade binds selected source and independent latest destinati
   assert(!workflow.includes('contents: write'));
   assert(!workflow.includes('id-token: write'));
   assert(!workflow.includes('continue-on-error: true'));
+});
+
+test("public installers exercise explicit and latest discovery plus supported upgrades", async () => {
+  const workflow = await text(".github/workflows/release-public-smoke.yml");
+  assert(workflow.includes("--limit 100 --json tagName,isDraft,isPrerelease"));
+  assert(workflow.includes("(0, 0, 10) <= version(r['tagName']) < latest"));
+  const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
+  const windows = workflow.slice(workflow.indexOf("  windows:"));
+  for (const job of [unix, windows]) {
+    assert(job.includes("Check the public website installer with an explicit version"));
+    assert(job.includes("Check previous-version upgrade and repeat upgrade through the public service"));
+    assert(job.includes("PREVIOUS_TAG: ${{ needs.resolve.outputs.previous_tag }}"));
+    assert(job.includes("LATEST_TAG: ${{ needs.resolve.outputs.latest_tag }}"));
+    assert(job.includes("RECORD_AWARE: ${{ needs.resolve.outputs.record_aware }}"));
+    assert(job.includes("is already up to date"));
+    assert(job.includes("public-repeat-upgrade.txt"));
+    assert(job.includes("Skip truthful repeat assertion: releases through 0.0.10"));
+  }
+  assert(unix.includes('latest_installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$LATEST_TAG/scripts/install.sh"'));
+  const parity = unix.indexOf('cmp "$RUNNER_TEMP/public-install.sh" "$RUNNER_TEMP/latest-tag-install.sh"');
+  assert(parity >= 0 && parity < unix.indexOf('sh "$RUNNER_TEMP/public-install.sh" --version'));
+  assert(windows.includes('$latestInstallerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:LATEST_TAG/scripts/install.ps1"'));
+  const nativePublic = windows.slice(windows.indexOf("- name: Check the public website installer with an explicit version"));
+  const nativeParity = nativePublic.indexOf("if ($installerDigest -cne $latestInstallerDigest)");
+  assert(nativeParity >= 0 && nativeParity < nativePublic.indexOf("& $installer -Version"));
+  assert(unix.includes('sh "$RUNNER_TEMP/public-install.sh" --version "$RELEASE_TAG"'));
+  assert(unix.includes('sh "$RUNNER_TEMP/public-install.sh" --install-dir "$install_dir"'));
+  assert(unix.includes(`test "$(shasum -a 256 "$binary" | cut -d ' ' -f 1)" = "$expected_digest"`));
+  assert(windows.includes("$installer = Join-Path $env:RUNNER_TEMP 'public-install.ps1'"));
+  assert(windows.includes("& $installer -Version $env:RELEASE_TAG -InstallDir $installDir"));
+  assert(windows.includes("& $installer -InstallDir $installDir"));
+  assert(windows.includes("if ((Get-FileHash $binary).Hash -cne $expectedDigest)"));
 });
 
 test("public smoke validates ancestry before detaching the resolved trusted runner", async () => {
@@ -317,8 +430,8 @@ test("installers use checksums without embedded release signing", async () => {
     const installer = await text(path);
     const checksum = installer.indexOf("SHA256SUMS");
     const archiveDownload = path.endsWith(".sh")
-      ? installer.indexOf('"$base/$archive" -o')
-      : installer.indexOf('Save-BoundedHttpsFile "$base/$archive"');
+      ? installer.indexOf('"$archive_url" -o')
+      : installer.indexOf('Save-BoundedHttpsFile $archiveUrl');
     assert(checksum >= 0 && archiveDownload > checksum);
     assert(!installer.includes("release-manifest.json"));
     assert(!installer.includes("python"));
@@ -449,7 +562,7 @@ done
 cp "$TAPID_TEST_FIXTURE/\${url##*/}" "$out"
 `);
     await chmod(fakeCurl, 0o755);
-    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, TAPID_TEST_FIXTURE: fixture };
+    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, TAPID_TEST_FIXTURE: fixture, TAPID_RELEASE_BASE_URL: "https://github.com/LimeTip/tapid/releases/download" };
     const installer = join(root, "scripts/install.sh");
     await execFileAsync("sh", [installer, "--version", version, "--install-dir", installDir], { env });
     assertEquals((await execFileAsync(join(installDir, "tapid"), ["--version"])).stdout.trim(), "tapid 1.2.3");
@@ -471,4 +584,19 @@ test("CI runs the TypeScript tool suite", async () => {
   const workflow = await text(".github/workflows/ci.yml");
   assert(workflow.includes("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"));
   assert(workflow.includes("node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts"));
+});
+
+
+test("native Windows archive fixture refreshes release records before each install", async () => {
+  const workflow = await text(".github/workflows/ci.yml");
+  const fixture = workflow.slice(workflow.indexOf("  windows-installer-contract:"), workflow.indexOf("  package:"));
+  assert(fixture.includes('function Write-FixtureReleaseRecord'));
+  assertEquals(fixture.match(/^          Write-FixtureReleaseRecord$/gm)?.length, 2);
+  assert(fixture.includes('tapid-release-v1`t1.2.3'));
+  assert(fixture.includes('$size = (Get-Item -LiteralPath $archive).Length'));
+  assert(fixture.includes("'https://tapid.dev/releases/v1/v1.2.3.tsv'"));
+  assert(fixture.includes('https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName'));
+  assert(fixture.includes('fixture did not use release record discovery and artifact URLs'));
+  assert(!fixture.includes('SHA256SUMS'));
+  assert(fixture.includes('exactly one member named tapid.exe'));
 });

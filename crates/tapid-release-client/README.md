@@ -15,6 +15,8 @@ The durable release-state helpers use validated, atomically replaced JSON state.
 
 Version 0.0.3 adds release-state verification provenance: `signature`, `checksum`, or `unknown`. Older state without this field reads as `unknown`; accepting a subsequent release preserves the recorded provenance until the caller updates it. This field records the caller's verification result and does not itself verify a signature or checksum.
 
+The next version, 0.0.4, accepts stable versions with any major number in durable release state and rollback comparisons. Every component must fit an unsigned 64-bit integer and must not have leading zeroes. The retained signed-manifest v1 parser keeps its existing strict contract, including its 0.x version restriction. This state change does not redefine that signed format. The CLI's new HTTPS release-record parser is separate from this crate's legacy signed discovery.
+
 Discovery tries another endpoint or manifest URL only after a fetch outage. Invalid received indexes or signed manifests, including stale metadata, missing targets, invalid signatures, and oversized responses, return their validation error immediately. Callers must not treat those errors as permission to use a weaker verification path or cached recovery.
 
 `Fetcher::fetch_metadata_with_limit` preserves this distinction for streaming transports. Version 0.0.3 requires every implementation to provide this typed method; there is no default conversion from string errors. Return `Error::Fetch` only for unavailability and a validation error for rejected responses, enforcing the byte limit during reads. Existing implementers must add this method when upgrading from 0.0.2. The CLI's curl transport already classifies these outcomes explicitly.
