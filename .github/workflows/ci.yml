@@ -195,7 +195,7 @@ jobs:
         with:
           node-version: 22
       - name: Test release helpers and workflows
-        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts tools/release/installers_test.ts
+        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts tools/release/installers_test.ts tools/release/evidence_test.ts
       - name: Check source architecture
         run: node --experimental-strip-types tools/check_architecture.ts
       - name: Validate Unix installer syntax and help
