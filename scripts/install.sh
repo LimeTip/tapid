@@ -60,7 +60,6 @@ valid_version() {
 }
 
 configure_path() {
-  case ":${PATH:-}:" in *:"$INSTALL_DIR":*) return ;; esac
   [ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0
   shell_name="${SHELL-}"; shell_name="${shell_name##*/}"
   case "$shell_name" in
@@ -144,10 +143,10 @@ if [ "$SOURCE_REF_SET" -eq 1 ]; then
   STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
   STAGED_MARKER="$(mktemp "$INSTALL_DIR/.tapid-marker.tmp.XXXXXX")"
   install -m 0755 "$tmp_dir/root/bin/tapid" "$STAGED_BINARY"
+  configure_path || fail 'could not safely update the selected shell startup file'
   printf 'tapid-managed-v1\n' > "$STAGED_MARKER"
   mv -f "$STAGED_MARKER" "$INSTALL_DIR/.tapid-managed"; STAGED_MARKER=""
   mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""
-  configure_path || fail 'could not safely update the selected shell startup file'
   printf 'Installed Tapid from %s into %s/tapid\n' "$SOURCE_REF" "$INSTALL_DIR"
   print_path_guidance
   exit 0
@@ -267,9 +266,9 @@ probe_bytes="$(tar -xOzf "$tmp_dir/$archive" tapid | dd bs=1048576 count=513 2>/
 STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
 STAGED_MARKER="$(mktemp "$INSTALL_DIR/.tapid-marker.tmp.XXXXXX")"
 install -m 0755 "$tmp_dir/extracted/tapid" "$STAGED_BINARY"
+configure_path || fail 'could not safely update the selected shell startup file'
 printf 'tapid-managed-v1\n' > "$STAGED_MARKER"
 mv -f "$STAGED_MARKER" "$INSTALL_DIR/.tapid-managed"; STAGED_MARKER=""
 mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""
-configure_path || fail 'could not safely update the selected shell startup file'
 printf 'Installed Tapid v%s into %s/tapid\n' "$VERSION" "$INSTALL_DIR"
 print_path_guidance
