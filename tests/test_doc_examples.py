@@ -252,7 +252,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('Check previous-version upgrade and repeat upgrade through the public service', workflow)
         self.assertIn('is already up to date', workflow)
 
-     def test_public_smoke_reuses_native_capability_validator(self):
+    def test_public_smoke_reuses_native_capability_validator(self):
         workflow = (ROOT / '.github/workflows/release-public-smoke.yml').read_text()
         self.assertEqual(workflow.count('node tests/fixtures/validate_consumer_project.js --binary'), 2)
         self.assertIn('--binary "$binary" --release-tag "$RELEASE_TAG"', workflow)
