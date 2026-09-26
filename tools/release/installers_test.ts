@@ -90,6 +90,22 @@ test("Unix installer configures the default macOS zsh profile", { skip: platform
   } finally { await f.cleanup(); }
 });
 
+test("Unix installer validates the default zsh profile before replacing an installation", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "home");
+  const profile = join(home, ".zprofile");
+  const pathInstall = join(home, ".local", "bin");
+  const existing = "existing tapid installation\n";
+  try {
+    await mkdir(pathInstall, { recursive: true });
+    await writeFile(join(pathInstall, "tapid"), existing);
+    await writeFile(join(f.directory, "foreign-profile"), "export PATH=\"$PATH\"\n");
+    await symlink(join(f.directory, "foreign-profile"), profile);
+    await rejects(() => f.defaultInstallShell(home, { PATH: `${pathInstall}:${f.env.PATH}` }));
+    equal(await readFile(join(pathInstall, "tapid"), "utf8"), existing);
+  } finally { await f.cleanup(); }
+});
+
  test("Unix installer owns an idempotent POSIX PATH block and uninstall removes only that block", { skip: platform === "win32" }, async () => {
   const f = await fixture();
   const home = join(f.directory, "home");
