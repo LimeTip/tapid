@@ -1,9 +1,15 @@
 //! Provider-neutral HTTPS release discovery shared with the bootstrap installers.
+use serde_json::Value;
 use std::collections::BTreeSet;
 use tapid_release_client::Error;
+use tapid_signatures::{KeyRing, TrustEnvelope, digest};
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub(super) const DEFAULT_URL: &str = "https://tapid.dev/releases/v1/latest.tsv";
 pub(super) const MAX_BYTES: usize = 256 * 1024;
+pub(super) const SIGNATURE_SUBJECT: &str = "tapid-release-v1";
+pub(super) const SIGNATURE_SCHEMA: &str = "tapid-release-v1-signature";
+const MAX_SIGNATURE_VALIDITY: Duration = Duration::days(30);
 
 #[derive(Debug)]
 pub(super) struct ReleaseRecord {
@@ -107,9 +113,70 @@ pub(super) fn parse(bytes: &[u8], target: &str) -> Result<ReleaseRecord, Error> 
     selected.ok_or_else(|| Error::TargetNotFound(target.into()))
 }
 
+pub(super) fn signature_url(record_url: &str) -> String {
+    format!("{record_url}.sig")
+}
+
+/// Verify the detached v1 sidecar before parsing or selecting any artifact row.
+pub(super) fn verify_signature(
+    record_bytes: &[u8],
+    sidecar_bytes: &[u8],
+    keyring: &KeyRing,
+    now: &str,
+) -> Result<(), Error> {
+    let envelope: TrustEnvelope = serde_json::from_slice(sidecar_bytes)
+        .map_err(|e| Error::InvalidManifest(format!("invalid release signature sidecar: {e}")))?;
+    let expected_digest =
+        digest(record_bytes).map_err(|e| Error::InvalidManifest(e.to_string()))?;
+    if envelope.version != tapid_signatures::ENVELOPE_VERSION
+        || envelope.subject != SIGNATURE_SUBJECT
+        || envelope.artifact_digest != expected_digest
+    {
+        return Err(Error::InvalidManifest(
+            "release signature sidecar does not bind the record".into(),
+        ));
+    }
+    let claims = envelope.claims.as_object().ok_or_else(|| {
+        Error::InvalidManifest("release signature claims must be an object".into())
+    })?;
+    if claims.get("schema").and_then(Value::as_str) != Some(SIGNATURE_SCHEMA) {
+        return Err(Error::InvalidManifest(
+            "invalid release signature schema".into(),
+        ));
+    }
+    let created = claims
+        .get("created_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::InvalidManifest("missing release signature created_at".into()))?;
+    let expires = claims
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::InvalidManifest("missing release signature expires_at".into()))?;
+    let now = parse_signature_time(now)?;
+    let created = parse_signature_time(created)?;
+    let expires = parse_signature_time(expires)?;
+    if created > now
+        || expires <= now
+        || expires <= created
+        || expires - created > MAX_SIGNATURE_VALIDITY
+    {
+        return Err(Error::StaleMetadata);
+    }
+    envelope
+        .verify_with_keyring(keyring)
+        .map_err(Error::Signature)
+}
+
+fn parse_signature_time(value: &str) -> Result<OffsetDateTime, Error> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|e| Error::InvalidManifest(format!("invalid release signature timestamp: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use serde_json::json;
 
     fn record(url: &str) -> String {
         format!(
@@ -156,5 +223,77 @@ mod tests {
         ] {
             assert!(parse(bad.as_bytes(), "x86_64-test").is_err(), "{bad:?}");
         }
+    }
+
+    fn signed_sidecar(record: &[u8], created_at: &str, expires_at: &str) -> (Vec<u8>, KeyRing) {
+        let secret = [7_u8; 32];
+        let signing_key = SigningKey::from_bytes(&secret);
+        let mut keyring = KeyRing::new();
+        keyring
+            .insert(tapid_signatures::TrustedKey {
+                key_id: "test-release-key".into(),
+                algorithm: tapid_signatures::SIGNATURE_ALGORITHM.into(),
+                public_key: signing_key.verifying_key().to_bytes(),
+            })
+            .unwrap();
+        let envelope = TrustEnvelope::unsigned(
+            SIGNATURE_SUBJECT,
+            digest(record).unwrap(),
+            json!({
+                "schema": SIGNATURE_SCHEMA,
+                "created_at": created_at,
+                "expires_at": expires_at,
+            }),
+        )
+        .sign("test-release-key", &secret)
+        .unwrap();
+        (serde_json::to_vec(&envelope).unwrap(), keyring)
+    }
+
+    #[test]
+    fn verifies_record_bound_sidecar_and_rejects_tampering() {
+        let record = record("https://example.test/file");
+        let (sidecar, keyring) = signed_sidecar(
+            record.as_bytes(),
+            "2026-09-26T00:00:00Z",
+            "2026-09-27T00:00:00Z",
+        );
+        assert!(
+            verify_signature(
+                record.as_bytes(),
+                &sidecar,
+                &keyring,
+                "2026-09-26T12:00:00Z"
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_signature(
+                format!("{record} ").as_bytes(),
+                &sidecar,
+                &keyring,
+                "2026-09-26T12:00:00Z"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_expired_record_sidecar() {
+        let record = record("https://example.test/file");
+        let (sidecar, keyring) = signed_sidecar(
+            record.as_bytes(),
+            "2026-09-24T00:00:00Z",
+            "2026-09-25T00:00:00Z",
+        );
+        assert!(matches!(
+            verify_signature(
+                record.as_bytes(),
+                &sidecar,
+                &keyring,
+                "2026-09-26T00:00:00Z"
+            ),
+            Err(Error::StaleMetadata)
+        ));
     }
 }
