@@ -1,4 +1,4 @@
-// Run the real built CLI, never a shell wrapper or a simulated backend.
+// Run the real built or published CLI, never a shell wrapper or a simulated backend.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -6,7 +6,23 @@ const { spawnSync } = require('node:child_process');
 
 const project = process.env.TAPID_FIXTURE_PROJECT;
 assert.ok(project, 'TAPID_FIXTURE_PROJECT is required');
-const binary = path.resolve('target', 'debug', process.platform === 'win32' ? 'tapid.exe' : 'tapid');
+const args = process.argv.slice(2);
+assert.ok(args.length === 0 ||
+  ([2, 4].includes(args.length) && args[0] === '--binary' && args[1] &&
+    (args.length === 2 || (args[2] === '--release-tag' && args[3]))),
+  'usage: validate_consumer_project.js [--binary PATH [--release-tag TAG]]');
+const binary = args.length ? path.resolve(args[1]) :
+  path.resolve('target', 'debug', process.platform === 'win32' ? 'tapid.exe' : 'tapid');
+// Expected capabilities, not verified-release evidence. Like the documentation
+// contracts, published tags require review; never infer capability from an error.
+// Source validation (no tag) always requires the current native contract.
+const releaseContracts = new Map([
+  ['v0.0.9', 'legacy-uncontained'],
+  ['v0.0.10', 'native-restricted'],
+]);
+const releaseTag = args[3];
+assert.ok(!releaseTag || releaseContracts.has(releaseTag), 'unreviewed root-script release');
+const legacy = releaseTag && releaseContracts.get(releaseTag) === 'legacy-uncontained';
 const lifecycleMarker = path.join(project, 'LIFECYCLE_SHOULD_NOT_RUN');
 const startMarker = 'TAPID_FIXTURE_STARTED=';
 assert.ok(['darwin', 'linux', 'win32'].includes(process.platform), 'unsupported validation host');
@@ -48,12 +64,12 @@ const cases = [
 ];
 for (const test of cases) {
   const result = invoke(
-    ['run', '--project-dir', project, '--receipt-json', 'test', '--', ...test.args],
+    ['run', '--project-dir', project, ...(legacy ? [] : ['--receipt-json']), 'test', '--', ...test.args],
     test.environment,
   );
   const output = result.stdout + result.stderr;
   const receipts = result.stderr.split(/\r?\n/).filter(line => line.startsWith('{')).map(line => JSON.parse(line));
-  if (process.platform !== 'darwin') {
+  if (!legacy && process.platform !== 'darwin') {
     assert.equal(result.status, 1, 'unsupported native containment must fail closed');
     assert.match(result.stderr, /unsupported-containment/);
     assert.match(result.stderr, /no process was started and no enforcement receipt was issued/);
@@ -65,6 +81,10 @@ for (const test of cases) {
     const starts = result.stdout.split(/\r?\n/).filter(line => line.startsWith(startMarker));
     assert.equal(starts.length, 1, 'the real Node child must run exactly once');
     assert.deepEqual(JSON.parse(starts[0].slice(startMarker.length)), test.args);
+    if (legacy) {
+      assert.equal(receipts.length, 0, 'legacy forwarding is not containment evidence');
+      continue;
+    }
     assert.equal(receipts.length, 1, 'a native run must issue exactly one receipt');
     const receipt = receipts[0];
     assert.equal(receipt.schema_version, 1);
@@ -77,6 +97,8 @@ for (const test of cases) {
     assert.ok(Object.values(receipt.configured_limits).every(value => value === null));
   }
 }
-console.log(process.platform === 'darwin'
+console.log(legacy
+  ? `${releaseTag}: legacy uncontained forwarding, environment, exit codes and lifecycle suppression passed; no containment claim.`
+  : process.platform === 'darwin'
   ? 'macOS native Restricted: install, lifecycle suppression, child marker, exact forwarding, environment and exit codes passed.'
   : `${process.platform}: install, lifecycle suppression, unsupported containment, no target marker and no receipt passed.`);

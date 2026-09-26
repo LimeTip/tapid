@@ -74,6 +74,56 @@ export function publicationPlan(metadata: CargoMetadata, published: Set<string>)
   return ordered;
 }
 
+export type PublicationPlan = {
+  packages: Package[];
+  blockers: string[];
+  verification: string[];
+  recovery: string;
+};
+export type RegistryLookup = (pkg: Package) => Promise<boolean>;
+
+/** Computes a read-only plan from exact registry lookups. */
+export async function planPublication(metadata: CargoMetadata, isInRegistry: RegistryLookup): Promise<PublicationPlan> {
+  const candidates = publicationPlan(metadata, new Set());
+  const published = new Set<string>();
+  const blockers: string[] = [];
+  for (const pkg of candidates) {
+    try {
+      if (await isInRegistry(pkg)) published.add(`${pkg.name}@${pkg.version}`);
+    } catch (error) {
+      blockers.push(`${pkg.name}@${pkg.version}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const packages = blockers.length === 0 ? publicationPlan(metadata, published) : [];
+  const verification = [
+    "cargo package --workspace --locked",
+    "cargo metadata --manifest-path tests/integration/Cargo.toml --locked --format-version 1",
+    ...packages.map((pkg) => `cargo package -p ${pkg.name} --locked`),
+  ];
+  return {
+    packages,
+    blockers,
+    verification,
+    recovery: "Record confirmed package versions, query crates.io again, and rerun this dry-run; resume only with the remaining dependency-ordered suffix.",
+  };
+}
+
+export function renderMachinePlan(plan: PublicationPlan): string {
+  return `${JSON.stringify(plan, null, 2)}\n`;
+}
+
+export function renderHumanPlan(plan: PublicationPlan): string {
+  if (plan.blockers.length > 0) return `Publication blocked:\n${plan.blockers.map((blocker) => `- ${blocker}`).join("\n")}\n`;
+  if (plan.packages.length === 0) return "No crates.io packages require publication.\n";
+  return [
+    "Crates.io publication plan:",
+    ...plan.packages.map((pkg, index) => `${index + 1}. ${pkg.name} ${pkg.version}`),
+    "Verification: cargo package --workspace --locked",
+    `Recovery: ${plan.recovery}`,
+    "",
+  ].join("\n");
+}
+
 async function cargoMetadata(): Promise<CargoMetadata> {
   const { stdout } = await execFileAsync(
     "cargo",
@@ -123,17 +173,18 @@ async function waitUntilPublished(pkg: Package): Promise<void> {
 
 async function main(): Promise<void> {
   const metadata = await cargoMetadata();
-  const published = new Set<string>();
-  for (const { name, version } of metadata.packages) {
-    const pkg = { name, version };
-    if (await isPublished(pkg)) published.add(`${pkg.name}@${pkg.version}`);
-  }
-
-  const plan = publicationPlan(metadata, published);
   if (process.argv.includes("--dry-run")) {
-    for (const pkg of plan) console.log(`${pkg.name} ${pkg.version}`);
+    const plan = await planPublication(metadata, (pkg) => isPublished(pkg));
+    console.log(process.argv.includes("--json") ? renderMachinePlan(plan) : renderHumanPlan(plan));
+    if (plan.blockers.length > 0) process.exitCode = 2;
     return;
   }
+
+  const published = new Set<string>();
+  for (const { name, version } of metadata.packages) {
+    if (await isPublished({ name, version })) published.add(`${name}@${version}`);
+  }
+  const plan = publicationPlan(metadata, published);
 
   for (const pkg of plan) {
     console.log(`Publishing ${pkg.name} ${pkg.version}`);

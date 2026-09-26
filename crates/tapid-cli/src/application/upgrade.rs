@@ -49,9 +49,6 @@ pub(crate) fn run(
     if !endpoints.is_empty() && release_url.is_some() {
         return Err("choose either a release record URL or legacy signed endpoints".into());
     }
-    if endpoints.is_empty() && keyring_path.is_some() {
-        return Err("a release keyring requires explicit legacy signed endpoints".into());
-    }
     let destination = match destination_arg {
         Some(path) => path.to_owned(),
         None => match std::env::current_exe() {
@@ -71,6 +68,17 @@ pub(crate) fn run(
         verification_known,
         recovered,
     } = if endpoints.is_empty() {
+        let keyring = match keyring_path {
+            Some(path) => KeyRing::from_embedded_json(&fs::read(&path).map_err(|error| {
+                format!(
+                    "cannot read trusted release keyring '{}': {error}",
+                    path.display()
+                )
+            })?)
+            .map_err(|error| format!("invalid trusted release keyring: {error}"))?,
+            None => KeyRing::production()
+                .map_err(|error| format!("invalid embedded keyring: {error}"))?,
+        };
         download_record_release(
             &mut fetcher,
             release_url
@@ -78,6 +86,7 @@ pub(crate) fn run(
                 .unwrap_or(super::release_record::DEFAULT_URL),
             target,
             &destination,
+            &keyring,
         )?
     } else {
         let keyring = match keyring_path {
@@ -218,6 +227,7 @@ fn download_record_release<F: Fetcher>(
     url: &str,
     target: &str,
     destination: &Path,
+    keyring: &KeyRing,
 ) -> Result<DownloadedRelease, String> {
     if !super::release_record::https_url(url) {
         return Err(
@@ -242,6 +252,32 @@ fn download_record_release<F: Fetcher>(
         }
         Err(error) => return Err(error.to_string()),
     };
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|error| format!("cannot determine current time: {error}"))?;
+    let sidecar_url = super::release_record::signature_url(url);
+    let sidecar = match fetcher
+        .fetch_metadata_with_limit(&sidecar_url, super::release_record::MAX_BYTES)
+    {
+        Ok(sidecar) => sidecar,
+        Err(ReleaseError::Fetch(error)) => {
+            let (version, artifact_name, bytes, signature_verified, verification_known) =
+                recover_last_known_good(destination, target).map_err(|recovery| {
+                    format!("release signature unavailable ({error}); recovery failed: {recovery}")
+                })?;
+            return Ok(DownloadedRelease {
+                version,
+                artifact_name,
+                bytes,
+                signature_verified,
+                verification_known,
+                recovered: true,
+            });
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    super::release_record::verify_signature(&body, &sidecar, keyring, &now)
+        .map_err(|error| error.to_string())?;
     let record = super::release_record::parse(&body, target).map_err(|error| error.to_string())?;
     // A rejected record or download must never become a successful cached upgrade.
     let bytes = fetcher
@@ -261,7 +297,7 @@ fn download_record_release<F: Fetcher>(
         version: record.version,
         artifact_name: record.name,
         bytes,
-        signature_verified: false,
+        signature_verified: true,
         verification_known: true,
         recovered: false,
     })

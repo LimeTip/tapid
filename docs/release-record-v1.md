@@ -2,7 +2,7 @@
 
 This contract is implemented for the next release, expected to be Tapid 0.0.11. Its presence in the repository does not establish that the release or website routes have been published. See the [release runbook](release-distribution.md) for the first-release cutover.
 
-A release record describes the version and exact downloadable archives. It is served over HTTPS and supplies SHA-256 integrity checks. It is not a signed release manifest and does not establish an independent release trust root.
+A release record describes the version and exact downloadable archives. It is served over HTTPS and supplies SHA-256 integrity checks. The record is accompanied by a signed sidecar at the deterministic URL formed by appending `.sig` to the record URL.
 
 ## Format
 
@@ -44,6 +44,8 @@ The public discovery addresses are:
 
 The website routes redirect to the release provider's metadata asset. Initially the latest route points to `https://github.com/LimeTip/tapid/releases/latest/download/tapid-release-v1.tsv`; a version route points to `https://github.com/LimeTip/tapid/releases/download/vVERSION/tapid-release-v1.tsv`. Ordinary releases need no website edit. Moving providers requires changing these routes and publishing compatible records and archives at the new provider.
 
+The sidecar is a JSON `tapid-trust-envelope-v1` with subject `tapid-release-v1`, artifact digest `sha256-*` over the exact record bytes, and claims `{ "schema": "tapid-release-v1-signature", "created_at": "...", "expires_at": "..." }`. The client verifies the Ed25519 signature with the embedded production keyring, requires the record digest and bounded active time window to match, and performs this verification before parsing rows or downloading an archive. Sidecars are valid for no more than 30 days.
+
 Both installers and the new default upgrade path consume this contract. The CLI accepts `--release-url` or `TAPID_RELEASE_RECORD_URL` to override the record address. The installers accept `TAPID_RELEASE_RECORD_URL`. An explicit installer version through 0.0.10 uses the historical GitHub archive and `SHA256SUMS` path unless a record override is supplied. These historical releases do not contain this asset.
 
 `/stable.json` remains the historical signed-channel-index address. Do not place this TSV record or unsigned JSON there. Tapid 0.0.10 would reject received metadata of the wrong format before attempting its GitHub fallback. Explicit CLI `--endpoint` continues to select the legacy signed protocol; it is separate from `--release-url`.
@@ -54,4 +56,4 @@ Received malformed metadata, unsupported targets, invalid archive sizes, and dig
 
 After successful download verification, the client validates archive contents and stages executable replacement. Identical executable bytes leave the installation unchanged. The local release floor prevents normal rollback below recorded state, but does not resist hostile modification of that local state.
 
-Compromise of the domain, its route configuration, the release provider, or the publishing workflow can substitute both a release record and an archive. SHA-256 detects mismatched bytes; it does not independently authorize a publisher. This contract has no signing keys or periodic metadata re-signing obligation.
+Compromise of the domain, its route configuration, the release provider, or the publishing workflow cannot authorize a substituted record without the embedded release signing key. The publisher must publish the record and its matching `.sig` sidecar together; changing either record bytes or artifact rows invalidates the sidecar before download.

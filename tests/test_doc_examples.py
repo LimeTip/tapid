@@ -252,6 +252,36 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('Check previous-version upgrade and repeat upgrade through the public service', workflow)
         self.assertIn('is already up to date', workflow)
 
+    def test_public_smoke_reuses_native_capability_validator(self):
+        workflow = (ROOT / '.github/workflows/release-public-smoke.yml').read_text()
+        self.assertEqual(workflow.count('node tests/fixtures/validate_consumer_project.js --binary'), 2)
+        self.assertIn('--binary "$binary" --release-tag "$RELEASE_TAG"', workflow)
+        self.assertIn('--binary $binary --release-tag $env:RELEASE_TAG', workflow)
+        self.assertNotIn('test -- forwarded 0', workflow)
+        self.assertNotIn('test -- wrong 0', workflow)
+
+    def test_public_smoke_independent_checks_use_explicit_prerequisites(self):
+        workflow = (ROOT / '.github/workflows/release-public-smoke.yml').read_text()
+        for job in (workflow.split('  unix:', 1)[1].split('  windows:', 1)[0],
+                    workflow.split('  windows:', 1)[1]):
+            latest = job.split('      - name: Install latest release through discovery', 1)[1].split('      - name:', 1)[0]
+            self.assertIn("if: ${{ !cancelled() && steps.install_published.outcome == 'success' }}", latest)
+            self.assertIn('id: install_latest', latest)
+            self.assertIn('id: install_published', job)
+        upgrade = workflow.split('      - name: Run canonical published upgrade', 1)[1].split('      - name:', 1)[0]
+        self.assertIn("if: ${{ !cancelled() && steps.install_published.outcome == 'success' && steps.install_latest.outcome == 'success' }}", upgrade)
+        self.assertIn('id: upgrade', upgrade)
+        evidence = workflow.split('      - name: Retain published upgrade evidence', 1)[1].split('  windows:', 1)[0]
+        self.assertIn("if: ${{ always() && steps.upgrade.outcome != 'skipped' }}", evidence)
+        self.assertIn('if-no-files-found: error', evidence)
+        self.assertNotIn('continue-on-error:', workflow)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node runtime not installed')
+    def test_native_capability_validator_regressions(self):
+        result = subprocess.run(['node', '--test', str(ROOT / 'tests/fixtures/validate_consumer_project.test.js')],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell runtime not installed')
     def test_native_powershell_requires_network_opt_in_before_execution(self):
         import shlex
