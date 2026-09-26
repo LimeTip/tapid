@@ -1,6 +1,6 @@
 import { deepStrictEqual as assertEquals, rejects as assertRejects, strictEqual } from "node:assert/strict";
 import { test } from "node:test";
-import { isPublished, publicationPlan } from "./publish.ts";
+import { isPublished, planPublication, publicationPlan, renderHumanPlan, renderMachinePlan } from "./publish.ts";
 
 const metadata = {
   packages: [
@@ -148,4 +148,36 @@ test("crates.io lookup retries transient responses with bounded requests", async
     () => isPublished({ name: "tapid", version: "1.2.3" }, async () => new Response(null, { status: 403 }), async () => {}),
     /HTTP 403/,
   );
+});
+
+test("publication planner reports a deterministic no-op with verification commands", async () => {
+  const result = await planPublication(metadata, async () => true);
+  assertEquals(result.packages, []);
+  assertEquals(result.blockers, []);
+  assertEquals(result.verification, [
+    "cargo package --workspace --locked",
+    "cargo metadata --manifest-path tests/integration/Cargo.toml --locked --format-version 1",
+  ]);
+  strictEqual(renderMachinePlan(result), JSON.stringify(result, null, 2) + "\n");
+  strictEqual(renderHumanPlan(result), "No crates.io packages require publication.\n");
+});
+
+test("publication planner includes changed dependents and records recovery guidance", async () => {
+  const result = await planPublication(metadata, async (pkg) => pkg.name === "tapid-core" && pkg.version === "0.0.4");
+  assertEquals(result.packages.map((pkg) => pkg.name), [
+    "tapid-archive", "tapid-manifest", "tapid-linker", "tapid-lockfile", "tapid-policy",
+    "tapid-registry-client", "tapid-resolver", "tapid-store", "tapid",
+  ]);
+  assertEquals(result.recovery, "Record confirmed package versions, query crates.io again, and rerun this dry-run; resume only with the remaining dependency-ordered suffix.");
+});
+
+test("publication planning preserves metadata and fails closed on registry errors", async () => {
+  const snapshot = JSON.stringify(metadata);
+  const result = await planPublication(metadata, async () => {
+    throw new Error("HTTP 429 from crates.io");
+  });
+  assertEquals(result.packages, []);
+  assertEquals(result.blockers.length, publicationPlan(metadata, new Set()).length);
+  for (const blocker of result.blockers) strictEqual(blocker.endsWith(": HTTP 429 from crates.io"), true);
+  strictEqual(JSON.stringify(metadata), snapshot);
 });

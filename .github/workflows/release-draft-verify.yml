@@ -1,0 +1,174 @@
+name: Verify draft release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact stable tag of the draft
+        required: true
+        type: string
+      release_id:
+        description: Expected numeric GitHub release ID
+        required: true
+        type: string
+      commit_sha:
+        description: Expected peeled commit for the annotated tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-draft-verify-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+env:
+  REPOSITORY: ${{ github.repository }}
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  RELEASE_ID: ${{ inputs.release_id }}
+  COMMIT_SHA: ${{ inputs.commit_sha }}
+
+jobs:
+  resolve-and-verify:
+    name: Resolve and verify exact draft assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve exact draft and tag commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$COMMIT_SHA" =~ ^[a-f0-9]{40}$ ]]
+          release_json="$RUNNER_TEMP/release.json"
+          gh api "repos/$REPOSITORY/releases/$RELEASE_ID" > "$release_json"
+          jq -e --arg tag "$RELEASE_TAG" --argjson id "$RELEASE_ID" \
+            '.id == $id and .tag_name == $tag and .draft == true and .prerelease == false' \
+            "$release_json" >/dev/null || {
+            echo "draft identity mismatch" >&2
+            exit 1
+          }
+          releases_json="$RUNNER_TEMP/releases.json"
+          gh api --paginate --slurp "repos/$REPOSITORY/releases" > "$releases_json"
+          matches_file="$RUNNER_TEMP/matching-release-ids"
+          jq -r --arg tag "$RELEASE_TAG" '.[][] | select(.tag_name == $tag) | .id' "$releases_json" > "$matches_file"
+          match_count="$(sed '/^$/d' "$matches_file" | wc -l | tr -d ' ')"
+          test "$match_count" = 1 || {
+            echo "expected exactly one draft release for tag" >&2
+            exit 1
+          }
+          test "$(cat "$matches_file")" = "$RELEASE_ID" || { echo "draft ID does not match exact tag" >&2; exit 1; }
+
+          tag_ref="$(gh api "repos/$REPOSITORY/git/ref/tags/$RELEASE_TAG")"
+          tag_type="$(printf '%s' "$tag_ref" | jq -r .object.type)"
+          test "$tag_type" = tag || { echo "tag is not annotated" >&2; exit 1; }
+          tag_object="$(printf '%s' "$tag_ref" | jq -r .object.sha)"
+          peeled="$(gh api "repos/$REPOSITORY/git/tags/$tag_object" --jq .object.sha)"
+          test "$peeled" = "$COMMIT_SHA" || { echo "git tag cannot be moved" >&2; exit 1; }
+          tagged_commit="$(gh api "repos/$REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
+          test "$tagged_commit" = "$COMMIT_SHA" || { echo "tag commit mismatch" >&2; exit 1; }
+
+          VERSION="${RELEASE_TAG#v}"
+          expected_assets_file="$RUNNER_TEMP/expected-assets"
+          printf '%s\n' \
+            "tapid-$VERSION-aarch64-apple-darwin.tar.gz" \
+            "tapid-$VERSION-aarch64-pc-windows-msvc.tar.gz" \
+            "tapid-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+            "tapid-$VERSION-x86_64-apple-darwin.tar.gz" \
+            "tapid-$VERSION-x86_64-pc-windows-msvc.tar.gz" \
+            "tapid-$VERSION-x86_64-unknown-linux-gnu.tar.gz" SHA256SUMS | LC_ALL=C sort > "$expected_assets_file"
+          jq -r '.assets[] | [.name, .id, .size] | @tsv' "$release_json" | LC_ALL=C sort -k1,1 > "$RUNNER_TEMP/assets.tsv"
+          test "$(wc -l < "$RUNNER_TEMP/assets.tsv" | tr -d ' ')" = 7 || { echo "expected exactly seven draft assets" >&2; exit 1; }
+          cut -f1 "$RUNNER_TEMP/assets.tsv" | diff -u "$expected_assets_file" - || { echo "unexpected draft asset" >&2; exit 1; }
+
+          mkdir -p "$RUNNER_TEMP/assets"
+          while IFS=$'\t' read -r name asset_id provider_size; do
+            case "$asset_id" in ''|*[!0-9]*) echo "invalid numeric asset ID" >&2; exit 1 ;; esac
+            gh api "repos/$REPOSITORY/releases/assets/$asset_id" \
+              -H 'Accept: application/octet-stream' > "$RUNNER_TEMP/assets/$name"
+            actual_size="$(wc -c < "$RUNNER_TEMP/assets/$name" | tr -d ' ')"
+            test "$actual_size" = "$provider_size" || { echo "provider size mismatch for $name" >&2; exit 1; }
+          done < "$RUNNER_TEMP/assets.tsv"
+          expected_checksum_file="$RUNNER_TEMP/expected-checksum-names"
+          printf '%s\n' \
+            "tapid-$VERSION-aarch64-apple-darwin.tar.gz" \
+            "tapid-$VERSION-aarch64-pc-windows-msvc.tar.gz" \
+            "tapid-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+            "tapid-$VERSION-x86_64-apple-darwin.tar.gz" \
+            "tapid-$VERSION-x86_64-pc-windows-msvc.tar.gz" \
+            "tapid-$VERSION-x86_64-unknown-linux-gnu.tar.gz" | LC_ALL=C sort > "$expected_checksum_file"
+          actual_checksum_file="$RUNNER_TEMP/actual-checksum-names"
+          awk 'NF == 2 && $1 ~ /^[0-9a-fA-F]{64}$/ { print $2 }' "$RUNNER_TEMP/assets/SHA256SUMS" | LC_ALL=C sort > "$actual_checksum_file"
+          diff -u "$expected_checksum_file" "$actual_checksum_file" || {
+            echo "SHA256SUMS must contain exactly one digest for each archive" >&2
+            exit 1
+          }
+          (cd "$RUNNER_TEMP/assets" && sha256sum -c SHA256SUMS)
+          for archive in "$RUNNER_TEMP/assets"/*.tar.gz; do
+            members="$(tar -tzf "$archive" | tr -d '\r')"
+            test "$(printf '%s\n' "$members" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 || {
+              echo "archive must contain exactly one member" >&2
+              exit 1
+            }
+            verbose_member="$(tar -tvzf "$archive" | tr -d '\r')"
+            test "$(printf '%s\n' "$verbose_member" | awk '$1 ~ /^-[rwx-]{9}$/ && ($NF == "tapid" || $NF == "tapid.exe") { count++ } END { print count + 0 }')" = 1 || {
+              echo "archive member must be a regular tapid executable" >&2
+              exit 1
+            }
+            test "$(file --brief --mime-type "$archive")" = application/gzip || { echo "unexpected archive type" >&2; exit 1; }
+          done
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+      - name: Publish exact verified assets for platform jobs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: exact-draft-assets
+          path: ${{ runner.temp }}/assets
+          if-no-files-found: error
+          retention-days: 1
+
+  install:
+    name: Install and execute (${{ matrix.runner }})
+    needs: resolve-and-verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            archive: x86_64-unknown-linux-gnu
+            binary: tapid
+          - runner: macos-latest
+            archive: x86_64-apple-darwin
+            binary: tapid
+          - runner: windows-latest
+            archive: x86_64-pc-windows-msvc
+            binary: tapid.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: exact-draft-assets
+          path: ${{ runner.temp }}/assets
+      - name: Install and execute draft binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/tapid-install"
+          mkdir -p "$install_dir"
+          tar -xzf "$RUNNER_TEMP/assets/tapid-${RELEASE_TAG#v}-${{ matrix.archive }}.tar.gz" -C "$install_dir"
+          test "$("$install_dir/${{ matrix.binary }}" --version)" = "tapid ${RELEASE_TAG#v}"
+          "$install_dir/${{ matrix.binary }}" --help >/dev/null
+      - name: Install and execute draft binary (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installDir = Join-Path $env:RUNNER_TEMP 'tapid-install'
+          New-Item -ItemType Directory -Force $installDir | Out-Null
+          tar -xzf (Join-Path $env:RUNNER_TEMP "assets/tapid-$($env:RELEASE_TAG.Substring(1))-x86_64-pc-windows-msvc.tar.gz") -C $installDir
+          $actual = & (Join-Path $installDir 'tapid.exe') --version
+          if ($actual -ne "tapid $($env:RELEASE_TAG.Substring(1))") { throw "installed version mismatch" }
+          & (Join-Path $installDir 'tapid.exe') --help | Out-Null
