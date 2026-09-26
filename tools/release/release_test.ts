@@ -478,7 +478,7 @@ test("installers use checksums without embedded release signing", async () => {
   assert(shell.includes("MAX_BINARY_BYTES="));
   assert(shell.includes("tar -xOzf"));
   assert(shell.includes('[ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0'));
-  assert(shell.includes("configure_path || printf 'Tapid was installed, but PATH could not be updated."));
+  assert(shell.includes("configure_path || fail 'could not safely update the selected shell startup file'"));
   assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\n  mv -f "$STAGED_MARKER"'));
   assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\nmv -f "$STAGED_MARKER"'));
   const powershell = await text("scripts/install.ps1");
