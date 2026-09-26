@@ -40,6 +40,7 @@ remove_path_block() {
     bash)
       if [ -f "$HOME/.bash_profile" ]; then PATH_RC="$HOME/.bash_profile"; else PATH_RC="$HOME/.bashrc"; fi
       ;;
+    zsh) PATH_RC="$HOME/.zprofile" ;;
     sh|dash|ksh) PATH_RC="$HOME/.profile" ;;
     *) return 1 ;;
   esac
