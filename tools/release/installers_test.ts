@@ -58,6 +58,8 @@ esac
   return { directory, install, bytes, hash, record, env,
     installShell: (args: string[] = [], additions: Record<string, string> = {}) =>
       run("/bin/sh", [join(root, "scripts/install.sh"), "--install-dir", install, ...args], { env: { ...env, ...additions } }),
+    defaultInstallShell: (home: string, additions: Record<string, string> = {}) =>
+      run("/bin/sh", [join(root, "scripts/install.sh")], { env: { ...env, HOME: home, SHELL: "/bin/zsh", ...additions } }),
     requests: () => readFile(join(directory, "requests"), "utf8"),
     cleanup: () => rm(directory, { recursive: true, force: true }),
   };
@@ -72,6 +74,19 @@ test("Unix installer follows owned discovery and provider-neutral artifact URLs"
     await writeFile(join(f.directory, "record.tsv"), f.record(`https://downloads.example.org/files/${archive}`));
     await f.installShell();
     ok((await f.requests()).endsWith(`https://downloads.example.org/files/${archive}\n`));
+  } finally { await f.cleanup(); }
+});
+
+test("Unix installer configures the default macOS zsh profile", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "home");
+  const profile = join(home, ".zprofile");
+  const pathInstall = join(home, ".local", "bin");
+  try {
+    await mkdir(home);
+    await f.defaultInstallShell(home);
+    equal((await run(join(pathInstall, "tapid"), ["--version"])).stdout.trim(), "tapid 1.2.3");
+    equal(await readFile(profile, "utf8"), "# tapid-path-managed-v1\nexport PATH=\"$HOME/.local/bin:$PATH\"\n# end tapid-path-managed-v1\n");
   } finally { await f.cleanup(); }
 });
 

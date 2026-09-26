@@ -64,6 +64,7 @@ configure_path() {
   [ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0
   shell_name="${SHELL-}"; shell_name="${shell_name##*/}"
   case "$shell_name" in
+    zsh) PATH_RC="$HOME/.zprofile"; PATH_COMMAND=". \"$PATH_RC\"" ;;
     bash)
       if [ -f "$HOME/.bash_profile" ]; then PATH_RC="$HOME/.bash_profile"; else PATH_RC="$HOME/.bashrc"; fi
       PATH_COMMAND=". \"$PATH_RC\""
