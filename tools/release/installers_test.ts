@@ -1,7 +1,7 @@
 import { strictEqual as equal, rejects, match, ok } from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { arch, platform } from "node:process";
@@ -57,7 +57,7 @@ esac
   for (const name of ["TAPID_REPO", "TAPID_RELEASE_BASE_URL", "TAPID_RELEASE_DISCOVERY_URL", "TAPID_RELEASE_RECORD_URL"]) delete env[name];
   return { directory, install, bytes, hash, record, env,
     installShell: (args: string[] = [], additions: Record<string, string> = {}) =>
-      run("sh", [join(root, "scripts/install.sh"), "--install-dir", install, ...args], { env: { ...env, ...additions } }),
+      run("/bin/sh", [join(root, "scripts/install.sh"), "--install-dir", install, ...args], { env: { ...env, ...additions } }),
     requests: () => readFile(join(directory, "requests"), "utf8"),
     cleanup: () => rm(directory, { recursive: true, force: true }),
   };
@@ -72,6 +72,50 @@ test("Unix installer follows owned discovery and provider-neutral artifact URLs"
     await writeFile(join(f.directory, "record.tsv"), f.record(`https://downloads.example.org/files/${archive}`));
     await f.installShell();
     ok((await f.requests()).endsWith(`https://downloads.example.org/files/${archive}\n`));
+  } finally { await f.cleanup(); }
+});
+
+ test("Unix installer owns an idempotent POSIX PATH block and uninstall removes only that block", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "home");
+  const profile = join(home, ".profile");
+  const pathInstall = join(home, ".local", "bin");
+  try {
+    await mkdir(home);
+    await mkdir(pathInstall, { recursive: true });
+    await writeFile(profile, "export PATH=\"$HOME/bin:$PATH\"\n");
+    const installShell = () => run("/bin/sh", [join(root, "scripts/install.sh"), "--install-dir", pathInstall], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
+    await installShell();
+    const first = await readFile(profile, "utf8");
+    equal(first, "export PATH=\"$HOME/bin:$PATH\"\n# tapid-path-managed-v1\nexport PATH=\"$HOME/.local/bin:$PATH\"\n# end tapid-path-managed-v1\n");
+    const resolved = await run("/bin/sh", ["-c", ". \"$HOME/.profile\"; command -v tapid"], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
+    equal(resolved.stdout, `${pathInstall}/tapid\n`);
+    await installShell();
+    equal(await readFile(profile, "utf8"), first);
+    const uninstalled = await run("/bin/sh", [join(root, "scripts/uninstall.sh"), "--install-dir", pathInstall], {
+      env: { ...f.env, HOME: home, SHELL: "/bin/sh" },
+    });
+    equal(uninstalled.stdout, `Removed ${join(pathInstall, "tapid")}\n`);
+    equal(await readFile(profile, "utf8"), "export PATH=\"$HOME/bin:$PATH\"\n");
+  } finally { await f.cleanup(); }
+});
+
+test("Unix PATH management refuses symlinked and foreign startup files", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "home");
+  const profile = join(home, ".profile");
+  const pathInstall = join(home, ".local", "bin");
+  try {
+    await mkdir(home);
+    await mkdir(pathInstall, { recursive: true });
+    const installShell = () => run("/bin/sh", [join(root, "scripts/install.sh"), "--install-dir", pathInstall], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
+    await writeFile(join(f.directory, "foreign-profile"), "export PATH=\"$PATH\"\n");
+    await symlink(join(f.directory, "foreign-profile"), profile);
+    await rejects(installShell);
+    await rm(profile);
+    await writeFile(profile, "export PATH=\"$PATH\"\n");
+    await chmod(profile, 0o444);
+    await rejects(installShell);
   } finally { await f.cleanup(); }
 });
 
