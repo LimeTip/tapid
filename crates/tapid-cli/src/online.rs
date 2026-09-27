@@ -35,6 +35,8 @@ struct FixturePackage {
     artifact: String,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "peerDependencies")]
+    peer_dependencies: BTreeMap<String, String>,
 }
 #[derive(Debug, Deserialize)]
 struct Fixture {
@@ -705,7 +707,7 @@ pub fn resolve_and_fetch(
                     integrity,
                     artifact: p.artifact.clone(),
                     dependencies: p.dependencies.clone(),
-                    peer_dependencies: BTreeMap::new(),
+                    peer_dependencies: p.peer_dependencies.clone(),
                     optional_dependencies: BTreeMap::new(),
                     platform: PackagePlatform::unrestricted(),
                     fixture: true,
@@ -1164,6 +1166,18 @@ mod tests {
             platform: PackagePlatform::unrestricted(),
             fixture: false,
         }
+    }
+
+    #[test]
+    fn fixture_metadata_preserves_peer_dependencies_separately() {
+        let fixture: Fixture = serde_json::from_str(
+            r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","artifact":"base64:AA==","dependencies":{"runtime":"^1.0.0"},"peerDependencies":{"host":"^2.0.0"}}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(fixture.packages[0].dependencies["runtime"], "^1.0.0");
+        assert_eq!(fixture.packages[0].peer_dependencies["host"], "^2.0.0");
+        assert!(!fixture.packages[0].dependencies.contains_key("host"));
     }
 
     #[test]
