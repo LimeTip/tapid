@@ -22,6 +22,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { printf 'uninstaller: --install-dir requires a value\n' >&2; exit 1; }
       INSTALL_DIR="$2"
       BINARY="$INSTALL_DIR/tapid"
+      MARKER="$INSTALL_DIR/.tapid-managed"
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
@@ -63,10 +64,8 @@ remove_path_block() {
   ! grep -Fqx "$PATH_MARKER_BEGIN" "$PATH_RC" && ! grep -Fqx "$PATH_MARKER_END" "$PATH_RC"
 }
 
-if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
-  [ -f "$MARKER" ] && [ ! -L "$MARKER" ] && [ -O "$MARKER" ] || { printf 'uninstaller: refusing foreign install marker: %s\n' "$MARKER" >&2; exit 1; }
-  [ "$(cat "$MARKER")" = 'tapid-managed-v1' ] || { printf 'uninstaller: refusing invalid install marker: %s\n' "$MARKER" >&2; exit 1; }
-fi
+[ -f "$MARKER" ] && [ ! -L "$MARKER" ] && [ -O "$MARKER" ] || { printf 'uninstaller: refusing foreign install marker: %s\n' "$MARKER" >&2; exit 1; }
+[ "$(cat "$MARKER")" = 'tapid-managed-v1' ] || { printf 'uninstaller: refusing invalid install marker: %s\n' "$MARKER" >&2; exit 1; }
 
 if [ -e "$BINARY" ] || [ -L "$BINARY" ]; then
   [ -L "$BINARY" ] && { printf 'uninstaller: refusing to remove symlink: %s\n' "$BINARY" >&2; exit 1; }

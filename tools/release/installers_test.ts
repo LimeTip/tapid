@@ -4,12 +4,13 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { arch, platform } from "node:process";
+import { arch, env as processEnv, platform } from "node:process";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
+const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const version = "1.2.3";
 const target = platform === "darwin"
@@ -33,6 +34,7 @@ async function fixture() {
   const record = (url = `https://gitlab.example/releases/${archive}`) =>
     `tapid-release-v1\t${version}\n${target}\t${archive}\t${bytes.length}\t${hash}\t${url}\n`;
   await writeFile(join(directory, "record.tsv"), record());
+  await writeFile(join(directory, "release.tsv.sig"), "fixture-signature\n");
   await writeFile(join(directory, "SHA256SUMS"), `${hash}  ${archive}\n`);
   await writeFile(join(bin, "curl"), `#!/bin/sh
 set -eu
@@ -48,19 +50,25 @@ while [ "$#" -gt 0 ]; do
 done
 printf '%s\\n' "$url" >> "$INSTALLER_FIXTURE/requests"
 case "$url" in
+  *.tsv.sig) cp "$INSTALLER_FIXTURE/release.tsv.sig" "$out" ;;
   *.tsv) cp "$INSTALLER_FIXTURE/record.tsv" "$out" ;;
   *) cp "$INSTALLER_FIXTURE/$(basename "$url")" "$out" ;;
 esac
 `);
   await chmod(join(bin, "curl"), 0o755);
-  const env: Record<string, string | undefined> = { ...process.env, PATH: `${bin}:${process.env.PATH}`, INSTALLER_FIXTURE: directory };
+  await writeFile(join(bin, "python3"), "#!/bin/sh\nexit 0\n");
+  await chmod(join(bin, "python3"), 0o755);
+  const env: Record<string, string | undefined> = { ...processEnv, PATH: `${bin}:${processEnv.PATH}`, INSTALLER_FIXTURE: directory };
   for (const name of ["TAPID_REPO", "TAPID_RELEASE_BASE_URL", "TAPID_RELEASE_DISCOVERY_URL", "TAPID_RELEASE_RECORD_URL"]) delete env[name];
   return { directory, install, bytes, hash, record, env,
     installShell: (args: string[] = [], additions: Record<string, string> = {}) =>
       run("/bin/sh", [join(root, "scripts/install.sh"), "--install-dir", install, ...args], { env: { ...env, ...additions } }),
     defaultInstallShell: (home: string, additions: Record<string, string> = {}) =>
       run("/bin/sh", [join(root, "scripts/install.sh")], { env: { ...env, HOME: home, SHELL: "/bin/zsh", ...additions } }),
-    requests: () => readFile(join(directory, "requests"), "utf8"),
+    requests: async () => (await readFile(join(directory, "requests"), "utf8"))
+      .split("\n")
+      .filter((request: string) => request && !request.endsWith(".sig"))
+      .join("\n") + "\n",
     cleanup: () => rm(directory, { recursive: true, force: true }),
   };
 }
@@ -90,6 +98,21 @@ test("Unix installer configures the default macOS zsh profile", { skip: platform
   } finally { await f.cleanup(); }
 });
 
+test("Unix installer accepts an existing unmarked default PATH export", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "home");
+  const profile = join(home, ".zprofile");
+  const pathInstall = join(home, ".local", "bin");
+  const existing = "export PATH=\"$HOME/.local/bin:$PATH\"\n";
+  try {
+    await mkdir(home);
+    await writeFile(profile, existing);
+    await f.defaultInstallShell(home, { PATH: `${pathInstall}:${f.env.PATH}` });
+    equal((await run(join(pathInstall, "tapid"), ["--version"])).stdout.trim(), "tapid 1.2.3");
+    equal(await readFile(profile, "utf8"), existing);
+  } finally { await f.cleanup(); }
+});
+
 test("Unix installer validates the default zsh profile before replacing an installation", { skip: platform === "win32" }, async () => {
   const f = await fixture();
   const home = join(f.directory, "home");
@@ -104,6 +127,64 @@ test("Unix installer validates the default zsh profile before replacing an insta
     await rejects(() => f.defaultInstallShell(home, { PATH: `${pathInstall}:${f.env.PATH}` }));
     equal(await readFile(join(pathInstall, "tapid"), "utf8"), existing);
   } finally { await f.cleanup(); }
+});
+
+test("Unix uninstaller refuses PATH removal without an owned install marker", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "home");
+  const profile = join(home, ".profile");
+  const pathInstall = join(home, ".local", "bin");
+  const managedProfile = "# tapid-path-managed-v1\nexport PATH=\"$HOME/.local/bin:$PATH\"\n# end tapid-path-managed-v1\n";
+  try {
+    await mkdir(pathInstall, { recursive: true });
+    await writeFile(profile, managedProfile);
+    await rejects(() => run("/bin/sh", [join(root, "scripts/uninstall.sh"), "--install-dir", pathInstall], {
+      env: { ...f.env, HOME: home, SHELL: "/bin/sh" },
+    }));
+    equal(await readFile(profile, "utf8"), managedProfile);
+  } finally { await f.cleanup(); }
+});
+
+test("Unix uninstaller preserves a foreign binary and removes a marked binary", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const installDir = join(f.directory, "install");
+  const binary = join(installDir, "tapid");
+  try {
+    await mkdir(installDir, { recursive: true });
+    await writeFile(binary, "foreign binary");
+    await rejects(() => run("/bin/sh", [join(root, "scripts/uninstall.sh"), "--install-dir", installDir], { env: f.env }));
+    equal(await readFile(binary, "utf8"), "foreign binary");
+
+    await writeFile(join(installDir, ".tapid-managed"), "tapid-managed-v1\n");
+    const result = await run("/bin/sh", [join(root, "scripts/uninstall.sh"), "--install-dir", installDir], { env: f.env });
+    equal(result.stdout, `Removed ${binary}\n`);
+    equal(await readFile(binary, "utf8").catch(() => null), null);
+    equal(await readFile(join(installDir, ".tapid-managed"), "utf8").catch(() => null), null);
+  } finally { await f.cleanup(); }
+});
+
+test("PowerShell uninstaller preserves a foreign binary and removes a marked binary", async (context) => {
+  try {
+    await execFileAsync("pwsh", ["-NoProfile", "-Command", "$null"]);
+  } catch {
+    context.skip("PowerShell is unavailable");
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), "tapid-powershell-uninstaller-"));
+  const installDir = join(directory, "install");
+  const binary = join(installDir, "tapid.exe");
+  const uninstaller = join(root, "scripts/uninstall.ps1");
+  try {
+    await mkdir(installDir);
+    await writeFile(binary, "foreign binary");
+    await rejects(() => execFileAsync("pwsh", ["-NoProfile", "-File", uninstaller, "-InstallDir", installDir]));
+    equal(await readFile(binary, "utf8"), "foreign binary");
+
+    await writeFile(join(installDir, ".tapid-managed"), "tapid-managed-v1\n");
+    await execFileAsync("pwsh", ["-NoProfile", "-File", uninstaller, "-InstallDir", installDir]);
+    equal(await readFile(binary, "utf8").catch(() => null), null);
+    equal(await readFile(join(installDir, ".tapid-managed"), "utf8").catch(() => null), null);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
  test("Unix installer owns an idempotent POSIX PATH block and uninstall removes only that block", { skip: platform === "win32" }, async () => {

@@ -4,19 +4,20 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 const execFileAsync = promisify(execFile);
-type Dependency = string | {
+export type Dependency = string | {
   name: string;
   source?: string | null;
   kind?: string | null;
   path?: string | null;
 };
-type MetadataPackage = {
+export type MetadataPackage = {
   name: string;
   version: string;
   dependencies?: Dependency[];
   publish?: string[] | null;
+  packageVerificationError?: string;
 };
-type CargoMetadata = { packages: MetadataPackage[] };
+export type CargoMetadata = { packages: MetadataPackage[]; lockfiles?: string[] };
 type Package = { name: string; version: string };
 
 /** Returns local non-dev dependencies that must be published before this package. */
@@ -24,7 +25,7 @@ function internalDependencies(pkg: MetadataPackage): string[] {
   return (pkg.dependencies ?? []).flatMap((dependency) => {
     if (typeof dependency === "string") return [dependency];
     return dependency.source === null && dependency.kind !== "dev" ? [dependency.name] : [];
-  });
+  }).sort();
 }
 
 /** Reports whether Cargo permits this package to be published to crates.io. */
@@ -76,32 +77,80 @@ export function publicationPlan(metadata: CargoMetadata, published: Set<string>)
 
 export type PublicationPlan = {
   packages: Package[];
+  missing: Package[];
+  drift: { name: string; localVersion: string; publicVersion: string }[];
+  dependentBumps: { dependent: string; dependency: string; requiredVersion: string }[];
+  lockfiles: string[];
   blockers: string[];
   verification: string[];
   recovery: string;
 };
-export type RegistryLookup = (pkg: Package) => Promise<boolean>;
+export type RegistryLookup = (pkg: Package) => Promise<boolean | { published: boolean; latestVersion?: string }>;
 
 /** Computes a read-only plan from exact registry lookups. */
 export async function planPublication(metadata: CargoMetadata, isInRegistry: RegistryLookup): Promise<PublicationPlan> {
-  const candidates = publicationPlan(metadata, new Set());
+  // Query every metadata package before planning so a locally unpublishable
+  // stand-in can be recognized as an already-published registry dependency.
+  const candidates = [...metadata.packages]
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map(({ name, version }) => ({ name, version }));
   const published = new Set<string>();
+  const missing: Package[] = [];
+  const drift: PublicationPlan["drift"] = [];
   const blockers: string[] = [];
   for (const pkg of candidates) {
     try {
-      if (await isInRegistry(pkg)) published.add(`${pkg.name}@${pkg.version}`);
+      const response = await isInRegistry(pkg);
+      const state = typeof response === "boolean" ? { published: response } : response;
+      if (state.published) published.add(`${pkg.name}@${pkg.version}`);
+      else {
+        missing.push(pkg);
+        if (state.latestVersion && state.latestVersion !== pkg.version) {
+          drift.push({ name: pkg.name, localVersion: pkg.version, publicVersion: state.latestVersion });
+        }
+      }
     } catch (error) {
       blockers.push(`${pkg.name}@${pkg.version}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  const packages = blockers.length === 0 ? publicationPlan(metadata, published) : [];
-  const verification = [
-    "cargo package --workspace --locked",
-    "cargo metadata --manifest-path tests/integration/Cargo.toml --locked --format-version 1",
-    ...packages.map((pkg) => `cargo package -p ${pkg.name} --locked`),
-  ];
+  for (const pkg of metadata.packages) {
+    if (pkg.packageVerificationError) blockers.push(`${pkg.name}: ${pkg.packageVerificationError}`);
+    for (const dependency of pkg.dependencies ?? []) {
+      if (typeof dependency !== "string" && dependency.path && dependency.source) {
+        blockers.push(`${pkg.name}: local path dependency ${dependency.name} has registry source ${dependency.source}`);
+      }
+    }
+  }
+  let packages: Package[] = [];
+  if (blockers.length === 0) {
+    try { packages = publicationPlan(metadata, published); }
+    catch (error) { blockers.push(error instanceof Error ? error.message : String(error)); }
+  }
+  const packageNames = new Set(packages.map((pkg) => pkg.name));
+  const dependentBumps: PublicationPlan["dependentBumps"] = [];
+  for (const pkg of metadata.packages) {
+    for (const dependency of internalDependencies(pkg)) {
+      const local = metadata.packages.find((candidate) => candidate.name === dependency);
+      if (local && packageNames.has(dependency) && packageNames.has(pkg.name)) {
+        dependentBumps.push({ dependent: pkg.name, dependency, requiredVersion: local.version });
+      }
+    }
+  }
+  dependentBumps.sort((a, b) => `${a.dependent}\0${a.dependency}`.localeCompare(`${b.dependent}\0${b.dependency}`));
+  const lockfiles = [...(metadata.lockfiles ?? [])].sort();
+  const verification = lockfiles.length === 0
+    ? ["cargo package --workspace --locked", "cargo metadata --manifest-path tests/integration/Cargo.toml --locked --format-version 1", ...packages.map((pkg) => `cargo package -p ${pkg.name} --locked`)]
+    : [
+      ...packages.map((pkg) => `cargo package -p ${pkg.name} --locked`),
+      "cargo metadata --locked --format-version 1",
+      ...lockfiles.filter((lockfile) => lockfile !== "Cargo.lock").map((lockfile) => `cargo metadata --manifest-path ${lockfile.replace(/Cargo\.lock$/, "Cargo.toml")} --locked --format-version 1`),
+    ];
   return {
     packages,
+    missing: missing.sort((a, b) => `${a.name}\0${a.version}`.localeCompare(`${b.name}\0${b.version}`)),
+    drift: drift.sort((a, b) => a.name.localeCompare(b.name)),
+    dependentBumps,
+    lockfiles,
     blockers,
     verification,
     recovery: "Record confirmed package versions, query crates.io again, and rerun this dry-run; resume only with the remaining dependency-ordered suffix.",
@@ -118,7 +167,11 @@ export function renderHumanPlan(plan: PublicationPlan): string {
   return [
     "Crates.io publication plan:",
     ...plan.packages.map((pkg, index) => `${index + 1}. ${pkg.name} ${pkg.version}`),
-    "Verification: cargo package --workspace --locked",
+    ...(plan.drift.length > 0 ? ["Version drift:", ...plan.drift.map((item) => `- ${item.name}: local ${item.localVersion}, public ${item.publicVersion}`)] : []),
+    ...(plan.dependentBumps.length > 0 ? ["Dependent bumps:", ...plan.dependentBumps.map((item) => `- ${item.dependent} requires ${item.dependency} ${item.requiredVersion}`)] : []),
+    "Verification:",
+    ...plan.verification.map((command) => `- ${command}`),
+    ...(plan.lockfiles.length > 0 ? ["Lockfiles requiring regeneration:", ...plan.lockfiles.map((lockfile) => `- ${lockfile}`)] : []),
     `Recovery: ${plan.recovery}`,
     "",
   ].join("\n");
@@ -163,37 +216,24 @@ export async function isPublished(
   throw new Error(`crates.io lookup retries exhausted for ${pkg.name} ${pkg.version}`);
 }
 
-async function waitUntilPublished(pkg: Package): Promise<void> {
-  for (let attempt = 1; attempt <= 20; attempt++) {
-    if (await isPublished(pkg)) return;
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-  }
-  throw new Error(`${pkg.name} ${pkg.version} was not visible on crates.io after 60 seconds`);
+/** Reads the public version state without attempting publication or mutation. */
+export async function registryState(pkg: Package, fetchFn: typeof fetch = fetch): Promise<{ published: boolean; latestVersion?: string }> {
+  const response = await fetchFn(`https://crates.io/api/v1/crates/${encodeURIComponent(pkg.name)}`, {
+    headers: { "User-Agent": "tapid-release-workflow (https://github.com/LimeTip/tapid)" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (response.status === 404) return { published: false };
+  if (!response.ok) throw new Error(`crates.io returned HTTP ${response.status} for ${pkg.name}`);
+  const body = await response.json() as { crate?: { max_version?: string }; versions?: { num?: string }[] };
+  const versions = new Set((body.versions ?? []).flatMap((version) => version.num ? [version.num] : []));
+  return { published: versions.has(pkg.version), latestVersion: body.crate?.max_version };
 }
 
 async function main(): Promise<void> {
   const metadata = await cargoMetadata();
-  if (process.argv.includes("--dry-run")) {
-    const plan = await planPublication(metadata, (pkg) => isPublished(pkg));
-    console.log(process.argv.includes("--json") ? renderMachinePlan(plan) : renderHumanPlan(plan));
-    if (plan.blockers.length > 0) process.exitCode = 2;
-    return;
-  }
-
-  const published = new Set<string>();
-  for (const { name, version } of metadata.packages) {
-    if (await isPublished({ name, version })) published.add(`${name}@${version}`);
-  }
-  const plan = publicationPlan(metadata, published);
-
-  for (const pkg of plan) {
-    console.log(`Publishing ${pkg.name} ${pkg.version}`);
-    await execFileAsync("cargo", ["publish", "-p", pkg.name, "--locked"], {
-      encoding: "utf8",
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    await waitUntilPublished(pkg);
-  }
+  const plan = await planPublication(metadata, (pkg) => registryState(pkg));
+  console.log(process.argv.includes("--json") ? renderMachinePlan(plan) : renderHumanPlan(plan));
+  if (plan.blockers.length > 0) process.exitCode = 2;
 }
 
 const isMain = process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;

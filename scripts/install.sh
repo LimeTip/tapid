@@ -86,7 +86,10 @@ configure_path() {
     grep -Fqx "$path_line" "$PATH_RC" || return 1
   }
   if [ "$begin_count" -eq 0 ]; then
-    grep -Fqx "$path_line" "$PATH_RC" && return 1
+    if grep -Fqx "$path_line" "$PATH_RC"; then
+      PATH="$INSTALL_DIR${PATH:+:$PATH}"; export PATH
+      return 0
+    fi
     path_tmp="$(mktemp "$PATH_RC.tapid.XXXXXX")" || return 1
     if ! { cat "$PATH_RC"; printf '%s\n%s\n%s\n' "$PATH_MARKER_BEGIN" "$path_line" "$PATH_MARKER_END"; } > "$path_tmp"; then
       rm -f "$path_tmp"; return 1
@@ -209,7 +212,13 @@ else
     END { exit bad }
   ' || fail "release record URL must be a safe HTTPS URL"
   curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize "$MAX_RECORD_BYTES" "$record_url" -o "$tmp_dir/release.tsv" 2>/dev/null || fail "could not download release record"
+  curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize "$MAX_RECORD_BYTES" "$record_url.sig" -o "$tmp_dir/release.tsv.sig" 2>/dev/null || fail "could not download release record signature"
   [ "$(wc -c < "$tmp_dir/release.tsv" | tr -d '[:space:]')" -le "$MAX_RECORD_BYTES" ] || fail "release record exceeds the size limit"
+  [ -s "$tmp_dir/release.tsv.sig" ] || fail "release record signature is empty"
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required to verify the release record signature"
+  verifier="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/verify-release-record.py"
+  [ -f "$verifier" ] || fail "release record signature verifier is missing"
+  python3 "$verifier" "$tmp_dir/release.tsv" "$tmp_dir/release.tsv.sig" || fail "release record signature verification failed"
   [ "$(tail -c 1 "$tmp_dir/release.tsv" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || fail "release record must end with a newline"
   # Some awk implementations truncate strings at NUL. Check raw bytes first.
   [ "$(LC_ALL=C tr -d '\011\012\040-\176' < "$tmp_dir/release.tsv" | wc -c | tr -d '[:space:]')" = 0 ] || fail "release record must contain ASCII fields and LF lines"

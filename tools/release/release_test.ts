@@ -485,7 +485,7 @@ test("public smoke retains tagged installer provenance before execution on both 
   assert(windows.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $installer'));
 });
 
-test("installers use checksums without embedded release signing", async () => {
+test("installers verify signed release records before parsing", async () => {
   for (const path of ["scripts/install.sh", "scripts/install.ps1"]) {
     const installer = await text(path);
     const checksum = installer.indexOf("SHA256SUMS");
@@ -494,9 +494,12 @@ test("installers use checksums without embedded release signing", async () => {
       : installer.indexOf('Save-BoundedHttpsFile $archiveUrl');
     assert(checksum >= 0 && archiveDownload > checksum);
     assert(!installer.includes("release-manifest.json"));
-    assert(!installer.includes("python"));
-    assert(!installer.includes("Ed25519"));
+    assert(installer.includes("release.tsv.sig"));
+    assert(installer.includes("release record signature verification failed"));
   }
+  const verifier = await text("scripts/verify-release-record.py");
+  assert(verifier.includes("tapid-release-v1-signature"));
+  assert(verifier.includes("release record signature verification failed"));
   const shell = await text("scripts/install.sh");
   assert(shell.includes("release archive must contain exactly one member named tapid"));
   assert(shell.includes("MAX_ARCHIVE_BYTES="));
@@ -534,6 +537,10 @@ test("installers use checksums without embedded release signing", async () => {
   assert(powershell.includes("$discovery.BaseResponse.RequestMessage.RequestUri"));
   const powershellUninstaller = await text("scripts/uninstall.ps1");
   assert(powershellUninstaller.includes("Test-AbsolutePath"));
+  assert(powershellUninstaller.includes(".tapid-managed"));
+  assert(powershellUninstaller.includes("tapid-managed-v1`n"));
+  assert(powershellUninstaller.includes("refusing foreign install marker"));
+  assert(powershellUninstaller.includes("Remove-Item -LiteralPath $marker -Force"));
   assert(!powershellUninstaller.includes("IsPathRooted"));
 });
 

@@ -262,6 +262,16 @@ try {
         Assert-ReleaseHttpsUrl $recordUrl
         $recordPath = Join-Path $tempRoot 'release.tsv'
         Save-BoundedHttpsFile $recordUrl $recordPath $MAX_RECORD_BYTES
+        $signaturePath = Join-Path $tempRoot 'release.tsv.sig'
+        Save-BoundedHttpsFile "$recordUrl.sig" $signaturePath $MAX_RECORD_BYTES
+        if ((Get-Item -LiteralPath $signaturePath).Length -eq 0) { Fail "release record signature is empty" }
+        $python = Get-Command python.exe -ErrorAction SilentlyContinue
+        if (-not $python) { $python = Get-Command python3.exe -ErrorAction SilentlyContinue }
+        if (-not $python) { Fail "python is required to verify the release record signature" }
+        $verifier = Join-Path $PSScriptRoot 'verify-release-record.py'
+        if (-not (Test-Path -LiteralPath $verifier -PathType Leaf)) { Fail "release record signature verifier is missing" }
+        & $python.Source $verifier $recordPath $signaturePath
+        if ($LASTEXITCODE -ne 0) { Fail "release record signature verification failed" }
         $record = Read-ReleaseRecord $recordPath $Version $target
         $Version = $record.Version
         $archive = $record.Archive

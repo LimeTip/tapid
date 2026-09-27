@@ -1,6 +1,6 @@
 import { deepStrictEqual as assertEquals, rejects as assertRejects, strictEqual } from "node:assert/strict";
 import { test } from "node:test";
-import { isPublished, planPublication, publicationPlan, renderHumanPlan, renderMachinePlan } from "./publish.ts";
+import { isPublished, planPublication, publicationPlan, registryState, renderHumanPlan, renderMachinePlan, type CargoMetadata } from "./publish.ts";
 
 const metadata = {
   packages: [
@@ -150,6 +150,14 @@ test("crates.io lookup retries transient responses with bounded requests", async
   );
 });
 
+test("registry state distinguishes an exact missing version from public version drift", async () => {
+  const state = await registryState({ name: "tapid", version: "2.0.0" }, async () => new Response(JSON.stringify({
+    crate: { max_version: "3.0.0" },
+    versions: [{ num: "3.0.0" }, { num: "1.0.0" }],
+  }), { status: 200 }));
+  assertEquals(state, { published: false, latestVersion: "3.0.0" });
+});
+
 test("publication planner reports a deterministic no-op with verification commands", async () => {
   const result = await planPublication(metadata, async () => true);
   assertEquals(result.packages, []);
@@ -180,4 +188,65 @@ test("publication planning preserves metadata and fails closed on registry error
   assertEquals(result.blockers.length, publicationPlan(metadata, new Set()).length);
   for (const blocker of result.blockers) strictEqual(blocker.endsWith(": HTTP 429 from crates.io"), true);
   strictEqual(JSON.stringify(metadata), snapshot);
+});
+
+test("publication planner checks registry before rejecting an unpublishable local stand-in", async () => {
+  const standIn = {
+    packages: [
+      { name: "tapid", version: "1.0.0", dependencies: ["tapid-private"] },
+      { name: "tapid-private", version: "1.0.0", dependencies: [], publish: [] },
+    ],
+  };
+  const lookedUp: string[] = [];
+  const result = await planPublication(standIn, async (pkg) => {
+    lookedUp.push(`${pkg.name}@${pkg.version}`);
+    return pkg.name === "tapid-private";
+  });
+  assertEquals(lookedUp, ["tapid@1.0.0", "tapid-private@1.0.0"]);
+  assertEquals(result.blockers, []);
+  assertEquals(result.packages, [{ name: "tapid", version: "1.0.0" }]);
+});
+
+test("publication planner reports missing and drifted registry versions and dependent bumps", async () => {
+  const input: CargoMetadata = {
+    packages: [
+      { name: "tapid", version: "1.0.0", dependencies: [{ name: "tapid-core", source: null, kind: null }] },
+      { name: "tapid-core", version: "2.0.0", dependencies: [] },
+    ],
+    lockfiles: ["Cargo.lock", "tests/integration/Cargo.lock"],
+  };
+  const plan = await planPublication(input, async (pkg) => pkg.name === "tapid-core"
+    ? { published: false, latestVersion: "1.0.0" }
+    : { published: false });
+  assertEquals(plan.drift, [{ name: "tapid-core", localVersion: "2.0.0", publicVersion: "1.0.0" }]);
+  assertEquals(plan.missing, [{ name: "tapid-core", version: "2.0.0" }, { name: "tapid", version: "1.0.0" }]);
+  assertEquals(plan.dependentBumps, [{ dependent: "tapid", dependency: "tapid-core", requiredVersion: "2.0.0" }]);
+  assertEquals(plan.lockfiles, ["Cargo.lock", "tests/integration/Cargo.lock"]);
+  assertEquals(plan.verification, [
+    "cargo package -p tapid-core --locked",
+    "cargo package -p tapid --locked",
+    "cargo metadata --locked --format-version 1",
+    "cargo metadata --manifest-path tests/integration/Cargo.toml --locked --format-version 1",
+  ]);
+});
+
+test("publication planner fails closed on package verification and path/registry incompatibility", async () => {
+  const input: CargoMetadata = {
+    packages: [
+      { name: "tapid", version: "1.0.0", dependencies: [{ name: "tapid-core", source: "registry+https://example.com", path: "../tapid-core", kind: null }], packageVerificationError: "cargo package failed" },
+      { name: "tapid-core", version: "1.0.0", dependencies: [] },
+    ],
+  };
+  const plan = await planPublication(input, async () => false);
+  assertEquals(plan.packages, []);
+  assertEquals(plan.blockers, [
+    "tapid: cargo package failed",
+    "tapid: local path dependency tapid-core has registry source registry+https://example.com",
+  ]);
+});
+
+test("publication planner emits byte-stable JSON", async () => {
+  const first = await planPublication(metadata, async () => false);
+  const second = await planPublication({ packages: [...metadata.packages].reverse() }, async () => false);
+  strictEqual(renderMachinePlan(first), renderMachinePlan(second));
 });
