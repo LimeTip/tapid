@@ -39,10 +39,11 @@ cargo package --workspace --locked
 cargo deny check
 cargo nextest run --workspace --all-features --locked
 cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+cargo mutants --package tapid-manifest --timeout 60
 cargo audit
 ```
 
-`cargo nextest` is the faster test runner used by the dedicated Ubuntu CI gate; the canonical `cargo test` command remains required for cross-platform coverage. `cargo llvm-cov` writes an LCOV report to `lcov.info`, matching the CI artifact. `cargo-deny` and `cargo-audit` are CI security gates. Install these tools with their upstream installers or skip only when documenting why the local tool is unavailable; do not weaken the CI jobs.
+`cargo nextest` is the faster test runner used by the dedicated Ubuntu CI gate; the canonical `cargo test` command remains required for cross-platform coverage. `cargo llvm-cov` writes an LCOV report to `lcov.info`, matching the CI artifact. `cargo-deny` and `cargo-audit` are CI security gates. `cargo-mutants` is a periodic test-strength check for focused crates, not a per-PR gate. Install these tools with their upstream installers or skip only when documenting why the local tool is unavailable; do not weaken the CI jobs.
 
 ## License and security
 

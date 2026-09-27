@@ -28,9 +28,10 @@ cargo metadata --no-deps --format-version 1 --locked
 cargo package --workspace --locked
 cargo nextest run --workspace --all-features --locked
 cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+cargo mutants --package tapid-manifest --timeout 60
 ```
 
-`cargo llvm-cov` produces the same `lcov.info` artifact that CI uploads. `cargo nextest` is an additional Ubuntu test lane; it does not replace the canonical `cargo test` lane.
+`cargo llvm-cov` produces the same `lcov.info` artifact that CI uploads. `cargo nextest` is an additional Ubuntu test lane; it does not replace the canonical `cargo test` lane. `cargo mutants` is intentionally a focused, periodic test-strength check rather than a per-PR gate because it recompiles and reruns the suite for each mutation.
 
 ## CI gates
 
