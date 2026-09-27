@@ -216,6 +216,7 @@ fn parse_npm(
         }
         let artifact_url = artifact_url.to_owned();
         let mut dependencies = parse_dependencies(version_entry.get("dependencies"))?;
+        let peer_dependencies = parse_dependencies(version_entry.get("peerDependencies"))?;
         let optional_dependencies = parse_dependencies(version_entry.get("optionalDependencies"))?;
         dependencies.retain(|name, _| !optional_dependencies.contains_key(name));
         let platform = match (
@@ -231,7 +232,7 @@ fn parse_npm(
             artifact_url,
             integrity,
             dependencies,
-            peer_dependencies: BTreeMap::new(),
+            peer_dependencies,
             optional_dependencies,
             platform,
             registry_kind: RegistryKind::Npm,
@@ -410,6 +411,29 @@ mod tests {
 
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].identity.version.to_string(), "2.0.0");
+    }
+
+    #[test]
+    fn npm_metadata_preserves_peer_dependencies_separately() {
+        let body = br#"{"name":"plugin","versions":{"1.0.0":{"name":"plugin","version":"1.0.0","dependencies":{"runtime":"^1.0.0"},"peerDependencies":{"host":"^2.0.0"},"dist":{"tarball":"https://cdn.example/plugin.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/plugin"), origin)
+            .fetch("plugin")
+            .unwrap();
+
+        assert_eq!(
+            artifacts[0].dependencies.get(&"runtime".parse().unwrap()),
+            Some(&"^1.0.0".to_owned())
+        );
+        assert_eq!(
+            artifacts[0].peer_dependencies.get(&"host".parse().unwrap()),
+            Some(&"^2.0.0".to_owned())
+        );
+        assert!(
+            !artifacts[0]
+                .dependencies
+                .contains_key(&"host".parse().unwrap())
+        );
     }
 
     #[test]
