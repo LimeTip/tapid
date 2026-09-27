@@ -158,11 +158,13 @@ fn parse_jsr(
                 ));
             }
         };
+        let (dependencies, peer_dependencies) = parse_jsr_dependencies(version_object)?;
         artifacts.push(RegistryArtifact {
             identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
             artifact_url,
             integrity: Some(integrity),
-            dependencies: parse_jsr_dependencies(version_object)?,
+            dependencies,
+            peer_dependencies,
             optional_dependencies: BTreeMap::new(),
             platform: crate::PackagePlatform::unrestricted(),
             registry_kind: RegistryKind::Jsr,
@@ -172,28 +174,22 @@ fn parse_jsr(
     Ok(artifacts)
 }
 
+type JsrDependencyMaps = (BTreeMap<PackageName, String>, BTreeMap<PackageName, String>);
+
 fn parse_jsr_dependencies(
     version: &serde_json::Map<String, serde_json::Value>,
-) -> Result<BTreeMap<PackageName, String>, RegistryClientError> {
+) -> Result<JsrDependencyMaps, RegistryClientError> {
     let Some(manifest) = version.get("manifest") else {
-        return Ok(BTreeMap::new());
+        return Ok((BTreeMap::new(), BTreeMap::new()));
     };
     let manifest = manifest.as_object().ok_or_else(|| {
         RegistryClientError::Metadata(MetadataError::InvalidJson(
             "manifest must be an object".into(),
         ))
     })?;
-    let mut dependencies = BTreeMap::new();
-    for field in ["dependencies", "peerDependencies"] {
-        let Some(value) = manifest.get(field) else {
-            continue;
-        };
-        let parsed = parse_dependencies(Some(value))?;
-        for (name, requirement) in parsed {
-            dependencies.entry(name).or_insert(requirement);
-        }
-    }
-    Ok(dependencies)
+    let dependencies = parse_dependencies(manifest.get("dependencies"))?;
+    let peer_dependencies = parse_dependencies(manifest.get("peerDependencies"))?;
+    Ok((dependencies, peer_dependencies))
 }
 
 fn parse_dependencies(
@@ -298,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_dependency_takes_precedence_over_peer_dependency() {
+    fn keeps_jsr_peer_dependencies_separate_from_regular_dependencies() {
         let version = serde_json::json!({
             "manifest": {
                 "dependencies": {"foo": "^1.0.0"},
@@ -306,14 +302,19 @@ mod tests {
             }
         });
 
-        let dependencies = parse_jsr_dependencies(version.as_object().unwrap()).unwrap();
+        let (dependencies, peers) = parse_jsr_dependencies(version.as_object().unwrap()).unwrap();
 
         assert_eq!(
             dependencies.get(&"foo".parse().unwrap()),
             Some(&"^1.0.0".to_owned())
         );
+        assert!(!dependencies.contains_key(&"bar".parse().unwrap()));
         assert_eq!(
-            dependencies.get(&"bar".parse().unwrap()),
+            peers.get(&"foo".parse().unwrap()),
+            Some(&"^2.0.0".to_owned())
+        );
+        assert_eq!(
+            peers.get(&"bar".parse().unwrap()),
             Some(&"^3.0.0".to_owned())
         );
     }

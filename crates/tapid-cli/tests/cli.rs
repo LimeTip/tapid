@@ -50,6 +50,63 @@ fn cleanup(path: PathBuf) {
 }
 
 #[test]
+fn lifecycle_commands_are_exposed_as_cli_commands() {
+    let dir = temp_dir("lifecycle-help");
+    let output = run(&dir, &["--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for command in ["add", "remove", "update", "outdated", "prune"] {
+        assert!(
+            stdout.contains(command),
+            "missing {command} in help: {stdout}"
+        );
+    }
+    cleanup(dir);
+}
+
+#[test]
+fn unsupported_read_only_lifecycle_commands_fail_closed_without_writing() {
+    let dir = temp_dir("lifecycle-read-only");
+    let manifest = "{\"name\":\"demo\",\"version\":\"1.0.0\"}\n";
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    for command in ["outdated", "prune"] {
+        let output = run(&dir, &[command]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not implemented"));
+    }
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!dir.join("tapid.lock").exists());
+    cleanup(dir);
+}
+
+#[test]
+fn lifecycle_add_rolls_back_manifest_when_resolution_fails() {
+    let dir = temp_dir("lifecycle-rollback");
+    let manifest =
+        "{\"name\":\"demo\",\"version\":\"1.0.0\",\"dependencies\":{\"existing\":\"1.0.0\"}}\n";
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let output = run(
+        &dir,
+        &[
+            "add",
+            "is-char",
+            "--registry-fixture",
+            "missing-registry-fixture.json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!dir.join("tapid.lock").exists());
+    cleanup(dir);
+}
+
+#[test]
 fn upgrade_is_exposed_as_a_cli_command() {
     let dir = temp_dir("upgrade-exposed");
     let output = run(&dir, &["--help"]);

@@ -9,6 +9,7 @@ use std::{
 };
 use tapid_linker::{LayoutInput, ManagedRoot, plan_layout};
 use tapid_lockfile::Lockfile;
+use tapid_manifest::PackageManifest;
 use tapid_store::Store;
 
 struct ManifestTransaction {
@@ -126,6 +127,29 @@ pub(crate) fn run(
     allow_unverified_registry_artifacts: bool,
     report_replay_progress: impl FnMut(usize, usize),
 ) -> Result<InstallReport, String> {
+    run_with_manifest(
+        project_dir,
+        None,
+        package,
+        store_root,
+        mode,
+        registry_fixture,
+        allow_unverified_registry_artifacts,
+        report_replay_progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_manifest(
+    project_dir: &Path,
+    manifest_override: Option<&PackageManifest>,
+    package: Option<&str>,
+    store_root: Option<&Path>,
+    mode: InstallMode,
+    registry_fixture: Option<&Path>,
+    allow_unverified_registry_artifacts: bool,
+    report_replay_progress: impl FnMut(usize, usize),
+) -> Result<InstallReport, String> {
     let offline = matches!(mode, InstallMode::Offline);
     let frozen = matches!(mode, InstallMode::Frozen);
     if package.is_some() && (offline || frozen) {
@@ -164,26 +188,34 @@ pub(crate) fn run(
         }
     }
     let activation_lock = ActivationLock::acquire(&project_dir)?;
-    let manifest = read_manifest(&project_dir.join("package.json"))?;
+    let current_manifest = read_manifest(&project_dir.join("package.json"))?;
     let manifest_path = project_dir.join("package.json");
     let mut manifest_transaction = None;
-    let manifest = if let Some(spec) = package {
-        let (name, requirement) = package_spec::parse(spec);
-        let updated = match manifest.with_dependency(name, requirement) {
-            Ok(value) => value,
-            Err(error) => return Err(format!("cannot add dependency '{spec}': {error}")),
-        };
-        let transaction = match ManifestTransaction::begin(&manifest_path) {
-            Ok(value) => value,
-            Err(error) => return Err(format!("cannot prepare package.json update: {error}")),
-        };
-        if let Err(error) = transaction.write(&updated.to_json()) {
-            return Err(format!("cannot update package.json: {error}"));
+    let manifest = if let Some(updated) = manifest_override {
+        if package.is_some() {
+            return Err("cannot combine a manifest override with a package argument".to_owned());
         }
+        let transaction = ManifestTransaction::begin(&manifest_path)
+            .map_err(|error| format!("cannot prepare package.json update: {error}"))?;
+        transaction
+            .write(&updated.to_json())
+            .map_err(|error| format!("cannot update package.json: {error}"))?;
+        manifest_transaction = Some(transaction);
+        updated.clone()
+    } else if let Some(spec) = package {
+        let (name, requirement) = package_spec::parse(spec);
+        let updated = current_manifest
+            .with_dependency(name, requirement)
+            .map_err(|error| format!("cannot add dependency '{spec}': {error}"))?;
+        let transaction = ManifestTransaction::begin(&manifest_path)
+            .map_err(|error| format!("cannot prepare package.json update: {error}"))?;
+        transaction
+            .write(&updated.to_json())
+            .map_err(|error| format!("cannot update package.json: {error}"))?;
         manifest_transaction = Some(transaction);
         updated
     } else {
-        manifest
+        current_manifest
     };
     let lock_path = project_dir.join("tapid.lock");
     if !offline && !frozen {

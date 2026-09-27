@@ -49,6 +49,7 @@ struct PackageRecord {
     integrity: Option<PackageIntegrity>,
     artifact: String,
     dependencies: BTreeMap<String, String>,
+    peer_dependencies: BTreeMap<String, String>,
     optional_dependencies: BTreeMap<String, String>,
     platform: PackagePlatform,
     fixture: bool,
@@ -126,6 +127,11 @@ fn remote_records(
             artifact: a.artifact_url,
             dependencies: a
                 .dependencies
+                .into_iter()
+                .map(|(n, r)| (n.to_string(), r))
+                .collect(),
+            peer_dependencies: a
+                .peer_dependencies
                 .into_iter()
                 .map(|(n, r)| (n.to_string(), r))
                 .collect(),
@@ -292,6 +298,12 @@ struct NormalizedRecord {
 type NormalizedRecords = BTreeMap<PackageRecordKey, Result<NormalizedRecord, String>>;
 
 fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String> {
+    if !package.peer_dependencies.is_empty() {
+        return Err(format!(
+            "peer dependency resolution is not implemented for {}@{}; refusing to flatten peer requirements",
+            package.name, package.version
+        ));
+    }
     if !current_platform_matches(&package.platform) {
         return Err("version is incompatible with the current platform".to_owned());
     }
@@ -676,12 +688,19 @@ pub fn resolve_and_fetch(
                     integrity,
                     artifact: p.artifact.clone(),
                     dependencies: p.dependencies.clone(),
+                    peer_dependencies: BTreeMap::new(),
                     optional_dependencies: BTreeMap::new(),
                     platform: PackagePlatform::unrestricted(),
                     fixture: true,
                 },
             );
         }
+    }
+    if !manifest.peer_dependencies().is_empty() {
+        return Err(
+            "peer dependency resolution is not implemented; refusing to install peer requirements as ordinary dependencies"
+                .to_owned(),
+        );
     }
     let mut roots = Vec::new();
     for map in [
@@ -1123,10 +1142,25 @@ mod tests {
                 .iter()
                 .map(|(name, requirement)| ((*name).into(), (*requirement).into()))
                 .collect(),
+            peer_dependencies: BTreeMap::new(),
             optional_dependencies: BTreeMap::new(),
             platform: PackagePlatform::unrestricted(),
             fixture: false,
         }
+    }
+
+    #[test]
+    fn peer_metadata_is_rejected_instead_of_flattened() {
+        let mut record = named_record("plugin", "1.0.0", &[]);
+        record
+            .peer_dependencies
+            .insert("host".into(), "^1.0.0".into());
+
+        let error = match normalize_record(&record) {
+            Ok(_) => panic!("peer metadata was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("refusing to flatten peer requirements"));
     }
 
     #[test]
