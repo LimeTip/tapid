@@ -53,7 +53,7 @@ case "$url" in
 esac
 `);
   await chmod(join(bin, "curl"), 0o755);
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, INSTALLER_FIXTURE: directory };
+  const env: Record<string, string | undefined> = { ...process.env, PATH: `${bin}:${process.env.PATH}`, INSTALLER_FIXTURE: directory };
   for (const name of ["TAPID_REPO", "TAPID_RELEASE_BASE_URL", "TAPID_RELEASE_DISCOVERY_URL", "TAPID_RELEASE_RECORD_URL"]) delete env[name];
   return { directory, install, bytes, hash, record, env,
     installShell: (args: string[] = [], additions: Record<string, string> = {}) =>
