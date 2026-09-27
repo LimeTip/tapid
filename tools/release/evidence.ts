@@ -45,6 +45,7 @@ export function validateReleaseEvidence(markdown: string): void {
     /\bvX\.Y\.Z\b/i,
     /\b(?:URL|commit SHA)\b/i,
     /^-\s+[^\n:]+:\s*$/m,
+    /^-\s+[^\n:]+:\s*`?(?:TBD|TODO|TBA|N\/A|NA|UNKNOWN|REPLACE ME|YOUR VALUE)`?\s*$/im,
   ];
   if (placeholders.some((pattern) => pattern.test(markdown))) {
     throw new Error("release evidence contains a blank or placeholder value");

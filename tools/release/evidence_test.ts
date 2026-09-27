@@ -39,6 +39,23 @@ test("release evidence contract rejects blank populated fields", async () => {
   );
 });
 
+test("release evidence contract rejects common nonblank placeholders in populated fields", async () => {
+  const recordPath = `${root}docs/releases/0.0.8-operations.md`;
+  const record = await readFile(recordPath, "utf8");
+  for (const placeholder of ["TBD", "TODO", "TBA", "N/A", "NA", "UNKNOWN", "REPLACE ME", "YOUR VALUE", "`TBD`"]) {
+    await assertRejects(
+      async () => validateReleaseEvidence(record.replace("- Public release ID: `383262465`", `- Public release ID: ${placeholder}`)),
+      /blank or placeholder/,
+    );
+  }
+});
+
+test("release evidence contract permits prose mentioning placeholder words", async () => {
+  const recordPath = `${root}docs/releases/0.0.8-operations.md`;
+  const record = await readFile(recordPath, "utf8");
+  validateReleaseEvidence(`${record}\nThe operator noted that TODO items were tracked separately.`);
+});
+
 test("release evidence contract rejects missing immutable references", async () => {
   const markdown = await template();
   await assertRejects(async () => validateReleaseEvidence(markdown.replace("- Peeled commit: commit SHA", "")), /Peeled commit/);
