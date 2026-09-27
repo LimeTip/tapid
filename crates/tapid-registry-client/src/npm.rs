@@ -231,6 +231,7 @@ fn parse_npm(
             artifact_url,
             integrity,
             dependencies,
+            peer_dependencies: BTreeMap::new(),
             optional_dependencies,
             platform,
             registry_kind: RegistryKind::Npm,
