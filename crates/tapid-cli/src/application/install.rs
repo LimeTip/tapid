@@ -139,6 +139,7 @@ pub(crate) fn run(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_with_manifest(
     project_dir: &Path,
     manifest_override: Option<&PackageManifest>,

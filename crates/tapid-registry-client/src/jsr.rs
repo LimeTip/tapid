@@ -174,9 +174,11 @@ fn parse_jsr(
     Ok(artifacts)
 }
 
+type JsrDependencyMaps = (BTreeMap<PackageName, String>, BTreeMap<PackageName, String>);
+
 fn parse_jsr_dependencies(
     version: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(BTreeMap<PackageName, String>, BTreeMap<PackageName, String>), RegistryClientError> {
+) -> Result<JsrDependencyMaps, RegistryClientError> {
     let Some(manifest) = version.get("manifest") else {
         return Ok((BTreeMap::new(), BTreeMap::new()));
     };
