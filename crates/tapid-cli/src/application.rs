@@ -3,6 +3,7 @@ use clap::Parser;
 use std::process::ExitCode;
 
 pub(crate) mod install;
+pub(crate) mod lifecycle;
 mod release_record;
 pub(crate) mod replay;
 pub(crate) mod upgrade;
