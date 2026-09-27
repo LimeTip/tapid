@@ -11,5 +11,8 @@ authors.workspace = true
 [dependencies]
 tapid-core = { version = "0.0.5", path = "../tapid-core" }
 tapid-registry-client = { version = "0.0.5", path = "../tapid-registry-client" }
+
+[dev-dependencies]
+proptest = "1"
 [lib]
 path = "src/lib.rs"

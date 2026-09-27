@@ -652,6 +652,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     fn req(s: &str) -> Requirement {
         s.parse().unwrap()
     }
@@ -675,6 +676,19 @@ mod tests {
             parses_after_validation,
             "candidate matching must not repeatedly parse the validated requirement"
         );
+    }
+
+    proptest! {
+        #[test]
+        fn generated_exact_requirements_trim_and_match_their_version(
+            major in 0u64..1000, minor in 0u64..1000, patch in 0u64..1000,
+        ) {
+            let version_text = format!("{major}.{minor}.{patch}");
+            let version: PackageVersion = version_text.parse().unwrap();
+            let requirement: Requirement = format!("  ={version_text}  ").parse().unwrap();
+            prop_assert_eq!(&requirement.raw, &format!("={version_text}"));
+            prop_assert!(requirement.matches(&version));
+        }
     }
 
     fn dep(registry: &str, name: &str, range: &str) -> Dependency {
