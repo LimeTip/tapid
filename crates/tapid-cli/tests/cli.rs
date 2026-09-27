@@ -108,6 +108,32 @@ fn lifecycle_add_rolls_back_manifest_when_resolution_fails() {
 }
 
 #[test]
+fn add_peer_fails_at_cli_boundary_without_mutating_project_state() {
+    let dir = temp_dir("peer-cli-atomicity");
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"existing":"1.0.0"}}"#;
+    let lock = "existing-lock\n";
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(dir.join("tapid.lock"), lock).unwrap();
+    fs::create_dir_all(dir.join("node_modules/existing")).unwrap();
+    fs::write(dir.join("node_modules/existing/marker"), "keep").unwrap();
+
+    let output = run(&dir, &["add", "react@^18.0.0", "--peer"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("peer-placement-unsupported"));
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(fs::read_to_string(dir.join("tapid.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read_to_string(dir.join("node_modules/existing/marker")).unwrap(),
+        "keep"
+    );
+    cleanup(dir);
+}
+
+#[test]
 fn upgrade_is_exposed_as_a_cli_command() {
     let dir = temp_dir("upgrade-exposed");
     let output = run(&dir, &["--help"]);

@@ -1181,6 +1181,35 @@ mod tests {
     }
 
     #[test]
+    fn malformed_peer_requirement_fails_without_flattening() {
+        let mut record = named_record("plugin", "1.0.0", &[("runtime", "^1.0.0")]);
+        record
+            .peer_dependencies
+            .insert("host".into(), "not-a-range".into());
+
+        let error = match normalize_record(&record) {
+            Ok(_) => panic!("malformed peer metadata was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("peer dependency host has unsupported requirement"));
+        assert!(!error.contains("ordinary"));
+    }
+
+    #[test]
+    fn malformed_peer_name_fails_closed() {
+        let mut record = named_record("plugin", "1.0.0", &[]);
+        record
+            .peer_dependencies
+            .insert("../host".into(), "^1.0.0".into());
+
+        let error = match normalize_record(&record) {
+            Ok(_) => panic!("malformed peer metadata was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("peer dependency ../host has an unsupported name"));
+    }
+
+    #[test]
     fn selected_platform_constraints_produce_an_exact_lockfile_context() {
         let platform = PackagePlatform {
             os: vec!["darwin".into()],
