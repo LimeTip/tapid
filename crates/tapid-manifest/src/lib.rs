@@ -7,7 +7,7 @@ mod model;
 mod parse;
 
 pub use error::ManifestError;
-pub use model::{BinTarget, PackageBin, PackageManifest};
+pub use model::{BinTarget, DependencyKind, PackageBin, PackageManifest};
 
 /// Returns the current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -38,6 +38,39 @@ mod tests {
         assert!(json.contains("\"bin\""));
         assert!(json.contains("\"tool\": \"cli.js\""));
         assert!(json.contains("\"is-char\": \"*\""));
+    }
+
+    #[test]
+    fn mutates_each_dependency_kind_without_cross_contamination() {
+        let manifest = PackageManifest::new("example-app", "1.2.3", true)
+            .unwrap()
+            .with_dependency_kind(DependencyKind::Dependencies, "is-char", "*")
+            .unwrap()
+            .with_dependency_kind(DependencyKind::DevDependencies, "tapid-dev", "^1.0.0")
+            .unwrap()
+            .with_dependency_kind(
+                DependencyKind::OptionalDependencies,
+                "optional-pkg",
+                "~2.0.0",
+            )
+            .unwrap()
+            .with_dependency_kind(DependencyKind::PeerDependencies, "peer-pkg", ">=3.0.0")
+            .unwrap();
+
+        assert_eq!(manifest.dependencies()["is-char"], "*");
+        assert_eq!(manifest.dev_dependencies()["tapid-dev"], "^1.0.0");
+        assert_eq!(manifest.optional_dependencies()["optional-pkg"], "~2.0.0");
+        assert_eq!(manifest.peer_dependencies()["peer-pkg"], ">=3.0.0");
+
+        let manifest = manifest.without_dependency("is-char").unwrap();
+        assert!(!manifest.dependencies().contains_key("is-char"));
+        assert!(manifest.dev_dependencies().contains_key("tapid-dev"));
+        assert!(
+            manifest
+                .optional_dependencies()
+                .contains_key("optional-pkg")
+        );
+        assert!(manifest.peer_dependencies().contains_key("peer-pkg"));
     }
 
     #[test]
