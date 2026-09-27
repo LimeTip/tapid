@@ -6,6 +6,12 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 const source = fs.readFileSync(path.join(__dirname, 'validate_consumer_project.js'), 'utf8');
 
+/**
+ * Execute the capability contract against a controlled platform model.
+ *
+ * The validator deliberately uses the supplied binary so offline regressions
+ * cannot accidentally validate a locally built replacement.
+ */
 function validate(platform, failure, releaseTag = 'v0.0.10') {
   const calls = [];
   const binary = path.resolve('published', 'tapid');

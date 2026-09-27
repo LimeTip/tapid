@@ -27,6 +27,7 @@ const lifecycleMarker = path.join(project, 'LIFECYCLE_SHOULD_NOT_RUN');
 const startMarker = 'TAPID_FIXTURE_STARTED=';
 assert.ok(['darwin', 'linux', 'win32'].includes(process.platform), 'unsupported validation host');
 
+/** Invoke the supplied binary with fixture input and return its bounded result. */
 function invoke(args, fixtureEnvironment = '1') {
   const result = spawnSync(binary, args, {
     encoding: 'utf8',

@@ -273,6 +273,7 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(!workflow.includes("CARGO_REGISTRY_TOKEN: ${{ secrets."));
 });
 
+/** Ensure PR smoke validates its exact head without becoming release evidence. */
 test("PR published-binary smoke is exact-head, read-only and separate from release approval", async () => {
   const ci = await text(".github/workflows/ci.yml");
   const job = ci.match(/^  pr-published-binary-smoke:\n[\s\S]*?(?=^  [a-z][a-z-]*:|$(?![\s\S]))/m)?.[0];
