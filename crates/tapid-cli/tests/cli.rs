@@ -65,15 +65,16 @@ fn lifecycle_commands_are_exposed_as_cli_commands() {
 }
 
 #[test]
-fn unsupported_read_only_lifecycle_commands_fail_closed_without_writing() {
+fn read_only_lifecycle_commands_fail_closed_without_writing() {
     let dir = temp_dir("lifecycle-read-only");
     let manifest = "{\"name\":\"demo\",\"version\":\"1.0.0\"}\n";
     fs::write(dir.join("package.json"), manifest).unwrap();
-    for command in ["outdated", "prune"] {
-        let output = run(&dir, &[command]);
-        assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("not implemented"));
-    }
+    let outdated = run(&dir, &["outdated"]);
+    assert_eq!(outdated.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&outdated.stderr).contains("cannot read lockfile"));
+    let prune = run(&dir, &["prune"]);
+    assert_eq!(prune.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&prune.stderr).contains("not implemented"));
     assert_eq!(
         fs::read_to_string(dir.join("package.json")).unwrap(),
         manifest

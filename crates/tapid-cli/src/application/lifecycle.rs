@@ -1,4 +1,10 @@
+use serde::Deserialize;
+use std::{fs, path::Path};
+use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
+use tapid_lockfile::Lockfile;
 use tapid_manifest::{DependencyKind, PackageManifest};
+use tapid_registry_client::{HttpsTransport, JsrRegistry, NpmRegistry};
+use tapid_resolver::Requirement;
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,6 +143,199 @@ pub(crate) fn parse_workspace_selector(selector: Option<&str>) -> Result<Option<
             "workspace selection is not implemented: '{value}' (only the current package is supported)"
         )),
     }
+}
+
+pub(crate) fn format_outdated_entry(entry: &OutdatedEntry) -> String {
+    format!(
+        "{} [{}] declared={} locked={} compatible={} available={}{}",
+        entry.identity,
+        entry.kind,
+        entry.declared,
+        entry.locked.as_deref().unwrap_or("unlocked"),
+        entry.newest_compatible.as_deref().unwrap_or("unavailable"),
+        entry.newest_available.as_deref().unwrap_or("unavailable"),
+        entry
+            .diagnostic
+            .as_deref()
+            .map(|value| format!(" diagnostic={value}"))
+            .unwrap_or_default()
+    )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OutdatedEntry {
+    pub(crate) identity: String,
+    pub(crate) kind: String,
+    pub(crate) declared: String,
+    pub(crate) locked: Option<String>,
+    pub(crate) newest_compatible: Option<String>,
+    pub(crate) newest_available: Option<String>,
+    pub(crate) diagnostic: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Fixture {
+    packages: Vec<FixturePackage>,
+}
+#[derive(Debug, Deserialize)]
+struct FixturePackage {
+    registry: String,
+    name: String,
+    version: String,
+}
+
+fn kind_name(kind: DependencyKind) -> &'static str {
+    match kind {
+        DependencyKind::Dependencies => "dependencies",
+        DependencyKind::DevDependencies => "devDependencies",
+        DependencyKind::OptionalDependencies => "optionalDependencies",
+        DependencyKind::PeerDependencies => "peerDependencies",
+    }
+}
+
+fn direct_dependencies(manifest: &PackageManifest) -> Vec<(String, String, DependencyKind)> {
+    [
+        (manifest.dependencies(), DependencyKind::Dependencies),
+        (manifest.dev_dependencies(), DependencyKind::DevDependencies),
+        (
+            manifest.optional_dependencies(),
+            DependencyKind::OptionalDependencies,
+        ),
+        (
+            manifest.peer_dependencies(),
+            DependencyKind::PeerDependencies,
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(map, kind)| {
+        map.iter()
+            .map(move |(name, requirement)| (name.clone(), requirement.clone(), kind))
+    })
+    .collect()
+}
+
+fn versions_from_fixture(
+    path: &Path,
+    origin: &RegistryOrigin,
+    name: &PackageName,
+) -> Result<Vec<PackageVersion>, String> {
+    let fixture: Fixture = serde_json::from_str(
+        &fs::read_to_string(path)
+            .map_err(|error| format!("cannot read registry fixture: {error}"))?,
+    )
+    .map_err(|error| format!("invalid registry fixture: {error}"))?;
+    fixture
+        .packages
+        .into_iter()
+        .filter(|package| {
+            package.registry == origin.to_string() && package.name == name.to_string()
+        })
+        .map(|package| {
+            package
+                .version
+                .parse()
+                .map_err(|error: tapid_core::DomainError| error.to_string())
+        })
+        .collect()
+}
+
+fn versions_from_registry(
+    transport: &HttpsTransport,
+    origin: &RegistryOrigin,
+    name: &PackageName,
+) -> Result<Vec<PackageVersion>, String> {
+    let artifacts = if origin.to_string() == "https://jsr.io" {
+        JsrRegistry::new(transport, origin.clone())
+            .fetch(&name.to_string())
+            .map_err(|error| error.to_string())?
+    } else if origin.to_string() == "https://registry.npmjs.org" {
+        NpmRegistry::new(transport, origin.clone())
+            .fetch(&name.to_string())
+            .map_err(|error| error.to_string())?
+    } else {
+        return Err(format!("unsupported registry origin {origin}"));
+    };
+    Ok(artifacts
+        .into_iter()
+        .map(|artifact| artifact.identity.version)
+        .collect())
+}
+
+pub(crate) fn outdated_report(
+    project_dir: &Path,
+    registry_fixture: Option<&Path>,
+) -> Result<Vec<OutdatedEntry>, String> {
+    let manifest = crate::commands::manifest::read_manifest(&project_dir.join("package.json"))?;
+    let lock = Lockfile::from_json(
+        &fs::read_to_string(project_dir.join("tapid.lock"))
+            .map_err(|error| format!("cannot read lockfile: {error}"))?,
+    )
+    .map_err(|error| format!("invalid lockfile: {error}"))?;
+    let locked = lock
+        .packages_typed()
+        .map_err(|error| format!("invalid lockfile package identity: {error}"))?;
+    let transport = if registry_fixture.is_none() {
+        Some(
+            HttpsTransport::standard()
+                .map_err(|error| format!("cannot initialize registry transport: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let mut entries = Vec::new();
+    for (identity, declared, kind) in direct_dependencies(&manifest) {
+        let (origin, package_name) = crate::online::dep_parts(&identity)?;
+        let locked_version = locked
+            .iter()
+            .filter(|(key, _)| key.registry == origin && key.name == package_name)
+            .map(|(key, _)| key.version.clone())
+            .max();
+        let versions = match registry_fixture {
+            Some(path) => versions_from_fixture(path, &origin, &package_name),
+            None => versions_from_registry(
+                transport.as_ref().expect("transport"),
+                &origin,
+                &package_name,
+            ),
+        };
+        let requirement = declared.parse::<Requirement>().ok();
+        let (newest_compatible, newest_available, diagnostic) = match versions {
+            Ok(mut versions) => {
+                versions.sort();
+                let available = versions.last().cloned();
+                let compatible = requirement.as_ref().and_then(|requirement| {
+                    versions
+                        .iter()
+                        .filter(|version| requirement.matches(version))
+                        .max()
+                        .cloned()
+                });
+                let diagnostic = if versions.is_empty() {
+                    Some("registry metadata returned no versions".to_owned())
+                } else if requirement.is_none() {
+                    Some(format!("unsupported declared requirement: {declared}"))
+                } else {
+                    None
+                };
+                (compatible, available, diagnostic)
+            }
+            Err(error) => (
+                None,
+                None,
+                Some(format!("registry metadata unavailable: {error}")),
+            ),
+        };
+        entries.push(OutdatedEntry {
+            identity,
+            kind: kind_name(kind).to_owned(),
+            declared,
+            locked: locked_version.map(|version| version.to_string()),
+            newest_compatible: newest_compatible.map(|version| version.to_string()),
+            newest_available: newest_available.map(|version| version.to_string()),
+            diagnostic,
+        });
+    }
+    Ok(entries)
 }
 
 #[cfg(test)]

@@ -108,13 +108,24 @@ pub(crate) fn update(args: UpdateArgs) -> ExitCode {
 }
 
 pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
-    match crate::application::lifecycle::parse_workspace_selector(args.common.workspace.as_deref())
+    if let Err(error) =
+        crate::application::lifecycle::parse_workspace_selector(args.common.workspace.as_deref())
     {
-        Ok(_) => {
-            eprintln!(
-                "error: outdated metadata comparison is not implemented yet; no files were changed"
-            );
-            ExitCode::from(1)
+        eprintln!("error: {error}");
+        return ExitCode::from(1);
+    }
+    match crate::application::lifecycle::outdated_report(
+        &args.common.project_dir,
+        args.common.registry_fixture.as_deref(),
+    ) {
+        Ok(entries) => {
+            for entry in entries {
+                println!(
+                    "{}",
+                    crate::application::lifecycle::format_outdated_entry(&entry)
+                );
+            }
+            ExitCode::SUCCESS
         }
         Err(error) => {
             eprintln!("error: {error}");
@@ -174,5 +185,25 @@ fn report(
             eprintln!("error: {error}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn formats_all_outdated_fields_without_fabricating_missing_versions() {
+        let entry = crate::application::lifecycle::OutdatedEntry {
+            identity: "npm:foo".into(),
+            kind: "dependencies".into(),
+            declared: "^1.0.0".into(),
+            locked: Some("1.0.0".into()),
+            newest_compatible: Some("1.4.0".into()),
+            newest_available: None,
+            diagnostic: Some("registry metadata unavailable".into()),
+        };
+        assert_eq!(
+            crate::application::lifecycle::format_outdated_entry(&entry),
+            "npm:foo [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.4.0 available=unavailable diagnostic=registry metadata unavailable"
+        );
     }
 }
