@@ -1,5 +1,5 @@
 use clap::Args as ClapArgs;
-use std::{fs, path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode};
 use tapid_manifest::DependencyKind;
 
 #[derive(Debug, ClapArgs)]
@@ -109,23 +109,12 @@ pub(crate) fn update(args: UpdateArgs) -> ExitCode {
 
 pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
     match crate::application::lifecycle::parse_workspace_selector(args.common.workspace.as_deref())
-        .and_then(|_| {
-            crate::commands::manifest::read_manifest(&args.common.project_dir.join("package.json"))
-        }) {
-        Ok(manifest) => {
-            for (name, requirement) in manifest
-                .dependencies()
-                .iter()
-                .chain(manifest.dev_dependencies().iter())
-                .chain(manifest.optional_dependencies().iter())
-                .chain(manifest.peer_dependencies().iter())
-            {
-                println!(
-                    "{name}\t{:?}\t{requirement}\tunknown\tunknown\tunknown",
-                    manifest.dependency_kind(name)
-                );
-            }
-            ExitCode::SUCCESS
+    {
+        Ok(_) => {
+            eprintln!(
+                "error: outdated metadata comparison is not implemented yet; no files were changed"
+            );
+            ExitCode::from(1)
         }
         Err(error) => {
             eprintln!("error: {error}");
@@ -137,28 +126,12 @@ pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
 pub(crate) fn prune(args: ReadOnlyArgs) -> ExitCode {
     match crate::application::lifecycle::parse_workspace_selector(args.common.workspace.as_deref())
     {
-        Ok(None) => match crate::application::install::run(
-            &args.common.project_dir,
-            None,
-            args.common.store_dir.as_deref(),
-            crate::application::install::InstallMode::Offline,
-            None,
-            false,
-            |_, _| {},
-        ) {
-            Ok(report) => {
-                println!(
-                    "Pruned materialized dependencies ({} package(s))",
-                    report.package_count
-                );
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("error: {error}");
-                ExitCode::from(1)
-            }
-        },
-        Ok(Some(_)) => unreachable!(),
+        Ok(_) => {
+            eprintln!(
+                "error: prune is not implemented yet; refusing to claim lockfile replay removed stale output"
+            );
+            ExitCode::from(1)
+        }
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::from(1)
@@ -174,24 +147,18 @@ fn mutate_and_install(
 ) -> Result<crate::application::install::InstallReport, String> {
     crate::application::lifecycle::parse_workspace_selector(common.workspace.as_deref())?;
     let path = common.project_dir.join("package.json");
-    let original = fs::read(&path).map_err(|error| format!("cannot read package.json: {error}"))?;
     let manifest = crate::commands::manifest::read_manifest(&path)?;
     let plan = planner(&manifest)?;
-    fs::write(&path, plan.manifest.to_json())
-        .map_err(|error| format!("cannot update package.json: {error}"))?;
-    let result = crate::application::install::run(
+    crate::application::install::run_with_manifest(
         &common.project_dir,
+        Some(&plan.manifest),
         None,
         common.store_dir.as_deref(),
         crate::application::install::InstallMode::Online,
         common.registry_fixture.as_deref(),
         common.allow_unverified_registry_artifacts,
         |_, _| {},
-    );
-    if result.is_err() {
-        let _ = fs::write(&path, original);
-    }
-    result
+    )
 }
 
 fn report(
