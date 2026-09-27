@@ -44,9 +44,7 @@ Starting with 0.0.10, `tapid upgrade` discovers and installs the latest stable r
 
 When the installed executable matches the verified release bytes, the command reports that Tapid is already up to date and leaves the executable unchanged. It still downloads and verifies the release before comparing. If network discovery fails and the command uses its recovery cache, it reports that the latest release could not be checked. Cached recovery is reported as a restore or an unchanged executable.
 
-The next-release command, expected for 0.0.11, reads the same `tapid.dev` release record as the installers. Use `--release-url` or `TAPID_RELEASE_RECORD_URL` to select another record address. It validates metadata, archive size, checksum, and archive contents before staging executable replacement. Invalid received metadata or mismatched downloads fail. Default discovery does not fall back to the GitHub API. HTTPS and checksums do not provide independent release authentication.
-
-Explicit `--endpoint` retains the historical signed-discovery protocol and is separate from `--release-url`. Released Tapid 0.0.10 still probes signed metadata first and uses its GitHub checksum fallback when those endpoints are unavailable. It can use that path to install the next release after publication.
+The next-release command, expected for 0.0.11, reads the same `tapid.dev` release record as the installers and verifies its `.sig` TrustEnvelope sidecar against the embedded production keyring before selecting an artifact. Use `--release-url` or `TAPID_RELEASE_RECORD_URL` to select another record address. It validates metadata, archive size, checksum, and archive contents before staging executable replacement. Invalid received metadata or mismatched downloads fail. Default discovery does not fall back to the GitHub API. An explicit injected keyring is reserved for controlled test seams; explicit `--endpoint` retains the historical signed-discovery protocol and is separate from `--release-url`.
 
 ## Install packages
 

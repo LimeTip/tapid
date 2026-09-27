@@ -150,9 +150,9 @@ Invoke-WebRequest https://tapid.dev/install.ps1 -OutFile $installer
 Remove-Item $installer
 ```
 
-Both installers add their user-local install directory to PATH without requiring administrator privileges. Unix shells are detected from `$SHELL`; zsh, bash, fish, and a POSIX profile fallback are supported. The default Unix directory, `~/.local/bin`, is configured automatically. For a custom `--install-dir`, the installer prints the directory that must be added manually. PowerShell updates the user-level Windows PATH. Open a new terminal, or follow the command printed by the installer, before using `tapid` in an existing terminal.
+The Unix installer manages only `~/.local/bin` through a versioned `tapid-path-managed-v1` block in an owned, writable Bash or POSIX startup file (`$HOME/.bash_profile`, `$HOME/.bashrc`, or `$HOME/.profile`). Repeated installs are idempotent; uninstall removes only that exact Tapid block and preserves unrelated PATH entries. Symlinked, non-regular, foreign, or unwritable startup files are rejected. For a custom `--install-dir`, the installer prints the directory that must be added manually. PowerShell updates the user-level Windows PATH. Open a new terminal, or follow the command printed by the installer, before using `tapid`. Other Unix shells remain outside this slice.
 
-Remove only the Tapid CLI binary on Unix:
+Remove the Tapid CLI binary and its managed PATH block on Unix:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/uninstall.sh | sh
