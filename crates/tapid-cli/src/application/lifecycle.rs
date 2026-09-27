@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::{fs, path::Path};
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
 use tapid_lockfile::Lockfile;
-use tapid_manifest::{DependencyKind, PackageManifest};
+use tapid_manifest::{DependencyKind, PackageManifest, Workspace};
 use tapid_registry_client::{HttpsTransport, JsrRegistry, NpmRegistry};
 use tapid_resolver::Requirement;
 
@@ -41,6 +41,12 @@ pub(crate) fn plan_add(
             .requirement
             .as_deref()
             .ok_or_else(|| format!("add requires a requirement for '{}'", mutation.name))?;
+        if requirement.starts_with("workspace:") {
+            return Err(format!(
+                "unsupported workspace dependency reference: {}@{}",
+                mutation.name, requirement
+            ));
+        }
         next = next
             .with_dependency_kind(mutation.kind, &mutation.name, requirement)
             .map_err(|error| format!("cannot add dependency '{}': {error}", mutation.name))?;
@@ -131,18 +137,38 @@ pub(crate) fn plan_update(
     })
 }
 
-pub(crate) fn parse_workspace_selector(selector: Option<&str>) -> Result<Option<&str>, String> {
-    match selector {
-        None => Ok(None),
-        Some("") => Err("workspace selector cannot be empty".to_owned()),
-        Some(value) if value.starts_with("workspace:") => Err(
+pub(crate) fn resolve_workspace(
+    project_dir: &Path,
+    selector: Option<&str>,
+) -> Result<(std::path::PathBuf, PackageManifest), String> {
+    if selector.is_some_and(|value| value.starts_with("workspace:")) {
+        return Err(
             "workspace protocol references are not implemented; refusing registry fallback"
                 .to_owned(),
-        ),
-        Some(value) => Err(format!(
-            "workspace selection is not implemented: '{value}' (only the current package is supported)"
-        )),
+        );
     }
+    let workspace = Workspace::discover(project_dir)?;
+    let manifest = workspace.select(selector)?.clone();
+    for dependencies in [
+        manifest.dependencies(),
+        manifest.dev_dependencies(),
+        manifest.optional_dependencies(),
+        manifest.peer_dependencies(),
+    ] {
+        if let Some((name, requirement)) = dependencies
+            .iter()
+            .find(|(_, requirement)| requirement.starts_with("workspace:"))
+        {
+            return Err(format!(
+                "unsupported workspace dependency reference: {name}@{requirement}; workspace linking is not implemented"
+            ));
+        }
+    }
+    let manifest_path = workspace.select_path(selector)?.to_path_buf();
+    Ok((
+        manifest_path.parent().unwrap_or(project_dir).to_path_buf(),
+        manifest,
+    ))
 }
 
 pub(crate) fn format_outdated_entry(entry: &OutdatedEntry) -> String {
@@ -263,9 +289,11 @@ fn versions_from_registry(
 
 pub(crate) fn outdated_report(
     project_dir: &Path,
+    workspace_selector: Option<&str>,
     registry_fixture: Option<&Path>,
 ) -> Result<Vec<OutdatedEntry>, String> {
-    let manifest = crate::commands::manifest::read_manifest(&project_dir.join("package.json"))?;
+    let (project_dir, manifest) = resolve_workspace(project_dir, workspace_selector)?;
+    let project_dir = project_dir.as_path();
     let lock = Lockfile::from_json(
         &fs::read_to_string(project_dir.join("tapid.lock"))
             .map_err(|error| format!("cannot read lockfile: {error}"))?,
@@ -388,17 +416,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_workspace_protocol_as_a_registry_requirement() {
+        let mutation = DependencyMutation {
+            name: "local-pkg".into(),
+            requirement: Some("workspace:*".into()),
+            kind: DependencyKind::Dependencies,
+        };
+        let error = plan_add(&manifest(), &[mutation]).unwrap_err();
+        assert!(error.contains("workspace dependency reference"));
+    }
+
+    #[test]
     fn update_preserves_declared_ranges_unless_latest_is_explicit() {
         let manifest = manifest().with_dependency("foo", "^1.2.3").unwrap();
         let update = plan_update(&manifest, &["foo".into()], false).unwrap();
         assert_eq!(update.mutations[0].requirement.as_deref(), Some("^1.2.3"));
         let latest = plan_update(&manifest, &["foo".into()], true).unwrap();
         assert_eq!(latest.mutations[0].requirement.as_deref(), Some("*"));
-    }
-
-    #[test]
-    fn workspace_selection_fails_closed() {
-        assert!(parse_workspace_selector(Some("web")).is_err());
-        assert!(parse_workspace_selector(Some("workspace:foo")).is_err());
     }
 }

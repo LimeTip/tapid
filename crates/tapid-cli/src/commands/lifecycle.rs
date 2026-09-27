@@ -108,14 +108,9 @@ pub(crate) fn update(args: UpdateArgs) -> ExitCode {
 }
 
 pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
-    if let Err(error) =
-        crate::application::lifecycle::parse_workspace_selector(args.common.workspace.as_deref())
-    {
-        eprintln!("error: {error}");
-        return ExitCode::from(1);
-    }
     match crate::application::lifecycle::outdated_report(
         &args.common.project_dir,
+        args.common.workspace.as_deref(),
         args.common.registry_fixture.as_deref(),
     ) {
         Ok(entries) => {
@@ -135,14 +130,18 @@ pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
 }
 
 pub(crate) fn prune(args: ReadOnlyArgs) -> ExitCode {
-    if let Err(error) =
-        crate::application::lifecycle::parse_workspace_selector(args.common.workspace.as_deref())
-    {
-        eprintln!("error: {error}");
-        return ExitCode::from(1);
-    }
-    match crate::application::install::run(
+    let project_dir = match crate::application::lifecycle::resolve_workspace(
         &args.common.project_dir,
+        args.common.workspace.as_deref(),
+    ) {
+        Ok((project_dir, _)) => project_dir,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    match crate::application::install::run(
+        &project_dir,
         None,
         args.common.store_dir.as_deref(),
         crate::application::install::InstallMode::Frozen,
@@ -167,12 +166,13 @@ fn mutate_and_install(
         &tapid_manifest::PackageManifest,
     ) -> Result<crate::application::lifecycle::LifecyclePlan, String>,
 ) -> Result<crate::application::install::InstallReport, String> {
-    crate::application::lifecycle::parse_workspace_selector(common.workspace.as_deref())?;
-    let path = common.project_dir.join("package.json");
-    let manifest = crate::commands::manifest::read_manifest(&path)?;
+    let (project_dir, manifest) = crate::application::lifecycle::resolve_workspace(
+        &common.project_dir,
+        common.workspace.as_deref(),
+    )?;
     let plan = planner(&manifest)?;
     crate::application::install::run_with_manifest(
-        &common.project_dir,
+        &project_dir,
         Some(&plan.manifest),
         None,
         common.store_dir.as_deref(),

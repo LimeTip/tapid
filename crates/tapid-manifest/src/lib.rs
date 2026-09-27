@@ -5,9 +5,11 @@
 mod error;
 mod model;
 mod parse;
+mod workspace;
 
 pub use error::ManifestError;
 pub use model::{BinTarget, DependencyKind, PackageBin, PackageManifest};
+pub use workspace::{Workspace, WorkspaceMember};
 
 /// Returns the current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -24,6 +26,74 @@ mod tests {
         assert!(manifest.is_private());
         assert_eq!(manifest.dependencies()["kleur"], "^4.1.5");
         assert_eq!(manifest.scripts()["test"], "cargo test");
+    }
+
+    #[test]
+    fn discovers_workspace_members_in_deterministic_order() {
+        let root = unique_temp_dir("workspace-array");
+        std::fs::create_dir_all(root.join("packages/zeta")).unwrap();
+        std::fs::create_dir_all(root.join("packages/alpha")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/zeta/package.json"),
+            r#"{"name":"zeta","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/alpha/package.json"),
+            r#"{"name":"alpha","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let workspace = Workspace::discover(&root).unwrap();
+        assert_eq!(
+            workspace
+                .members()
+                .iter()
+                .map(|m| m.name())
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert_eq!(
+            workspace.select(Some("zeta")).unwrap().name().as_str(),
+            "zeta"
+        );
+        assert_eq!(workspace.select(None).unwrap().name().as_str(), "root");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_object_workspace_packages_and_rejects_unknown_selection() {
+        let root = unique_temp_dir("workspace-object");
+        std::fs::create_dir_all(root.join("apps/web")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":{"packages":["apps/*"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("apps/web/package.json"),
+            r#"{"name":"web","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let workspace = Workspace::discover(&root).unwrap();
+        assert_eq!(
+            workspace.members()[0].path(),
+            root.join("apps/web/package.json")
+        );
+        assert!(workspace.select(Some("missing")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("tapid-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        path
     }
 
     #[test]
