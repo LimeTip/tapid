@@ -61,7 +61,10 @@ pub(crate) fn add(args: AddArgs) -> ExitCode {
     } else if args.optional {
         DependencyKind::OptionalDependencies
     } else if args.peer {
-        DependencyKind::PeerDependencies
+        eprintln!(
+            "error: peer-placement-unsupported: cannot install peer dependencies; automatic peer placement is not implemented"
+        );
+        return ExitCode::from(1);
     } else {
         DependencyKind::Dependencies
     };
@@ -201,6 +204,51 @@ fn report(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn peer_add_fails_before_touching_project_state() {
+        let project = std::env::temp_dir().join(format!(
+            "tapid-peer-add-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&project).unwrap();
+        let package = project.join("package.json");
+        let lock = project.join("tapid.lock");
+        let modules = project.join("node_modules");
+        fs::write(&package, "original package\n").unwrap();
+        fs::write(&lock, "original lock\n").unwrap();
+        fs::create_dir(&modules).unwrap();
+
+        let result = add(AddArgs {
+            packages: vec!["react@^18.0.0".into()],
+            dev: false,
+            optional: false,
+            peer: true,
+            common: CommonArgs {
+                project_dir: project.clone(),
+                workspace: None,
+                store_dir: None,
+                registry_fixture: None,
+                allow_unverified_registry_artifacts: false,
+            },
+        });
+
+        assert_eq!(result, ExitCode::from(1));
+        assert_eq!(fs::read_to_string(package).unwrap(), "original package\n");
+        assert_eq!(fs::read_to_string(lock).unwrap(), "original lock\n");
+        assert!(modules.is_dir());
+        fs::remove_dir_all(project).unwrap();
+    }
+
     #[test]
     fn formats_all_outdated_fields_without_fabricating_missing_versions() {
         let entry = crate::application::lifecycle::OutdatedEntry {

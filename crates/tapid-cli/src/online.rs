@@ -283,6 +283,7 @@ fn usable_versions(packages: Vec<PackageRecord>) -> Vec<PackageVersionMetadata> 
                 name: package.name,
                 version: package.version,
                 dependencies,
+                peer_dependencies: BTreeMap::new(),
             });
         }
     }
@@ -298,12 +299,6 @@ struct NormalizedRecord {
 type NormalizedRecords = BTreeMap<PackageRecordKey, Result<NormalizedRecord, String>>;
 
 fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String> {
-    if !package.peer_dependencies.is_empty() {
-        return Err(format!(
-            "peer dependency resolution is not implemented for {}@{}; refusing to flatten peer requirements",
-            package.name, package.version
-        ));
-    }
     if !current_platform_matches(&package.platform) {
         return Err("version is incompatible with the current platform".to_owned());
     }
@@ -322,11 +317,33 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
             Ok((parsed_name, parsed_requirement))
         })
         .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
+    let peer_dependencies = package
+        .peer_dependencies
+        .iter()
+        .map(|(name, requirement)| {
+            let parsed_name =
+                name.parse::<PackageName>()
+                    .map_err(|error: tapid_core::DomainError| {
+                        format!("peer dependency {name} has an unsupported name: {error}")
+                    })?;
+            let parsed_requirement = requirement.parse::<Requirement>().map_err(|error| {
+                format!("peer dependency {name} has unsupported requirement {requirement}: {error}")
+            })?;
+            Ok((parsed_name, parsed_requirement))
+        })
+        .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
     let metadata = PackageVersionMetadata {
         name: package.name.clone(),
         version: package.version.clone(),
         dependencies,
+        peer_dependencies: peer_dependencies.clone(),
     };
+    if !peer_dependencies.is_empty() {
+        return Err(format!(
+            "peer-placement-unsupported: peer dependency resolution is not implemented for {}@{}; refusing to flatten peer requirements",
+            package.name, package.version
+        ));
+    }
     let optional_dependencies = package
         .optional_dependencies
         .iter()
@@ -1161,6 +1178,35 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("refusing to flatten peer requirements"));
+    }
+
+    #[test]
+    fn malformed_peer_requirement_fails_without_flattening() {
+        let mut record = named_record("plugin", "1.0.0", &[("runtime", "^1.0.0")]);
+        record
+            .peer_dependencies
+            .insert("host".into(), "not-a-range".into());
+
+        let error = match normalize_record(&record) {
+            Ok(_) => panic!("malformed peer metadata was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("peer dependency host has unsupported requirement"));
+        assert!(!error.contains("ordinary"));
+    }
+
+    #[test]
+    fn malformed_peer_name_fails_closed() {
+        let mut record = named_record("plugin", "1.0.0", &[]);
+        record
+            .peer_dependencies
+            .insert("../host".into(), "^1.0.0".into());
+
+        let error = match normalize_record(&record) {
+            Ok(_) => panic!("malformed peer metadata was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("peer dependency ../host has an unsupported name"));
     }
 
     #[test]

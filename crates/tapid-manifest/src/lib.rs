@@ -17,6 +17,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn parses_supported_metadata() {
@@ -238,6 +239,32 @@ mod tests {
                 ))
                 .is_err()
             );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn dependency_kind_mutation_keeps_one_source_identity_in_one_section(
+            kind_indices in prop::collection::vec(0usize..4, 1..8),
+            requirement in "[[:ascii:]]{0,32}",
+            source_prefix in prop::sample::select(vec!["", "npm:", "jsr:"]),
+        ) {
+            let dependency = format!("{source_prefix}tapid-property");
+            let mut manifest = PackageManifest::new("example-app", "1.0.0", false).unwrap();
+            for kind_index in kind_indices {
+                let kind = match kind_index {
+                    0 => DependencyKind::Dependencies,
+                    1 => DependencyKind::DevDependencies,
+                    2 => DependencyKind::OptionalDependencies,
+                    _ => DependencyKind::PeerDependencies,
+                };
+                manifest = manifest.with_dependency_kind(kind, &dependency, &requirement).unwrap();
+            }
+            let kind = manifest.dependency_kind(&dependency).unwrap();
+            prop_assert_eq!(manifest.dependencies().contains_key(&dependency), kind == DependencyKind::Dependencies);
+            prop_assert_eq!(manifest.dev_dependencies().contains_key(&dependency), kind == DependencyKind::DevDependencies);
+            prop_assert_eq!(manifest.optional_dependencies().contains_key(&dependency), kind == DependencyKind::OptionalDependencies);
+            prop_assert_eq!(manifest.peer_dependencies().contains_key(&dependency), kind == DependencyKind::PeerDependencies);
         }
     }
 }

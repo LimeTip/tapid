@@ -1,4 +1,5 @@
 use super::{LockedPackage, Lockfile, VERSION};
+use proptest::prelude::*;
 
 #[test]
 fn old_main_registry_identity_requires_explicit_recovery() {
@@ -648,6 +649,29 @@ fn package_key_distinguishes_platform_component_boundaries() {
         .unwrap()
     };
     assert_ne!(make(&first).key(), make(&second).key());
+}
+
+proptest! {
+    #[test]
+    fn generated_package_keys_roundtrip_without_changing_identity(
+        package_number in 0u32..1000, peer_count in 0usize..4,
+        os in prop::option::of(prop::sample::select(vec!["linux", "darwin", "windows"])),
+        cpu in prop::option::of(prop::sample::select(vec!["x86_64", "aarch64"])),
+        libc in prop::option::of(prop::sample::select(vec!["gnu", "musl"])),
+    ) {
+        let peer = (0..peer_count).fold(tapid_core::PeerContext::default(), |context, index| {
+            context.with(format!("peer-{index}").parse().unwrap(), format!("1.{index}.0").parse().unwrap())
+        });
+        let platform = tapid_core::PlatformContext::new(os, cpu, libc).unwrap();
+        let package = LockedPackage::new_with_context_and_provenance(
+            "https://registry.example.test", &format!("pkg-{package_number}"), "1.0.0",
+            &format!("sha512-{}", "A".repeat(86)),
+            "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            (&peer, &platform), super::RegistryIntegrityProvenance::RegistryDeclared,
+        ).unwrap();
+        let key = package.key();
+        prop_assert_eq!(key.parse::<super::LockfilePackageKey>().unwrap().to_string(), key);
+    }
 }
 
 #[test]

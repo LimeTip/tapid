@@ -183,3 +183,18 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
     manifests.sort();
     Ok(manifests)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::expand_pattern;
+    use proptest::prelude::*;
+    use std::path::Path;
+
+    proptest! {
+        #[test]
+        fn workspace_patterns_with_parent_components_are_always_rejected(components in prop::collection::vec("[a-z]{1,8}", 0..4)) {
+            let pattern = if components.is_empty() { "..".to_owned() } else { format!("{}/..", components.join("/")) };
+            prop_assert!(expand_pattern(Path::new("/tmp/tapid-workspace"), &pattern).is_err());
+        }
+    }
+}
