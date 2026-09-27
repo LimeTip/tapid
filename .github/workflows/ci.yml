@@ -428,7 +428,7 @@ jobs:
           )
           $fixtureVerifier = Join-Path $fixture 'verify-release-record.py'
           $fixtureVerifierText = Get-Content -Raw (Join-Path $PWD 'scripts/verify-release-record.py')
-          $fixturePublicKey = ((Get-Content -Raw $keyring | ConvertFrom-Json).keys[0].public_key)
+          $fixturePublicKey = ((Get-Content -Raw (Join-Path $fixture 'keyring.json') | ConvertFrom-Json).keys[0].public_key)
           $fixtureVerifierText = $fixtureVerifierText.Replace(
             'eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc=',
             $fixturePublicKey)
