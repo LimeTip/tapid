@@ -1,6 +1,6 @@
 # Client release distribution
 
-Status: the GitHub and crates.io flow has historical verification through `v0.0.8`. The release-record changes below target the next release, expected `v0.0.11`; they are not evidence of a published release or deployed website routes.
+Status: implemented and verified through the real `v0.0.8` GitHub and crates.io release flow.
 
 ## Scope and sources of truth
 
@@ -9,7 +9,7 @@ This document is the operator runbook for releasing the Tapid command-line clien
 - `.github/workflows/release-publication.yml` for binary builds and draft GitHub releases;
 - `.github/workflows/release-public-smoke.yml` for public installer verification;
 - `.github/workflows/crates-publication.yml` for separate crates.io publication;
-- `tools/release/release.ts` for tag validation, checksums, and release-record generation;
+- `tools/release/release.ts` for tag and checksum validation;
 - `tools/release/publish.ts` for the dependency-ordered crates.io plan;
 - `docs/releases/<version>.md` for reviewed release notes.
 
@@ -18,25 +18,13 @@ The [`v0.0.8` operations record](releases/0.0.8-operations.md) preserves the fir
 
 ## Trust model
 
-Tapid relies on the reviewed repository, an annotated version tag, GitHub Actions, the owned domain and its route configuration, the release provider, HTTPS, and repository release immutability. New release archives are accompanied by `SHA256SUMS` and the [release record](release-record-v1.md). GitHub remains the initial provider.
+Tapid currently relies on the reviewed repository, an annotated version tag, GitHub Actions, GitHub Releases, HTTPS, and repository release immutability. Release archives are accompanied by `SHA256SUMS`.
 
 The checksum detects corruption, truncation, and accidental asset substitution. Because the checksum and archive come from the same GitHub release, it is not an independent authenticity proof. Tapid does not currently claim a separate signed release trust root.
 
-The new installers accept only stable `vX.Y.Z` versions and HTTPS release endpoints. They consume the record through `tapid.dev/releases/v1/latest.tsv`, or the corresponding `vVERSION.tsv` route for an explicit new version. They validate metadata and archive size, verify SHA-256, require exactly one expected regular executable in the archive, extract into a temporary directory, and stage the destination before replacement. Explicit versions through 0.0.10 retain the historical GitHub archive and `SHA256SUMS` path unless `TAPID_RELEASE_RECORD_URL` is supplied.
+The installers accept only stable `vX.Y.Z` versions and HTTPS release endpoints. They select a platform-specific archive, enforce conservative checksum, archive, and executable size limits, verify its SHA-256 checksum, require exactly one expected regular executable in the archive, extract into a temporary directory, and stage the destination before replacement.
 
-Released Tapid 0.0.10 first attempts signed discovery, then uses the canonical GitHub Releases API and `SHA256SUMS` when both default endpoints are unavailable. The next-release default upgrade path reads the same owned-domain release record as the installers, with no GitHub discovery fallback. `--release-url` or `TAPID_RELEASE_RECORD_URL` overrides the record URL; explicit `--endpoint` retains the legacy signed protocol. Invalid received metadata and mismatched downloads fail. Metadata unavailability may use last-known-good recovery but reports that the latest release could not be checked. Identical verified executable bytes leave the installation unchanged. Use `tapid upgrade --dry-run` to inspect the selected release without replacing the binary.
-
-## First release-record rollout
-
-This is a one-time cutover, expected for 0.0.11. Subsequent releases generate the record in the ordinary draft workflow and need no website edit.
-
-1. Review the client, installers, publisher, website routes, and tests together. Prepare the website change, but do not deploy the new default installer copies while the latest public release lacks `tapid-release-v1.tsv`.
-2. Build and review the first eight-asset draft. Verify the record against all six downloaded archives, including version, immutable URLs, sizes, and hashes. Keep existing public installation working during draft review.
-3. Publish the reviewed draft after approval. Deploy the prepared website routes and installer copies at the controlled cutover, then verify the latest and explicit-version public record routes and public installation. The route returns 404 before a record-bearing release is public, so source tests alone cannot prove this step.
-4. Require the public smoke evidence described below. If the automatic publication run raced the website cutover, rerun the original release-event workflow run after the routes and installer copies are deployed, and retain both attempts. A new manual dispatch does not satisfy the crates.io gate, which requires a successful `release` event run with the exact release title and tag commit.
-5. Verify an installed 0.0.10 upgrades through its existing GitHub fallback to the new binary, then repeats through the new record path with an already-up-to-date result. Keep historical `/stable.json` behavior unchanged; placing unsigned metadata there breaks released signed-discovery clients.
-
-The website routes are static provider mappings: `latest.tsv` redirects to GitHub's latest release asset, and `vVERSION.tsv` redirects to that version's asset. Provider migration changes those mappings and the published artifact URLs. It does not require per-release website deployment or signing-key operations.
+Starting with Tapid 0.0.10, `tapid upgrade` supports the published GitHub release format. It first attempts signed stable-channel discovery; when the default discovery endpoints are unavailable, it falls back to the canonical GitHub Releases API and verifies the selected platform archive against `SHA256SUMS`. This fallback is checksum-based integrity checking within the same GitHub trust boundary, not independent release authentication. Explicit custom discovery endpoints do not enable that GitHub fallback. The command validates archive structure, stages executable replacement, and records verification provenance for last-known-good recovery. Use `tapid upgrade --dry-run` to inspect the selected release without replacing the binary. Older installations can be upgraded by rerunning the public installer.
 
 ## Versioning policy
 
@@ -82,7 +70,7 @@ The release pull request must:
 Run the release contract tests before declaring the pull request ready:
 
 ```sh
-node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/installers_test.ts tools/release/publish_test.ts
+node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts
 ```
 
 Before merge, record the exact pull-request head and base. After merge, read back the concrete merge commit and verify that it is the expected protected `main` tip. Wait for post-merge CI and security checks on that exact commit.
@@ -146,8 +134,7 @@ The tag-triggered workflow must:
 - retain the numeric release ID returned by creation;
 - tolerate brief collection read-after-write delay with bounded retries;
 - require exactly one matching release whose ID equals the create response;
-- generate `tapid-release-v1.tsv` from the immutable archive bytes;
-- upload and read back the exact eight-asset set.
+- upload and read back the exact seven-asset set.
 
 Warnings and notices are evidence, not harmless decoration. Inspect the workflow annotations even when every job is green. Upgrade deprecated action runtimes and validate announced runner-image migrations in an ordinary pull request before their deadlines.
 
@@ -164,14 +151,11 @@ The expected asset set is exactly:
 - `tapid-<version>-aarch64-pc-windows-msvc.tar.gz`
 - `tapid-<version>-x86_64-pc-windows-msvc.tar.gz`
 - `SHA256SUMS`
-- `tapid-release-v1.tsv`
-
-This is eight assets for the new release flow. Historical releases through 0.0.10 have seven assets and no release record. Recovery must use the asset contract of the original tagged workflow; never add metadata to a published historical release.
 
 Before publication:
 
 1. Require `draft=true`, `prerelease=false`, the exact tag, and the expected release ID.
-2. Require exactly eight assets and no unexpected names for a new release.
+2. Require exactly seven assets and no unexpected names.
 3. Record every asset ID, name, and provider-reported size.
 4. Download every asset from GitHub by numeric asset ID into a fresh directory.
 5. Compare each downloaded size with the provider-reported size.
@@ -180,7 +164,6 @@ Before publication:
 8. Execute the locally compatible downloaded binary and require `tapid <version>`.
 9. Correlate the other binaries with successful native build jobs that executed the version check.
 10. Review `docs/releases/<version>.md` and require the draft body to match it exactly.
-11. Parse the release record and compare all six rows with the downloaded archive names, byte counts, SHA-256 values, and immutable public download URLs. Require its version to match the tag.
 
 On macOS, checksum verification can use:
 
@@ -212,7 +195,7 @@ For an existing annotated tag, `target_commitish` does not determine source iden
 
 Changing `target_commitish` to an older commit that modifies `.github/workflows` relative to the default branch can require additional OAuth `workflow` scope. GitHub may deliberately return 404 when that scope is absent. Do not broaden token scope merely to make an unnecessary metadata edit work.
 
-After every draft edit, read back the release by numeric ID and through the draft-aware `gh release view` surface. Require the original release ID, exact tag, expected asset set, reviewed body, `draft=true`, and unchanged remote tag object and peeled commit. Require every field outside the intended change set to remain byte-for-byte or value-for-value unchanged. The edit invalidates any prior approval; repeat the final draft review before publication.
+After every draft edit, read back the release by numeric ID and through the draft-aware `gh release view` surface. Require the original release ID, exact tag, expected seven assets, reviewed body, `draft=true`, and unchanged remote tag object and peeled commit. Require every field outside the intended change set to remain byte-for-byte or value-for-value unchanged. The edit invalidates any prior approval; repeat the final draft review before publication.
 
 ### 6. Publish the reviewed draft
 
@@ -236,13 +219,13 @@ Immediately verify through an unauthenticated API request that:
 - the public release ID is the reviewed draft ID;
 - `tag_name` equals the intended tag;
 - `draft=false` and `prerelease=false`;
-- the exact eight assets remain present for the new release;
+- the exact seven assets remain present;
 - the release is immutable when repository release immutability is enabled;
 - the remote annotated tag object and peeled commit are unchanged.
 
 ### 7. Verify public installation
 
-Publication triggers `.github/workflows/release-public-smoke.yml`. Require the resolver to succeed and all three platform jobs:
+Publication triggers `.github/workflows/release-public-smoke.yml` at the tagged commit. Require three successful installer jobs in addition to the resolver:
 
 - `Unix installer (ubuntu-latest)`;
 - `Unix installer (macos-latest)`;
@@ -250,16 +233,45 @@ Publication triggers `.github/workflows/release-public-smoke.yml`. Require the r
 
 Each platform must:
 
-1. Download the tagged installer from the source provider and retain its URL, release source revision, script digest, and installation evidence.
-2. Install the explicit published version, execute it, and require `tapid <version>`.
-3. Independently download the public `tapid.dev` installer, install the explicit version, and require the same binary bytes as the tagged installer produced.
-4. Install latest through the public website installer without an explicit version and verify its expected version.
-5. For a latest release newer than 0.0.10, install the highest supported earlier stable version found among the latest 100 releases, upgrade it, and compare its resulting version and executable digest with the independent latest installation.
-6. Repeat the upgrade and require the exact already-up-to-date output and unchanged executable bytes. Retain evidence even on failure.
-
-The scheduled daily run covers Linux; release and manual runs cover Linux, macOS, and Windows. Historical latest versions through 0.0.10 explicitly skip the new truthful-repeat assertion. The canonical documentation upgrade check remains separate. Matching source and destination releases demonstrate repeated installation, not a previous-version upgrade.
+1. download the tagged installer URL rendered by the website;
+2. install the explicit published version;
+3. execute the installed binary and require `tapid <version>`;
+4. execute `--help` where configured;
+5. install again through latest-release discovery without an explicit version;
+6. execute that binary and require the same version.
 
 Read the job steps and logs. Do not infer real installation from workflow success alone.
+
+The supplemental root-script fixture uses `tests/fixtures/validate_consumer_project.js`
+against the installed binary, not a source build. Before tagging, review its
+`releaseContracts` capability table alongside `docs/examples/contracts.json`.
+Unknown published tags fail until reviewed; never infer support from an arbitrary
+command failure. The native Restricted contract requires macOS child execution,
+exact arguments, environment/exit-code checks and receipts. Linux and Windows
+must instead return the specific unsupported-containment rejection with no child
+marker or receipt. The historical uncontained contract retains forwarding checks
+without claiming containment. These expected contracts are not public execution
+evidence.
+
+Pull-request CI also runs `PR published-binary regression` on Linux, macOS and
+Windows. This unprivileged test checks out the exact PR head, downloads the
+installer from the pinned v0.0.10 source commit, and installs that immutable
+published version with the installer's existing checksum and archive checks.
+It uses isolated home, cache/store, binary and temporary directories. The existing
+consumer validator checks install/lifecycle suppression and the platform-specific
+root-script contract.
+The job has read-only repository permissions, no secrets, no release environment
+and no artifact uploads. Its logs identify the PR source, release source, binary
+version and binary digest. These are **pre-merge regression results**, not public
+release readiness, package compatibility, upgrade or website promotion evidence.
+The trusted-main runner and approval gates in public installer smoke remain
+unchanged; this PR lane does not satisfy those release gates.
+
+Latest discovery and the configured Unix upgrade checks depend on their explicit
+installation prerequisites, not on successful supplemental script checks. An
+earlier failure still fails the job. Upgrade reports remain required for attempted
+upgrades; a skipped upgrade does not trigger a misleading missing-artifact failure.
+Inspect skipped prerequisites separately and do not count them as verified.
 
 Do not start crates.io publication until the public release and all three installer jobs are verified against the exact tag commit.
 
@@ -310,10 +322,8 @@ A release is complete only after verifying:
 - exact asset names, sizes, and SHA-256 values from public downloads;
 - archive structure and locally compatible binary version;
 - public `tapid.dev/install.sh` and `tapid.dev/install.ps1` endpoints;
-- latest and explicit-version `tapid.dev/releases/v1/*.tsv` records matching the published archive metadata;
 - explicit-version installation on Ubuntu, macOS, and Windows;
 - latest-release discovery installation on Ubuntu, macOS, and Windows;
-- previous-version upgrade and unchanged repeat upgrade on those platforms;
 - every planned crates.io version;
 - clean `cargo install tapid --version <version> --locked` behavior;
 - final repository, release, tag, workflow, and registry state.
@@ -390,12 +400,12 @@ Do not dispatch the create-only workflow again and do not create a duplicate rel
 2. Confirm the draft tag and ID correspond to the failed create response.
 3. Download only successful build artifacts from the exact failed run.
 4. Require all six expected archives and reject extra files.
-5. Generate and verify `SHA256SUMS` from those exact bytes. For the new release flow, also generate the release record using that version's immutable public download directory.
+5. Generate and verify `SHA256SUMS` from those exact bytes.
 6. Inspect archive layout and correlate native version checks with the build logs.
-7. List assets already attached to the draft by numeric release ID. Require their names to be a unique subset of the expected asset set and reject unexpected or duplicate names. Use eight assets for the new flow or seven for a historical tagged workflow.
+7. List assets already attached to the draft by numeric release ID. Require their names to be a unique subset of the expected seven names and reject unexpected or duplicate names.
 8. Download every existing asset by numeric asset ID. Require its size and SHA-256 to match the corresponding locally recovered file exactly. Stop on any mismatch; never overwrite or delete an ambiguous asset.
 9. Upload only expected names that are not already present, using the existing numeric release ID.
-10. Download every resulting asset back by numeric asset ID.
+10. Download all seven resulting assets back by numeric asset ID.
 11. Recheck names, sizes, checksums, archive layout, draft state, tag object, and peeled commit.
 
 Manual recovery is an evidence-preserving exception, not the normal release path.
@@ -404,11 +414,11 @@ Manual recovery is an evidence-preserving exception, not the normal release path
 
 Stop before publication. Do not delete the release or tag.
 
-1. Locate the draft through the release collection and confirm its original numeric ID and expected asset set.
+1. Locate the draft through the release collection and confirm its original numeric ID and seven assets.
 2. Confirm the real annotated version tag still exists and peels to the original commit.
 3. Restore the draft with a complete metadata update containing the intended `tag_name`, `target_commitish: main`, title, reviewed body, `draft=true`, `prerelease=false`, and `make_latest=false`.
 4. Read back by numeric ID and with `gh release view <tag>`.
-5. Require the same ID, exact tag, expected asset set, reviewed notes, draft state, and unchanged tag object before continuing.
+5. Require the same ID, exact tag, seven assets, reviewed notes, draft state, and unchanged tag object before continuing.
 
 A 404 while changing the target to an older workflow-bearing commit can mean the token lacks OAuth `workflow` scope. Keep `target_commitish: main` for an existing tag instead of expanding credentials. The annotated tag remains the source binding.
 
@@ -472,7 +482,7 @@ Never:
 
 ## Residual risks
 
-- Domain, route configuration, release provider, repository, or workflow compromise can substitute both an archive and its release record. SHA-256 is not independent release authorization.
+- GitHub repository or workflow compromise can replace both an archive and its checksum before publication.
 - The installers do not enforce rollback protection beyond selecting a requested immutable release version.
 - Public smoke tests run after publication and can detect but cannot prevent a broken release from briefly being available.
 - macOS and Windows platform code signing are not part of this flow.
