@@ -253,6 +253,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('is already up to date', workflow)
 
     def test_public_smoke_reuses_native_capability_validator(self):
+        """Require public smoke to exercise the canonical capability validator."""
         workflow = (ROOT / '.github/workflows/release-public-smoke.yml').read_text()
         self.assertEqual(workflow.count('node tests/fixtures/validate_consumer_project.js --binary'), 2)
         self.assertIn('--binary "$binary" --release-tag "$RELEASE_TAG"', workflow)
@@ -261,6 +262,7 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn('test -- wrong 0', workflow)
 
     def test_public_smoke_independent_checks_use_explicit_prerequisites(self):
+        """Require discovery and upgrade checks to declare their prerequisites."""
         workflow = (ROOT / '.github/workflows/release-public-smoke.yml').read_text()
         for job in (workflow.split('  unix:', 1)[1].split('  windows:', 1)[0],
                     workflow.split('  windows:', 1)[1]):
@@ -278,6 +280,7 @@ class RunnerTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('node'), 'Node runtime not installed')
     def test_native_capability_validator_regressions(self):
+        """Run the offline native capability validator regression suite."""
         result = subprocess.run(['node', '--test', str(ROOT / 'tests/fixtures/validate_consumer_project.test.js')],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
