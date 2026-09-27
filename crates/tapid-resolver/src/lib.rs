@@ -225,6 +225,9 @@ pub struct PackageVersionMetadata {
     pub version: PackageVersion,
     /// Dependency requirements declared by this exact version.
     pub dependencies: BTreeMap<PackageName, Requirement>,
+    /// Peer requirements declared by this exact version. These are never merged
+    /// into `dependencies` and are retained for context validation.
+    pub peer_dependencies: BTreeMap<PackageName, Requirement>,
 }
 
 /// Normalized deterministic package records belonging to one registry origin.
@@ -638,6 +641,7 @@ pub fn resolve(
                     name: p.identity.name.clone(),
                     version: p.identity.version.clone(),
                     dependencies: BTreeMap::new(),
+                    peer_dependencies: BTreeMap::new(),
                 })
                 .collect(),
         })
@@ -684,6 +688,7 @@ mod tests {
                 .iter()
                 .map(|(n, r)| (n.parse().unwrap(), req(r)))
                 .collect(),
+            peer_dependencies: BTreeMap::new(),
         }
     }
     fn registry(url: &str, packages: Vec<PackageVersionMetadata>) -> RegistryMetadata {
@@ -982,16 +987,35 @@ mod tests {
     }
 
     #[test]
+    fn preserves_peer_requirements_separately_from_ordinary_dependencies() {
+        let peer: PackageVersionMetadata = PackageVersionMetadata {
+            name: "plugin".parse().unwrap(),
+            version: "1.0.0".parse().unwrap(),
+            dependencies: BTreeMap::from([("runtime".parse().unwrap(), req("^1.0.0"))]),
+            peer_dependencies: BTreeMap::from([("react".parse().unwrap(), req("^18.0.0"))]),
+        };
+
+        assert!(peer.dependencies.contains_key(&"runtime".parse().unwrap()));
+        assert!(!peer.dependencies.contains_key(&"react".parse().unwrap()));
+        assert_eq!(
+            peer.peer_dependencies[&"react".parse().unwrap()].raw,
+            "^18.0.0"
+        );
+    }
+
+    #[test]
     fn available_versions_use_semver_order_before_rendering() {
         let first = PackageVersionMetadata {
             name: "pkg".parse().unwrap(),
             version: "10.0.0".parse().unwrap(),
             dependencies: BTreeMap::new(),
+            peer_dependencies: BTreeMap::new(),
         };
         let second = PackageVersionMetadata {
             name: "pkg".parse().unwrap(),
             version: "2.0.0".parse().unwrap(),
             dependencies: BTreeMap::new(),
+            peer_dependencies: BTreeMap::new(),
         };
 
         assert_eq!(available(&[&first, &second]), vec!["2.0.0", "10.0.0"]);
@@ -1010,6 +1034,7 @@ mod tests {
                     ("z-child".parse().unwrap(), req("1.0.0")),
                     ("a-child".parse().unwrap(), req("1.0.0")),
                 ]),
+                peer_dependencies: BTreeMap::new(),
             }],
         )
         .unwrap();
