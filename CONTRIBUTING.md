@@ -37,10 +37,12 @@ cargo test --workspace --all-features --locked
 cargo metadata --no-deps --format-version 1 --locked
 cargo package --workspace --locked
 cargo deny check
+cargo nextest run --workspace --all-features --locked
+cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
 cargo audit
 ```
 
-`cargo-deny` and `cargo-audit` are CI security gates. Install them with their upstream installers or skip only when documenting why the local tool is unavailable; do not weaken the CI jobs.
+`cargo nextest` is the faster test runner used by the dedicated Ubuntu CI gate; the canonical `cargo test` command remains required for cross-platform coverage. `cargo llvm-cov` writes an LCOV report to `lcov.info`, matching the CI artifact. `cargo-deny` and `cargo-audit` are CI security gates. Install these tools with their upstream installers or skip only when documenting why the local tool is unavailable; do not weaken the CI jobs.
 
 ## License and security
 
