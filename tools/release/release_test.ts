@@ -194,16 +194,16 @@ test("binary release follows the small draft release flow", async () => {
   assert(!workflow.includes("${{ inputs."));
   assert(workflow.includes("group: release-publication"));
   assert(!workflow.includes("release-manifest"));
-  assert(!workflow.includes("python"));
+  assert(workflow.includes("node --experimental-strip-types tools/release/sign.ts sign release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig"));
   assert(!workflow.includes("gh release edit"));
   const metadata = workflow.indexOf('tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"');
   assert(metadata > workflow.indexOf("tools/release/release.ts checksums release"));
   assert(metadata < createRelease, "the complete metadata asset must exist before draft creation");
-  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv; do"));
+  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig; do"));
   assert(workflow.includes("find release -maxdepth 1 -type f -exec basename {}"), "draft readback must include the metadata asset");
 });
 
-test("release runbook documents the workflow's eight-asset contract", async () => {
+test("release runbook documents the workflow's nine-asset contract", async () => {
   const workflow = await text(".github/workflows/release-publication.yml");
   const runbook = await text("docs/release-distribution.md");
   const assets = [
@@ -215,16 +215,17 @@ test("release runbook documents the workflow's eight-asset contract", async () =
     "tapid-<version>-x86_64-pc-windows-msvc.tar.gz",
     "SHA256SUMS",
     "tapid-release-v1.tsv",
+    "tapid-release-v1.tsv.sig",
   ];
   for (const asset of assets) assert(runbook.includes(`\`${asset}\``), `runbook omits ${asset}`);
-  assert(runbook.includes("upload and read back the exact eight-asset set"));
-  assert(runbook.includes("This is eight assets for the new release flow."));
-  assert(runbook.includes("Require exactly eight assets and no unexpected names for a new release."));
-  assert(runbook.includes("the exact eight assets remain present for the new release"));
-  assert(runbook.includes("Use eight assets for the new flow or seven for a historical tagged workflow."));
+  assert(runbook.includes("upload and read back the exact nine-asset set"));
+  assert(runbook.includes("This is nine assets for the new release flow."));
+  assert(runbook.includes("Require exactly nine assets and no unexpected names for a new release."));
+  assert(runbook.includes("the exact nine assets remain present for the new release"));
+  assert(runbook.includes("Use nine assets for the new flow or seven for a historical tagged workflow."));
   assert(!runbook.includes("exact seven-asset set"));
   assert(!runbook.includes("Require exactly seven assets and no unexpected names"));
-  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv; do"));
+  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig; do"));
 });
 
 test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM runner", async () => {

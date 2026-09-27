@@ -79,9 +79,9 @@ jobs:
             "tapid-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
             "tapid-$VERSION-x86_64-apple-darwin.tar.gz" \
             "tapid-$VERSION-x86_64-pc-windows-msvc.tar.gz" \
-            "tapid-$VERSION-x86_64-unknown-linux-gnu.tar.gz" SHA256SUMS | LC_ALL=C sort > "$expected_assets_file"
+            "tapid-$VERSION-x86_64-unknown-linux-gnu.tar.gz" SHA256SUMS tapid-release-v1.tsv tapid-release-v1.tsv.sig | LC_ALL=C sort > "$expected_assets_file"
           jq -r '.assets[] | [.name, .id, .size] | @tsv' "$release_json" | LC_ALL=C sort -k1,1 > "$RUNNER_TEMP/assets.tsv"
-          test "$(wc -l < "$RUNNER_TEMP/assets.tsv" | tr -d ' ')" = 7 || { echo "expected exactly seven draft assets" >&2; exit 1; }
+          test "$(wc -l < "$RUNNER_TEMP/assets.tsv" | tr -d ' ')" = 9 || { echo "expected exactly nine draft assets" >&2; exit 1; }
           cut -f1 "$RUNNER_TEMP/assets.tsv" | diff -u "$expected_assets_file" - || { echo "unexpected draft asset" >&2; exit 1; }
 
           mkdir -p "$RUNNER_TEMP/assets"
@@ -107,6 +107,8 @@ jobs:
             exit 1
           }
           (cd "$RUNNER_TEMP/assets" && sha256sum -c SHA256SUMS)
+          test -s "$RUNNER_TEMP/assets/tapid-release-v1.tsv"
+          test -s "$RUNNER_TEMP/assets/tapid-release-v1.tsv.sig"
           for archive in "$RUNNER_TEMP/assets"/*.tar.gz; do
             members="$(tar -tzf "$archive" | tr -d '\r')"
             test "$(printf '%s\n' "$members" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 || {
