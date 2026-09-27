@@ -20,6 +20,8 @@ MAX_RECORD_BYTES=262144
 MAX_CHECKSUM_BYTES=1048576
 MAX_ARCHIVE_BYTES=536870912
 MAX_BINARY_BYTES=536870912
+VERIFIER_URL="https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py"
+VERIFIER_SHA256="4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d"
 
 usage() {
   cat <<'USAGE'
@@ -216,9 +218,16 @@ else
   [ "$(wc -c < "$tmp_dir/release.tsv" | tr -d '[:space:]')" -le "$MAX_RECORD_BYTES" ] || fail "release record exceeds the size limit"
   [ -s "$tmp_dir/release.tsv.sig" ] || fail "release record signature is empty"
   command -v python3 >/dev/null 2>&1 || fail "python3 is required to verify the release record signature"
-  verifier="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/verify-release-record.py"
-  [ -f "$verifier" ] || fail "release record signature verifier is missing"
-  python3 "$verifier" "$tmp_dir/release.tsv" "$tmp_dir/release.tsv.sig" || fail "release record signature verification failed"
+  curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize 262144 "$VERIFIER_URL" -o "$tmp_dir/verify-release-record.py" 2>/dev/null || fail "could not download release record verifier"
+  if command -v shasum >/dev/null 2>&1; then
+    verifier_hash="$(shasum -a 256 "$tmp_dir/verify-release-record.py" | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    verifier_hash="$(sha256sum "$tmp_dir/verify-release-record.py" | awk '{print $1}')"
+  else
+    fail "shasum or sha256sum is required"
+  fi
+  [ "$verifier_hash" = "$VERIFIER_SHA256" ] || fail "release record verifier checksum mismatch"
+  python3 "$tmp_dir/verify-release-record.py" "$tmp_dir/release.tsv" "$tmp_dir/release.tsv.sig" || fail "release record signature verification failed"
   [ "$(tail -c 1 "$tmp_dir/release.tsv" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || fail "release record must end with a newline"
   # Some awk implementations truncate strings at NUL. Check raw bytes first.
   [ "$(LC_ALL=C tr -d '\011\012\040-\176' < "$tmp_dir/release.tsv" | wc -c | tr -d '[:space:]')" = 0 ] || fail "release record must contain ASCII fields and LF lines"

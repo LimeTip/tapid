@@ -52,12 +52,14 @@ printf '%s\\n' "$url" >> "$INSTALLER_FIXTURE/requests"
 case "$url" in
   *.tsv.sig) cp "$INSTALLER_FIXTURE/release.tsv.sig" "$out" ;;
   *.tsv) cp "$INSTALLER_FIXTURE/record.tsv" "$out" ;;
+  *.py) cp "$INSTALLER_FIXTURE/verify-release-record.py" "$out" ;;
   *) cp "$INSTALLER_FIXTURE/$(basename "$url")" "$out" ;;
 esac
 `);
   await chmod(join(bin, "curl"), 0o755);
   await writeFile(join(bin, "python3"), "#!/bin/sh\nexit 0\n");
   await chmod(join(bin, "python3"), 0o755);
+  await writeFile(join(directory, "verify-release-record.py"), await readFile(join(root, "scripts/verify-release-record.py")));
   const env: Record<string, string | undefined> = { ...processEnv, PATH: `${bin}:${processEnv.PATH}`, INSTALLER_FIXTURE: directory };
   for (const name of ["TAPID_REPO", "TAPID_RELEASE_BASE_URL", "TAPID_RELEASE_DISCOVERY_URL", "TAPID_RELEASE_RECORD_URL"]) delete env[name];
   return { directory, install, bytes, hash, record, env,
@@ -67,7 +69,7 @@ esac
       run("/bin/sh", [join(root, "scripts/install.sh")], { env: { ...env, HOME: home, SHELL: "/bin/zsh", ...additions } }),
     requests: async () => (await readFile(join(directory, "requests"), "utf8"))
       .split("\n")
-      .filter((request: string) => request && !request.endsWith(".sig"))
+      .filter((request: string) => request && !request.endsWith(".sig") && !request.endsWith(".py"))
       .join("\n") + "\n",
     cleanup: () => rm(directory, { recursive: true, force: true }),
   };
@@ -82,6 +84,21 @@ test("Unix installer follows owned discovery and provider-neutral artifact URLs"
     await writeFile(join(f.directory, "record.tsv"), f.record(`https://downloads.example.org/files/${archive}`));
     await f.installShell();
     ok((await f.requests()).endsWith(`https://downloads.example.org/files/${archive}\n`));
+  } finally { await f.cleanup(); }
+});
+
+test("Unix single-file installer downloads its pinned verifier", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const singleFileDir = join(f.directory, "single-file");
+  const installer = join(singleFileDir, "install.sh");
+  try {
+    await mkdir(singleFileDir);
+    await writeFile(installer, await readFile(join(root, "scripts/install.sh")));
+    await run("/bin/sh", [installer, "--install-dir", f.install], { env: f.env });
+    const requests = await readFile(join(f.directory, "requests"), "utf8");
+    ok(requests.includes("raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py"));
+    await writeFile(join(f.directory, "verify-release-record.py"), "tampered verifier\n");
+    await rejects(() => run("/bin/sh", [installer, "--install-dir", f.install], { env: f.env }));
   } finally { await f.cleanup(); }
 });
 

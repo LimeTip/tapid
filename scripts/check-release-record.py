@@ -101,7 +101,7 @@ def sign_record(record, signature, keyring):
     keyring.write_text(json.dumps({
         'version': 'tapid-release-keyring-v1',
         'keys': [{
-            'key_id': 'test-release-key',
+            'key_id': 'release-key-2026-01',
             'algorithm': 'ed25519',
             'public_key': base64.b64encode(public_key).decode(),
             'fingerprint': 'sha256-' + hashlib.sha256(public_key).hexdigest(),
@@ -122,7 +122,7 @@ def sign_record(record, signature, keyring):
     }
     signing_payload = dict(envelope)
     signing_payload['signature_context'] = {
-        'algorithm': 'ed25519', 'key_id': 'test-release-key'}
+        'algorithm': 'ed25519', 'key_id': 'release-key-2026-01'}
     payload = record.parent / '.signature-payload.json'
     raw_signature = record.parent / '.signature.raw'
     payload.write_text(json.dumps(signing_payload, ensure_ascii=False,
@@ -130,7 +130,7 @@ def sign_record(record, signature, keyring):
     raw_signature.write_bytes(ed25519_sign(payload.read_bytes(), secret)[0])
     envelope['signature'] = {
         'algorithm': 'ed25519',
-        'key_id': 'test-release-key',
+        'key_id': 'release-key-2026-01',
         'subject': envelope['subject'],
         'artifact_digest': digest,
         'value': base64.b64encode(raw_signature.read_bytes()).decode(),
@@ -209,13 +209,27 @@ else:
         mapping, first_payload = release(
             directory / 'first', '1.2.3',
             'https://gitlab.example/tapid/releases/v1.2.3/downloads', env, keyring)
+        fixture_verifier_url = 'https://fixture.example/verify-release-record.py'
+        fixture_verifier = directory / 'verify-release-record.py'
+        fixture_verifier_text = (ROOT / 'scripts/verify-release-record.py').read_text()
+        fixture_public_key = json.loads(keyring.read_text())['keys'][0]['public_key']
+        fixture_verifier.write_text(fixture_verifier_text.replace(
+            'eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc=',
+            fixture_public_key))
+        fixture_verifier_hash = hashlib.sha256(fixture_verifier.read_bytes()).hexdigest()
+        installer = directory / 'install.sh'
+        installer.write_text((ROOT / 'scripts/install.sh').read_text()
+                             .replace('https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py', fixture_verifier_url)
+                             .replace('4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d', fixture_verifier_hash))
+        installer.chmod(0o755)
+        mapping[fixture_verifier_url] = str(fixture_verifier)
         (directory / 'mapping.json').write_text(json.dumps(mapping))
-        command(['sh', str(ROOT / 'scripts/install.sh'), '--install-dir', str(installed)], env, directory)
+        command(['sh', str(installer), '--install-dir', str(installed)], env, directory)
         require(destination.read_bytes() == first_payload, 'installer changed executable bytes')
         require(command([str(destination), '--version'], env, directory).strip() == 'tapid 1.2.3',
                 'installer did not install the generated release')
         # Exercise explicit-version discovery through the same generated record.
-        command(['sh', str(ROOT / 'scripts/install.sh'), '--version', '1.2.3',
+        command(['sh', str(installer), '--version', '1.2.3',
                  '--install-dir', str(directory / 'explicit')], env, directory)
         env['TAPID_RELEASE_KEYRING'] = str(keyring)
         destination.write_bytes(fixture_executable('1.2.2'))
@@ -233,6 +247,7 @@ else:
         mapping, second_payload = release(
             directory / 'second', '1.2.4',
             'https://downloads.example.net/tapid/v1.2.4', env, keyring)
+        mapping['https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py'] = str(ROOT / 'scripts/verify-release-record.py')
         (directory / 'mapping.json').write_text(json.dumps(mapping))
         output = command(upgrade, env, directory)
         require('Upgraded Tapid to 1.2.4' in output, 'provider migration did not upgrade')
@@ -259,7 +274,7 @@ else:
         require(snapshot(installed) == before, 'rejected metadata changed installation or recovery state')
         requests = (directory / 'requests').read_text().splitlines()
         require(requests.count(DISCOVERY) == 6, 'updater did not consistently use owned discovery')
-        require(requests.count(DISCOVERY + '.sig') == 5, 'updater did not consistently fetch record signatures')
+        require(requests.count(DISCOVERY + '.sig') == 6, 'updater and installer did not consistently fetch record signatures')
         require(any(url.startswith('https://gitlab.example/') for url in requests), 'first provider was unused')
         require(any(url.startswith('https://downloads.example.net/') for url in requests), 'second provider was unused')
         require(not any(urlsplit(url).hostname == 'github.com' for url in requests),

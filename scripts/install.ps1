@@ -10,7 +10,9 @@ $ErrorActionPreference = "Stop"
 $MAX_RECORD_BYTES = 256KB
 $MAX_CHECKSUM_BYTES = 1MB
 $MAX_ARCHIVE_BYTES = 512MB
-$MAX_BINARY_BYTES = 512MB
+$MAX_BINARY_BYTES = 536870912
+$VerifierUrl = 'https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py'
+$VerifierSha256 = '4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d'
 function Fail([string]$Message) { throw "tapid installer: $Message" }
 
 function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
@@ -268,8 +270,9 @@ try {
         $python = Get-Command python.exe -ErrorAction SilentlyContinue
         if (-not $python) { $python = Get-Command python3.exe -ErrorAction SilentlyContinue }
         if (-not $python) { Fail "python is required to verify the release record signature" }
-        $verifier = Join-Path $PSScriptRoot 'verify-release-record.py'
-        if (-not (Test-Path -LiteralPath $verifier -PathType Leaf)) { Fail "release record signature verifier is missing" }
+        $verifier = Join-Path $tempRoot 'verify-release-record.py'
+        Save-BoundedHttpsFile $VerifierUrl $verifier 262144
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifier).Hash.ToLowerInvariant() -cne $VerifierSha256) { Fail "release record verifier checksum mismatch" }
         & $python.Source $verifier $recordPath $signaturePath
         if ($LASTEXITCODE -ne 0) { Fail "release record signature verification failed" }
         $record = Read-ReleaseRecord $recordPath $Version $target

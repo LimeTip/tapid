@@ -397,6 +397,20 @@ jobs:
             $size = (Get-Item -LiteralPath $archive).Length
             $record = "tapid-release-v1`t1.2.3`n$target`t$archiveName`t$size`t$digest`thttps://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName`n"
             Set-Content -Encoding ascii -NoNewline -Path (Join-Path $fixture 'v1.2.3.tsv') -Value $record
+            $signer = Join-Path $fixture 'sign-fixture.py'
+          @'
+          import importlib.util
+          import sys
+          from pathlib import Path
+
+          spec = importlib.util.spec_from_file_location('check_release_record', sys.argv[1])
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.sign_record(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
+          '@ | Set-Content -Encoding utf8 -Path $signer
+            $keyring = Join-Path $fixture 'keyring.json'
+            & python.exe $signer (Join-Path $PWD 'scripts/check-release-record.py') (Join-Path $fixture 'v1.2.3.tsv') (Join-Path $fixture 'v1.2.3.tsv.sig') $keyring
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           Write-FixtureReleaseRecord
           $installerUnderTest = Join-Path $fixture 'install.ps1'
@@ -412,8 +426,22 @@ jobs:
             '^function Save-BoundedHttpsFile\([^\r\n]+\) \{.*?^\}',
             ([Text.RegularExpressions.RegexOptions]::Multiline -bor [Text.RegularExpressions.RegexOptions]::Singleline)
           )
+          $fixtureVerifier = Join-Path $fixture 'verify-release-record.py'
+          $fixtureVerifierText = Get-Content -Raw (Join-Path $PWD 'scripts/verify-release-record.py')
+          $fixturePublicKey = ((Get-Content -Raw $keyring | ConvertFrom-Json).keys[0].public_key)
+          $fixtureVerifierText = $fixtureVerifierText.Replace(
+            'eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc=',
+            $fixturePublicKey)
+          Set-Content -Encoding utf8 -NoNewline -Path $fixtureVerifier -Value $fixtureVerifierText
+          $fixtureVerifierHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixtureVerifier).Hash.ToLowerInvariant()
           $fixtureInstallerText = $downloaderPattern.Replace($installerText, $fixtureDownloader, 1)
           if ($fixtureInstallerText -eq $installerText) { throw 'failed to create isolated installer fixture' }
+          $fixtureInstallerText = $fixtureInstallerText.Replace(
+            'https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py',
+            'https://fixture.example/verify-release-record.py')
+          $fixtureInstallerText = $fixtureInstallerText.Replace(
+            '4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d',
+            $fixtureVerifierHash)
           Set-Content -NoNewline -Path $installerUnderTest -Value $fixtureInstallerText
           $env:TAPID_FIXTURE_ROOT = $fixture
           Set-Content -NoNewline -Path (Join-Path $fixture 'requests.txt') -Value ''
@@ -437,8 +465,12 @@ jobs:
           $requests = @(Get-Content -LiteralPath (Join-Path $fixture 'requests.txt'))
           $expectedRequests = @(
             'https://tapid.dev/releases/v1/v1.2.3.tsv'
+            'https://tapid.dev/releases/v1/v1.2.3.tsv.sig'
+            'https://fixture.example/verify-release-record.py'
             "https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName"
             'https://tapid.dev/releases/v1/v1.2.3.tsv'
+            'https://tapid.dev/releases/v1/v1.2.3.tsv.sig'
+            'https://fixture.example/verify-release-record.py'
             "https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName"
           )
           if (($requests -join "`n") -cne ($expectedRequests -join "`n")) { throw 'fixture did not use release record discovery and artifact URLs' }
