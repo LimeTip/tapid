@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256, Sha512};
 use std::{
     ffi::OsStr,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -74,7 +74,7 @@ fn read_only_lifecycle_commands_fail_closed_without_writing() {
     assert!(String::from_utf8_lossy(&outdated.stderr).contains("cannot read lockfile"));
     let prune = run(&dir, &["prune"]);
     assert_eq!(prune.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&prune.stderr).contains("not implemented"));
+    assert!(String::from_utf8_lossy(&prune.stderr).contains("requires tapid.lock"));
     assert_eq!(
         fs::read_to_string(dir.join("package.json")).unwrap(),
         manifest
@@ -121,6 +121,127 @@ fn lock_for_manifest(raw: &str) -> Lockfile {
     hasher.update(raw.as_bytes());
     let digest = format!("sha256-{}", hex::encode(hasher.finalize()));
     Lockfile::new(&digest).unwrap()
+}
+
+fn write_prune_fixture(dir: &Path, manifest: &str, mismatch: bool) -> (PathBuf, String, String) {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+    use tapid_store::Store;
+
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let store_root = dir.join("store");
+    let store = Store::new(&store_root);
+    let make_tree = |name: &str| {
+        let source = dir.join(format!("source-{name}"));
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("package.json"),
+            format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+        )
+        .unwrap();
+        let digest = tapid_archive::canonical_tree_digest(&source).unwrap();
+        let parsed = digest.parse::<tapid_core::ArtifactDigest>().unwrap();
+        store.activate_verified_tree(&parsed, &source).unwrap();
+        digest
+    };
+    let required_digest = make_tree("required");
+    let orphan_digest = make_tree("orphan");
+    let mut lock = lock_for_manifest(if mismatch {
+        r#"{"name":"app","version":"1.0.0","dependencies":{"required":"2.0.0"}}"#
+    } else {
+        manifest
+    });
+    let required = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "required",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &required_digest,
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let orphan = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "orphan",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &orphan_digest,
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let required_key = required.key();
+    lock.insert_package(required).unwrap();
+    lock.insert_package(orphan).unwrap();
+    lock.set_roots([required_key]).unwrap();
+    fs::write(dir.join("tapid.lock"), lock.to_json().unwrap()).unwrap();
+    (store_root, required_digest, orphan_digest)
+}
+
+#[test]
+fn prune_removes_only_unreachable_package_from_managed_node_modules() {
+    let dir = temp_dir("prune-reachable");
+    let manifest = r#"{"name":"app","version":"1.0.0","dependencies":{"required":"1.0.0"}}"#;
+    let (store, _, _) = write_prune_fixture(&dir, manifest, false);
+    let lock_before = fs::read_to_string(dir.join("tapid.lock")).unwrap();
+    fs::create_dir_all(dir.join("node_modules/old")).unwrap();
+    fs::write(dir.join("node_modules/old/file"), "old").unwrap();
+    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
+
+    let output = run(&dir, &["prune", "--store-dir", store.to_str().unwrap()]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.join("node_modules/required/package.json").is_file());
+    assert!(!dir.join("node_modules/orphan").exists());
+    assert!(!dir.join("node_modules/old").exists());
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("tapid.lock")).unwrap(),
+        lock_before
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn prune_preserves_unmarked_node_modules() {
+    let dir = temp_dir("prune-unmarked");
+    let manifest = r#"{"name":"app","version":"1.0.0","dependencies":{"required":"1.0.0"}}"#;
+    let (store, _, _) = write_prune_fixture(&dir, manifest, false);
+    fs::create_dir_all(dir.join("node_modules/old")).unwrap();
+    fs::write(dir.join("node_modules/old/file"), "old").unwrap();
+
+    let output = run(&dir, &["prune", "--store-dir", store.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unmarked node_modules"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.join("node_modules/old/file").is_file());
+    cleanup(dir);
+}
+
+#[test]
+fn prune_preserves_tree_on_lockfile_manifest_mismatch() {
+    let dir = temp_dir("prune-mismatch");
+    let manifest = r#"{"name":"app","version":"1.0.0","dependencies":{"required":"1.0.0"}}"#;
+    let (store, _, _) = write_prune_fixture(&dir, manifest, true);
+    fs::create_dir_all(dir.join("node_modules/old")).unwrap();
+    fs::write(dir.join("node_modules/old/file"), "old").unwrap();
+    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
+
+    let output = run(&dir, &["prune", "--store-dir", store.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("manifest digest mismatch"));
+    assert!(dir.join("node_modules/old/file").is_file());
+    cleanup(dir);
 }
 
 #[test]

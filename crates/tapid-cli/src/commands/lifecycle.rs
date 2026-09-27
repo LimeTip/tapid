@@ -135,13 +135,24 @@ pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
 }
 
 pub(crate) fn prune(args: ReadOnlyArgs) -> ExitCode {
-    match crate::application::lifecycle::parse_workspace_selector(args.common.workspace.as_deref())
+    if let Err(error) =
+        crate::application::lifecycle::parse_workspace_selector(args.common.workspace.as_deref())
     {
-        Ok(_) => {
-            eprintln!(
-                "error: prune is not implemented yet; refusing to claim lockfile replay removed stale output"
-            );
-            ExitCode::from(1)
+        eprintln!("error: {error}");
+        return ExitCode::from(1);
+    }
+    match crate::application::install::run(
+        &args.common.project_dir,
+        None,
+        args.common.store_dir.as_deref(),
+        crate::application::install::InstallMode::Frozen,
+        None,
+        false,
+        |_, _| {},
+    ) {
+        Ok(report) => {
+            println!("Pruned ({} package(s))", report.package_count);
+            ExitCode::SUCCESS
         }
         Err(error) => {
             eprintln!("error: {error}");
