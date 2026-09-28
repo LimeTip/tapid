@@ -1101,7 +1101,12 @@ fn sync_directory(path: &Path) -> io::Result<()> {
     };
     #[cfg(not(windows))]
     let sync = File::open(path).and_then(|directory| directory.sync_all());
-    sync
+    sync.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot sync store directory {}: {error}", path.display()),
+        )
+    })
 }
 
 const STORE_JOURNAL: &str = ".tapid-transaction.json";
