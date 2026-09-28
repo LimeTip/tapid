@@ -715,12 +715,6 @@ pub fn resolve_and_fetch(
             );
         }
     }
-    if !manifest.peer_dependencies().is_empty() {
-        return Err(
-            "peer dependency resolution is not implemented; refusing to install peer requirements as ordinary dependencies"
-                .to_owned(),
-        );
-    }
     let mut roots = Vec::new();
     for map in [
         manifest.dependencies(),

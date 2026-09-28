@@ -108,28 +108,38 @@ fn lifecycle_add_rolls_back_manifest_when_resolution_fails() {
 }
 
 #[test]
-fn add_peer_fails_at_cli_boundary_without_mutating_project_state() {
-    let dir = temp_dir("peer-cli-atomicity");
-    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"existing":"1.0.0"}}"#;
-    let lock = "existing-lock\n";
+fn add_peer_records_only_peer_requirement() {
+    let dir = temp_dir("peer-cli-transaction");
+    let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+    let fixture = dir.join("registry.json");
     fs::write(dir.join("package.json"), manifest).unwrap();
-    fs::write(dir.join("tapid.lock"), lock).unwrap();
-    fs::create_dir_all(dir.join("node_modules/existing")).unwrap();
-    fs::write(dir.join("node_modules/existing/marker"), "keep").unwrap();
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://jsr.io","name":"@scope/peer","version":"1.0.0","artifact":"https://jsr.io/@scope/peer/1.0.0.tgz"}]}"#,
+    )
+    .unwrap();
 
-    let output = run(&dir, &["add", "react@^18.0.0", "--peer"]);
+    let output = run(
+        &dir,
+        &[
+            "add",
+            "react@^18.0.0",
+            "--peer",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
 
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("peer-placement-unsupported"));
-    assert_eq!(
-        fs::read_to_string(dir.join("package.json")).unwrap(),
-        manifest
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(fs::read_to_string(dir.join("tapid.lock")).unwrap(), lock);
-    assert_eq!(
-        fs::read_to_string(dir.join("node_modules/existing/marker")).unwrap(),
-        "keep"
-    );
+    let updated = fs::read_to_string(dir.join("package.json")).unwrap();
+    assert!(updated.contains("\"peerDependencies\""));
+    assert!(updated.contains("\"react\": \"^18.0.0\""));
+    assert!(!updated.contains("\"dependencies\""));
+    assert!(dir.join("tapid.lock").is_file());
     cleanup(dir);
 }
 

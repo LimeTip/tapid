@@ -1,14 +1,8 @@
 ## Peer dependency behavior
 
-Tapid preserves `peerDependencies` as a separate requirement map in manifests and
-normalized registry metadata. Peer requirements are included in package identity
-contexts for lockfile and materialization validation; incompatible contexts are
-not silently merged.
+Manifest and registry parsing preserve `peerDependencies` separately from regular dependencies. `tapid add --peer <name>@<range>` writes the requirement to `peerDependencies` and does not add it to the resolver's production roots; thus it does not install that package merely because it is declared as a peer. The existing atomic manifest/lockfile/materialization transaction is used.
 
-Automatic peer placement is not implemented. Therefore `tapid add --peer` fails
-closed with a `peer-placement-unsupported` diagnostic before writing
-`package.json`, `tapid.lock`, or changing `node_modules`. Tapid also refuses to
-flatten peer metadata from registry artifacts into ordinary dependencies.
+This is a narrow declaration-only lifecycle slice, not peer-aware package resolution. Registry packages declaring peers are still rejected with `peer-placement-unsupported`; Tapid does not yet validate peers against the selected graph, create peer contexts in lockfile/materialization identities, or perform automatic peer placement. The declaration is not evidence that the consuming application has a compatible peer installed. Full npm/pnpm peer behavior remains unsupported.
 
 # Compatibility matrix
 

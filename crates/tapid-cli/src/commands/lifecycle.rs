@@ -61,10 +61,7 @@ pub(crate) fn add(args: AddArgs) -> ExitCode {
     } else if args.optional {
         DependencyKind::OptionalDependencies
     } else if args.peer {
-        eprintln!(
-            "error: peer-placement-unsupported: cannot install peer dependencies; automatic peer placement is not implemented"
-        );
-        return ExitCode::from(1);
+        DependencyKind::PeerDependencies
     } else {
         DependencyKind::Dependencies
     };
@@ -211,7 +208,7 @@ mod tests {
     };
 
     #[test]
-    fn peer_add_fails_before_touching_project_state() {
+    fn peer_add_records_peer_without_installing_it_as_a_regular_root() {
         let project = std::env::temp_dir().join(format!(
             "tapid-peer-add-{}-{}",
             std::process::id(),
@@ -222,11 +219,13 @@ mod tests {
         ));
         fs::create_dir(&project).unwrap();
         let package = project.join("package.json");
-        let lock = project.join("tapid.lock");
-        let modules = project.join("node_modules");
-        fs::write(&package, "original package\n").unwrap();
-        fs::write(&lock, "original lock\n").unwrap();
-        fs::create_dir(&modules).unwrap();
+        let fixture = project.join("registry.json");
+        fs::write(&package, r#"{"name":"app","version":"1.0.0"}"#).unwrap();
+        fs::write(
+            &fixture,
+            r#"{"packages":[{"registry":"https://jsr.io","name":"@scope/peer","version":"1.0.0","artifact":"https://jsr.io/@scope/peer/1.0.0.tgz"}]}"#,
+        )
+        .unwrap();
 
         let result = add(AddArgs {
             packages: vec!["react@^18.0.0".into()],
@@ -236,16 +235,23 @@ mod tests {
             common: CommonArgs {
                 project_dir: project.clone(),
                 workspace: None,
-                store_dir: None,
-                registry_fixture: None,
+                store_dir: Some(project.join("store")),
+                registry_fixture: Some(fixture),
                 allow_unverified_registry_artifacts: false,
             },
         });
 
-        assert_eq!(result, ExitCode::from(1));
-        assert_eq!(fs::read_to_string(package).unwrap(), "original package\n");
-        assert_eq!(fs::read_to_string(lock).unwrap(), "original lock\n");
-        assert!(modules.is_dir());
+        assert_eq!(result, ExitCode::SUCCESS);
+        let manifest = crate::commands::manifest::read_manifest(&package).unwrap();
+        assert!(!manifest.dependencies().contains_key("react"));
+        assert_eq!(
+            manifest
+                .peer_dependencies()
+                .get("react")
+                .map(String::as_str),
+            Some("^18.0.0")
+        );
+        assert!(project.join("tapid.lock").is_file());
         fs::remove_dir_all(project).unwrap();
     }
 
