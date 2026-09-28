@@ -1081,7 +1081,9 @@ fn sync_tree(path: &Path) -> io::Result<()> {
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             sync_tree(&child)?;
         } else if metadata.is_file() {
-            File::open(&child)
+            OpenOptions::new()
+                .write(true)
+                .open(&child)
                 .and_then(|file| file.sync_all())
                 .map_err(|error| {
                     io::Error::new(
