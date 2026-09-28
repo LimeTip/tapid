@@ -1,6 +1,9 @@
 import { deepStrictEqual as assertEquals, rejects as assertRejects, strictEqual, throws as assertThrows } from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { isPublished, parseCliArgs, planPublication, publicationPlan, publishPackages, registryState, renderHumanPlan, renderMachinePlan, waitForRegistryPublication, cargoPublishEnv, cargoMetadataEnv, type CargoMetadata } from "./publish.ts";
+import { findCargoLockfiles, isPublished, parseCliArgs, planPublication, publicationPlan, publishPackages, registryState, renderHumanPlan, renderMachinePlan, waitForRegistryPublication, cargoPublishEnv, cargoMetadataEnv, type CargoMetadata } from "./publish.ts";
 
 const metadata = {
   packages: [
@@ -16,6 +19,24 @@ const metadata = {
     { name: "tapid-policy", version: "0.0.2", dependencies: [] },
   ],
 };
+
+test("discovers root and nested Cargo lockfiles without build or Git internals", async () => {
+  const root = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "tapid-lockfiles-"));
+  try {
+    await mkdir(join(root, "tests", "integration"), { recursive: true });
+    await mkdir(join(root, "target", "fixture"), { recursive: true });
+    await mkdir(join(root, ".git", "objects"), { recursive: true });
+    for (const relative of [
+      "Cargo.toml", "Cargo.lock",
+      "tests/integration/Cargo.toml", "tests/integration/Cargo.lock",
+      "target/fixture/Cargo.toml", "target/fixture/Cargo.lock",
+      ".git/objects/Cargo.toml", ".git/objects/Cargo.lock",
+    ]) await writeFile(join(root, relative), "");
+    assertEquals(await findCargoLockfiles(root), ["Cargo.lock", "tests/integration/Cargo.lock"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("publication plan follows dependency order and skips published versions", () => {
   const published = new Set(["tapid-core@0.0.4", "tapid-manifest@0.0.6"]);
@@ -211,12 +232,18 @@ test("registry state rejects an incomplete success response instead of treating 
 });
 
 test("publication planner reports a deterministic no-op with verification commands", async () => {
-  const result = await planPublication(metadata, async () => true);
+  const result = await planPublication({
+    ...metadata,
+    lockfiles: ["Cargo.lock", "tests/integration/Cargo.lock"],
+  }, async () => true);
   assertEquals(result.packages, []);
   assertEquals(result.blockers, []);
+  assertEquals(result.lockfiles, ["Cargo.lock", "tests/integration/Cargo.lock"]);
   assertEquals(result.verification, [
     "cargo package --workspace --locked",
     "cargo metadata --manifest-path tests/integration/Cargo.toml --locked --format-version 1",
+    'CARGO_HOME="$RUNNER_TEMP/clean-cargo-home" cargo install tapid --version 0.0.7 --locked --root "$RUNNER_TEMP/tapid-clean-install"',
+    '"$RUNNER_TEMP/tapid-clean-install/bin/tapid" --version',
   ]);
   strictEqual(renderMachinePlan(result), JSON.stringify(result, null, 2) + "\n");
   strictEqual(renderHumanPlan(result), "No crates.io packages require publication.\n");
@@ -277,6 +304,8 @@ test("publication planner reports missing and drifted registry versions and depe
   assertEquals(plan.verification, [
     "cargo package --workspace --locked",
     "cargo metadata --manifest-path tests/integration/Cargo.toml --locked --format-version 1",
+    'CARGO_HOME="$RUNNER_TEMP/clean-cargo-home" cargo install tapid --version 1.0.0 --locked --root "$RUNNER_TEMP/tapid-clean-install"',
+    '"$RUNNER_TEMP/tapid-clean-install/bin/tapid" --version',
   ]);
 });
 

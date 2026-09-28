@@ -323,6 +323,10 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(publisher.includes("env: cargoMetadataEnv(process.env, cargoHome)"));
   assert(publisher.includes("env: cargoPublishEnv(process.env, token, cargoHome)"));
   assert(publisher.includes("CARGO_CHILD_ENV_KEYS"));
+  assert(publisher.includes("metadata.lockfiles = await findCargoLockfiles(workspaceDir)"));
+  assert(publisher.includes("const lockfileVerification = lockfiles"));
+  assert(publisher.includes("cleanInstallVerification"));
+  assert(publisher.includes("cargo install tapid --version ${tapidVersion}"));
   assert(!publisher.includes("verifyPackage"));
   assert(!publisher.includes('"package", "--locked", "--package"'));
   assert(workflow.includes("CARGO_HOME: ${{ runner.temp }}/package-verify-cargo-home"));

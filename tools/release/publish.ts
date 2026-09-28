@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
@@ -20,6 +20,29 @@ export type MetadataPackage = {
   packageVerificationError?: string;
 };
 export type CargoMetadata = { packages: MetadataPackage[]; lockfiles?: string[] };
+
+const ignoredLockfileDirectories = new Set([".git", "node_modules", "target", ".worktrees", "worktrees"]);
+
+/** Returns Cargo.lock files paired with a manifest, relative to the workspace tree. */
+export async function findCargoLockfiles(workspaceDir: string): Promise<string[]> {
+  const root = resolve(workspaceDir);
+  const lockfiles: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    const files = new Set(entries.filter((entry) => entry.isFile()).map((entry) => entry.name));
+    if (files.has("Cargo.toml") && files.has("Cargo.lock")) {
+      lockfiles.push(relative(root, join(directory, "Cargo.lock")).split(sep).join("/"));
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && !ignoredLockfileDirectories.has(entry.name)) {
+        await visit(join(directory, entry.name));
+      }
+    }
+  }
+  await visit(root);
+  return lockfiles.sort();
+}
+
 export type Package = { name: string; version: string };
 
 export type PublicationAdapter = {
@@ -175,9 +198,18 @@ export async function planPublication(metadata: CargoMetadata, isInRegistry: Reg
   }
   dependentBumps.sort((a, b) => `${a.dependent}\0${a.dependency}`.localeCompare(`${b.dependent}\0${b.dependency}`));
   const lockfiles = [...(metadata.lockfiles ?? [])].sort();
+  const lockfileVerification = lockfiles
+    .filter((lockfile) => lockfile !== "Cargo.lock")
+    .map((lockfile) => `cargo metadata --manifest-path ${lockfile.replace(/Cargo\.lock$/, "Cargo.toml")} --locked --format-version 1`);
+  const tapidVersion = metadata.packages.find((pkg) => pkg.name === "tapid")?.version;
+  const cleanInstallVerification = tapidVersion === undefined ? [] : [
+    `CARGO_HOME="$RUNNER_TEMP/clean-cargo-home" cargo install tapid --version ${tapidVersion} --locked --root "$RUNNER_TEMP/tapid-clean-install"`,
+    '"$RUNNER_TEMP/tapid-clean-install/bin/tapid" --version',
+  ];
   const verification = [
     "cargo package --workspace --locked",
-    "cargo metadata --manifest-path tests/integration/Cargo.toml --locked --format-version 1",
+    ...lockfileVerification,
+    ...cleanInstallVerification,
   ];
   return {
     packages,
@@ -277,7 +309,9 @@ async function cargoMetadata(workspaceDir: string): Promise<CargoMetadata> {
     ["metadata", "--no-deps", "--format-version", "1", "--locked", "--manifest-path", manifestPath],
     { cwd: workspaceDir, encoding: "utf8", env: cargoMetadataEnv(process.env, cargoHome), maxBuffer: 10 * 1024 * 1024 },
   );
-  return JSON.parse(stdout);
+  const metadata = JSON.parse(stdout) as CargoMetadata;
+  metadata.lockfiles = await findCargoLockfiles(workspaceDir);
+  return metadata;
 }
 
 function retryAfterMilliseconds(response: Response): number | undefined {
