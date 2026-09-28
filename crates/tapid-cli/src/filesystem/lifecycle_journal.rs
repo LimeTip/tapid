@@ -390,9 +390,20 @@ fn remove_journal(project: &Path) -> Result<(), String> {
 
 fn sync_parent(path: &Path) -> Result<(), String> {
     let parent = path.parent().ok_or("lifecycle path has no parent")?;
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("cannot sync lifecycle directory: {error}"))
+    #[cfg(windows)]
+    let sync = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0x1 | 0x2 | 0x4)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(parent)
+            .and_then(|directory| directory.sync_all())
+    };
+    #[cfg(not(windows))]
+    let sync = fs::File::open(parent).and_then(|directory| directory.sync_all());
+    sync.map_err(|error| format!("cannot sync lifecycle directory: {error}"))
 }
 
 fn exists(path: impl AsRef<Path>) -> Result<bool, String> {
