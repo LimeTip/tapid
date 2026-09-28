@@ -401,9 +401,20 @@ fn open_lock_file(path: &Path) -> Result<fs::File, String> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("cannot sync activation directory: {error}"))
+    #[cfg(windows)]
+    let sync = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0x1 | 0x2 | 0x4)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .and_then(|directory| directory.sync_all())
+    };
+    #[cfg(not(windows))]
+    let sync = fs::File::open(path).and_then(|directory| directory.sync_all());
+    sync.map_err(|error| format!("cannot sync activation directory: {error}"))
 }
 
 pub(crate) fn commit_owned_activation(project: &Path, owner: &str) -> Result<(), String> {

@@ -1088,7 +1088,20 @@ fn sync_tree(path: &Path) -> io::Result<()> {
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
+    #[cfg(windows)]
+    let sync = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0x1 | 0x2 | 0x4)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .and_then(|directory| directory.sync_all())
+    };
+    #[cfg(not(windows))]
+    let sync = File::open(path).and_then(|directory| directory.sync_all());
+    sync
 }
 
 const STORE_JOURNAL: &str = ".tapid-transaction.json";
