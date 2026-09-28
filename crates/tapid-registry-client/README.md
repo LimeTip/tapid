@@ -15,7 +15,7 @@ Read-only, validated registry metadata and artifact-download boundary for Tapid.
 
 ## JSR
 
-`JsrRegistry` accepts scoped names such as `@std/path` and the current `/{scope}/{name}/meta.json` shape. Version keys must be strict semver. Dependencies come from `manifest.dependencies` and `manifest.peerDependencies`. An artifact is returned only when metadata explicitly supplies an HTTPS `npm.tarball` and valid SHA-512 `npm.integrity`; integrity is never derived from the package name, version, URL, or response transport. Missing or unusable integrity returns `UnsupportedIntegrity`.
+`JsrRegistry` accepts scoped names such as `@std/path` and the current `/{scope}/{name}/meta.json` shape. Version keys must be strict semver. It preserves `manifest.dependencies` and `manifest.peerDependencies` as separate metadata maps. An artifact is returned only when metadata explicitly supplies an HTTPS `npm.tarball` and valid SHA-512 `npm.integrity`; integrity is never derived from the package name, version, URL, or response transport. Missing or unusable integrity returns `UnsupportedIntegrity`.
 
 Live JSR installation and live integrity behavior are not verified. Local fixtures exercise the parser and fail-closed contract only.
 

@@ -35,6 +35,8 @@ struct FixturePackage {
     artifact: String,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "peerDependencies")]
+    peer_dependencies: BTreeMap<String, String>,
 }
 #[derive(Debug, Deserialize)]
 struct Fixture {
@@ -49,6 +51,7 @@ struct PackageRecord {
     integrity: Option<PackageIntegrity>,
     artifact: String,
     dependencies: BTreeMap<String, String>,
+    peer_dependencies: BTreeMap<String, String>,
     optional_dependencies: BTreeMap<String, String>,
     platform: PackagePlatform,
     fixture: bool,
@@ -126,6 +129,11 @@ fn remote_records(
             artifact: a.artifact_url,
             dependencies: a
                 .dependencies
+                .into_iter()
+                .map(|(n, r)| (n.to_string(), r))
+                .collect(),
+            peer_dependencies: a
+                .peer_dependencies
                 .into_iter()
                 .map(|(n, r)| (n.to_string(), r))
                 .collect(),
@@ -277,6 +285,7 @@ fn usable_versions(packages: Vec<PackageRecord>) -> Vec<PackageVersionMetadata> 
                 name: package.name,
                 version: package.version,
                 dependencies,
+                peer_dependencies: BTreeMap::new(),
             });
         }
     }
@@ -310,11 +319,33 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
             Ok((parsed_name, parsed_requirement))
         })
         .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
+    let peer_dependencies = package
+        .peer_dependencies
+        .iter()
+        .map(|(name, requirement)| {
+            let parsed_name =
+                name.parse::<PackageName>()
+                    .map_err(|error: tapid_core::DomainError| {
+                        format!("peer dependency {name} has an unsupported name: {error}")
+                    })?;
+            let parsed_requirement = requirement.parse::<Requirement>().map_err(|error| {
+                format!("peer dependency {name} has unsupported requirement {requirement}: {error}")
+            })?;
+            Ok((parsed_name, parsed_requirement))
+        })
+        .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
     let metadata = PackageVersionMetadata {
         name: package.name.clone(),
         version: package.version.clone(),
         dependencies,
+        peer_dependencies: peer_dependencies.clone(),
     };
+    if !peer_dependencies.is_empty() {
+        return Err(format!(
+            "peer-placement-unsupported: peer dependency resolution is not implemented for {}@{}; refusing to flatten peer requirements",
+            package.name, package.version
+        ));
+    }
     let optional_dependencies = package
         .optional_dependencies
         .iter()
@@ -676,12 +707,19 @@ pub fn resolve_and_fetch(
                     integrity,
                     artifact: p.artifact.clone(),
                     dependencies: p.dependencies.clone(),
+                    peer_dependencies: p.peer_dependencies.clone(),
                     optional_dependencies: BTreeMap::new(),
                     platform: PackagePlatform::unrestricted(),
                     fixture: true,
                 },
             );
         }
+    }
+    if !manifest.peer_dependencies().is_empty() {
+        return Err(
+            "peer dependency resolution is not implemented; refusing to install peer requirements as ordinary dependencies"
+                .to_owned(),
+        );
     }
     let mut roots = Vec::new();
     for map in [
@@ -1123,10 +1161,66 @@ mod tests {
                 .iter()
                 .map(|(name, requirement)| ((*name).into(), (*requirement).into()))
                 .collect(),
+            peer_dependencies: BTreeMap::new(),
             optional_dependencies: BTreeMap::new(),
             platform: PackagePlatform::unrestricted(),
             fixture: false,
         }
+    }
+
+    #[test]
+    fn fixture_metadata_preserves_peer_dependencies_separately() {
+        let fixture: Fixture = serde_json::from_str(
+            r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","artifact":"base64:AA==","dependencies":{"runtime":"^1.0.0"},"peerDependencies":{"host":"^2.0.0"}}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(fixture.packages[0].dependencies["runtime"], "^1.0.0");
+        assert_eq!(fixture.packages[0].peer_dependencies["host"], "^2.0.0");
+        assert!(!fixture.packages[0].dependencies.contains_key("host"));
+    }
+
+    #[test]
+    fn peer_metadata_is_rejected_instead_of_flattened() {
+        let mut record = named_record("plugin", "1.0.0", &[]);
+        record
+            .peer_dependencies
+            .insert("host".into(), "^1.0.0".into());
+
+        let error = match normalize_record(&record) {
+            Ok(_) => panic!("peer metadata was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("refusing to flatten peer requirements"));
+    }
+
+    #[test]
+    fn malformed_peer_requirement_fails_without_flattening() {
+        let mut record = named_record("plugin", "1.0.0", &[("runtime", "^1.0.0")]);
+        record
+            .peer_dependencies
+            .insert("host".into(), "not-a-range".into());
+
+        let error = match normalize_record(&record) {
+            Ok(_) => panic!("malformed peer metadata was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("peer dependency host has unsupported requirement"));
+        assert!(!error.contains("ordinary"));
+    }
+
+    #[test]
+    fn malformed_peer_name_fails_closed() {
+        let mut record = named_record("plugin", "1.0.0", &[]);
+        record
+            .peer_dependencies
+            .insert("../host".into(), "^1.0.0".into());
+
+        let error = match normalize_record(&record) {
+            Ok(_) => panic!("malformed peer metadata was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("peer dependency ../host has an unsupported name"));
     }
 
     #[test]

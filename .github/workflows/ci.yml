@@ -104,6 +104,51 @@ jobs:
           if (Test-Path -LiteralPath $binary) { throw 'Tapid was not uninstalled' }
           Write-Host 'Windows developer install and uninstall passed.'
 
+  nextest:
+    name: Nextest (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
+        with:
+          tool: cargo-nextest
+      - name: Run tests with nextest
+        run: cargo nextest run --workspace --all-features --locked
+
+  coverage:
+    name: Coverage (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate LCOV coverage report
+        run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+      - name: Upload LCOV coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lcov-coverage
+          path: lcov.info
+          if-no-files-found: error
+          retention-days: 30
+
   release-platform-build:
     name: Release target (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
@@ -201,6 +246,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -351,6 +397,20 @@ jobs:
             $size = (Get-Item -LiteralPath $archive).Length
             $record = "tapid-release-v1`t1.2.3`n$target`t$archiveName`t$size`t$digest`thttps://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName`n"
             Set-Content -Encoding ascii -NoNewline -Path (Join-Path $fixture 'v1.2.3.tsv') -Value $record
+            $signer = Join-Path $fixture 'sign-fixture.py'
+          @'
+          import importlib.util
+          import sys
+          from pathlib import Path
+
+          spec = importlib.util.spec_from_file_location('check_release_record', sys.argv[1])
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.sign_record(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
+          '@ | Set-Content -Encoding utf8 -Path $signer
+            $keyring = Join-Path $fixture 'keyring.json'
+            & python.exe $signer (Join-Path $PWD 'scripts/check-release-record.py') (Join-Path $fixture 'v1.2.3.tsv') (Join-Path $fixture 'v1.2.3.tsv.sig') $keyring
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           Write-FixtureReleaseRecord
           $installerUnderTest = Join-Path $fixture 'install.ps1'
@@ -366,8 +426,22 @@ jobs:
             '^function Save-BoundedHttpsFile\([^\r\n]+\) \{.*?^\}',
             ([Text.RegularExpressions.RegexOptions]::Multiline -bor [Text.RegularExpressions.RegexOptions]::Singleline)
           )
+          $fixtureVerifier = Join-Path $fixture 'verify-release-record.py'
+          $fixtureVerifierText = Get-Content -Raw (Join-Path $PWD 'scripts/verify-release-record.py')
+          $fixturePublicKey = ((Get-Content -Raw (Join-Path $fixture 'keyring.json') | ConvertFrom-Json).keys[0].public_key)
+          $fixtureVerifierText = $fixtureVerifierText.Replace(
+            'eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc=',
+            $fixturePublicKey)
+          Set-Content -Encoding utf8 -NoNewline -Path $fixtureVerifier -Value $fixtureVerifierText
+          $fixtureVerifierHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixtureVerifier).Hash.ToLowerInvariant()
           $fixtureInstallerText = $downloaderPattern.Replace($installerText, $fixtureDownloader, 1)
           if ($fixtureInstallerText -eq $installerText) { throw 'failed to create isolated installer fixture' }
+          $fixtureInstallerText = $fixtureInstallerText.Replace(
+            'https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py',
+            'https://fixture.example/verify-release-record.py')
+          $fixtureInstallerText = $fixtureInstallerText.Replace(
+            '4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d',
+            $fixtureVerifierHash)
           Set-Content -NoNewline -Path $installerUnderTest -Value $fixtureInstallerText
           $env:TAPID_FIXTURE_ROOT = $fixture
           Set-Content -NoNewline -Path (Join-Path $fixture 'requests.txt') -Value ''
@@ -391,8 +465,12 @@ jobs:
           $requests = @(Get-Content -LiteralPath (Join-Path $fixture 'requests.txt'))
           $expectedRequests = @(
             'https://tapid.dev/releases/v1/v1.2.3.tsv'
+            'https://tapid.dev/releases/v1/v1.2.3.tsv.sig'
+            'https://fixture.example/verify-release-record.py'
             "https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName"
             'https://tapid.dev/releases/v1/v1.2.3.tsv'
+            'https://tapid.dev/releases/v1/v1.2.3.tsv.sig'
+            'https://fixture.example/verify-release-record.py'
             "https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName"
           )
           if (($requests -join "`n") -cne ($expectedRequests -join "`n")) { throw 'fixture did not use release record discovery and artifact URLs' }

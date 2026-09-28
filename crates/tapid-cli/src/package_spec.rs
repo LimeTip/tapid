@@ -21,6 +21,7 @@ pub(crate) fn parse(spec: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::parse;
+    use proptest::prelude::*;
 
     #[test]
     fn preserves_scoped_names_and_registry_prefixes() {
@@ -30,5 +31,25 @@ mod tests {
         assert_eq!(parse("npm:@scope/pkg@1.2.3"), ("npm:@scope/pkg", "1.2.3"));
         assert_eq!(parse(" foo@ 1.2.3 "), ("foo", "1.2.3"));
         assert_eq!(parse("foo@ "), ("foo", "*"));
+    }
+
+    proptest! {
+        #[test]
+        fn trims_and_defaults_requirement_for_generated_package_specs(
+            prefix in prop::sample::select(vec!["", "npm:", "jsr:"]),
+            name in prop::sample::select(vec!["pkg", "@scope/pkg"]),
+            requirement in "[A-Za-z0-9.^~><= -]{0,24}",
+        ) {
+            let package = format!("{prefix}{name}");
+            let spec = format!("  {package}@ {requirement}  ");
+            let expected = if requirement.trim().is_empty() { "*" } else { requirement.trim() };
+            prop_assert_eq!(parse(&spec), (package.as_str(), expected));
+        }
+
+        #[test]
+        fn arbitrary_specs_without_at_are_trimmed_and_unconstrained(value in "[^@\\r\\n]{0,64}") {
+            let wrapped = format!("  {value}  ");
+            prop_assert_eq!(parse(&wrapped), (value.trim(), "*"));
+        }
     }
 }

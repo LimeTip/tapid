@@ -1,7 +1,19 @@
 #![cfg(unix)]
 
+use base64::Engine;
+use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+use tapid_signatures::{TrustEnvelope, digest as envelope_digest};
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
+
+fn validity_window() -> (String, String) {
+    let now = OffsetDateTime::now_utc();
+    (
+        (now - Duration::hours(1)).format(&Rfc3339).unwrap(),
+        (now + Duration::hours(24)).format(&Rfc3339).unwrap(),
+    )
+}
 
 fn run_executable_with_retry(command: &mut Command) -> std::process::Output {
     for attempt in 0..5 {
@@ -62,6 +74,41 @@ impl Fixture {
             record.push_str(&format!("{target}\ttapid-0.0.11-{target}.tar.gz\t{}\t{digest}\thttps://downloads.example.test/artifact\n", bytes.len()));
         }
         fs::write(root.join("release.tsv"), record).unwrap();
+        let secret = [7_u8; 32];
+        let signing_key = SigningKey::from_bytes(&secret);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let keyring = serde_json::json!({
+            "version": tapid_signatures::KEY_RING_VERSION,
+            "keys": [{
+                "key_id": "test-release-key",
+                "algorithm": tapid_signatures::SIGNATURE_ALGORITHM,
+                "public_key": base64::engine::general_purpose::STANDARD.encode(public_key),
+                "fingerprint": envelope_digest(&public_key).unwrap(),
+            }]
+        });
+        fs::write(
+            root.join("keyring.json"),
+            serde_json::to_vec(&keyring).unwrap(),
+        )
+        .unwrap();
+        let record_bytes = fs::read(root.join("release.tsv")).unwrap();
+        let (created_at, expires_at) = validity_window();
+        let sidecar = TrustEnvelope::unsigned(
+            "tapid-release-v1",
+            envelope_digest(&record_bytes).unwrap(),
+            serde_json::json!({
+                "schema": "tapid-release-v1-signature",
+                "created_at": created_at,
+                "expires_at": expires_at,
+            }),
+        )
+        .sign("test-release-key", &secret)
+        .unwrap();
+        fs::write(
+            root.join("release.tsv.sig"),
+            serde_json::to_vec(&sidecar).unwrap(),
+        )
+        .unwrap();
         fs::write(
             root.join("bin/curl"),
             r#"#!/bin/sh
@@ -69,6 +116,7 @@ for url do :; done
 printf '%s\n' "$url" >> "$FIXTURE/requests"
 case "$url" in
   https://tapid.dev/releases/v1/latest.tsv|https://custom.test/latest.tsv) /bin/cat "$FIXTURE/release.tsv" ;;
+  https://tapid.dev/releases/v1/latest.tsv.sig|https://custom.test/latest.tsv.sig) /bin/cat "$FIXTURE/release.tsv.sig" ;;
   */artifact) /bin/cat "$FIXTURE/artifact.tar.gz" ;;
   *) echo "unexpected URL" >&2; exit 99 ;;
 esac
@@ -89,8 +137,30 @@ esac
             .env_remove("TAPID_RELEASE_RECORD_URL")
             .env("PATH", self.root.join("bin"))
             .env("FIXTURE", &self.root)
+            .env("TAPID_RELEASE_KEYRING", self.root.join("keyring.json"))
             .output()
             .unwrap()
+    }
+
+    fn resign_record(&self) {
+        let record = fs::read(self.root.join("release.tsv")).unwrap();
+        let (created_at, expires_at) = validity_window();
+        let sidecar = TrustEnvelope::unsigned(
+            "tapid-release-v1",
+            envelope_digest(&record).unwrap(),
+            serde_json::json!({
+                "schema": "tapid-release-v1-signature",
+                "created_at": created_at,
+                "expires_at": expires_at,
+            }),
+        )
+        .sign("test-release-key", &[7_u8; 32])
+        .unwrap();
+        fs::write(
+            self.root.join("release.tsv.sig"),
+            serde_json::to_vec(&sidecar).unwrap(),
+        )
+        .unwrap();
     }
 }
 
@@ -139,7 +209,7 @@ fn default_discovery_uses_owned_record_without_signed_or_github_probes() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("curl:"), "{stderr}");
     assert!(
-        String::from_utf8_lossy(&output.stdout)
+        !String::from_utf8_lossy(&output.stdout)
             .contains("independent signature verification was not performed")
     );
 }
@@ -164,7 +234,7 @@ fn already_installed_release_initializes_recovery_without_replacing_executable()
     let state: serde_json::Value =
         serde_json::from_slice(&fs::read(fixture.root.join(".tapid-release-state.json")).unwrap())
             .unwrap();
-    assert_eq!(state["verification"], "checksum");
+    assert_eq!(state["verification"], "signature");
 }
 
 #[test]
@@ -242,7 +312,7 @@ fn identical_executable_still_requires_valid_release_checksum() {
     .unwrap();
     let output = fixture.upgrade(&[]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("ArtifactDigestMismatch"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not bind the record"));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("up to date"));
     assert!(!fixture.root.join(".tapid-release-state.json").exists());
 }
@@ -259,6 +329,7 @@ fn provider_migration_and_major_version_upgrade_need_no_client_changes() {
             .replace("downloads.example.test", "gitlab.example.org"),
     )
     .unwrap();
+    fixture.resign_record();
     fs::write(fixture.root.join("tapid"), b"previous version executable").unwrap();
     let output = fixture.upgrade(&[]);
     assert!(
@@ -292,6 +363,7 @@ fn rejected_record_or_artifact_never_uses_existing_recovery_cache() {
     fs::write(fixture.root.join("release.tsv"), b"invalid record\n").unwrap();
     assert!(!fixture.upgrade(&[]).status.success());
     fs::write(fixture.root.join("release.tsv"), record).unwrap();
+    fixture.resign_record();
     fs::write(fixture.root.join("artifact.tar.gz"), b"corrupted").unwrap();
     assert!(!fixture.upgrade(&[]).status.success());
     assert_eq!(fs::read(fixture.root.join("tapid")).unwrap(), executable);
@@ -311,6 +383,7 @@ fn earlier_release_is_rejected_after_successful_upgrade() {
         record.replace("0.0.11", "0.0.10"),
     )
     .unwrap();
+    fixture.resign_record();
     let output = fixture.upgrade(&[]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ReleaseDowngrade"));
@@ -326,6 +399,7 @@ fn matching_new_install_refreshes_old_recovery_state() {
         record.replace("0.0.11", "1.0.0"),
     )
     .unwrap();
+    fixture.resign_record();
     let output = fixture.upgrade(&[]);
     assert!(
         output.status.success(),
@@ -359,6 +433,7 @@ fn fresh_self_upgrade_rejects_an_older_release_without_state() {
         record.replace("0.0.11", "0.0.10"),
     )
     .unwrap();
+    fixture.resign_record();
     let output = run_executable_with_retry(
         Command::new(&executable)
             .arg("upgrade")
@@ -366,7 +441,8 @@ fn fresh_self_upgrade_rejects_an_older_release_without_state() {
             .env_remove("TAPID_STABLE_ENDPOINTS")
             .env_remove("TAPID_RELEASE_KEYRING")
             .env("PATH", fixture.root.join("bin"))
-            .env("FIXTURE", &fixture.root),
+            .env("FIXTURE", &fixture.root)
+            .env("TAPID_RELEASE_KEYRING", fixture.root.join("keyring.json")),
     );
     assert!(!output.status.success());
     assert!(

@@ -150,9 +150,9 @@ Invoke-WebRequest https://tapid.dev/install.ps1 -OutFile $installer
 Remove-Item $installer
 ```
 
-Both installers add their user-local install directory to PATH without requiring administrator privileges. Unix shells are detected from `$SHELL`; zsh, bash, fish, and a POSIX profile fallback are supported. The default Unix directory, `~/.local/bin`, is configured automatically. For a custom `--install-dir`, the installer prints the directory that must be added manually. PowerShell updates the user-level Windows PATH. Open a new terminal, or follow the command printed by the installer, before using `tapid` in an existing terminal.
+The Unix installer manages only `~/.local/bin` through a versioned `tapid-path-managed-v1` block in an owned, writable Bash or POSIX startup file (`$HOME/.bash_profile`, `$HOME/.bashrc`, or `$HOME/.profile`). Repeated installs are idempotent; uninstall removes only that exact Tapid block and preserves unrelated PATH entries. Symlinked, non-regular, foreign, or unwritable startup files are rejected. For a custom `--install-dir`, the installer prints the directory that must be added manually. PowerShell updates the user-level Windows PATH. Open a new terminal, or follow the command printed by the installer, before using `tapid`. Other Unix shells remain outside this slice.
 
-Remove only the Tapid CLI binary on Unix:
+Remove the Tapid CLI binary and its managed PATH block on Unix:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LimeTip/tapid/main/scripts/uninstall.sh | sh
@@ -186,9 +186,9 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 ## Supported subset and limitations
 
 - npm package metadata with semver versions, package dependencies, and HTTPS tarball URLs is supported.
-- Exact, bare major and minor, caret, tilde, and selected whitespace-separated comparison requirements are supported. Full npm range syntax, aliases, tags, git, file, workspace, and peer-resolution compatibility are not complete.
+- Exact, bare major and minor, caret, tilde, and selected whitespace-separated comparison requirements are supported. Full npm range syntax, aliases, tags, git, file, workspace linking, and peer placement are not complete.
+- `add`, `remove`, and range-preserving `update` are available for the current package, with `--dev`, `--optional`, `--peer`, and explicit `--latest` mutation modes. `outdated` reports lockfile versions and registry metadata without mutation; `prune` replays the validated lockfile atomically to remove unreachable managed output. Workspace selection and automatic peer placement remain fail-closed boundaries rather than implemented compatibility claims.
 - Lifecycle scripts from dependencies never run during install. There is no approval workflow yet.
-- `add`, `remove`, `update`, `prune`, workspaces, full npm lockfile compatibility, and private-registry authentication are not implemented.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
 - ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; ManagedTree, resource-limit profiles, and Linux/Windows native backends remain unavailable. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
