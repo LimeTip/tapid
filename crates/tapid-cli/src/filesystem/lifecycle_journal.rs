@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
 
 const JOURNAL: &str = ".tapid-lifecycle-journal.json";
-const MAX_JOURNAL_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_SNAPSHOT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_ENCODED_SNAPSHOT_BYTES: u64 = MAX_SNAPSHOT_BYTES.div_ceil(3) * 4;
+// Must match tapid-store's COORDINATOR_MAX.
+const MAX_JOURNAL_BYTES: u64 = 96 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,8 +44,8 @@ impl LifecycleJournal {
         if !valid_owner(owner) {
             return Err("refusing to create lifecycle journal with invalid owner".into());
         }
-        if manifest.len() as u64 > MAX_JOURNAL_BYTES
-            || lock.is_some_and(|bytes| bytes.len() as u64 > MAX_JOURNAL_BYTES)
+        if manifest.len() as u64 > MAX_SNAPSHOT_BYTES
+            || lock.is_some_and(|bytes| bytes.len() as u64 > MAX_SNAPSHOT_BYTES)
         {
             return Err("lifecycle recovery state exceeds size limit".into());
         }
@@ -213,8 +216,8 @@ pub(crate) fn recover(
     {
         return Err("refusing to recover a lifecycle journal with invalid ownership".into());
     }
-    if record.manifest.len() as u64 > MAX_JOURNAL_BYTES
-        || record.lock.len() as u64 > MAX_JOURNAL_BYTES
+    if record.manifest.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES
+        || record.lock.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES
     {
         return Err("refusing to recover oversized lifecycle state".into());
     }
@@ -333,6 +336,9 @@ fn write_record(project: &Path, record: &Record) -> Result<(), String> {
         crate::filesystem::atomic::unique_nonce()
     ));
     let bytes = serde_json::to_vec(record).map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_JOURNAL_BYTES {
+        return Err("lifecycle recovery state exceeds encoded size limit".into());
+    }
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -430,6 +436,30 @@ fn valid_owner(owner: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_snapshot_journal_is_recoverable_after_begin() {
+        let project = std::env::temp_dir().join(format!(
+            "tapid-journal-large-snapshot-{}-{}",
+            std::process::id(),
+            crate::filesystem::atomic::unique_nonce()
+        ));
+        fs::create_dir_all(&project).unwrap();
+        let owner = "123-deadbeef\n";
+        let manifest = b"{\"name\":\"large-project\"}";
+        let lock = vec![b'x'; 25 * 1024 * 1024];
+        fs::write(project.join("package.json"), b"current manifest").unwrap();
+
+        let journal = LifecycleJournal::begin(&project, owner, manifest, Some(&lock)).unwrap();
+        std::mem::forget(journal);
+        assert!(has_pending(&project).unwrap());
+        let decision = recover(&project, Some(owner)).unwrap().unwrap();
+
+        assert!(!decision.committed);
+        assert_eq!(fs::read(project.join("package.json")).unwrap(), manifest);
+        assert_eq!(fs::read(project.join("tapid.lock")).unwrap(), lock);
+        let _ = fs::remove_dir_all(project);
+    }
 
     #[test]
     fn recovery_restores_interrupted_existing_journal_replacement() {
