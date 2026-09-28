@@ -298,15 +298,15 @@ Do not start crates.io publication until the public release and all three instal
 
 ### 8. Verify and dispatch crates.io publication separately
 
-Run the live dry-run before dispatch:
+Run the publication planner from the tagged source tree (or pass that tree with `--workspace`):
 
 ```sh
-node --experimental-strip-types tools/release/publish.ts --dry-run
-# add --json for stable machine-readable evidence
-node --experimental-strip-types tools/release/publish.ts --dry-run --json
+node --experimental-strip-types tools/release/publish.ts --json
 ```
 
-The planner is read-only and does not require crates.io credentials. It performs exact-version registry checks, excludes unchanged versions, reports transient/429 lookups as blockers, emits dependency-first order, and includes the historical workspace package verification command plus the nested integration lockfile metadata check and per-package locked package checks. A plan with blockers is not publishable. Human and JSON output are derived from the same plan; after a partial publication, record confirmed versions and rerun the dry-run so only the remaining dependency-ordered suffix is considered.
+Planning is read-only by default and does not require crates.io credentials. It performs exact-version registry checks, excludes already-published versions, reports transient/429 lookups and unsafe version drift as blockers, and emits dependency-first order. `--publish` is the only mode that can mutate crates.io; do not use it outside the protected workflow. After a partial publication, rerun the planner and review the remaining dependency-ordered suffix.
+
+The workflow first displays the machine-readable plan in an unprivileged preflight job. Before the protected job can start, preflight must also pass `cargo package --workspace --locked` and the nested integration-workspace metadata check from the exact tagged source tree, using an isolated Cargo home and no publication credentials. This full workspace package verification runs before any OIDC token exists and blocks on package or API/version incompatibilities (including the class tracked by #28). After authentication, the protected job recomputes the plan using read-only Cargo metadata and registry checks, then runs only `cargo publish --no-verify --locked`; it performs no package/build/test verification with the token present. Publication uses the pre-verified immutable tag source, the publish subprocess receives a restricted environment containing the short-lived token and necessary system settings only, and the job waits for exact crates.io read-back before advancing.
 
 Review the exact missing package/version sequence. Every package in that plan must have exactly one crates.io Trusted Publisher configuration with:
 
@@ -322,7 +322,7 @@ The GitHub environment must:
 - require independent approval;
 - prevent the dispatching actor from approving the same deployment.
 
-Dispatch only after a separate explicit approval:
+Dispatch the trusted workflow from `main` only after separate explicit approval:
 
 ```sh
 gh workflow run crates-publication.yml \
@@ -331,11 +331,11 @@ gh workflow run crates-publication.yml \
   -f tag="$TAG"
 ```
 
-The workflow checks out the tag, validates that it is annotated and belongs to `main`, verifies the matching public GitHub release and exact-tag public smoke run, packages the workspace, acquires a short-lived OIDC token, and publishes only missing packages in dependency order.
+The workflow code is checked out from the trusted workflow commit on `main`; it fetches and validates the annotated release tag as a separate immutable source tree. It verifies the matching public GitHub release and exact-tag public smoke run, and refuses to continue if the publication plan changes between preflight and the protected job.
 
 No long-lived crates.io token is stored in GitHub. Do not add one as a fallback.
 
-After environment approval, verify every package through the crates.io API before treating it as published. Then perform a clean registry installation of the exact `tapid` version and execute the installed binary.
+After environment approval, the workflow publishes one crate at a time, reads back each exact version before advancing, then installs the exact `tapid` version from a clean Cargo home and executes the installed binary. If publication partially succeeds or registry propagation is delayed, query crates.io independently and rerun the plan; never blindly repeat `cargo publish` for a version that may already exist.
 
 ### 9. Complete final public read-back
 
@@ -465,7 +465,7 @@ Published crate versions are immutable.
 
 1. Record every confirmed package/version and the failing package.
 2. Query crates.io independently rather than trusting only the failed workflow log.
-3. Run `tools/release/publish.ts --dry-run` again against the registry.
+3. Run `node --experimental-strip-types tools/release/publish.ts --json` again against the registry.
 4. Require the new plan to contain only the still-missing suffix of the dependency order.
 5. Respect crates.io rate-limit instructions and avoid rapid blind retries.
 6. Redispatch only after confirming the failure is safely resumable and obtaining the required environment approval.

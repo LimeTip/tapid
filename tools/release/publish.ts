@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -18,7 +20,13 @@ export type MetadataPackage = {
   packageVerificationError?: string;
 };
 export type CargoMetadata = { packages: MetadataPackage[]; lockfiles?: string[] };
-type Package = { name: string; version: string };
+export type Package = { name: string; version: string };
+
+export type PublicationAdapter = {
+  isPublished(pkg: Package): Promise<boolean>;
+  publish(pkg: Package): Promise<void>;
+  waitForPublished(pkg: Package): Promise<void>;
+};
 
 /** Returns local non-dev dependencies that must be published before this package. */
 function internalDependencies(pkg: MetadataPackage): string[] {
@@ -31,6 +39,20 @@ function internalDependencies(pkg: MetadataPackage): string[] {
 /** Reports whether Cargo permits this package to be published to crates.io. */
 function publishableToCratesIo(pkg: MetadataPackage): boolean {
   return pkg.publish === undefined || pkg.publish === null || pkg.publish.includes("crates-io");
+}
+
+function compareStableVersions(left: string, right: string): number | undefined {
+  const parse = (version: string): bigint[] | undefined => {
+    const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.exec(version);
+    return match ? match.slice(1).map(BigInt) : undefined;
+  };
+  const leftParts = parse(left);
+  const rightParts = parse(right);
+  if (!leftParts || !rightParts) return undefined;
+  for (let index = 0; index < 3; index++) {
+    if (leftParts[index] !== rightParts[index]) return leftParts[index] > rightParts[index] ? 1 : -1;
+  }
+  return 0;
 }
 
 /**
@@ -75,6 +97,15 @@ export function publicationPlan(metadata: CargoMetadata, published: Set<string>)
   return ordered;
 }
 
+/** Publishes each missing package in dependency order and waits for registry read-back before continuing. */
+export async function publishPackages(packages: Package[], adapter: PublicationAdapter): Promise<void> {
+  for (const pkg of packages) {
+    if (await adapter.isPublished(pkg)) continue;
+    await adapter.publish(pkg);
+    await adapter.waitForPublished(pkg);
+  }
+}
+
 export type PublicationPlan = {
   packages: Package[];
   missing: Package[];
@@ -107,6 +138,12 @@ export async function planPublication(metadata: CargoMetadata, isInRegistry: Reg
         missing.push(pkg);
         if (state.latestVersion && state.latestVersion !== pkg.version) {
           drift.push({ name: pkg.name, localVersion: pkg.version, publicVersion: state.latestVersion });
+          const comparison = compareStableVersions(pkg.version, state.latestVersion);
+          if (comparison === undefined) {
+            blockers.push(`${pkg.name}@${pkg.version}: cannot safely compare crates.io version ${state.latestVersion}`);
+          } else if (comparison < 0) {
+            blockers.push(`${pkg.name}@${pkg.version} is older than published crates.io version ${state.latestVersion}`);
+          }
         }
       }
     } catch (error) {
@@ -138,13 +175,10 @@ export async function planPublication(metadata: CargoMetadata, isInRegistry: Reg
   }
   dependentBumps.sort((a, b) => `${a.dependent}\0${a.dependency}`.localeCompare(`${b.dependent}\0${b.dependency}`));
   const lockfiles = [...(metadata.lockfiles ?? [])].sort();
-  const verification = lockfiles.length === 0
-    ? ["cargo package --workspace --locked", "cargo metadata --manifest-path tests/integration/Cargo.toml --locked --format-version 1", ...packages.map((pkg) => `cargo package -p ${pkg.name} --locked`)]
-    : [
-      ...packages.map((pkg) => `cargo package -p ${pkg.name} --locked`),
-      "cargo metadata --locked --format-version 1",
-      ...lockfiles.filter((lockfile) => lockfile !== "Cargo.lock").map((lockfile) => `cargo metadata --manifest-path ${lockfile.replace(/Cargo\.lock$/, "Cargo.toml")} --locked --format-version 1`),
-    ];
+  const verification = [
+    "cargo package --workspace --locked",
+    "cargo metadata --manifest-path tests/integration/Cargo.toml --locked --format-version 1",
+  ];
   return {
     packages,
     missing: missing.sort((a, b) => `${a.name}\0${a.version}`.localeCompare(`${b.name}\0${b.version}`)),
@@ -153,7 +187,7 @@ export async function planPublication(metadata: CargoMetadata, isInRegistry: Reg
     lockfiles,
     blockers,
     verification,
-    recovery: "Record confirmed package versions, query crates.io again, and rerun this dry-run; resume only with the remaining dependency-ordered suffix.",
+    recovery: "Record confirmed package versions, query crates.io again, and rerun this read-only plan; resume only with the remaining dependency-ordered suffix.",
   };
 }
 
@@ -177,22 +211,92 @@ export function renderHumanPlan(plan: PublicationPlan): string {
   ].join("\n");
 }
 
-async function cargoMetadata(): Promise<CargoMetadata> {
+export type CliOptions = {
+  publish: boolean;
+  json: boolean;
+  workspaceDir: string;
+  expectedPlanPath?: string;
+};
+
+/** Parses safe defaults: publication is impossible unless --publish is explicit. */
+export function parseCliArgs(args: string[], baseDir = process.cwd()): CliOptions {
+  let publish = false;
+  let json = false;
+  let workspace: string | undefined;
+  let expectedPlan: string | undefined;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === "--publish") {
+      if (publish) throw new Error("duplicate --publish option");
+      publish = true;
+    } else if (arg === "--json") {
+      if (json) throw new Error("duplicate --json option");
+      json = true;
+    } else if (arg === "--workspace" || arg === "--expected-plan") {
+      const value = args[++index];
+      if (!value || value.startsWith("--")) throw new Error(`${arg} requires a path`);
+      if (arg === "--workspace") {
+        if (workspace !== undefined) throw new Error("duplicate --workspace option");
+        workspace = value;
+      } else {
+        if (expectedPlan !== undefined) throw new Error("duplicate --expected-plan option");
+        expectedPlan = value;
+      }
+    } else {
+      throw new Error(`unknown option: ${arg}`);
+    }
+  }
+  if (expectedPlan !== undefined && !publish) throw new Error("--expected-plan requires --publish");
+  return {
+    publish,
+    json,
+    workspaceDir: resolve(baseDir, workspace ?? "."),
+    expectedPlanPath: expectedPlan === undefined ? undefined : resolve(baseDir, expectedPlan),
+  };
+}
+
+export async function waitForRegistryPublication(
+  pkg: Package,
+  lookup: (pkg: Package) => Promise<boolean> = isPublished,
+  sleepFn: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  maxAttempts = 12,
+): Promise<void> {
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) throw new Error("maxAttempts must be a positive integer");
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (await lookup(pkg)) return;
+    if (attempt < maxAttempts) await sleepFn(Math.min(attempt * 5_000, 30_000));
+  }
+  throw new Error(`crates.io did not expose ${pkg.name}@${pkg.version} after ${maxAttempts} checks`);
+}
+
+async function cargoMetadata(workspaceDir: string): Promise<CargoMetadata> {
+  const manifestPath = resolve(workspaceDir, "Cargo.toml");
+  const cargoHome = resolve(process.env.RUNNER_TEMP ?? tmpdir(), "tapid-cargo-metadata-home");
   const { stdout } = await execFileAsync(
     "cargo",
-    ["metadata", "--no-deps", "--format-version", "1", "--locked"],
-    { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 },
+    ["metadata", "--no-deps", "--format-version", "1", "--locked", "--manifest-path", manifestPath],
+    { cwd: workspaceDir, encoding: "utf8", env: cargoMetadataEnv(process.env, cargoHome), maxBuffer: 10 * 1024 * 1024 },
   );
   return JSON.parse(stdout);
 }
 
-/** Queries crates.io for one exact package version with bounded transient retries. */
-export async function isPublished(
+function retryAfterMilliseconds(response: Response): number | undefined {
+  const value = response.headers.get("Retry-After");
+  if (value === null) return undefined;
+  if (/^\d+$/.test(value.trim())) return Number(value.trim()) * 1_000;
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+/** Queries crates.io with bounded retry for transient HTTP and transport failures. */
+async function fetchCratesIo(
+  url: string,
   pkg: Package,
-  fetchFn: typeof fetch = fetch,
-  sleepFn: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-): Promise<boolean> {
-  const url = `https://crates.io/api/v1/crates/${encodeURIComponent(pkg.name)}/${encodeURIComponent(pkg.version)}`;
+  versioned: boolean,
+  fetchFn: typeof fetch,
+  sleepFn: (milliseconds: number) => Promise<void>,
+): Promise<Response> {
+  const label = versioned ? `${pkg.name} ${pkg.version}` : pkg.name;
   for (let attempt = 1; attempt <= 3; attempt++) {
     let response: Response;
     try {
@@ -205,35 +309,144 @@ export async function isPublished(
       await sleepFn(attempt * 1_000);
       continue;
     }
-    if (response.status === 200) return true;
-    if (response.status === 404) return false;
+    if (response.status === 404 || response.status === 200) return response;
     const transient = response.status === 429 || response.status >= 500;
     if (!transient || attempt === 3) {
-      throw new Error(`crates.io returned HTTP ${response.status} for ${pkg.name} ${pkg.version}`);
+      throw new Error(`crates.io returned HTTP ${response.status} for ${label}`);
     }
-    await sleepFn(attempt * 1_000);
+    const retryAfter = retryAfterMilliseconds(response);
+    if (retryAfter !== undefined && retryAfter > 300_000) {
+      throw new Error(`crates.io requested a retry delay over 5 minutes for ${label}`);
+    }
+    await sleepFn(retryAfter ?? attempt * 1_000);
   }
-  throw new Error(`crates.io lookup retries exhausted for ${pkg.name} ${pkg.version}`);
+  throw new Error(`crates.io lookup retries exhausted for ${label}`);
+}
+
+/** Queries crates.io for one exact package version with bounded transient retries. */
+export async function isPublished(
+  pkg: Package,
+  fetchFn: typeof fetch = fetch,
+  sleepFn: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+): Promise<boolean> {
+  const url = `https://crates.io/api/v1/crates/${encodeURIComponent(pkg.name)}/${encodeURIComponent(pkg.version)}`;
+  const response = await fetchCratesIo(url, pkg, true, fetchFn, sleepFn);
+  if (response.status === 404) return false;
+  return true;
 }
 
 /** Reads the public version state without attempting publication or mutation. */
-export async function registryState(pkg: Package, fetchFn: typeof fetch = fetch): Promise<{ published: boolean; latestVersion?: string }> {
-  const response = await fetchFn(`https://crates.io/api/v1/crates/${encodeURIComponent(pkg.name)}`, {
-    headers: { "User-Agent": "tapid-release-workflow (https://github.com/LimeTip/tapid)" },
-    signal: AbortSignal.timeout(10_000),
-  });
+export async function registryState(
+  pkg: Package,
+  fetchFn: typeof fetch = fetch,
+  sleepFn: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+): Promise<{ published: boolean; latestVersion?: string }> {
+  const url = `https://crates.io/api/v1/crates/${encodeURIComponent(pkg.name)}`;
+  const response = await fetchCratesIo(url, pkg, false, fetchFn, sleepFn);
   if (response.status === 404) return { published: false };
-  if (!response.ok) throw new Error(`crates.io returned HTTP ${response.status} for ${pkg.name}`);
-  const body = await response.json() as { crate?: { max_version?: string }; versions?: { num?: string }[] };
-  const versions = new Set((body.versions ?? []).flatMap((version) => version.num ? [version.num] : []));
-  return { published: versions.has(pkg.version), latestVersion: body.crate?.max_version };
+  const body = await response.json() as {
+    crate?: { max_version?: unknown };
+    versions?: unknown;
+  };
+  if (
+    typeof body.crate?.max_version !== "string" ||
+    !Array.isArray(body.versions) ||
+    body.versions.some((version) => !version || typeof version !== "object" || typeof (version as { num?: unknown }).num !== "string")
+  ) {
+    throw new Error(`malformed crates.io response for ${pkg.name}`);
+  }
+  const versions = new Set((body.versions as { num: string }[]).map((version) => version.num));
+  if (!versions.has(body.crate.max_version)) throw new Error(`malformed crates.io response for ${pkg.name}`);
+  return { published: versions.has(pkg.version), latestVersion: body.crate.max_version };
+}
+
+const CARGO_CHILD_ENV_KEYS = [
+  "PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN",
+  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+  "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "TMPDIR", "TMP", "TEMP",
+];
+
+function cargoChildEnv(environment: Record<string, string | undefined>, isolatedCargoHome: string): Record<string, string | undefined> {
+  const safeEnvironment: Record<string, string | undefined> = {};
+  for (const key of CARGO_CHILD_ENV_KEYS) {
+    if (environment[key] !== undefined) safeEnvironment[key] = environment[key];
+  }
+  safeEnvironment.CARGO_HOME = isolatedCargoHome;
+  return safeEnvironment;
+}
+
+export function cargoMetadataEnv(
+  environment: Record<string, string | undefined>,
+  isolatedCargoHome: string,
+): Record<string, string | undefined> {
+  return cargoChildEnv(environment, isolatedCargoHome);
+}
+
+export function cargoPublishEnv(
+  environment: Record<string, string | undefined>,
+  registryToken: string,
+  isolatedCargoHome: string,
+): Record<string, string | undefined> {
+  return { ...cargoChildEnv(environment, isolatedCargoHome), CARGO_REGISTRY_TOKEN: registryToken };
+}
+
+async function cargoPublish(pkg: Package, workspaceDir: string): Promise<void> {
+  const token = process.env.CARGO_REGISTRY_TOKEN;
+  if (!token) throw new Error("CARGO_REGISTRY_TOKEN is required for explicit publication");
+  const manifestPath = resolve(workspaceDir, "Cargo.toml");
+  const cargoHome = resolve(process.env.RUNNER_TEMP ?? tmpdir(), "tapid-cargo-publish-home");
+  try {
+    const { stdout, stderr } = await execFileAsync("cargo", [
+      "publish", "--no-verify", "--locked", "--package", pkg.name, "--manifest-path", manifestPath,
+    ], {
+      cwd: workspaceDir,
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+      env: cargoPublishEnv(process.env, token, cargoHome),
+      timeout: 10 * 60 * 1_000,
+    });
+    if (stdout) process.stdout.write(stdout.replaceAll(token, "[REDACTED]"));
+    if (stderr) process.stderr.write(stderr.replaceAll(token, "[REDACTED]"));
+  } catch (error) {
+    const failure = error as Error & { stdout?: string; stderr?: string; code?: number | string };
+    for (const [label, output] of [["stdout", failure.stdout], ["stderr", failure.stderr]] as const) {
+      if (output) process.stderr.write(`${label}: ${output.replaceAll(token, "[REDACTED]")}\n`);
+    }
+    throw new Error(`cargo publish failed for ${pkg.name}@${pkg.version} (exit ${failure.code ?? "unknown"})`);
+  }
 }
 
 async function main(): Promise<void> {
-  const metadata = await cargoMetadata();
+  let options: CliOptions;
+  try {
+    options = parseCliArgs(process.argv.slice(2));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 2;
+    return;
+  }
+  const metadata = await cargoMetadata(options.workspaceDir);
   const plan = await planPublication(metadata, (pkg) => registryState(pkg));
-  console.log(process.argv.includes("--json") ? renderMachinePlan(plan) : renderHumanPlan(plan));
-  if (plan.blockers.length > 0) process.exitCode = 2;
+  const rendered = options.json ? renderMachinePlan(plan) : renderHumanPlan(plan);
+  process.stdout.write(rendered);
+  if (plan.blockers.length > 0) {
+    process.exitCode = 2;
+    return;
+  }
+  if (options.expectedPlanPath !== undefined) {
+    const expected = await readFile(options.expectedPlanPath, "utf8");
+    if (expected !== renderMachinePlan(plan)) {
+      throw new Error("current publication plan differs from the reviewed preflight plan; rerun preflight before publishing");
+    }
+  }
+  if (!options.publish || plan.packages.length === 0) return;
+  if (!process.env.CARGO_REGISTRY_TOKEN) throw new Error("CARGO_REGISTRY_TOKEN is required for explicit publication");
+  await publishPackages(plan.packages, {
+    isPublished,
+    publish: (pkg) => cargoPublish(pkg, options.workspaceDir),
+    waitForPublished: (pkg) => waitForRegistryPublication(pkg),
+  });
 }
 
 const isMain = process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;

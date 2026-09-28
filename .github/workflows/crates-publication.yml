@@ -11,27 +11,43 @@ on:
 permissions:
   actions: read
   contents: read
-  id-token: write
+
+concurrency:
+  group: crates-io-publication
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  preflight:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: crates-io-release
+    outputs:
+      tag_commit: ${{ steps.tag.outputs.commit }}
+      version: ${{ steps.version.outputs.version }}
+      plan_b64: ${{ steps.plan.outputs.plan_b64 }}
+      package_count: ${{ steps.plan.outputs.package_count }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify annotated tag belongs to main
+      - name: Resolve reviewed release tag
+        id: tag
         shell: bash
         env:
           TAG: ${{ inputs.tag }}
+          WORKFLOW_REF: ${{ github.ref }}
         run: |
+          set -euo pipefail
+          test "$WORKFLOW_REF" = refs/heads/main || {
+            echo "dispatch this trusted workflow from main" >&2
+            exit 1
+          }
           [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
             echo "tag must be a stable vX.Y.Z release" >&2
             exit 1
           }
+          git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
           test "$(git cat-file -t "refs/tags/$TAG")" = tag || {
             echo "release tag must be annotated" >&2
             exit 1
@@ -42,20 +58,31 @@ jobs:
             echo "release tag commit must belong to main" >&2
             exit 1
           }
-      - uses: actions/setup-node@v7
+          printf 'commit=%s\n' "$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Validate annotated tag and Cargo version
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Check tag version using trusted release tooling
+        id: version
+        shell: bash
         env:
           TAG: ${{ inputs.tag }}
-        run: node --experimental-strip-types tools/release/release.ts check-tag "$TAG"
-      - name: Verify the public binary release and installer smoke
+          TAG_COMMIT: ${{ steps.tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          TAG_SOURCE="$RUNNER_TEMP/tapid-release-source"
+          git worktree add --detach "$TAG_SOURCE" "$TAG_COMMIT"
+          VERSION="$(cd "$TAG_SOURCE" && node --experimental-strip-types "$GITHUB_WORKSPACE/tools/release/release.ts" check-tag "$TAG")"
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Verify public GitHub release and installer smoke
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
+          TAG_COMMIT: ${{ steps.tag.outputs.commit }}
         run: |
-          TAG_COMMIT="$(git rev-parse "$TAG^{commit}")"
-          export TAG_COMMIT
+          set -euo pipefail
           release="$(gh release view "$TAG" --json isDraft,isPrerelease,tagName --jq 'select(.tagName == env.TAG and (.isDraft | not) and (.isPrerelease | not)) | .tagName')"
           test "$release" = "$TAG" || {
             echo "the matching public non-prerelease GitHub release is required" >&2
@@ -73,13 +100,115 @@ jobs:
             echo "all public installer smoke jobs must succeed for $TAG" >&2
             exit 1
           }
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Package the workspace
-        run: cargo package --workspace --locked
+      - name: Generate reviewable crates.io plan
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_SOURCE="$RUNNER_TEMP/tapid-release-source"
+          PLAN_FILE="$RUNNER_TEMP/crates-publication-plan.json"
+          node --experimental-strip-types tools/release/publish.ts --workspace "$TAG_SOURCE" --json > "$PLAN_FILE"
+          PLAN_B64="$(base64 -w0 < "$PLAN_FILE")"
+          PACKAGE_COUNT="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).packages.length)))' < "$PLAN_FILE")"
+          printf 'plan_b64=%s\n' "$PLAN_B64" >> "$GITHUB_OUTPUT"
+          printf 'package_count=%s\n' "$PACKAGE_COUNT" >> "$GITHUB_OUTPUT"
+          {
+            printf '### Crates.io publication plan\n\n'
+            printf 'The plan was generated without publication credentials. The protected publication job will refuse to proceed if the registry state or exact plan changes.\n\n'
+            printf '```json\n'
+            cat "$PLAN_FILE"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify workspace package compatibility before credentials
+        shell: bash
+        env:
+          CARGO_HOME: ${{ runner.temp }}/package-verify-cargo-home
+        run: |
+          set -euo pipefail
+          TAG_SOURCE="$RUNNER_TEMP/tapid-release-source"
+          (cd "$TAG_SOURCE" && cargo package --workspace --locked)
+          (cd "$TAG_SOURCE" && cargo metadata --manifest-path "$TAG_SOURCE/tests/integration/Cargo.toml" --locked --format-version 1 >/dev/null)
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: crates-io-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Rebuild exact tagged source and compare reviewed plan
+        id: recheck
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED_TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_PLAN_B64: ${{ needs.preflight.outputs.plan_b64 }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/main || {
+            echo "trusted publication automation must run from main" >&2
+            exit 1
+          }
+          git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          TAG_COMMIT="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          test "$TAG_COMMIT" = "$EXPECTED_TAG_COMMIT" || {
+            echo "release tag changed after preflight" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main || {
+            echo "release tag commit must belong to main" >&2
+            exit 1
+          }
+          TAG_SOURCE="$RUNNER_TEMP/tapid-release-source"
+          git worktree add --detach "$TAG_SOURCE" "$TAG_COMMIT"
+          VERSION="$(cd "$TAG_SOURCE" && node --experimental-strip-types "$GITHUB_WORKSPACE/tools/release/release.ts" check-tag "$TAG")"
+          test "$VERSION" = "$EXPECTED_VERSION" || {
+            echo "release version changed after preflight" >&2
+            exit 1
+          }
+          EXPECTED_PLAN="$RUNNER_TEMP/expected-crates-publication-plan.json"
+          printf '%s' "$EXPECTED_PLAN_B64" | base64 --decode > "$EXPECTED_PLAN"
+          ACTUAL_PLAN="$RUNNER_TEMP/current-crates-publication-plan.json"
+          node --experimental-strip-types tools/release/publish.ts --workspace "$TAG_SOURCE" --json > "$ACTUAL_PLAN"
+          if ! cmp -s "$EXPECTED_PLAN" "$ACTUAL_PLAN"; then
+            echo "crates.io state or publication plan changed after preflight" >&2
+            diff -u "$EXPECTED_PLAN" "$ACTUAL_PLAN" || true
+            exit 1
+          fi
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
       - name: Authenticate to crates.io with OIDC
-        uses: rust-lang/crates-io-auth-action@v1
+        if: needs.preflight.outputs.package_count != '0'
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
-      - name: Publish missing crates in dependency order
-        run: node --experimental-strip-types tools/release/publish.ts
+      - name: Publish missing crates one at a time
+        if: needs.preflight.outputs.package_count != '0'
+        run: node --experimental-strip-types tools/release/publish.ts --workspace "$RUNNER_TEMP/tapid-release-source" --publish --json --expected-plan "$RUNNER_TEMP/expected-crates-publication-plan.json"
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Install the released CLI from a clean Cargo home
+        shell: bash
+        env:
+          VERSION: ${{ steps.recheck.outputs.version }}
+          CARGO_HOME: ${{ runner.temp }}/clean-cargo-home
+        run: |
+          set -euo pipefail
+          INSTALL_ROOT="$RUNNER_TEMP/tapid-clean-install"
+          cargo install tapid --version "$VERSION" --locked --root "$INSTALL_ROOT"
+          ACTUAL="$("$INSTALL_ROOT/bin/tapid" --version)"
+          test "$ACTUAL" = "tapid $VERSION" || {
+            echo "clean Cargo install returned unexpected version: $ACTUAL" >&2
+            exit 1
+          }

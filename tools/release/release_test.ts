@@ -270,6 +270,15 @@ test("repository workflows avoid the deprecated Node.js 20 action majors", async
   );
 });
 
+test("crates publication actions use immutable commit references", async () => {
+  const workflow = await text(".github/workflows/crates-publication.yml");
+  const actionLines = workflow.split(/\r?\n/).filter((line: string) => /^\s*uses:/.test(line));
+  assert(actionLines.length > 0);
+  for (const line of actionLines) {
+    assertMatch(line, /uses:\s+[^@\s]+@[a-f0-9]{40}(?:\s+#\s+v[^\s]+)?$/);
+  }
+});
+
 test("crates publication uses trusted publishing and native Cargo", async () => {
   const workflow = await text(".github/workflows/crates-publication.yml");
   assert(workflow.includes("workflow_dispatch:"));
@@ -277,13 +286,14 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(!workflow.includes("types: [published]"));
   assert(workflow.includes("id-token: write"));
   assert(workflow.includes("environment: crates-io-release"));
-  assert(workflow.includes("rust-lang/crates-io-auth-action@v1"));
+  assert(workflow.includes("rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5"));
   assert(workflow.includes("cargo package --workspace --locked"));
   assert(workflow.includes("node --experimental-strip-types tools/release/publish.ts"));
   assert(workflow.includes('check-tag "$TAG"'));
+  assertEquals(workflow.match(/node --experimental-strip-types "\$GITHUB_WORKSPACE\/tools\/release\/release\.ts" check-tag "\$TAG"/g)?.length, 2);
   assert(!workflow.includes('check-tag "${{ inputs.tag }}"'));
   const ancestry = workflow.indexOf('merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main');
-  const setupNode = workflow.indexOf("actions/setup-node@v7");
+  const setupNode = workflow.indexOf("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
   const repositoryCode = workflow.indexOf("tools/release/release.ts");
   assert(ancestry >= 0 && ancestry < setupNode && ancestry < repositoryCode);
   assert(workflow.includes("git cat-file -t \"refs/tags/$TAG\""));
@@ -296,6 +306,30 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(workflow.includes('test "$successful_jobs" -eq 3'));
   assert(!workflow.includes("python"));
   assert(!workflow.includes("CARGO_REGISTRY_TOKEN: ${{ secrets."));
+  assert(workflow.includes("if: github.ref == 'refs/heads/main'"));
+  assert(workflow.includes("ref: ${{ github.sha }}"));
+  const planStep = workflow.indexOf("Generate reviewable crates.io plan");
+  const packageGate = workflow.indexOf("Verify workspace package compatibility before credentials");
+  const protectedJob = workflow.indexOf("\n  publish:");
+  const authStep = workflow.indexOf("Authenticate to crates.io with OIDC");
+  const publishStep = workflow.indexOf("Publish missing crates one at a time");
+  assert(planStep >= 0 && planStep < packageGate && packageGate < protectedJob);
+  assert(protectedJob < authStep && authStep < publishStep);
+  const publisher = await text("tools/release/publish.ts");
+  assertEquals(publisher.match(/cwd: workspaceDir/g)?.length, 2);
+  assert(workflow.includes('cd "$TAG_SOURCE" && cargo package --workspace --locked'));
+  assert(workflow.includes('cd "$TAG_SOURCE" && cargo metadata --manifest-path "$TAG_SOURCE/tests/integration/Cargo.toml" --locked --format-version 1'));
+  assert(publisher.includes('"publish", "--no-verify", "--locked"'));
+  assert(publisher.includes("env: cargoMetadataEnv(process.env, cargoHome)"));
+  assert(publisher.includes("env: cargoPublishEnv(process.env, token, cargoHome)"));
+  assert(publisher.includes("CARGO_CHILD_ENV_KEYS"));
+  assert(!publisher.includes("verifyPackage"));
+  assert(!publisher.includes('"package", "--locked", "--package"'));
+  assert(workflow.includes("CARGO_HOME: ${{ runner.temp }}/package-verify-cargo-home"));
+  assert(workflow.includes("--publish --json --expected-plan"));
+  assert(workflow.includes("CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}"));
+
+  assert(workflow.includes("CARGO_HOME: ${{ runner.temp }}/clean-cargo-home"));
 });
 
 /** Ensure PR smoke validates its exact head without becoming release evidence. */
