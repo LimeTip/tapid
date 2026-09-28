@@ -49,6 +49,18 @@ Current examples include:
 - `RegistryOrigin`, `PackageInstanceId`, and lossless `PackageIntegrity` for registry-qualified package identity and integrity metadata.
 - `PeerContext` and `PlatformContext`, deterministic context primitives used by dependency resolution and lockfile identity.
 
+## Peer dependency lifecycle boundary
+
+Peer-aware installation is not yet implemented. Until it is, registry metadata containing peer requirements must fail closed; it must not be flattened into ordinary dependencies or treated as successfully resolved. A complete implementation must preserve these invariants:
+
+- A required peer with no provider in the applicable ancestor/root context, or whose selected version does not satisfy the declared range, fails resolution before any project state is committed.
+- Peer requirements remain distinct from ordinary dependencies throughout metadata parsing, graph resolution, and lockfile edges.
+- A package's identity includes its peer context. The same registry/name/version under different peer contexts must have distinct lockfile keys and linker instances.
+- `tapid add --peer` writes the declaration to `peerDependencies`, never `dependencies`; it does not imply that the peer itself should be installed as an ordinary dependency.
+- Resolution, artifact preparation, lockfile writing, and materialization are transactional: any peer validation failure leaves the manifest, lockfile, and installed tree unchanged.
+
+The current `tapid add --peer` command implements declaration-only lifecycle behavior through the transaction mechanism. It does **not** provide peer-aware graph resolution, peer-context materialization, or npm/pnpm compatibility. Those features must remain explicitly unsupported until the invariants above have end-to-end tests, including unresolved and incompatible peers and rollback.
+
 `tapid-core` must not depend on the CLI, filesystem, network, operating system, registry implementation, process execution, clock, environment, or global mutable state. It must not become a general utility crate or a place to hide ambiguity between focused capabilities.
 
 The detailed inclusion and exclusion rules are in the Tapid project skill reference `references/crate-boundaries.md`.
