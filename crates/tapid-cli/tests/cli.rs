@@ -519,9 +519,16 @@ fn npm_and_jsr_registry_identities_remain_distinct_for_related_packages() {
     )
     .unwrap();
 
+    let store = dir.join("store");
     let output = run(
         &dir,
-        &["install", "--registry-fixture", fixture.to_str().unwrap()],
+        &[
+            "install",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
     );
 
     assert!(
@@ -642,6 +649,8 @@ fn add_peer_records_only_peer_requirement() {
         &dir,
         &[
             "add",
+            "--store-dir",
+            dir.join("store").to_str().unwrap(),
             "react@^18.0.0",
             "--peer",
             "--registry-fixture",
@@ -679,9 +688,16 @@ fn install_validates_peer_providers_and_persists_peer_context() {
     )
     .unwrap();
 
+    let store = dir.join("store");
     let output = run(
         &dir,
-        &["install", "--registry-fixture", fixture.to_str().unwrap()],
+        &[
+            "install",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
     );
     assert!(
         output.status.success(),
@@ -702,7 +718,16 @@ fn install_validates_peer_providers_and_persists_peer_context() {
             .any(|key| key.contains("|react@18.2.0|peer=-|"))
     );
     fs::remove_dir_all(dir.join("node_modules")).unwrap();
-    let replay = run(&dir, &["install", "--offline", "--frozen"]);
+    let replay = run(
+        &dir,
+        &[
+            "install",
+            "--offline",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
     assert!(
         replay.status.success(),
         "{}",
@@ -807,11 +832,14 @@ fn install_rolls_back_when_a_required_peer_is_incompatible() {
     )
     .unwrap();
 
+    let store = dir.join("store");
     let output = run(
         &dir,
         &[
             "install",
             "--allow-unverified-registry-artifacts",
+            "--store-dir",
+            store.to_str().unwrap(),
             "--registry-fixture",
             fixture.to_str().unwrap(),
         ],

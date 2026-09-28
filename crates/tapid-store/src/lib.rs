@@ -1081,16 +1081,22 @@ fn sync_tree(path: &Path) -> io::Result<()> {
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             sync_tree(&child)?;
         } else if metadata.is_file() {
-            OpenOptions::new()
-                .write(true)
-                .open(&child)
-                .and_then(|file| file.sync_all())
-                .map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!("cannot sync staged store file {}: {error}", child.display()),
-                    )
-                })?;
+            #[cfg(windows)]
+            if metadata.permissions().readonly() {
+                // Archive extraction and verified-tree copying sync file contents before
+                // applying read-only permissions; opening these files for flushing fails.
+                continue;
+            }
+            #[cfg(windows)]
+            let sync = OpenOptions::new().write(true).open(&child);
+            #[cfg(not(windows))]
+            let sync = OpenOptions::new().read(true).open(&child);
+            sync.and_then(|file| file.sync_all()).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("cannot sync staged store file {}: {error}", child.display()),
+                )
+            })?;
         } else if !metadata.file_type().is_symlink() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1125,6 +1131,8 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 
 const STORE_JOURNAL: &str = ".tapid-transaction.json";
 const STORE_JOURNAL_MAX: u64 = 1024 * 1024;
+// Lifecycle coordinator embeds base64 manifest and lockfile snapshots (each <= 32 MiB).
+const COORDINATOR_MAX: u64 = 96 * 1024 * 1024;
 
 fn write_store_journal(
     root: &Path,
@@ -1134,7 +1142,7 @@ fn write_store_journal(
 ) -> Result<PathBuf, IngestError> {
     let coordinator = coordinator.canonicalize()?;
     let metadata = fs::symlink_metadata(&coordinator)?;
-    if !metadata.file_type().is_file() || metadata.len() > STORE_JOURNAL_MAX {
+    if !metadata.file_type().is_file() || metadata.len() > COORDINATOR_MAX {
         return Err(
             io::Error::new(io::ErrorKind::InvalidData, "invalid lifecycle coordinator").into(),
         );
@@ -1243,22 +1251,10 @@ fn recover_store_journal(root: &Path) -> io::Result<()> {
             )
         })?;
     let coordinator_path = Path::new(coordinator);
-    if !coordinator_path.is_absolute()
-        || coordinator_path
-            .canonicalize()
-            .map(|canonical| canonical != coordinator_path)
-            .unwrap_or(true)
-    {
+    if !coordinator_path.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "store coordinator path is unavailable or noncanonical",
-        ));
-    }
-    let coordinator_meta = fs::symlink_metadata(coordinator_path)?;
-    if !coordinator_meta.file_type().is_file() || coordinator_meta.len() > STORE_JOURNAL_MAX {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid store transaction coordinator",
+            "store coordinator path is not absolute",
         ));
     }
     let owner = record
@@ -1270,29 +1266,67 @@ fn recover_store_journal(root: &Path) -> io::Result<()> {
                 "store transaction journal lacks owner",
             )
         })?;
-    let decision: serde_json::Value = serde_json::from_slice(&fs::read(coordinator_path)?)
-        .map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("malformed lifecycle coordinator: {error}"),
-            )
-        })?;
-    if decision.get("version").and_then(serde_json::Value::as_u64) != Some(1)
-        || decision.get("owner").and_then(serde_json::Value::as_str) != Some(owner)
-    {
-        return Err(io::Error::new(
+    let coordinator_parent = coordinator_path.parent().ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidData,
-            "store coordinator identity mismatch",
-        ));
-    }
-    let committed = match decision.get("state").and_then(serde_json::Value::as_str) {
-        Some("Prepared") => false,
-        Some("Committed") => true,
-        _ => {
+            "store coordinator path has no project directory",
+        )
+    })?;
+    let project_gone = match fs::symlink_metadata(coordinator_parent) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error),
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "unknown lifecycle transaction decision",
+                "store coordinator project path is not a regular directory",
             ));
+        }
+        Ok(_) => false,
+    };
+    let committed = if project_gone {
+        false
+    } else {
+        if coordinator_path
+            .canonicalize()
+            .map(|canonical| canonical != coordinator_path)
+            .unwrap_or(true)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store coordinator path is unavailable or noncanonical",
+            ));
+        }
+        let coordinator_meta = fs::symlink_metadata(coordinator_path)?;
+        if !coordinator_meta.file_type().is_file() || coordinator_meta.len() > COORDINATOR_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid store transaction coordinator",
+            ));
+        }
+        let decision: serde_json::Value = serde_json::from_slice(&fs::read(coordinator_path)?)
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("malformed lifecycle coordinator: {error}"),
+                )
+            })?;
+        if decision.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+            || decision.get("owner").and_then(serde_json::Value::as_str) != Some(owner)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store coordinator identity mismatch",
+            ));
+        }
+        match decision.get("state").and_then(serde_json::Value::as_str) {
+            Some("Prepared") => false,
+            Some("Committed") => true,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unknown lifecycle transaction decision",
+                ));
+            }
         }
     };
     let created_trees_dir = record
@@ -1412,13 +1446,6 @@ fn lock_file(root: &Path, exclusive: bool) -> io::Result<File> {
         return Ok(file);
     }
     loop {
-        let recovery_lock = open()?;
-        FileExt::lock(&recovery_lock)?;
-        let recovery = recover_store_journal(root);
-        let _ = FileExt::unlock(&recovery_lock);
-        recovery?;
-        drop(recovery_lock);
-
         let file = open()?;
         FileExt::lock_shared(&file)?;
         if !root.join(STORE_JOURNAL).exists() {
@@ -1426,6 +1453,12 @@ fn lock_file(root: &Path, exclusive: bool) -> io::Result<File> {
         }
         let _ = FileExt::unlock(&file);
         drop(file);
+
+        let recovery_lock = open()?;
+        FileExt::lock(&recovery_lock)?;
+        let recovery = recover_store_journal(root);
+        let _ = FileExt::unlock(&recovery_lock);
+        recovery?;
     }
 }
 
@@ -1625,6 +1658,58 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_larger_than_store_journal_limit_is_supported() {
+        let root = root();
+        let project = root.with_extension("large-coordinator-project");
+        let store_root = root.join("store");
+        fs::create_dir_all(&store_root).unwrap();
+        let digest = make_marked_tree(&store_root, "large coordinator transaction");
+        let coordinator = coordinator(&project, "Prepared");
+        let mut decision: serde_json::Value =
+            serde_json::from_slice(&fs::read(&coordinator).unwrap()).unwrap();
+        decision["padding"] = serde_json::Value::String("x".repeat(2 * 1024 * 1024));
+        fs::write(&coordinator, decision.to_string()).unwrap();
+
+        write_store_journal(
+            &store_root,
+            &coordinator,
+            &[digest.as_str().to_owned()],
+            false,
+        )
+        .unwrap();
+        Store::new(&store_root).recover_transactions().unwrap();
+
+        assert!(!store_root.join("trees").join(digest.as_str()).exists());
+        assert!(!store_root.join(STORE_JOURNAL).exists());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn missing_project_directory_rolls_back_orphaned_transaction() {
+        let root = root();
+        let project = root.with_extension("orphaned-project");
+        let store_root = root.join("store");
+        fs::create_dir_all(&store_root).unwrap();
+        let digest = make_marked_tree(&store_root, "orphaned transaction");
+        let coordinator = coordinator(&project, "Prepared");
+        write_store_journal(
+            &store_root,
+            &coordinator,
+            &[digest.as_str().to_owned()],
+            false,
+        )
+        .unwrap();
+        fs::remove_dir_all(&project).unwrap();
+
+        Store::new(&store_root).recover_transactions().unwrap();
+
+        assert!(!store_root.join("trees").join(digest.as_str()).exists());
+        assert!(!store_root.join(STORE_JOURNAL).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn missing_coordinator_fails_closed_without_deleting_tree() {
         let root = root();
         let project = root.with_extension("project");
@@ -1732,6 +1817,35 @@ mod tests {
     }
 
     #[test]
+    fn verified_tree_lookup_does_not_deadlock_when_caller_holds_read_guard() {
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"{\"name\":\"guarded\"}").unwrap();
+        let digest: ArtifactDigest = tapid_archive::canonical_tree_digest(&source)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let store = Store::new(&root);
+        store.activate_verified_tree(&digest, &source).unwrap();
+        let _guard = store.read_guard().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker_store = store.clone();
+        std::thread::spawn(move || {
+            let result = worker_store.verified_tree_path(&digest);
+            let _ = sent.send(result.is_ok());
+        });
+
+        assert!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("verified-tree lookup blocked while a read guard was held")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn store_readers_cannot_observe_trees_that_will_be_rolled_back() {
         let root = root();
         let _ = fs::remove_dir_all(&root);
@@ -1812,6 +1926,22 @@ mod tests {
         transaction.publish().unwrap();
 
         assert!(store.verified_tree_path(&digest).is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_tree_flushes_read_only_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("read-only");
+        fs::write(&file, b"verified bytes").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+
+        assert!(sync_tree(&root).is_ok());
         let _ = fs::remove_dir_all(root);
     }
 

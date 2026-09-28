@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use tapid_archive::{ArchiveFormat, ArchiveLimits, canonical_tree_digest, extract_to};
 use tapid_core::{ArtifactDigest, PackageIntegrity, PackageName, PackageVersion, RegistryOrigin};
@@ -24,6 +25,15 @@ use tapid_store::{Store, StoreTransaction};
 
 const NPM: &str = "https://registry.npmjs.org";
 const JSR: &str = "https://jsr.io";
+static NEXT_TEMP_TREE_ID: AtomicU64 = AtomicU64::new(0);
+
+struct TemporaryTree(PathBuf);
+
+impl Drop for TemporaryTree {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 struct FixturePackage {
@@ -844,13 +854,13 @@ pub fn resolve_and_fetch(
         {
             return Err(format!("integrity mismatch for {}", id));
         }
-        let archive_digest = digest(&bytes);
+        let temp_id = NEXT_TEMP_TREE_ID.fetch_add(1, Ordering::Relaxed);
         let temp = store.root().join(format!(
-            ".online-tree-{}-{}",
+            ".online-tree-{}-{temp_id}-{}",
             std::process::id(),
             id.version
         ));
-        let _ = fs::remove_dir_all(&temp);
+        let _temporary_tree = TemporaryTree(temp.clone());
         extract_to(
             &bytes,
             ArchiveFormat::TarGz,
@@ -863,13 +873,7 @@ pub fn resolve_and_fetch(
             .parse()
             .map_err(|e: tapid_core::DomainError| e.to_string())?;
         let tree = store_transaction
-            .stage_archive(
-                &bytes,
-                &archive_digest,
-                &tree_digest,
-                ArchiveFormat::TarGz,
-                ArchiveLimits::default(),
-            )
+            .stage_verified_tree(&tree_digest, &temp)
             .map_err(|e| e.to_string())?;
         let key = LockfilePackageKey::new(
             id.registry.clone(),
@@ -912,7 +916,6 @@ pub fn resolve_and_fetch(
             tree: VerifiedTreeReference::new(&tree_digest.to_string(), &tree)
                 .map_err(|e| e.to_string())?,
         });
-        let _ = fs::remove_dir_all(temp);
         let completed = index + 1;
         if artifact_progress_checkpoint(completed, artifact_total) {
             eprintln!("Artifact verification progress: {completed}/{artifact_total}");
