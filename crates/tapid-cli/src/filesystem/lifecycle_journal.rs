@@ -347,6 +347,8 @@ fn write_record(project: &Path, record: &Record) -> Result<(), String> {
 }
 
 fn replace_journal_file(temp: &Path, target: &Path, force_fallback: bool) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let _ = force_fallback;
     if !target.exists() {
         return fs::rename(temp, target);
     }
