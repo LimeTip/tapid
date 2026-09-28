@@ -1173,7 +1173,7 @@ fn write_store_journal(
         file.write_all(&bytes)?;
         file.sync_all()?;
         fs::rename(&temp, &path)?;
-        File::open(root)?.sync_all()?;
+        sync_directory(root)?;
         Ok::<(), io::Error>(())
     })();
     if write_result.is_err() {
@@ -1352,7 +1352,7 @@ fn remove_store_journal(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => {
             if let Some(parent) = path.parent() {
-                File::open(parent)?.sync_all()?;
+                sync_directory(parent)?;
             }
             Ok(())
         }
