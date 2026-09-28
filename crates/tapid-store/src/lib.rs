@@ -865,7 +865,12 @@ impl StoreTransaction {
         mut self,
         coordinator: Option<&Path>,
     ) -> Result<StorePublication, IngestError> {
-        let file = lock_file(&self.store.root, true)?;
+        let file = lock_file(&self.store.root, true).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot acquire store publication lock: {error}"),
+            )
+        })?;
         let trees_dir = self.store.root.join("trees");
         let created_trees_dir = !trees_dir.exists() && !self.staged.is_empty();
         let mut new_digests = Vec::new();
