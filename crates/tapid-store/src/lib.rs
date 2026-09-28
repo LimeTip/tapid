@@ -1081,7 +1081,14 @@ fn sync_tree(path: &Path) -> io::Result<()> {
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             sync_tree(&child)?;
         } else if metadata.is_file() {
-            File::open(&child)?.sync_all()?;
+            File::open(&child)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("cannot sync staged store file {}: {error}", child.display()),
+                    )
+                })?;
         } else if !metadata.file_type().is_symlink() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
