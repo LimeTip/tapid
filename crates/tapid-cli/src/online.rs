@@ -340,12 +340,6 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
         dependencies,
         peer_dependencies: peer_dependencies.clone(),
     };
-    if !peer_dependencies.is_empty() {
-        return Err(format!(
-            "peer-placement-unsupported: peer dependency resolution is not implemented for {}@{}; refusing to flatten peer requirements",
-            package.name, package.version
-        ));
-    }
     let optional_dependencies = package
         .optional_dependencies
         .iter()
@@ -772,6 +766,11 @@ pub fn resolve_and_fetch(
     };
     let artifact_total = resolution.selected.len();
     for (index, id) in resolution.selected.iter().enumerate() {
+        let peer_context = resolution
+            .peer_contexts
+            .get(id)
+            .cloned()
+            .unwrap_or_default();
         let key3 = (
             id.registry.to_string(),
             id.name.to_string(),
@@ -870,7 +869,7 @@ pub fn resolve_and_fetch(
             id.registry.clone(),
             id.name.clone(),
             id.version.clone(),
-            &empty_peer,
+            &peer_context,
             &platform_context,
         )
         .to_string();
@@ -885,7 +884,7 @@ pub fn resolve_and_fetch(
             &id.version.to_string(),
             &actual.to_string(),
             &tree_digest.to_string(),
-            (&empty_peer, &platform_context),
+            (&peer_context, &platform_context),
             integrity_provenance,
         )
         .map_err(|e| e.to_string())?;
@@ -902,7 +901,7 @@ pub fn resolve_and_fetch(
                 id.name.clone(),
                 id.version.clone(),
             ),
-            peer_context: empty_peer.clone(),
+            peer_context,
             platform_context,
             tree: VerifiedTreeReference::new(&tree_digest.to_string(), &tree)
                 .map_err(|e| e.to_string())?,
@@ -933,7 +932,7 @@ pub fn resolve_and_fetch(
                     target.registry.clone(),
                     target.name.clone(),
                     target.version.clone(),
-                    &empty_peer,
+                    resolution.peer_contexts.get(target).unwrap_or(&empty_peer),
                     target_platform,
                 )
                 .to_string();
@@ -954,7 +953,7 @@ pub fn resolve_and_fetch(
             id.registry.clone(),
             id.name.clone(),
             id.version.clone(),
-            &empty_peer,
+            resolution.peer_contexts.get(id).unwrap_or(&empty_peer),
             platform,
         )
         .to_string()
@@ -968,6 +967,7 @@ pub fn resolve_and_fetch(
                     instance.id.registry.clone(),
                     instance.id.name.clone(),
                     instance.id.version.clone(),
+                    instance.peer_context.clone(),
                 ),
                 InstanceKey::from(instance),
             )
@@ -981,6 +981,11 @@ pub fn resolve_and_fetch(
                 edge.parent.registry.clone(),
                 edge.parent.name.clone(),
                 edge.parent.version.clone(),
+                resolution
+                    .peer_contexts
+                    .get(&edge.parent)
+                    .cloned()
+                    .unwrap_or_default(),
             ))
             .ok_or_else(|| format!("missing parent instance for {}", edge.parent))?;
         let child = instance_keys
@@ -988,6 +993,11 @@ pub fn resolve_and_fetch(
                 edge.child.registry.clone(),
                 edge.child.name.clone(),
                 edge.child.version.clone(),
+                resolution
+                    .peer_contexts
+                    .get(&edge.child)
+                    .cloned()
+                    .unwrap_or_default(),
             ))
             .ok_or_else(|| format!("missing child instance for {}", edge.child))?;
         edge_list.push(DependencyEdge {
@@ -997,7 +1007,16 @@ pub fn resolve_and_fetch(
     }
     for id in &resolution.roots {
         let instance = instance_keys
-            .get(&(id.registry.clone(), id.name.clone(), id.version.clone()))
+            .get(&(
+                id.registry.clone(),
+                id.name.clone(),
+                id.version.clone(),
+                resolution
+                    .peer_contexts
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default(),
+            ))
             .ok_or_else(|| format!("missing root instance for {id}"))?;
         root_deps.push(instance.clone());
     }
@@ -1175,17 +1194,18 @@ mod tests {
     }
 
     #[test]
-    fn peer_metadata_is_rejected_instead_of_flattened() {
-        let mut record = named_record("plugin", "1.0.0", &[]);
+    fn peer_metadata_is_preserved_separately_for_peer_context_resolution() {
+        let mut record = named_record("plugin", "1.0.0", &[("runtime", "^1.0.0")]);
         record
             .peer_dependencies
             .insert("host".into(), "^1.0.0".into());
 
-        let error = match normalize_record(&record) {
-            Ok(_) => panic!("peer metadata was accepted"),
-            Err(error) => error,
-        };
-        assert!(error.contains("refusing to flatten peer requirements"));
+        let normalized = normalize_record(&record).unwrap();
+        assert_eq!(normalized.metadata.dependencies.len(), 1);
+        assert_eq!(
+            normalized.metadata.peer_dependencies[&"host".parse().unwrap()].raw,
+            "^1.0.0"
+        );
     }
 
     #[test]

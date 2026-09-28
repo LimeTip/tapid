@@ -51,15 +51,18 @@ Current examples include:
 
 ## Peer dependency lifecycle boundary
 
-Peer-aware installation is not yet implemented. Until it is, registry metadata containing peer requirements must fail closed; it must not be flattened into ordinary dependencies or treated as successfully resolved. A complete implementation must preserve these invariants:
+The resolver supports registry package peer requirements when a compatible provider is selected as a direct project root from the same registry. The provider is not flattened into ordinary dependency metadata; its selected version is captured in the requiring package's peer context, lockfile key, and linker instance. A missing or incompatible root provider fails before transaction commit.
 
-- A required peer with no provider in the applicable ancestor/root context, or whose selected version does not satisfy the declared range, fails resolution before any project state is committed.
+This is deliberately narrower than npm/pnpm. A project's own `peerDependencies` are declarations and are not fetched or installed as ordinary roots. Nested/ancestor provider lookup and multiple placements of one exact package instance under different peer contexts remain unsupported and must fail closed. `tapid add --peer` writes only the peer declaration through the existing atomic lifecycle transaction; it does not imply that the project has installed or supplied that peer at runtime.
+
+The supported direct-root slice guarantees these invariants:
+
 - Peer requirements remain distinct from ordinary dependencies throughout metadata parsing, graph resolution, and lockfile edges.
-- A package's identity includes its peer context. The same registry/name/version under different peer contexts must have distinct lockfile keys and linker instances.
+- A package's identity includes its peer context. The same registry/name/version under different peer contexts must have distinct lockfile keys and linker instances; unsupported topologies must not be silently conflated.
 - `tapid add --peer` writes the declaration to `peerDependencies`, never `dependencies`; it does not imply that the peer itself should be installed as an ordinary dependency.
 - Resolution, artifact preparation, lockfile writing, and materialization are transactional: any peer validation failure leaves the manifest, lockfile, and installed tree unchanged.
 
-The current `tapid add --peer` command implements declaration-only lifecycle behavior through the transaction mechanism. It does **not** provide peer-aware graph resolution, peer-context materialization, or npm/pnpm compatibility. Those features must remain explicitly unsupported until the invariants above have end-to-end tests, including unresolved and incompatible peers and rollback.
+Full npm/pnpm compatibility and automatic peer placement are not claimed.
 
 `tapid-core` must not depend on the CLI, filesystem, network, operating system, registry implementation, process execution, clock, environment, or global mutable state. It must not become a general utility crate or a place to hide ambiguity between focused capabilities.
 

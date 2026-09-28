@@ -144,6 +144,153 @@ fn add_peer_records_only_peer_requirement() {
 }
 
 #[test]
+fn install_validates_peer_providers_and_persists_peer_context() {
+    let dir = temp_dir("peer-context-install");
+    let manifest =
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"plugin":"1.0.0","react":"18.2.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}","peerDependencies":{{"react":"^18.0.0"}}}},{{"registry":"https://registry.npmjs.org","name":"react","version":"18.2.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+
+    let output = run(
+        &dir,
+        &["install", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
+    let packages = lock["packages"].as_object().unwrap();
+    assert!(
+        packages
+            .keys()
+            .any(|key| { key.contains("|plugin@1.0.0|peer=name=react;version=18.2.0|") })
+    );
+    assert!(
+        packages
+            .keys()
+            .any(|key| key.contains("|react@18.2.0|peer=-|"))
+    );
+    fs::remove_dir_all(dir.join("node_modules")).unwrap();
+    let replay = run(&dir, &["install", "--offline", "--frozen"]);
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let replayed_lock: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
+    assert!(
+        replayed_lock["packages"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| { key.contains("|plugin@1.0.0|peer=name=react;version=18.2.0|") })
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn install_rolls_back_when_a_required_peer_provider_is_missing() {
+    let dir = temp_dir("peer-context-rollback");
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"plugin":"1.0.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(dir.join("tapid.lock"), "old lock\n").unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join("node_modules/sentinel"), "keep").unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","artifact":"{artifact}","peerDependencies":{{"react":"^18.0.0"}}}}]}}"#
+        ),
+    )
+    .unwrap();
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--allow-unverified-registry-artifacts",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("peer dependency"));
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("tapid.lock")).unwrap(),
+        "old lock\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("node_modules/sentinel")).unwrap(),
+        "keep"
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn install_rolls_back_when_a_required_peer_is_incompatible() {
+    let dir = temp_dir("peer-context-incompatible-rollback");
+    let manifest =
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"plugin":"1.0.0","react":"18.2.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(dir.join("tapid.lock"), "old lock\n").unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join("node_modules/sentinel"), "keep").unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","artifact":"{artifact}","peerDependencies":{{"react":"^19.0.0"}}}},{{"registry":"https://registry.npmjs.org","name":"react","version":"18.2.0","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--allow-unverified-registry-artifacts",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("peer dependency"));
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("tapid.lock")).unwrap(),
+        "old lock\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("node_modules/sentinel")).unwrap(),
+        "keep"
+    );
+    cleanup(dir);
+}
+
+#[test]
 fn upgrade_is_exposed_as_a_cli_command() {
     let dir = temp_dir("upgrade-exposed");
     let output = run(&dir, &["--help"]);
