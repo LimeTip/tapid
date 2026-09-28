@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use tapid_archive::{ArchiveFormat, ArchiveLimits, canonical_tree_digest, extract_to};
 use tapid_core::{ArtifactDigest, PackageIntegrity, PackageName, PackageVersion, RegistryOrigin};
@@ -20,10 +21,19 @@ use tapid_resolver::{
     Dependency, PackageVersionMetadata, RegistryMetadata, Requirement, Resolution,
     ResolutionOptions, ResolveError, resolve_graph,
 };
-use tapid_store::Store;
+use tapid_store::{Store, StoreTransaction};
 
 const NPM: &str = "https://registry.npmjs.org";
 const JSR: &str = "https://jsr.io";
+static NEXT_TEMP_TREE_ID: AtomicU64 = AtomicU64::new(0);
+
+struct TemporaryTree(PathBuf);
+
+impl Drop for TemporaryTree {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 struct FixturePackage {
@@ -340,12 +350,6 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
         dependencies,
         peer_dependencies: peer_dependencies.clone(),
     };
-    if !peer_dependencies.is_empty() {
-        return Err(format!(
-            "peer-placement-unsupported: peer dependency resolution is not implemented for {}@{}; refusing to flatten peer requirements",
-            package.name, package.version
-        ));
-    }
     let optional_dependencies = package
         .optional_dependencies
         .iter()
@@ -666,7 +670,16 @@ pub fn resolve_and_fetch(
     store: &Store,
     fixture_path: Option<&Path>,
     allow_missing_integrity: bool,
-) -> Result<(Lockfile, LayoutInput, BTreeMap<String, PathBuf>), String> {
+) -> Result<
+    (
+        Lockfile,
+        LayoutInput,
+        BTreeMap<String, PathBuf>,
+        StoreTransaction,
+    ),
+    String,
+> {
+    let mut store_transaction = store.transaction();
     let fixture = fixture_path.map(fixture).transpose()?;
     fs::create_dir_all(store.root()).map_err(|e| format!("cannot create store: {e}"))?;
     let mut fixture_records = BTreeMap::<(String, String, String), PackageRecord>::new();
@@ -714,12 +727,6 @@ pub fn resolve_and_fetch(
                 },
             );
         }
-    }
-    if !manifest.peer_dependencies().is_empty() {
-        return Err(
-            "peer dependency resolution is not implemented; refusing to install peer requirements as ordinary dependencies"
-                .to_owned(),
-        );
     }
     let mut roots = Vec::new();
     for map in [
@@ -778,6 +785,11 @@ pub fn resolve_and_fetch(
     };
     let artifact_total = resolution.selected.len();
     for (index, id) in resolution.selected.iter().enumerate() {
+        let peer_context = resolution
+            .peer_contexts
+            .get(id)
+            .cloned()
+            .unwrap_or_default();
         let key3 = (
             id.registry.to_string(),
             id.name.to_string(),
@@ -842,13 +854,13 @@ pub fn resolve_and_fetch(
         {
             return Err(format!("integrity mismatch for {}", id));
         }
-        let archive_digest = digest(&bytes);
+        let temp_id = NEXT_TEMP_TREE_ID.fetch_add(1, Ordering::Relaxed);
         let temp = store.root().join(format!(
-            ".online-tree-{}-{}",
+            ".online-tree-{}-{temp_id}-{}",
             std::process::id(),
             id.version
         ));
-        let _ = fs::remove_dir_all(&temp);
+        let _temporary_tree = TemporaryTree(temp.clone());
         extract_to(
             &bytes,
             ArchiveFormat::TarGz,
@@ -860,23 +872,14 @@ pub fn resolve_and_fetch(
             .map_err(|e| e.to_string())?
             .parse()
             .map_err(|e: tapid_core::DomainError| e.to_string())?;
-        store
-            .ingest_archive(
-                &bytes,
-                &archive_digest,
-                &tree_digest,
-                ArchiveFormat::TarGz,
-                ArchiveLimits::default(),
-            )
-            .map_err(|e| e.to_string())?;
-        let tree = store
-            .verified_tree_path(&tree_digest)
+        let tree = store_transaction
+            .stage_verified_tree(&tree_digest, &temp)
             .map_err(|e| e.to_string())?;
         let key = LockfilePackageKey::new(
             id.registry.clone(),
             id.name.clone(),
             id.version.clone(),
-            &empty_peer,
+            &peer_context,
             &platform_context,
         )
         .to_string();
@@ -891,7 +894,7 @@ pub fn resolve_and_fetch(
             &id.version.to_string(),
             &actual.to_string(),
             &tree_digest.to_string(),
-            (&empty_peer, &platform_context),
+            (&peer_context, &platform_context),
             integrity_provenance,
         )
         .map_err(|e| e.to_string())?;
@@ -908,12 +911,11 @@ pub fn resolve_and_fetch(
                 id.name.clone(),
                 id.version.clone(),
             ),
-            peer_context: empty_peer.clone(),
+            peer_context,
             platform_context,
             tree: VerifiedTreeReference::new(&tree_digest.to_string(), &tree)
                 .map_err(|e| e.to_string())?,
         });
-        let _ = fs::remove_dir_all(temp);
         let completed = index + 1;
         if artifact_progress_checkpoint(completed, artifact_total) {
             eprintln!("Artifact verification progress: {completed}/{artifact_total}");
@@ -939,7 +941,7 @@ pub fn resolve_and_fetch(
                     target.registry.clone(),
                     target.name.clone(),
                     target.version.clone(),
-                    &empty_peer,
+                    resolution.peer_contexts.get(target).unwrap_or(&empty_peer),
                     target_platform,
                 )
                 .to_string();
@@ -960,7 +962,7 @@ pub fn resolve_and_fetch(
             id.registry.clone(),
             id.name.clone(),
             id.version.clone(),
-            &empty_peer,
+            resolution.peer_contexts.get(id).unwrap_or(&empty_peer),
             platform,
         )
         .to_string()
@@ -974,6 +976,7 @@ pub fn resolve_and_fetch(
                     instance.id.registry.clone(),
                     instance.id.name.clone(),
                     instance.id.version.clone(),
+                    instance.peer_context.clone(),
                 ),
                 InstanceKey::from(instance),
             )
@@ -987,6 +990,11 @@ pub fn resolve_and_fetch(
                 edge.parent.registry.clone(),
                 edge.parent.name.clone(),
                 edge.parent.version.clone(),
+                resolution
+                    .peer_contexts
+                    .get(&edge.parent)
+                    .cloned()
+                    .unwrap_or_default(),
             ))
             .ok_or_else(|| format!("missing parent instance for {}", edge.parent))?;
         let child = instance_keys
@@ -994,6 +1002,11 @@ pub fn resolve_and_fetch(
                 edge.child.registry.clone(),
                 edge.child.name.clone(),
                 edge.child.version.clone(),
+                resolution
+                    .peer_contexts
+                    .get(&edge.child)
+                    .cloned()
+                    .unwrap_or_default(),
             ))
             .ok_or_else(|| format!("missing child instance for {}", edge.child))?;
         edge_list.push(DependencyEdge {
@@ -1003,7 +1016,16 @@ pub fn resolve_and_fetch(
     }
     for id in &resolution.roots {
         let instance = instance_keys
-            .get(&(id.registry.clone(), id.name.clone(), id.version.clone()))
+            .get(&(
+                id.registry.clone(),
+                id.name.clone(),
+                id.version.clone(),
+                resolution
+                    .peer_contexts
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default(),
+            ))
             .ok_or_else(|| format!("missing root instance for {id}"))?;
         root_deps.push(instance.clone());
     }
@@ -1015,6 +1037,7 @@ pub fn resolve_and_fetch(
             dependency_edges: edge_list,
         },
         trees,
+        store_transaction,
     ))
 }
 
@@ -1181,17 +1204,18 @@ mod tests {
     }
 
     #[test]
-    fn peer_metadata_is_rejected_instead_of_flattened() {
-        let mut record = named_record("plugin", "1.0.0", &[]);
+    fn peer_metadata_is_preserved_separately_for_peer_context_resolution() {
+        let mut record = named_record("plugin", "1.0.0", &[("runtime", "^1.0.0")]);
         record
             .peer_dependencies
             .insert("host".into(), "^1.0.0".into());
 
-        let error = match normalize_record(&record) {
-            Ok(_) => panic!("peer metadata was accepted"),
-            Err(error) => error,
-        };
-        assert!(error.contains("refusing to flatten peer requirements"));
+        let normalized = normalize_record(&record).unwrap();
+        assert_eq!(normalized.metadata.dependencies.len(), 1);
+        assert_eq!(
+            normalized.metadata.peer_dependencies[&"host".parse().unwrap()].raw,
+            "^1.0.0"
+        );
     }
 
     #[test]

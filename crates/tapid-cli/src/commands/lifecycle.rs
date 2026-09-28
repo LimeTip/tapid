@@ -4,12 +4,25 @@ use tapid_manifest::DependencyKind;
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct AddArgs {
+    #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
-    #[arg(long, conflicts_with_all = ["optional", "peer"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["optional", "peer"],
+        help = "Add dependencies to devDependencies"
+    )]
     pub(crate) dev: bool,
-    #[arg(long, conflicts_with_all = ["dev", "peer"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["dev", "peer"],
+        help = "Add dependencies to optionalDependencies"
+    )]
     pub(crate) optional: bool,
-    #[arg(long, conflicts_with_all = ["dev", "optional"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["dev", "optional"],
+        help = "Record requirements in peerDependencies without installing them as regular dependencies"
+    )]
     pub(crate) peer: bool,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
@@ -17,6 +30,7 @@ pub(crate) struct AddArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct RemoveArgs {
+    #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
@@ -24,8 +38,12 @@ pub(crate) struct RemoveArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct UpdateArgs {
+    #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Update package versions beyond their declared requirements"
+    )]
     pub(crate) latest: bool,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
@@ -39,15 +57,31 @@ pub(crate) struct ReadOnlyArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct CommonArgs {
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = ".",
+        help = "Project root directory"
+    )]
     pub(crate) project_dir: PathBuf,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Select workspace member by name; default is the manifest in --project-dir"
+    )]
     pub(crate) workspace: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_name = "PATH", help = "Verified package store directory")]
     pub(crate) store_dir: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Use a local registry fixture instead of live metadata"
+    )]
     pub(crate) registry_fixture: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Allow online use of registry artifacts without declared integrity; disables offline/frozen replay"
+    )]
     pub(crate) allow_unverified_registry_artifacts: bool,
 }
 
@@ -61,10 +95,7 @@ pub(crate) fn add(args: AddArgs) -> ExitCode {
     } else if args.optional {
         DependencyKind::OptionalDependencies
     } else if args.peer {
-        eprintln!(
-            "error: peer-placement-unsupported: cannot install peer dependencies; automatic peer placement is not implemented"
-        );
-        return ExitCode::from(1);
+        DependencyKind::PeerDependencies
     } else {
         DependencyKind::Dependencies
     };
@@ -211,7 +242,7 @@ mod tests {
     };
 
     #[test]
-    fn peer_add_fails_before_touching_project_state() {
+    fn peer_add_records_peer_without_installing_it_as_a_regular_root() {
         let project = std::env::temp_dir().join(format!(
             "tapid-peer-add-{}-{}",
             std::process::id(),
@@ -222,11 +253,13 @@ mod tests {
         ));
         fs::create_dir(&project).unwrap();
         let package = project.join("package.json");
-        let lock = project.join("tapid.lock");
-        let modules = project.join("node_modules");
-        fs::write(&package, "original package\n").unwrap();
-        fs::write(&lock, "original lock\n").unwrap();
-        fs::create_dir(&modules).unwrap();
+        let fixture = project.join("registry.json");
+        fs::write(&package, r#"{"name":"app","version":"1.0.0"}"#).unwrap();
+        fs::write(
+            &fixture,
+            r#"{"packages":[{"registry":"https://jsr.io","name":"@scope/peer","version":"1.0.0","artifact":"https://jsr.io/@scope/peer/1.0.0.tgz"}]}"#,
+        )
+        .unwrap();
 
         let result = add(AddArgs {
             packages: vec!["react@^18.0.0".into()],
@@ -236,16 +269,23 @@ mod tests {
             common: CommonArgs {
                 project_dir: project.clone(),
                 workspace: None,
-                store_dir: None,
-                registry_fixture: None,
+                store_dir: Some(project.join("store")),
+                registry_fixture: Some(fixture),
                 allow_unverified_registry_artifacts: false,
             },
         });
 
-        assert_eq!(result, ExitCode::from(1));
-        assert_eq!(fs::read_to_string(package).unwrap(), "original package\n");
-        assert_eq!(fs::read_to_string(lock).unwrap(), "original lock\n");
-        assert!(modules.is_dir());
+        assert_eq!(result, ExitCode::SUCCESS);
+        let manifest = crate::commands::manifest::read_manifest(&package).unwrap();
+        assert!(!manifest.dependencies().contains_key("react"));
+        assert_eq!(
+            manifest
+                .peer_dependencies()
+                .get("react")
+                .map(String::as_str),
+            Some("^18.0.0")
+        );
+        assert!(project.join("tapid.lock").is_file());
         fs::remove_dir_all(project).unwrap();
     }
 

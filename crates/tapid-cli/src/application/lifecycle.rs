@@ -166,7 +166,10 @@ pub(crate) fn resolve_workspace(
     }
     let manifest_path = workspace.select_path(selector)?.to_path_buf();
     Ok((
-        manifest_path.parent().unwrap_or(project_dir).to_path_buf(),
+        manifest_path
+            .parent()
+            .ok_or("workspace manifest has no parent directory")?
+            .to_path_buf(),
         manifest,
     ))
 }
@@ -292,8 +295,21 @@ pub(crate) fn outdated_report(
     workspace_selector: Option<&str>,
     registry_fixture: Option<&Path>,
 ) -> Result<Vec<OutdatedEntry>, String> {
-    let (project_dir, manifest) = resolve_workspace(project_dir, workspace_selector)?;
+    let (project_dir, mut manifest) = resolve_workspace(project_dir, workspace_selector)?;
     let project_dir = project_dir.as_path();
+    let recovery_lock = if crate::filesystem::lifecycle_journal::has_pending(project_dir)? {
+        Some(crate::filesystem::activation::ActivationLock::acquire(
+            project_dir,
+        )?)
+    } else {
+        None
+    };
+    if recovery_lock.is_some() {
+        let recovered_manifest = fs::read_to_string(project_dir.join("package.json"))
+            .map_err(|error| format!("cannot read recovered package manifest: {error}"))?;
+        manifest = PackageManifest::parse(&recovered_manifest)
+            .map_err(|error| format!("invalid recovered package manifest: {error}"))?;
+    }
     let lock = Lockfile::from_json(
         &fs::read_to_string(project_dir.join("tapid.lock"))
             .map_err(|error| format!("cannot read lockfile: {error}"))?,
@@ -302,6 +318,8 @@ pub(crate) fn outdated_report(
     let locked = lock
         .packages_typed()
         .map_err(|error| format!("invalid lockfile package identity: {error}"))?;
+    let direct_dependencies = direct_dependencies(&manifest);
+    drop(recovery_lock);
     let transport = if registry_fixture.is_none() {
         Some(
             HttpsTransport::standard()
@@ -311,7 +329,7 @@ pub(crate) fn outdated_report(
         None
     };
     let mut entries = Vec::new();
-    for (identity, declared, kind) in direct_dependencies(&manifest) {
+    for (identity, declared, kind) in direct_dependencies {
         let (origin, package_name) = crate::online::dep_parts(&identity)?;
         let locked_version = locked
             .iter()

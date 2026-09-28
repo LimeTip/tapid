@@ -100,6 +100,7 @@ impl Workspace {
     pub fn select_path(&self, name: Option<&str>) -> Result<&Path, String> {
         match name {
             None => Ok(&self.root_path),
+            Some("") => Err("workspace selector cannot be empty".to_owned()),
             Some(name) => self
                 .members
                 .iter()

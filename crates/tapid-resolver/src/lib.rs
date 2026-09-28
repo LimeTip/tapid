@@ -6,7 +6,7 @@ use std::{
     fmt,
     str::FromStr,
 };
-use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
+use tapid_core::{PackageName, PackageVersion, PeerContext, RegistryOrigin};
 use tapid_registry_client::{RegistryPackageId, RegistrySnapshot};
 
 #[cfg(test)]
@@ -274,6 +274,8 @@ pub struct Resolution {
     pub roots: Vec<RegistryPackageId>,
     /// Exact dependency edges used by lockfile and linker construction.
     pub dependencies: Vec<ResolvedDependency>,
+    /// Peer providers bound to each selected package identity.
+    pub peer_contexts: BTreeMap<RegistryPackageId, PeerContext>,
 }
 
 /// Exact parent-to-child target selected for one dependency edge.
@@ -311,10 +313,36 @@ pub enum ResolveError {
         requirements: Vec<String>,
         available: Vec<String>,
     },
+    PeerDependency {
+        package: String,
+        peer: String,
+        requirement: String,
+        provider: Option<String>,
+    },
 }
 impl fmt::Display for ResolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::PeerDependency {
+                package,
+                peer,
+                requirement,
+                provider: None,
+            } => write!(
+                f,
+                "peer dependency unresolved: {package} requires {peer}@{requirement}, but no direct root provider was selected"
+            ),
+            Self::PeerDependency {
+                package,
+                peer,
+                requirement,
+                provider: Some(provider),
+            } => write!(
+                f,
+                "peer dependency incompatible: {package} requires {peer}@{requirement}, but the direct root provider is {provider}"
+            ),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 impl std::error::Error for ResolveError {}
@@ -420,10 +448,41 @@ pub fn resolve_graph(
         });
     }
 
+    let root_providers = roots
+        .iter()
+        .map(|root| {
+            (
+                (root.registry.clone(), root.name.clone()),
+                root.version.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut peer_contexts = BTreeMap::new();
+    for (id, package) in &selected_packages {
+        let mut context = PeerContext::default();
+        for (peer, requirement) in &package.peer_dependencies {
+            let provider = root_providers.get(&(id.registry.clone(), peer.clone()));
+            if !provider.is_some_and(|version| requirement.matches(version)) {
+                return Err(ResolveError::PeerDependency {
+                    package: id.to_string(),
+                    peer: peer.to_string(),
+                    requirement: requirement.raw.clone(),
+                    provider: provider.map(ToString::to_string),
+                });
+            }
+            context = context.with(
+                peer.clone(),
+                provider.expect("validated root peer provider").clone(),
+            );
+        }
+        peer_contexts.insert(id.clone(), context);
+    }
+
     Ok(Resolution {
         selected: selected.into_iter().collect(),
         roots,
         dependencies: dependencies.into_iter().collect(),
+        peer_contexts,
     })
 }
 
@@ -998,6 +1057,50 @@ mod tests {
             r.selected[0].to_string(),
             "https://registry.npmjs.org:foo@0.9.0"
         );
+    }
+
+    #[test]
+    fn resolves_peer_requirements_from_root_providers_without_installing_peer_as_root() {
+        let mut plugin = package("plugin", "1.0.0", &[]);
+        plugin.peer_dependencies = BTreeMap::from([("react".parse().unwrap(), req("^18.0.0"))]);
+        let metadata = registry(
+            "https://registry.npmjs.org",
+            vec![plugin, package("react", "18.2.0", &[])],
+        );
+        let result = resolve_graph(
+            &[
+                dep("https://registry.npmjs.org", "plugin", "1.0.0"),
+                dep("https://registry.npmjs.org", "react", "^18.0.0"),
+            ],
+            &[metadata],
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(result.roots.len(), 2);
+        assert_eq!(result.selected.len(), 2);
+        let plugin_id = RegistryPackageId::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            "plugin".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+        );
+        let expected_context = tapid_core::PeerContext::default()
+            .with("react".parse().unwrap(), "18.2.0".parse().unwrap());
+        assert_eq!(
+            result.peer_contexts.get(&plugin_id),
+            Some(&expected_context)
+        );
+
+        let mut missing = package("plugin", "1.0.0", &[]);
+        missing.peer_dependencies = BTreeMap::from([("react".parse().unwrap(), req("^18.0.0"))]);
+        let metadata = registry("https://registry.npmjs.org", vec![missing]);
+        let error = resolve_graph(
+            &[dep("https://registry.npmjs.org", "plugin", "1.0.0")],
+            &[metadata],
+            Default::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ResolveError::PeerDependency { .. }));
+        assert!(error.to_string().contains("peer dependency unresolved"));
     }
 
     #[test]
