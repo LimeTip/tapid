@@ -15,6 +15,7 @@ The CLI supports bounded live npm metadata and artifact retrieval in addition to
 - Distinct parents can select different exact versions of one transitive package.
 - Resolver root selections and exact dependency edges are preserved through lockfile construction, linking, and replay.
 - Project activation uses an operating-system advisory lock and owner-marked staging directories. A later run reclaims only stages matching the prior unlocked owner's exact marker; live, malformed, oversized, symlinked, and ambiguous state fails closed.
+- Online verified trees stay in private transaction staging until lockfile replacement and managed project activation succeed; store publication commits only after activation succeeds. Durable project and store journals define recovery across process crashes: a pending decision restores the pre-operation state, while a committed decision completes cleanup. Readers are coordinated with publication so trees being rolled back are not exposed.
 - Lifecycle scripts remain disabled during installation.
 
 The explicit `--allow-unverified-registry-artifacts` compatibility option can retain npm versions without declared integrity for an interactive online install. It emits a warning and cannot be combined with `--offline` or `--frozen`. It does not turn a locally computed digest into registry authentication.
@@ -22,7 +23,7 @@ The explicit `--allow-unverified-registry-artifacts` compatibility option can re
 ## Remaining limitations
 
 - Live JSR installation and integrity behavior are not verified.
-- Full npm range, alias, tag, peer, optional dependency, workspace, private registry authentication, and platform-condition compatibility are incomplete.
+- Full npm range, alias, tag, automatic peer placement/nested peer lookup, complete optional-dependency and platform-condition semantics, workspace linking, and private registry authentication are incomplete.
 - Metadata and artifact downloads remain sequential; retry delays and per-attempt timeouts are bounded but can extend a single resource fetch.
 - Frozen replay does not yet implement every npm frozen-lockfile policy rule.
 

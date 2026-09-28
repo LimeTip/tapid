@@ -320,6 +320,35 @@ mod tests {
     }
 
     #[test]
+    fn fetched_jsr_artifact_keeps_peer_dependencies_out_of_regular_dependencies() {
+        let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
+        let artifacts = JsrRegistry::new(
+            fake(
+                br#"{"scope":"arvid","name":"is-char","versions":{"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/@arvid__is-char/1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="},"manifest":{"dependencies":{"foo":"^1.0.0"},"peerDependencies":{"foo":"^2.0.0","bar":"^3.0.0"}}}}}"#,
+                "https://jsr.io/@arvid/is-char/meta.json",
+            ),
+            origin,
+        )
+        .fetch("@arvid/is-char")
+        .unwrap();
+        assert_eq!(artifacts.len(), 1);
+        let artifact = &artifacts[0];
+        assert_eq!(
+            artifact.dependencies.get(&"foo".parse().unwrap()),
+            Some(&"^1.0.0".to_owned())
+        );
+        assert_eq!(artifact.dependencies.len(), 1);
+        assert_eq!(
+            artifact.peer_dependencies.get(&"foo".parse().unwrap()),
+            Some(&"^2.0.0".to_owned())
+        );
+        assert_eq!(
+            artifact.peer_dependencies.get(&"bar".parse().unwrap()),
+            Some(&"^3.0.0".to_owned())
+        );
+    }
+
+    #[test]
     fn jsr_unsupported_integrity_is_rejected() {
         let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
         let body = br#"{"scope":"std","name":"path","versions":{"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/a.tgz","integrity":"sha256-deadbeef"}}}}"#;

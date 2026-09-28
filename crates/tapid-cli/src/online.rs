@@ -20,7 +20,7 @@ use tapid_resolver::{
     Dependency, PackageVersionMetadata, RegistryMetadata, Requirement, Resolution,
     ResolutionOptions, ResolveError, resolve_graph,
 };
-use tapid_store::Store;
+use tapid_store::{Store, StoreTransaction};
 
 const NPM: &str = "https://registry.npmjs.org";
 const JSR: &str = "https://jsr.io";
@@ -660,7 +660,16 @@ pub fn resolve_and_fetch(
     store: &Store,
     fixture_path: Option<&Path>,
     allow_missing_integrity: bool,
-) -> Result<(Lockfile, LayoutInput, BTreeMap<String, PathBuf>), String> {
+) -> Result<
+    (
+        Lockfile,
+        LayoutInput,
+        BTreeMap<String, PathBuf>,
+        StoreTransaction,
+    ),
+    String,
+> {
+    let mut store_transaction = store.transaction();
     let fixture = fixture_path.map(fixture).transpose()?;
     fs::create_dir_all(store.root()).map_err(|e| format!("cannot create store: {e}"))?;
     let mut fixture_records = BTreeMap::<(String, String, String), PackageRecord>::new();
@@ -853,17 +862,14 @@ pub fn resolve_and_fetch(
             .map_err(|e| e.to_string())?
             .parse()
             .map_err(|e: tapid_core::DomainError| e.to_string())?;
-        store
-            .ingest_archive(
+        let tree = store_transaction
+            .stage_archive(
                 &bytes,
                 &archive_digest,
                 &tree_digest,
                 ArchiveFormat::TarGz,
                 ArchiveLimits::default(),
             )
-            .map_err(|e| e.to_string())?;
-        let tree = store
-            .verified_tree_path(&tree_digest)
             .map_err(|e| e.to_string())?;
         let key = LockfilePackageKey::new(
             id.registry.clone(),
@@ -1028,6 +1034,7 @@ pub fn resolve_and_fetch(
             dependency_edges: edge_list,
         },
         trees,
+        store_transaction,
     ))
 }
 

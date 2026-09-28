@@ -4,12 +4,25 @@ use tapid_manifest::DependencyKind;
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct AddArgs {
+    #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
-    #[arg(long, conflicts_with_all = ["optional", "peer"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["optional", "peer"],
+        help = "Add dependencies to devDependencies"
+    )]
     pub(crate) dev: bool,
-    #[arg(long, conflicts_with_all = ["dev", "peer"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["dev", "peer"],
+        help = "Add dependencies to optionalDependencies"
+    )]
     pub(crate) optional: bool,
-    #[arg(long, conflicts_with_all = ["dev", "optional"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["dev", "optional"],
+        help = "Record requirements in peerDependencies without installing them as regular dependencies"
+    )]
     pub(crate) peer: bool,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
@@ -17,6 +30,7 @@ pub(crate) struct AddArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct RemoveArgs {
+    #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
@@ -24,8 +38,12 @@ pub(crate) struct RemoveArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct UpdateArgs {
+    #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Update package versions beyond their declared requirements"
+    )]
     pub(crate) latest: bool,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
@@ -39,15 +57,31 @@ pub(crate) struct ReadOnlyArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct CommonArgs {
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = ".",
+        help = "Project root directory"
+    )]
     pub(crate) project_dir: PathBuf,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Select workspace member by name; default is the manifest in --project-dir"
+    )]
     pub(crate) workspace: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_name = "PATH", help = "Verified package store directory")]
     pub(crate) store_dir: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Use a local registry fixture instead of live metadata"
+    )]
     pub(crate) registry_fixture: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Allow online use of registry artifacts without declared integrity; disables offline/frozen replay"
+    )]
     pub(crate) allow_unverified_registry_artifacts: bool,
 }
 
