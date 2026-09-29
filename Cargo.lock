@@ -1490,6 +1490,7 @@ dependencies = [
  "tapid-signatures",
  "tapid-store",
  "time",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1633,13 +1634,14 @@ dependencies = [
 
 [[package]]
 name = "tapid-store"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "fs4",
  "hex",
  "libc",
  "rustix",
  "same-file",
+ "serde_json",
  "sha2",
  "tapid-archive",
  "tapid-core",
