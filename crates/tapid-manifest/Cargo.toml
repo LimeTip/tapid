@@ -14,5 +14,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tapid-core = { version = "0.0.5", path = "../tapid-core" }
 
+[dev-dependencies]
+proptest = "1"
+
 [lib]
 path = "src/lib.rs"

@@ -31,7 +31,7 @@ Released Tapid 0.0.10 first attempts signed discovery, then uses the canonical G
 This is a one-time cutover, expected for 0.0.11. Subsequent releases generate the record in the ordinary draft workflow and need no website edit.
 
 1. Review the client, installers, publisher, website routes, and tests together. Prepare the website change, but do not deploy the new default installer copies while the latest public release lacks `tapid-release-v1.tsv`.
-2. Build and review the first eight-asset draft. Verify the record against all six downloaded archives, including version, immutable URLs, sizes, and hashes. Keep existing public installation working during draft review.
+2. Build and review the first nine-asset draft. Verify the record and signature against all six downloaded archives, including version, immutable URLs, sizes, and hashes. Keep existing public installation working during draft review.
 3. Publish the reviewed draft after approval. Deploy the prepared website routes and installer copies at the controlled cutover, then verify the latest and explicit-version public record routes and public installation. The route returns 404 before a record-bearing release is public, so source tests alone cannot prove this step.
 4. Require the public smoke evidence described below. If the automatic publication run raced the website cutover, rerun the original release-event workflow run after the routes and installer copies are deployed, and retain both attempts. A new manual dispatch does not satisfy the crates.io gate, which requires a successful `release` event run with the exact release title and tag commit.
 5. Verify an installed 0.0.10 upgrades through its existing GitHub fallback to the new binary, then repeats through the new record path with an already-up-to-date result. Keep historical `/stable.json` behavior unchanged; placing unsigned metadata there breaks released signed-discovery clients.
@@ -147,7 +147,8 @@ The tag-triggered workflow must:
 - tolerate brief collection read-after-write delay with bounded retries;
 - require exactly one matching release whose ID equals the create response;
 - generate `tapid-release-v1.tsv` from the immutable archive bytes;
-- upload and read back the exact eight-asset set.
+- generate its `tapid-release-v1.tsv.sig` sidecar with the protected release key;
+- upload and read back the exact nine-asset set.
 
 Warnings and notices are evidence, not harmless decoration. Inspect the workflow annotations even when every job is green. Upgrade deprecated action runtimes and validate announced runner-image migrations in an ordinary pull request before their deadlines.
 
@@ -165,13 +166,14 @@ The expected asset set is exactly:
 - `tapid-<version>-x86_64-pc-windows-msvc.tar.gz`
 - `SHA256SUMS`
 - `tapid-release-v1.tsv`
+- `tapid-release-v1.tsv.sig`
 
-This is eight assets for the new release flow. Historical releases through 0.0.10 have seven assets and no release record. Recovery must use the asset contract of the original tagged workflow; never add metadata to a published historical release.
+This is nine assets for the new release flow. Historical releases through 0.0.10 have seven assets and no release record. Recovery must use the asset contract of the original tagged workflow; never add metadata to a published historical release.
 
 Before publication:
 
 1. Require `draft=true`, `prerelease=false`, the exact tag, and the expected release ID.
-2. Require exactly eight assets and no unexpected names for a new release.
+2. Require exactly nine assets and no unexpected names for a new release.
 3. Record every asset ID, name, and provider-reported size.
 4. Download every asset from GitHub by numeric asset ID into a fresh directory.
 5. Compare each downloaded size with the provider-reported size.
@@ -236,13 +238,13 @@ Immediately verify through an unauthenticated API request that:
 - the public release ID is the reviewed draft ID;
 - `tag_name` equals the intended tag;
 - `draft=false` and `prerelease=false`;
-- the exact eight assets remain present for the new release;
+- the exact nine assets remain present for the new release;
 - the release is immutable when repository release immutability is enabled;
 - the remote annotated tag object and peeled commit are unchanged.
 
 ### 7. Verify public installation
 
-Publication triggers `.github/workflows/release-public-smoke.yml`. Require the resolver to succeed and all three platform jobs:
+Publication triggers `.github/workflows/release-public-smoke.yml` at the tagged commit. Require the resolver to succeed and all three platform jobs:
 
 - `Unix installer (ubuntu-latest)`;
 - `Unix installer (macos-latest)`;
@@ -261,15 +263,50 @@ The scheduled daily run covers Linux; release and manual runs cover Linux, macOS
 
 Read the job steps and logs. Do not infer real installation from workflow success alone.
 
+The supplemental root-script fixture uses `tests/fixtures/validate_consumer_project.js`
+against the installed binary, not a source build. Before tagging, review its
+`releaseContracts` capability table alongside `docs/examples/contracts.json`.
+Unknown published tags fail until reviewed; never infer support from an arbitrary
+command failure. The native Restricted contract requires macOS child execution,
+exact arguments, environment/exit-code checks and receipts. Linux and Windows
+must instead return the specific unsupported-containment rejection with no child
+marker or receipt. The historical uncontained contract retains forwarding checks
+without claiming containment. These expected contracts are not public execution
+evidence.
+
+Pull-request CI also runs `PR published-binary regression` on Linux, macOS and
+Windows. This unprivileged test checks out the exact PR head, downloads the
+installer from the pinned v0.0.10 source commit, and installs that immutable
+published version with the installer's existing checksum and archive checks.
+It uses isolated home, cache/store, binary and temporary directories. The existing
+consumer validator checks install/lifecycle suppression and the platform-specific
+root-script contract.
+The job has read-only repository permissions, no secrets, no release environment
+and no artifact uploads. Its logs identify the PR source, release source, binary
+version and binary digest. These are **pre-merge regression results**, not public
+release readiness, package compatibility, upgrade or website promotion evidence.
+The trusted-main runner and approval gates in public installer smoke remain
+unchanged; this PR lane does not satisfy those release gates.
+
+Latest discovery and the configured Unix upgrade checks depend on their explicit
+installation prerequisites, not on successful supplemental script checks. An
+earlier failure still fails the job. Upgrade reports remain required for attempted
+upgrades; a skipped upgrade does not trigger a misleading missing-artifact failure.
+Inspect skipped prerequisites separately and do not count them as verified.
+
 Do not start crates.io publication until the public release and all three installer jobs are verified against the exact tag commit.
 
 ### 8. Verify and dispatch crates.io publication separately
 
-Run the live dry-run before dispatch:
+Run the publication planner from the tagged source tree (or pass that tree with `--workspace`):
 
 ```sh
-node --experimental-strip-types tools/release/publish.ts --dry-run
+node --experimental-strip-types tools/release/publish.ts --json
 ```
+
+Planning is read-only by default and does not require crates.io credentials. It performs exact-version registry checks, excludes already-published versions, reports transient/429 lookups and unsafe version drift as blockers, and emits dependency-first order. The JSON plan lists the discovered root and nested `Cargo.lock` files, locked metadata checks for nested workspaces, workspace package verification, and the clean `tapid` install/version commands. `--publish` is the only mode that can mutate crates.io; do not use it outside the protected workflow. After a partial publication, rerun the planner and review the remaining dependency-ordered suffix.
+
+The workflow first displays the machine-readable plan in an unprivileged preflight job. Before the protected job can start, preflight must also pass `cargo package --workspace --locked` and the nested integration-workspace metadata check from the exact tagged source tree, using an isolated Cargo home and no publication credentials. This full workspace package verification runs before any OIDC token exists and blocks on package or API/version incompatibilities (including the class tracked by #28). After authentication, the protected job recomputes the plan using read-only Cargo metadata and registry checks, then runs only `cargo publish --no-verify --locked`; it performs no package/build/test verification with the token present. Publication uses the pre-verified immutable tag source, the publish subprocess receives a restricted environment containing the short-lived token and necessary system settings only, and the job waits for exact crates.io read-back before advancing.
 
 Review the exact missing package/version sequence. Every package in that plan must have exactly one crates.io Trusted Publisher configuration with:
 
@@ -285,7 +322,7 @@ The GitHub environment must:
 - require independent approval;
 - prevent the dispatching actor from approving the same deployment.
 
-Dispatch only after a separate explicit approval:
+Dispatch the trusted workflow from `main` only after separate explicit approval:
 
 ```sh
 gh workflow run crates-publication.yml \
@@ -294,11 +331,11 @@ gh workflow run crates-publication.yml \
   -f tag="$TAG"
 ```
 
-The workflow checks out the tag, validates that it is annotated and belongs to `main`, verifies the matching public GitHub release and exact-tag public smoke run, packages the workspace, acquires a short-lived OIDC token, and publishes only missing packages in dependency order.
+The workflow code is checked out from the trusted workflow commit on `main`; it fetches and validates the annotated release tag as a separate immutable source tree. It verifies the matching public GitHub release and exact-tag public smoke run, and refuses to continue if the publication plan changes between preflight and the protected job.
 
 No long-lived crates.io token is stored in GitHub. Do not add one as a fallback.
 
-After environment approval, verify every package through the crates.io API before treating it as published. Then perform a clean registry installation of the exact `tapid` version and execute the installed binary.
+After environment approval, the workflow publishes one crate at a time, reads back each exact version before advancing, then installs the exact `tapid` version from a clean Cargo home and executes the installed binary. If publication partially succeeds or registry propagation is delayed, query crates.io independently and rerun the plan; never blindly repeat `cargo publish` for a version that may already exist.
 
 ### 9. Complete final public read-back
 
@@ -392,7 +429,7 @@ Do not dispatch the create-only workflow again and do not create a duplicate rel
 4. Require all six expected archives and reject extra files.
 5. Generate and verify `SHA256SUMS` from those exact bytes. For the new release flow, also generate the release record using that version's immutable public download directory.
 6. Inspect archive layout and correlate native version checks with the build logs.
-7. List assets already attached to the draft by numeric release ID. Require their names to be a unique subset of the expected asset set and reject unexpected or duplicate names. Use eight assets for the new flow or seven for a historical tagged workflow.
+7. List assets already attached to the draft by numeric release ID. Require their names to be a unique subset of the expected asset set and reject unexpected or duplicate names. Use nine assets for the new flow or seven for a historical tagged workflow.
 8. Download every existing asset by numeric asset ID. Require its size and SHA-256 to match the corresponding locally recovered file exactly. Stop on any mismatch; never overwrite or delete an ambiguous asset.
 9. Upload only expected names that are not already present, using the existing numeric release ID.
 10. Download every resulting asset back by numeric asset ID.
@@ -428,7 +465,7 @@ Published crate versions are immutable.
 
 1. Record every confirmed package/version and the failing package.
 2. Query crates.io independently rather than trusting only the failed workflow log.
-3. Run `tools/release/publish.ts --dry-run` again against the registry.
+3. Run `node --experimental-strip-types tools/release/publish.ts --json` again against the registry.
 4. Require the new plan to contain only the still-missing suffix of the dependency order.
 5. Respect crates.io rate-limit instructions and avoid rapid blind retries.
 6. Redispatch only after confirming the failure is safely resumable and obtaining the required environment approval.

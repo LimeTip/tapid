@@ -26,10 +26,15 @@ cargo test --workspace --all-features --locked
 cargo test --manifest-path tests/integration/Cargo.toml --locked
 cargo metadata --no-deps --format-version 1 --locked
 cargo package --workspace --locked
+cargo nextest run --workspace --all-features --locked
+cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+cargo mutants --package tapid-manifest --timeout 60
 ```
+
+`cargo llvm-cov` produces the same `lcov.info` artifact that CI uploads. `cargo nextest` is an additional Ubuntu test lane; it does not replace the canonical `cargo test` lane. `cargo mutants` is intentionally a focused, periodic test-strength check rather than a per-PR gate because it recompiles and reruns the suite for each mutation.
 
 ## CI gates
 
-The GitHub Actions workflow runs tests, formatting, and Clippy on Ubuntu, macOS, and Windows. A separate Ubuntu security job installs and runs `cargo deny check` and `cargo audit`. Packaging waits for both test and security jobs and validates metadata before `cargo package --workspace --locked`.
+The GitHub Actions workflow runs tests, formatting, and Clippy on Ubuntu, macOS, and Windows. Separate Ubuntu jobs run nextest, generate an LCOV coverage artifact, and enforce dependency policy with `cargo deny check` and `cargo audit`. Packaging waits for both test and security jobs and validates metadata before `cargo package --workspace --locked`.
 
 The security and package jobs use runner-provided workspaces and do not rely on local absolute paths. A local command may be unavailable on a developer machine, but CI treats the corresponding gate as required.

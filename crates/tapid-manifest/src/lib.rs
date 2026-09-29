@@ -5,9 +5,11 @@
 mod error;
 mod model;
 mod parse;
+mod workspace;
 
 pub use error::ManifestError;
-pub use model::{BinTarget, PackageBin, PackageManifest};
+pub use model::{BinTarget, DependencyKind, PackageBin, PackageManifest};
+pub use workspace::{Workspace, WorkspaceMember};
 
 /// Returns the current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -15,6 +17,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn parses_supported_metadata() {
@@ -24,6 +27,74 @@ mod tests {
         assert!(manifest.is_private());
         assert_eq!(manifest.dependencies()["kleur"], "^4.1.5");
         assert_eq!(manifest.scripts()["test"], "cargo test");
+    }
+
+    #[test]
+    fn discovers_workspace_members_in_deterministic_order() {
+        let root = unique_temp_dir("workspace-array");
+        std::fs::create_dir_all(root.join("packages/zeta")).unwrap();
+        std::fs::create_dir_all(root.join("packages/alpha")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/zeta/package.json"),
+            r#"{"name":"zeta","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/alpha/package.json"),
+            r#"{"name":"alpha","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let workspace = Workspace::discover(&root).unwrap();
+        assert_eq!(
+            workspace
+                .members()
+                .iter()
+                .map(|m| m.name())
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert_eq!(
+            workspace.select(Some("zeta")).unwrap().name().as_str(),
+            "zeta"
+        );
+        assert_eq!(workspace.select(None).unwrap().name().as_str(), "root");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_object_workspace_packages_and_rejects_unknown_selection() {
+        let root = unique_temp_dir("workspace-object");
+        std::fs::create_dir_all(root.join("apps/web")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":{"packages":["apps/*"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("apps/web/package.json"),
+            r#"{"name":"web","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let workspace = Workspace::discover(&root).unwrap();
+        assert_eq!(
+            workspace.members()[0].path(),
+            root.join("apps/web/package.json")
+        );
+        assert!(workspace.select(Some("missing")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("tapid-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        path
     }
 
     #[test]
@@ -38,6 +109,39 @@ mod tests {
         assert!(json.contains("\"bin\""));
         assert!(json.contains("\"tool\": \"cli.js\""));
         assert!(json.contains("\"is-char\": \"*\""));
+    }
+
+    #[test]
+    fn mutates_each_dependency_kind_without_cross_contamination() {
+        let manifest = PackageManifest::new("example-app", "1.2.3", true)
+            .unwrap()
+            .with_dependency_kind(DependencyKind::Dependencies, "is-char", "*")
+            .unwrap()
+            .with_dependency_kind(DependencyKind::DevDependencies, "tapid-dev", "^1.0.0")
+            .unwrap()
+            .with_dependency_kind(
+                DependencyKind::OptionalDependencies,
+                "optional-pkg",
+                "~2.0.0",
+            )
+            .unwrap()
+            .with_dependency_kind(DependencyKind::PeerDependencies, "peer-pkg", ">=3.0.0")
+            .unwrap();
+
+        assert_eq!(manifest.dependencies()["is-char"], "*");
+        assert_eq!(manifest.dev_dependencies()["tapid-dev"], "^1.0.0");
+        assert_eq!(manifest.optional_dependencies()["optional-pkg"], "~2.0.0");
+        assert_eq!(manifest.peer_dependencies()["peer-pkg"], ">=3.0.0");
+
+        let manifest = manifest.without_dependency("is-char").unwrap();
+        assert!(!manifest.dependencies().contains_key("is-char"));
+        assert!(manifest.dev_dependencies().contains_key("tapid-dev"));
+        assert!(
+            manifest
+                .optional_dependencies()
+                .contains_key("optional-pkg")
+        );
+        assert!(manifest.peer_dependencies().contains_key("peer-pkg"));
     }
 
     #[test]
@@ -135,6 +239,32 @@ mod tests {
                 ))
                 .is_err()
             );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn dependency_kind_mutation_keeps_one_source_identity_in_one_section(
+            kind_indices in prop::collection::vec(0usize..4, 1..8),
+            requirement in "[[:ascii:]]{0,32}",
+            source_prefix in prop::sample::select(vec!["", "npm:", "jsr:"]),
+        ) {
+            let dependency = format!("{source_prefix}tapid-property");
+            let mut manifest = PackageManifest::new("example-app", "1.0.0", false).unwrap();
+            for kind_index in kind_indices {
+                let kind = match kind_index {
+                    0 => DependencyKind::Dependencies,
+                    1 => DependencyKind::DevDependencies,
+                    2 => DependencyKind::OptionalDependencies,
+                    _ => DependencyKind::PeerDependencies,
+                };
+                manifest = manifest.with_dependency_kind(kind, &dependency, &requirement).unwrap();
+            }
+            let kind = manifest.dependency_kind(&dependency).unwrap();
+            prop_assert_eq!(manifest.dependencies().contains_key(&dependency), kind == DependencyKind::Dependencies);
+            prop_assert_eq!(manifest.dev_dependencies().contains_key(&dependency), kind == DependencyKind::DevDependencies);
+            prop_assert_eq!(manifest.optional_dependencies().contains_key(&dependency), kind == DependencyKind::OptionalDependencies);
+            prop_assert_eq!(manifest.peer_dependencies().contains_key(&dependency), kind == DependencyKind::PeerDependencies);
         }
     }
 }

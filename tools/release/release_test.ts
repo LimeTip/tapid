@@ -194,13 +194,38 @@ test("binary release follows the small draft release flow", async () => {
   assert(!workflow.includes("${{ inputs."));
   assert(workflow.includes("group: release-publication"));
   assert(!workflow.includes("release-manifest"));
-  assert(!workflow.includes("python"));
+  assert(workflow.includes("node --experimental-strip-types tools/release/sign.ts sign release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig"));
   assert(!workflow.includes("gh release edit"));
   const metadata = workflow.indexOf('tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"');
   assert(metadata > workflow.indexOf("tools/release/release.ts checksums release"));
   assert(metadata < createRelease, "the complete metadata asset must exist before draft creation");
-  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv; do"));
+  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig; do"));
   assert(workflow.includes("find release -maxdepth 1 -type f -exec basename {}"), "draft readback must include the metadata asset");
+});
+
+test("release runbook documents the workflow's nine-asset contract", async () => {
+  const workflow = await text(".github/workflows/release-publication.yml");
+  const runbook = await text("docs/release-distribution.md");
+  const assets = [
+    "tapid-<version>-aarch64-apple-darwin.tar.gz",
+    "tapid-<version>-x86_64-apple-darwin.tar.gz",
+    "tapid-<version>-aarch64-unknown-linux-gnu.tar.gz",
+    "tapid-<version>-x86_64-unknown-linux-gnu.tar.gz",
+    "tapid-<version>-aarch64-pc-windows-msvc.tar.gz",
+    "tapid-<version>-x86_64-pc-windows-msvc.tar.gz",
+    "SHA256SUMS",
+    "tapid-release-v1.tsv",
+    "tapid-release-v1.tsv.sig",
+  ];
+  for (const asset of assets) assert(runbook.includes(`\`${asset}\``), `runbook omits ${asset}`);
+  assert(runbook.includes("upload and read back the exact nine-asset set"));
+  assert(runbook.includes("This is nine assets for the new release flow."));
+  assert(runbook.includes("Require exactly nine assets and no unexpected names for a new release."));
+  assert(runbook.includes("the exact nine assets remain present for the new release"));
+  assert(runbook.includes("Use nine assets for the new flow or seven for a historical tagged workflow."));
+  assert(!runbook.includes("exact seven-asset set"));
+  assert(!runbook.includes("Require exactly seven assets and no unexpected names"));
+  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig; do"));
 });
 
 test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM runner", async () => {
@@ -245,6 +270,15 @@ test("repository workflows avoid the deprecated Node.js 20 action majors", async
   );
 });
 
+test("crates publication actions use immutable commit references", async () => {
+  const workflow = await text(".github/workflows/crates-publication.yml");
+  const actionLines = workflow.split(/\r?\n/).filter((line: string) => /^\s*uses:/.test(line));
+  assert(actionLines.length > 0);
+  for (const line of actionLines) {
+    assertMatch(line, /uses:\s+[^@\s]+@[a-f0-9]{40}(?:\s+#\s+v[^\s]+)?$/);
+  }
+});
+
 test("crates publication uses trusted publishing and native Cargo", async () => {
   const workflow = await text(".github/workflows/crates-publication.yml");
   assert(workflow.includes("workflow_dispatch:"));
@@ -252,13 +286,14 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(!workflow.includes("types: [published]"));
   assert(workflow.includes("id-token: write"));
   assert(workflow.includes("environment: crates-io-release"));
-  assert(workflow.includes("rust-lang/crates-io-auth-action@v1"));
+  assert(workflow.includes("rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5"));
   assert(workflow.includes("cargo package --workspace --locked"));
   assert(workflow.includes("node --experimental-strip-types tools/release/publish.ts"));
   assert(workflow.includes('check-tag "$TAG"'));
+  assertEquals(workflow.match(/node --experimental-strip-types "\$GITHUB_WORKSPACE\/tools\/release\/release\.ts" check-tag "\$TAG"/g)?.length, 2);
   assert(!workflow.includes('check-tag "${{ inputs.tag }}"'));
   const ancestry = workflow.indexOf('merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main');
-  const setupNode = workflow.indexOf("actions/setup-node@v7");
+  const setupNode = workflow.indexOf("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
   const repositoryCode = workflow.indexOf("tools/release/release.ts");
   assert(ancestry >= 0 && ancestry < setupNode && ancestry < repositoryCode);
   assert(workflow.includes("git cat-file -t \"refs/tags/$TAG\""));
@@ -271,6 +306,76 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(workflow.includes('test "$successful_jobs" -eq 3'));
   assert(!workflow.includes("python"));
   assert(!workflow.includes("CARGO_REGISTRY_TOKEN: ${{ secrets."));
+  assert(workflow.includes("if: github.ref == 'refs/heads/main'"));
+  assert(workflow.includes("ref: ${{ github.sha }}"));
+  const planStep = workflow.indexOf("Generate reviewable crates.io plan");
+  const packageGate = workflow.indexOf("Verify workspace package compatibility before credentials");
+  const protectedJob = workflow.indexOf("\n  publish:");
+  const authStep = workflow.indexOf("Authenticate to crates.io with OIDC");
+  const publishStep = workflow.indexOf("Publish missing crates one at a time");
+  const approvalRecheck = workflow.indexOf("Recheck public release and installer smoke after approval");
+  assert(planStep >= 0 && planStep < packageGate && packageGate < protectedJob);
+  assert(protectedJob < approvalRecheck && approvalRecheck < authStep && authStep < publishStep);
+  const approvalGate = workflow.slice(approvalRecheck, authStep);
+  assert(approvalGate.includes('gh release view "$TAG"'));
+  assert(approvalGate.includes("release-public-smoke.yml/runs?event=release"));
+  assert(approvalGate.includes('test "$successful_jobs" -eq 3'));
+  const publisher = await text("tools/release/publish.ts");
+  assertEquals(publisher.match(/cwd: workspaceDir/g)?.length, 2);
+  assert(workflow.includes('cd "$TAG_SOURCE" && cargo package --workspace --locked'));
+  assert(workflow.includes('cd "$TAG_SOURCE" && cargo metadata --manifest-path "$TAG_SOURCE/tests/integration/Cargo.toml" --locked --format-version 1'));
+  assert(publisher.includes('"publish", "--no-verify", "--locked"'));
+  assert(publisher.includes("env: cargoMetadataEnv(process.env, cargoHome)"));
+  assert(publisher.includes("env: cargoPublishEnv(process.env, token, cargoHome)"));
+  assert(publisher.includes("CARGO_CHILD_ENV_KEYS"));
+  assert(publisher.includes("metadata.lockfiles = await findCargoLockfiles(workspaceDir)"));
+  assert(publisher.includes("const lockfileVerification = lockfiles"));
+  assert(publisher.includes("cleanInstallVerification"));
+  assert(publisher.includes("cargo install tapid --version ${tapidVersion}"));
+  assert(!publisher.includes("verifyPackage"));
+  assert(!publisher.includes('"package", "--locked", "--package"'));
+  assert(workflow.includes("CARGO_HOME: ${{ runner.temp }}/package-verify-cargo-home"));
+  assert(workflow.includes("--publish --json --expected-plan"));
+  assert(workflow.includes("CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}"));
+
+  assert(workflow.includes("CARGO_HOME: ${{ runner.temp }}/clean-cargo-home"));
+  assert(workflow.includes("for attempt in 1 2 3 4 5 6; do"));
+  assert(workflow.includes('cargo install tapid --version "$VERSION" --locked --root "$INSTALL_ROOT" && break'));
+  assert(workflow.includes('test "$attempt" -lt 6 || exit 1'));
+  assert(workflow.includes("sleep $((attempt * 10))"));
+});
+
+/** Ensure PR smoke validates its exact head without becoming release evidence. */
+test("PR published-binary smoke is exact-head, read-only and separate from release approval", async () => {
+  const ci = await text(".github/workflows/ci.yml");
+  const job = ci.match(/^  pr-published-binary-smoke:\n[\s\S]*?(?=^  [a-z][a-z-]*:|$(?![\s\S]))/m)?.[0];
+  assert(job, "missing unprivileged PR published-binary job");
+  assertMatch(ci, /\n  pull_request:\n/);
+  assert(!ci.includes("pull_request_target:"));
+  assert(job.includes("if: github.event_name == 'pull_request'"));
+  assert(job.includes("contents: read"));
+  assert(job.includes("os: [ubuntu-latest, macos-latest, windows-latest]"));
+  assert(job.includes("ref: ${{ github.event.pull_request.head.sha }}"));
+  assert(job.includes("persist-credentials: false"));
+  assert(job.includes("EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}"));
+  assert(job.includes("$actual -cne $env:EXPECTED_HEAD"));
+  assert(job.includes("RELEASE_TAG: v0.0.10"));
+  assert(job.includes("RELEASE_SOURCE_SHA: 3d5f97c91f08b64a5ace26c2004081d57b88fee2"));
+  for (const forbidden of ["secrets.", "github.token", ": write", "upload-artifact", "download-artifact", "environment:", "continue-on-error", "cargo build", "releases/latest"]) {
+    assert(!job.includes(forbidden), `PR smoke must not contain ${forbidden}`);
+  }
+  for (const variable of ["HOME", "USERPROFILE", "LOCALAPPDATA", "XDG_CACHE_HOME", "TMPDIR", "TEMP", "TMP"]) {
+    assert(job.includes(`\"${variable}=`), `missing isolated ${variable}`);
+  }
+  assert(job.includes("--proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144"));
+  assert(job.includes('sh "$RUNNER_TEMP/pr-published/install.sh" --version "$RELEASE_TAG"'));
+  assert(job.includes("& $installer -Version $env:RELEASE_TAG -Repo LimeTip/tapid -InstallDir $installDir"));
+  assert(job.includes("finally {"));
+  assert(job.includes("SetEnvironmentVariable('Path', $originalUserPath, 'User')"));
+  assert(job.includes("if ($actual -cne 'tapid 0.0.10')"));
+  assert(job.includes("node tests/fixtures/create_consumer_project.js"));
+  assert(job.includes("node tests/fixtures/validate_consumer_project.js --binary $binary --release-tag $env:RELEASE_TAG"));
+  assert(job.includes("pre-merge regression evidence only"));
 });
 
 test("public smoke tests use the published installer and released version", async () => {
@@ -312,7 +417,9 @@ test("public Unix upgrade binds selected source and independent latest destinati
   assert(step.includes('--release-tag "$RELEASE_TAG" --release-source-sha "$RELEASE_SHA"'));
   assert(step.includes('--allow-network'));
   assert(step.includes('--report "$RUNNER_TEMP/doc-contract-upgrade.json"'));
-  assertMatch(unix.slice(retention), /if: always\(\)/);
+  assert(step.includes('id: upgrade'));
+  assert(unix.slice(retention).includes("if: ${{ always() && steps.upgrade.outcome != 'skipped' }}"));
+  assert(unix.slice(retention).includes('if-no-files-found: error'));
   assert(unix.slice(retention).includes('${{ runner.temp }}/doc-contract-upgrade.json'));
   assert(!workflow.includes('contents: write'));
   assert(!workflow.includes('id-token: write'));
@@ -425,7 +532,7 @@ test("public smoke retains tagged installer provenance before execution on both 
   assert(windows.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $installer'));
 });
 
-test("installers use checksums without embedded release signing", async () => {
+test("installers verify signed release records before parsing", async () => {
   for (const path of ["scripts/install.sh", "scripts/install.ps1"]) {
     const installer = await text(path);
     const checksum = installer.indexOf("SHA256SUMS");
@@ -434,16 +541,19 @@ test("installers use checksums without embedded release signing", async () => {
       : installer.indexOf('Save-BoundedHttpsFile $archiveUrl');
     assert(checksum >= 0 && archiveDownload > checksum);
     assert(!installer.includes("release-manifest.json"));
-    assert(!installer.includes("python"));
-    assert(!installer.includes("Ed25519"));
+    assert(installer.includes("release.tsv.sig"));
+    assert(installer.includes("release record signature verification failed"));
   }
+  const verifier = await text("scripts/verify-release-record.py");
+  assert(verifier.includes("tapid-release-v1-signature"));
+  assert(verifier.includes("release record signature verification failed"));
   const shell = await text("scripts/install.sh");
   assert(shell.includes("release archive must contain exactly one member named tapid"));
   assert(shell.includes("MAX_ARCHIVE_BYTES="));
   assert(shell.includes("MAX_BINARY_BYTES="));
   assert(shell.includes("tar -xOzf"));
   assert(shell.includes('[ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0'));
-  assert(shell.includes("configure_path || printf 'Tapid was installed, but PATH could not be updated."));
+  assert(shell.includes("configure_path || fail 'could not safely update the selected shell startup file'"));
   assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\n  mv -f "$STAGED_MARKER"'));
   assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\nmv -f "$STAGED_MARKER"'));
   const powershell = await text("scripts/install.ps1");
@@ -474,6 +584,10 @@ test("installers use checksums without embedded release signing", async () => {
   assert(powershell.includes("$discovery.BaseResponse.RequestMessage.RequestUri"));
   const powershellUninstaller = await text("scripts/uninstall.ps1");
   assert(powershellUninstaller.includes("Test-AbsolutePath"));
+  assert(powershellUninstaller.includes(".tapid-managed"));
+  assert(powershellUninstaller.includes("tapid-managed-v1`n"));
+  assert(powershellUninstaller.includes("refusing foreign install marker"));
+  assert(powershellUninstaller.includes("Remove-Item -LiteralPath $marker -Force"));
   assert(!powershellUninstaller.includes("IsPathRooted"));
 });
 
