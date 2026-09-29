@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::Component;
 use tapid_core::{
     ArtifactDigest, PackageIntegrity, PackageName, PackageVersion, PeerContext, PlatformContext,
     RegistryOrigin,
@@ -146,6 +147,127 @@ fn validate_platform_context(value: &str, original: &str) -> Result<(), Lockfile
         return Err(LockfileError::InvalidPackageKey(original.into()));
     }
     Ok(())
+}
+
+/// Identifies a package provided by a workspace member.
+///
+/// The path is a normalized, workspace-root-relative POSIX path. This type is
+/// representation-only: installation and registry fallback deliberately do not
+/// consume it yet.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct LocalWorkspaceSource {
+    path: String,
+    name: String,
+    version: String,
+}
+
+impl LocalWorkspaceSource {
+    pub fn new(path: &str, name: &str, version: &str) -> Result<Self, LockfileError> {
+        let path = canonical_workspace_path(path)?;
+        Ok(Self {
+            path,
+            name: name
+                .parse::<PackageName>()
+                .map_err(LockfileError::Domain)?
+                .to_string(),
+            version: version
+                .parse::<PackageVersion>()
+                .map_err(LockfileError::Domain)?
+                .to_string(),
+        })
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn identity(&self) -> String {
+        format!("workspace:{}:{}@{}", self.path, self.name, self.version)
+    }
+}
+
+impl<'de> Deserialize<'de> for LocalWorkspaceSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            path: String,
+            name: String,
+            version: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(&wire.path, &wire.name, &wire.version).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for LocalWorkspaceSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.identity().fmt(f)
+    }
+}
+
+impl std::str::FromStr for LocalWorkspaceSource {
+    type Err = LockfileError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let rest = value
+            .strip_prefix("workspace:")
+            .ok_or_else(|| LockfileError::InvalidWorkspaceSource(value.to_owned()))?;
+        let (path, package) = rest
+            .rsplit_once(':')
+            .ok_or_else(|| LockfileError::InvalidWorkspaceSource(value.to_owned()))?;
+        let (name, version) = package
+            .rsplit_once('@')
+            .ok_or_else(|| LockfileError::InvalidWorkspaceSource(value.to_owned()))?;
+        let source = Self::new(path, name, version)?;
+        if source.identity() != value {
+            return Err(LockfileError::InvalidWorkspaceSource(value.to_owned()));
+        }
+        Ok(source)
+    }
+}
+
+fn canonical_workspace_path(value: &str) -> Result<String, LockfileError> {
+    if value.is_empty() || value.contains('\\') || value.chars().any(char::is_control) {
+        return Err(LockfileError::InvalidWorkspaceSource(value.to_owned()));
+    }
+    let path = std::path::Path::new(value);
+    if path.is_absolute() {
+        return Err(LockfileError::InvalidWorkspaceSource(value.to_owned()));
+    }
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| LockfileError::InvalidWorkspaceSource(value.to_owned()))?;
+                if part.is_empty() || part == "." || part.contains(':') {
+                    return Err(LockfileError::InvalidWorkspaceSource(value.to_owned()));
+                }
+                components.push(part);
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(LockfileError::InvalidWorkspaceSource(value.to_owned()));
+            }
+        }
+    }
+    if components.is_empty() {
+        return Err(LockfileError::InvalidWorkspaceSource(value.to_owned()));
+    }
+    Ok(components.join("/"))
 }
 
 /// Exact persisted package identity. Parsing requires an already canonical

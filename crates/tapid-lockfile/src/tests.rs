@@ -1,5 +1,34 @@
-use super::{LockedPackage, Lockfile, VERSION};
+use super::{LocalWorkspaceSource, LockedPackage, Lockfile, VERSION};
+use proptest::prelude::*;
 
+#[test]
+fn local_workspace_source_has_a_canonical_identity_and_rejects_escape_paths() {
+    let source = LocalWorkspaceSource::new("packages/web", "@tapid/web", "1.2.3").unwrap();
+
+    assert_eq!(source.identity(), "workspace:packages/web:@tapid/web@1.2.3");
+    assert_eq!(
+        source,
+        "workspace:packages/web:@tapid/web@1.2.3".parse().unwrap()
+    );
+    assert!(LocalWorkspaceSource::new("../outside", "@tapid/web", "1.2.3").is_err());
+}
+
+#[test]
+fn local_workspace_source_serialization_revalidates_the_canonical_path() {
+    let source = LocalWorkspaceSource::new("packages/web", "@tapid/web", "1.2.3").unwrap();
+    let json = serde_json::to_string(&source).unwrap();
+
+    assert_eq!(
+        serde_json::from_str::<LocalWorkspaceSource>(&json).unwrap(),
+        source
+    );
+    assert!(
+        serde_json::from_str::<LocalWorkspaceSource>(
+            r#"{"path":"../outside","name":"@tapid/web","version":"1.2.3"}"#
+        )
+        .is_err()
+    );
+}
 #[test]
 fn old_main_registry_identity_requires_explicit_recovery() {
     // Produced and round-tripped by pre-canonicalization main (3d5f97c).
@@ -648,6 +677,29 @@ fn package_key_distinguishes_platform_component_boundaries() {
         .unwrap()
     };
     assert_ne!(make(&first).key(), make(&second).key());
+}
+
+proptest! {
+    #[test]
+    fn generated_package_keys_roundtrip_without_changing_identity(
+        package_number in 0u32..1000, peer_count in 0usize..4,
+        os in prop::option::of(prop::sample::select(vec!["linux", "darwin", "windows"])),
+        cpu in prop::option::of(prop::sample::select(vec!["x86_64", "aarch64"])),
+        libc in prop::option::of(prop::sample::select(vec!["gnu", "musl"])),
+    ) {
+        let peer = (0..peer_count).fold(tapid_core::PeerContext::default(), |context, index| {
+            context.with(format!("peer-{index}").parse().unwrap(), format!("1.{index}.0").parse().unwrap())
+        });
+        let platform = tapid_core::PlatformContext::new(os, cpu, libc).unwrap();
+        let package = LockedPackage::new_with_context_and_provenance(
+            "https://registry.example.test", &format!("pkg-{package_number}"), "1.0.0",
+            &format!("sha512-{}", "A".repeat(86)),
+            "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            (&peer, &platform), super::RegistryIntegrityProvenance::RegistryDeclared,
+        ).unwrap();
+        let key = package.key();
+        prop_assert_eq!(key.parse::<super::LockfilePackageKey>().unwrap().to_string(), key);
+    }
 }
 
 #[test]

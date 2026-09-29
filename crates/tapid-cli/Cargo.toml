@@ -18,7 +18,7 @@ tapid-lockfile = { version = "0.0.9", path = "../tapid-lockfile" }
 tapid-manifest = { version = "0.0.7", path = "../tapid-manifest" }
 tapid-core = { version = "0.0.5", path = "../tapid-core" }
 tapid-linker = { version = "0.0.5", path = "../tapid-linker" }
-tapid-store = { version = "0.0.5", path = "../tapid-store" }
+tapid-store = { version = "0.0.6", path = "../tapid-store" }
 tapid-archive = { version = "0.0.4", path = "../tapid-archive" }
 tapid-registry-client = { version = "0.0.5", path = "../tapid-registry-client" }
 tapid-resolver = { version = "0.0.5", path = "../tapid-resolver" }
@@ -33,3 +33,10 @@ base64 = "0.23"
 time = { version = "0.3", features = ["formatting"] }
 libc = "0.2"
 fs4 = "1.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+proptest = "1"
+ed25519-dalek = "2"

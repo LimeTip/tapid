@@ -14,10 +14,14 @@ STAGED_MARKER=""
 PATH_UPDATED=0
 PATH_RC=""
 PATH_COMMAND=""
+PATH_MARKER_BEGIN="# tapid-path-managed-v1"
+PATH_MARKER_END="# end tapid-path-managed-v1"
 MAX_RECORD_BYTES=262144
 MAX_CHECKSUM_BYTES=1048576
 MAX_ARCHIVE_BYTES=536870912
 MAX_BINARY_BYTES=536870912
+VERIFIER_URL="https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py"
+VERIFIER_SHA256="4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d"
 
 usage() {
   cat <<'USAGE'
@@ -58,24 +62,43 @@ valid_version() {
 }
 
 configure_path() {
-  case ":${PATH:-}:" in *:"$INSTALL_DIR":*) return ;; esac
   [ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0
   shell_name="${SHELL-}"; shell_name="${shell_name##*/}"
   case "$shell_name" in
-    zsh) PATH_RC="$HOME/.zprofile"; PATH_COMMAND=". \"$PATH_RC\""; path_line='export PATH="$HOME/.local/bin:$PATH"' ;;
+    zsh) PATH_RC="$HOME/.zprofile"; PATH_COMMAND=". \"$PATH_RC\"" ;;
     bash)
       if [ -f "$HOME/.bash_profile" ]; then PATH_RC="$HOME/.bash_profile"; else PATH_RC="$HOME/.bashrc"; fi
-      PATH_COMMAND=". \"$PATH_RC\""; path_line='export PATH="$HOME/.local/bin:$PATH"'
+      PATH_COMMAND=". \"$PATH_RC\""
       ;;
-    fish)
-      PATH_RC="$HOME/.config/fish/config.fish"; PATH_COMMAND="source \"$PATH_RC\""
-      path_line='set -gx PATH $HOME/.local/bin $PATH'; mkdir -p "$(dirname "$PATH_RC")" || return 1
-      ;;
-    *) PATH_RC="$HOME/.profile"; PATH_COMMAND=". \"$PATH_RC\""; path_line='export PATH="$HOME/.local/bin:$PATH"' ;;
+    sh|dash|ksh) PATH_RC="$HOME/.profile"; PATH_COMMAND=". \"$PATH_RC\"" ;;
+    *) return 1 ;;
   esac
-  if [ ! -f "$PATH_RC" ] || ! grep -Fqx "$path_line" "$PATH_RC"; then
-    printf '\n# Tapid\n%s\n' "$path_line" >> "$PATH_RC" || return 1
+  path_line='export PATH="$HOME/.local/bin:$PATH"'
+  if [ -L "$PATH_RC" ] || { [ -e "$PATH_RC" ] && { [ ! -f "$PATH_RC" ] || [ ! -O "$PATH_RC" ] || [ ! -r "$PATH_RC" ] || [ ! -w "$PATH_RC" ]; }; }; then
+    return 1
   fi
+  if [ ! -e "$PATH_RC" ]; then
+    [ -O "$HOME" ] && [ ! -d "$HOME" -o ! -L "$HOME" ] || return 1
+    : > "$PATH_RC" || return 1
+  fi
+  begin_count="$(grep -Fxc "$PATH_MARKER_BEGIN" "$PATH_RC" || true)"
+  end_count="$(grep -Fxc "$PATH_MARKER_END" "$PATH_RC" || true)"
+  [ "$begin_count" -eq 0 ] && [ "$end_count" -eq 0 ] || {
+    [ "$begin_count" -eq 1 ] && [ "$end_count" -eq 1 ] || return 1
+    grep -Fqx "$path_line" "$PATH_RC" || return 1
+  }
+  if [ "$begin_count" -eq 0 ]; then
+    if grep -Fqx "$path_line" "$PATH_RC"; then
+      PATH="$INSTALL_DIR${PATH:+:$PATH}"; export PATH
+      return 0
+    fi
+    path_tmp="$(mktemp "$PATH_RC.tapid.XXXXXX")" || return 1
+    if ! { cat "$PATH_RC"; printf '%s\n%s\n%s\n' "$PATH_MARKER_BEGIN" "$path_line" "$PATH_MARKER_END"; } > "$path_tmp"; then
+      rm -f "$path_tmp"; return 1
+    fi
+    mv -f "$path_tmp" "$PATH_RC" || { rm -f "$path_tmp"; return 1; }
+  fi
+  grep -Fqx "$PATH_MARKER_BEGIN" "$PATH_RC" && grep -Fqx "$PATH_MARKER_END" "$PATH_RC" || return 1
   PATH="$INSTALL_DIR${PATH:+:$PATH}"; export PATH; PATH_UPDATED=1
 }
 
@@ -125,10 +148,10 @@ if [ "$SOURCE_REF_SET" -eq 1 ]; then
   STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
   STAGED_MARKER="$(mktemp "$INSTALL_DIR/.tapid-marker.tmp.XXXXXX")"
   install -m 0755 "$tmp_dir/root/bin/tapid" "$STAGED_BINARY"
+  configure_path || fail 'could not safely update the selected shell startup file'
   printf 'tapid-managed-v1\n' > "$STAGED_MARKER"
   mv -f "$STAGED_MARKER" "$INSTALL_DIR/.tapid-managed"; STAGED_MARKER=""
   mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""
-  configure_path || printf 'Tapid was installed, but PATH could not be updated.\n' >&2
   printf 'Installed Tapid from %s into %s/tapid\n' "$SOURCE_REF" "$INSTALL_DIR"
   print_path_guidance
   exit 0
@@ -191,7 +214,20 @@ else
     END { exit bad }
   ' || fail "release record URL must be a safe HTTPS URL"
   curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize "$MAX_RECORD_BYTES" "$record_url" -o "$tmp_dir/release.tsv" 2>/dev/null || fail "could not download release record"
+  curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize "$MAX_RECORD_BYTES" "$record_url.sig" -o "$tmp_dir/release.tsv.sig" 2>/dev/null || fail "could not download release record signature"
   [ "$(wc -c < "$tmp_dir/release.tsv" | tr -d '[:space:]')" -le "$MAX_RECORD_BYTES" ] || fail "release record exceeds the size limit"
+  [ -s "$tmp_dir/release.tsv.sig" ] || fail "release record signature is empty"
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required to verify the release record signature"
+  curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize 262144 "$VERIFIER_URL" -o "$tmp_dir/verify-release-record.py" 2>/dev/null || fail "could not download release record verifier"
+  if command -v shasum >/dev/null 2>&1; then
+    verifier_hash="$(shasum -a 256 "$tmp_dir/verify-release-record.py" | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    verifier_hash="$(sha256sum "$tmp_dir/verify-release-record.py" | awk '{print $1}')"
+  else
+    fail "shasum or sha256sum is required"
+  fi
+  [ "$verifier_hash" = "$VERIFIER_SHA256" ] || fail "release record verifier checksum mismatch"
+  python3 "$tmp_dir/verify-release-record.py" "$tmp_dir/release.tsv" "$tmp_dir/release.tsv.sig" || fail "release record signature verification failed"
   [ "$(tail -c 1 "$tmp_dir/release.tsv" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || fail "release record must end with a newline"
   # Some awk implementations truncate strings at NUL. Check raw bytes first.
   [ "$(LC_ALL=C tr -d '\011\012\040-\176' < "$tmp_dir/release.tsv" | wc -c | tr -d '[:space:]')" = 0 ] || fail "release record must contain ASCII fields and LF lines"
@@ -248,9 +284,9 @@ probe_bytes="$(tar -xOzf "$tmp_dir/$archive" tapid | dd bs=1048576 count=513 2>/
 STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
 STAGED_MARKER="$(mktemp "$INSTALL_DIR/.tapid-marker.tmp.XXXXXX")"
 install -m 0755 "$tmp_dir/extracted/tapid" "$STAGED_BINARY"
+configure_path || fail 'could not safely update the selected shell startup file'
 printf 'tapid-managed-v1\n' > "$STAGED_MARKER"
 mv -f "$STAGED_MARKER" "$INSTALL_DIR/.tapid-managed"; STAGED_MARKER=""
 mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""
-configure_path || printf 'Tapid was installed, but PATH could not be updated.\n' >&2
 printf 'Installed Tapid v%s into %s/tapid\n' "$VERSION" "$INSTALL_DIR"
 print_path_guidance

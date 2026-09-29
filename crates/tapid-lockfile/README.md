@@ -18,6 +18,8 @@ The current contract provides:
 - Rejection of local file URLs, query fragments, userinfo, and unsupported versions.
 - Rejection of missing registry-integrity provenance and missing, dangling, duplicate, unordered, or noncanonical schema 6 roots.
 - Round-trip parsing and replay validation through `Lockfile::from_json` and `validate_replay`.
+- Package identities retain registry origin and canonical peer-provider context; direct roots identify the exact selected package instances without merging peer requirements into regular dependencies.
+- Online lifecycle operations publish staged verified trees only while holding the store's cross-process lock, retain rollback until project activation succeeds, and commit the resulting lockfile/project state together; failed activation restores prior shared-store entries.
 
 Schema `4` remains readable for controlled compatibility when package keys use canonical or empty contexts and SHA-512 integrity is padded canonically. When such a schema 4 lockfile has no explicit roots, CLI replay reconstructs one root per direct manifest identity by applying all requirements from dependencies, development dependencies, and optional dependencies, then selecting the highest matching locked version. Replay rejects missing candidates, ambiguous package contexts, and legacy values that cannot be normalized safely. Schema versions earlier than 4 are not accepted implicitly.
 

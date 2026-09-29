@@ -413,6 +413,8 @@ jobs:
           $expected = "tapid " + $env:RELEASE_TAG.TrimStart('v')
           if ($actual -ne $expected) { throw "Expected '$expected', got '$actual'" }
       - name: Check previous-version upgrade and repeat upgrade through the public service
+        id: upgrade
+        if: ${{ !cancelled() && steps.install_published.outcome == 'success' && steps.install_latest.outcome == 'success' }}
         timeout-minutes: 5
         shell: pwsh
         env:
