@@ -3,6 +3,14 @@ use serde::Serialize;
 use std::{collections::BTreeMap, path::PathBuf};
 use tapid_core::{PackageName, PackageVersion};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DependencyKind {
+    Dependencies,
+    DevDependencies,
+    OptionalDependencies,
+    PeerDependencies,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageManifest {
     pub(crate) name: PackageName,
@@ -83,7 +91,26 @@ impl PackageManifest {
     }
 
     /// Add or update a regular dependency while preserving deterministic output.
-    pub fn with_dependency(mut self, name: &str, requirement: &str) -> Result<Self, ManifestError> {
+    pub fn with_dependency(self, name: &str, requirement: &str) -> Result<Self, ManifestError> {
+        self.set_dependency(DependencyKind::Dependencies, name, requirement)
+    }
+
+    /// Add or update a dependency in the selected manifest section.
+    pub fn with_dependency_kind(
+        self,
+        kind: DependencyKind,
+        name: &str,
+        requirement: &str,
+    ) -> Result<Self, ManifestError> {
+        self.set_dependency(kind, name, requirement)
+    }
+
+    fn set_dependency(
+        mut self,
+        kind: DependencyKind,
+        name: &str,
+        requirement: &str,
+    ) -> Result<Self, ManifestError> {
         let validation_name = name
             .strip_prefix("npm:")
             .or_else(|| name.strip_prefix("jsr:"))
@@ -91,9 +118,56 @@ impl PackageManifest {
         validation_name
             .parse::<PackageName>()
             .map_err(ManifestError::InvalidPackageName)?;
-        self.dependencies
-            .insert(name.to_owned(), requirement.trim().to_owned());
+        for dependencies in [
+            &mut self.dependencies,
+            &mut self.dev_dependencies,
+            &mut self.optional_dependencies,
+            &mut self.peer_dependencies,
+        ] {
+            dependencies.remove(name);
+        }
+        let dependencies = match kind {
+            DependencyKind::Dependencies => &mut self.dependencies,
+            DependencyKind::DevDependencies => &mut self.dev_dependencies,
+            DependencyKind::OptionalDependencies => &mut self.optional_dependencies,
+            DependencyKind::PeerDependencies => &mut self.peer_dependencies,
+        };
+        dependencies.insert(name.to_owned(), requirement.trim().to_owned());
         Ok(self)
+    }
+
+    /// Remove a dependency from every manifest section.
+    pub fn without_dependency(mut self, name: &str) -> Result<Self, ManifestError> {
+        let validation_name = name
+            .strip_prefix("npm:")
+            .or_else(|| name.strip_prefix("jsr:"))
+            .unwrap_or(name);
+        validation_name
+            .parse::<PackageName>()
+            .map_err(ManifestError::InvalidPackageName)?;
+        for dependencies in [
+            &mut self.dependencies,
+            &mut self.dev_dependencies,
+            &mut self.optional_dependencies,
+            &mut self.peer_dependencies,
+        ] {
+            dependencies.remove(name);
+        }
+        Ok(self)
+    }
+
+    pub fn dependency_kind(&self, name: &str) -> Option<DependencyKind> {
+        [
+            (DependencyKind::Dependencies, &self.dependencies),
+            (DependencyKind::DevDependencies, &self.dev_dependencies),
+            (
+                DependencyKind::OptionalDependencies,
+                &self.optional_dependencies,
+            ),
+            (DependencyKind::PeerDependencies, &self.peer_dependencies),
+        ]
+        .into_iter()
+        .find_map(|(kind, dependencies)| dependencies.contains_key(name).then_some(kind))
     }
     pub fn dev_dependencies(&self) -> &BTreeMap<String, String> {
         &self.dev_dependencies

@@ -176,6 +176,7 @@ pub struct RegistryArtifact {
     pub artifact_url: String,
     pub integrity: Option<PackageIntegrity>,
     pub dependencies: BTreeMap<PackageName, String>,
+    pub peer_dependencies: BTreeMap<PackageName, String>,
     pub optional_dependencies: BTreeMap<PackageName, String>,
     pub platform: PackagePlatform,
     pub registry_kind: RegistryKind,

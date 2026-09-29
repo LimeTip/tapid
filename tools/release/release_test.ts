@@ -194,13 +194,38 @@ test("binary release follows the small draft release flow", async () => {
   assert(!workflow.includes("${{ inputs."));
   assert(workflow.includes("group: release-publication"));
   assert(!workflow.includes("release-manifest"));
-  assert(!workflow.includes("python"));
+  assert(workflow.includes("node --experimental-strip-types tools/release/sign.ts sign release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig"));
   assert(!workflow.includes("gh release edit"));
   const metadata = workflow.indexOf('tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"');
   assert(metadata > workflow.indexOf("tools/release/release.ts checksums release"));
   assert(metadata < createRelease, "the complete metadata asset must exist before draft creation");
-  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv; do"));
+  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig; do"));
   assert(workflow.includes("find release -maxdepth 1 -type f -exec basename {}"), "draft readback must include the metadata asset");
+});
+
+test("release runbook documents the workflow's nine-asset contract", async () => {
+  const workflow = await text(".github/workflows/release-publication.yml");
+  const runbook = await text("docs/release-distribution.md");
+  const assets = [
+    "tapid-<version>-aarch64-apple-darwin.tar.gz",
+    "tapid-<version>-x86_64-apple-darwin.tar.gz",
+    "tapid-<version>-aarch64-unknown-linux-gnu.tar.gz",
+    "tapid-<version>-x86_64-unknown-linux-gnu.tar.gz",
+    "tapid-<version>-aarch64-pc-windows-msvc.tar.gz",
+    "tapid-<version>-x86_64-pc-windows-msvc.tar.gz",
+    "SHA256SUMS",
+    "tapid-release-v1.tsv",
+    "tapid-release-v1.tsv.sig",
+  ];
+  for (const asset of assets) assert(runbook.includes(`\`${asset}\``), `runbook omits ${asset}`);
+  assert(runbook.includes("upload and read back the exact nine-asset set"));
+  assert(runbook.includes("This is nine assets for the new release flow."));
+  assert(runbook.includes("Require exactly nine assets and no unexpected names for a new release."));
+  assert(runbook.includes("the exact nine assets remain present for the new release"));
+  assert(runbook.includes("Use nine assets for the new flow or seven for a historical tagged workflow."));
+  assert(!runbook.includes("exact seven-asset set"));
+  assert(!runbook.includes("Require exactly seven assets and no unexpected names"));
+  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig; do"));
 });
 
 test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM runner", async () => {
@@ -460,7 +485,7 @@ test("public smoke retains tagged installer provenance before execution on both 
   assert(windows.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $installer'));
 });
 
-test("installers use checksums without embedded release signing", async () => {
+test("installers verify signed release records before parsing", async () => {
   for (const path of ["scripts/install.sh", "scripts/install.ps1"]) {
     const installer = await text(path);
     const checksum = installer.indexOf("SHA256SUMS");
@@ -469,16 +494,19 @@ test("installers use checksums without embedded release signing", async () => {
       : installer.indexOf('Save-BoundedHttpsFile $archiveUrl');
     assert(checksum >= 0 && archiveDownload > checksum);
     assert(!installer.includes("release-manifest.json"));
-    assert(!installer.includes("python"));
-    assert(!installer.includes("Ed25519"));
+    assert(installer.includes("release.tsv.sig"));
+    assert(installer.includes("release record signature verification failed"));
   }
+  const verifier = await text("scripts/verify-release-record.py");
+  assert(verifier.includes("tapid-release-v1-signature"));
+  assert(verifier.includes("release record signature verification failed"));
   const shell = await text("scripts/install.sh");
   assert(shell.includes("release archive must contain exactly one member named tapid"));
   assert(shell.includes("MAX_ARCHIVE_BYTES="));
   assert(shell.includes("MAX_BINARY_BYTES="));
   assert(shell.includes("tar -xOzf"));
   assert(shell.includes('[ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0'));
-  assert(shell.includes("configure_path || printf 'Tapid was installed, but PATH could not be updated."));
+  assert(shell.includes("configure_path || fail 'could not safely update the selected shell startup file'"));
   assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\n  mv -f "$STAGED_MARKER"'));
   assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\nmv -f "$STAGED_MARKER"'));
   const powershell = await text("scripts/install.ps1");
@@ -509,6 +537,10 @@ test("installers use checksums without embedded release signing", async () => {
   assert(powershell.includes("$discovery.BaseResponse.RequestMessage.RequestUri"));
   const powershellUninstaller = await text("scripts/uninstall.ps1");
   assert(powershellUninstaller.includes("Test-AbsolutePath"));
+  assert(powershellUninstaller.includes(".tapid-managed"));
+  assert(powershellUninstaller.includes("tapid-managed-v1`n"));
+  assert(powershellUninstaller.includes("refusing foreign install marker"));
+  assert(powershellUninstaller.includes("Remove-Item -LiteralPath $marker -Force"));
   assert(!powershellUninstaller.includes("IsPathRooted"));
 });
 

@@ -275,11 +275,13 @@ fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
                 dependencies: [("dep".parse().unwrap(), "1.0.0".parse().unwrap())]
                     .into_iter()
                     .collect(),
+                peer_dependencies: BTreeMap::new(),
             },
             PackageVersionMetadata {
                 name: "dep".parse().unwrap(),
                 version: "1.0.0".parse().unwrap(),
                 dependencies: BTreeMap::new(),
+                peer_dependencies: BTreeMap::new(),
             },
         ],
     )

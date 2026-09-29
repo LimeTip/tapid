@@ -10,7 +10,9 @@ mod validation;
 mod tests;
 
 pub use error::LockfileError;
-pub use model::{LockedPackage, Lockfile, LockfilePackageKey, RegistryIntegrityProvenance};
+pub use model::{
+    LocalWorkspaceSource, LockedPackage, Lockfile, LockfilePackageKey, RegistryIntegrityProvenance,
+};
 
 /// Returns the current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -11,4 +11,4 @@
 
 The CLI also replays verified package trees at `STORE/trees/<sha256-...>/`. Each tree requires a regular `.tapid-tree` marker containing the exact digest before offline or frozen installation can use it. Replay uses atomically reserved snapshots, advisory ownership leases, stale-state recovery, copy-on-write cloning where supported, and verified byte-copy fallback. The store does not fetch registry metadata, run lifecycle scripts, garbage-collect, or provide a remote cache.
 
-`tapid-archive` is a direct dependency used to validate extraction limits and canonical tree digests before activation.
+`tapid-archive` is a direct dependency used to validate extraction limits and canonical tree digests before activation. `StoreTransaction` stages verified package trees privately, publishes them under a cross-process store lock, and keeps rollback available until the caller commits. Readers that consume a verified tree path across operations must hold `StoreReadGuard` for the duration; replay snapshots acquire that guard while copying.

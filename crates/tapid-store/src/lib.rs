@@ -31,6 +31,28 @@ pub enum IngestResult {
     AlreadyPresent(PathBuf),
 }
 
+/// Holds a shared store lock while callers consume paths returned by `Store`.
+pub struct StoreReadGuard {
+    _file: File,
+}
+
+/// Stages verified trees privately until they are published as one transaction.
+pub struct StoreTransaction {
+    store: Store,
+    staged: Vec<(ArtifactDigest, PathBuf)>,
+}
+
+/// Published trees remain rollback-capable until this guard is committed.
+pub struct StorePublication {
+    _file: File,
+    published: Vec<PathBuf>,
+    staged_paths: Vec<(PathBuf, PathBuf)>,
+    trees_dir: PathBuf,
+    created_trees_dir: bool,
+    pending_journal: Option<PathBuf>,
+    committed: bool,
+}
+
 #[derive(Debug)]
 pub enum IngestError {
     Io(io::Error),
@@ -80,8 +102,25 @@ impl Store {
     pub fn root(&self) -> &Path {
         &self.root
     }
+    pub fn recover_transactions(&self) -> Result<(), IngestError> {
+        drop(lock_file(&self.root, true)?);
+        Ok(())
+    }
     pub fn artifact_path(&self, digest: &ArtifactDigest) -> PathBuf {
         self.root.join("artifacts").join(digest.as_str())
+    }
+
+    pub fn read_guard(&self) -> Result<StoreReadGuard, IngestError> {
+        Ok(StoreReadGuard {
+            _file: lock_file(&self.root, false)?,
+        })
+    }
+
+    pub fn transaction(&self) -> StoreTransaction {
+        StoreTransaction {
+            store: self.clone(),
+            staged: Vec::new(),
+        }
     }
 
     pub fn ingest_archive(
@@ -92,50 +131,28 @@ impl Store {
         format: tapid_archive::ArchiveFormat,
         limits: tapid_archive::ArchiveLimits,
     ) -> Result<IngestResult, IngestError> {
-        let actual_archive = digest_bytes(bytes);
-        if actual_archive != expected_archive.as_str() {
-            return Err(IngestError::DigestMismatch {
-                expected: expected_archive.clone(),
-                actual: actual_archive,
-            });
-        }
+        let mut transaction = self.transaction();
+        transaction.stage_archive(bytes, expected_archive, expected_tree, format, limits)?;
         let destination = self.root.join("trees").join(expected_tree.as_str());
-        if destination.exists() {
-            self.verified_tree_path(expected_tree)?;
-            return Ok(IngestResult::AlreadyPresent(destination));
-        }
-        let staging = private_staging_path(&self.root, "tree")?;
-        tapid_archive::extract_to(bytes, format, &staging, limits)?;
-        let actual_tree = tapid_archive::canonical_tree_digest(&staging)?;
-        if actual_tree != expected_tree.as_str() {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(IngestError::TreeDigestMismatch {
-                expected: expected_tree.clone(),
-                actual: actual_tree,
-            });
-        }
-        fs::write(staging.join(".tapid-tree"), expected_tree.as_str())?;
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        match fs::rename(&staging, &destination) {
-            Ok(()) => Ok(IngestResult::Activated(destination)),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_dir_all(&staging);
-                self.verified_tree_path(expected_tree)?;
-                Ok(IngestResult::AlreadyPresent(destination))
-            }
-            Err(e) => {
-                let _ = fs::remove_dir_all(&staging);
-                Err(e.into())
-            }
+        let publication = transaction.publish()?;
+        let already_present = !publication.published.contains(&destination);
+        publication.commit()?;
+        if already_present {
+            Ok(IngestResult::AlreadyPresent(destination))
+        } else {
+            Ok(IngestResult::Activated(destination))
         }
     }
 
-    /// Returns a verified package tree. A tree is activated by store tooling
-    /// with a `.tapid-tree` marker containing the exact digest; install never
-    /// trusts an unmarked directory or a symlink.
+    /// Verifies a package tree's exact marker and canonical digest. The returned
+    /// path is checked under a short-lived shared lock; callers that continue
+    /// using it must hold `read_guard()` for the entire use.
     pub fn verified_tree_path(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
+        let _guard = self.read_guard()?;
+        self.verified_tree_path_unlocked(digest)
+    }
+
+    fn verified_tree_path_unlocked(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
         let path = self.marked_tree_path(digest)?;
         let actual = tapid_archive::canonical_tree_digest(&path)?;
         if actual != digest.as_str() {
@@ -298,6 +315,7 @@ impl Store {
     where
         F: FnOnce(&Path, &Path) -> io::Result<bool>,
     {
+        let _guard = self.read_guard()?;
         let source = self.marked_tree_path(digest)?;
         let reservation = create_replay_reservation(&self.root)?;
         let reservation_identity = Handle::from_path(&reservation)?;
@@ -337,56 +355,10 @@ impl Store {
         digest: &ArtifactDigest,
         source: &Path,
     ) -> Result<PathBuf, IngestError> {
-        if !source.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "tree source is not a directory",
-            )
-            .into());
-        }
-        let actual = tapid_archive::canonical_tree_digest(source)?;
-        if actual != digest.as_str() {
-            return Err(IngestError::TreeDigestMismatch {
-                expected: digest.clone(),
-                actual,
-            });
-        }
-        let destination = self.root.join("trees").join(digest.as_str());
-        if destination.exists() {
-            self.verified_tree_path(digest)?;
-            return Ok(destination);
-        }
-        let staging = create_private_staging_dir(&self.root, "tree")?;
-        let result = (|| {
-            copy_tree_contents(source, &staging)?;
-            let staged_digest = tapid_archive::canonical_tree_digest(&staging)?;
-            if staged_digest != digest.as_str() {
-                return Err(IngestError::TreeDigestMismatch {
-                    expected: digest.clone(),
-                    actual: staged_digest,
-                });
-            }
-            fs::write(staging.join(".tapid-tree"), digest.as_str())?;
-            fs::create_dir_all(destination.parent().expect("tree destination has parent"))?;
-            match fs::rename(&staging, &destination) {
-                Ok(()) => Ok(destination.clone()),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
-                    ) =>
-                {
-                    let existing = self.verified_tree_path(digest);
-                    let _ = fs::remove_dir_all(&staging);
-                    existing
-                }
-                Err(error) => Err(error.into()),
-            }
-        })();
-        if result.is_err() {
-            let _ = fs::remove_dir_all(&staging);
-        }
-        result
+        let mut transaction = self.transaction();
+        transaction.stage_verified_tree(digest, source)?;
+        transaction.publish()?.commit()?;
+        Ok(self.root.join("trees").join(digest.as_str()))
     }
 
     /// Stream bytes into a private staging file, verify SHA-256, then atomically
@@ -791,6 +763,705 @@ fn digest_file(path: &Path) -> io::Result<String> {
     Ok(format!("sha256-{}", hex::encode(hasher.finalize())))
 }
 
+impl StoreTransaction {
+    pub fn new(store: Store) -> Self {
+        store.transaction()
+    }
+
+    pub fn stage_archive(
+        &mut self,
+        bytes: &[u8],
+        expected_archive: &ArtifactDigest,
+        expected_tree: &ArtifactDigest,
+        format: tapid_archive::ArchiveFormat,
+        limits: tapid_archive::ArchiveLimits,
+    ) -> Result<PathBuf, IngestError> {
+        let actual_archive = digest_bytes(bytes);
+        if actual_archive != expected_archive.as_str() {
+            return Err(IngestError::DigestMismatch {
+                expected: expected_archive.clone(),
+                actual: actual_archive,
+            });
+        }
+        if let Some((_, path)) = self
+            .staged
+            .iter()
+            .find(|(digest, _)| digest == expected_tree)
+        {
+            return Ok(path.clone());
+        }
+        let staging = private_staging_path(&self.store.root, "transaction-archive")?;
+        let result = (|| {
+            tapid_archive::extract_to(bytes, format, &staging, limits)?;
+            let actual_tree = tapid_archive::canonical_tree_digest(&staging)?;
+            if actual_tree != expected_tree.as_str() {
+                return Err(IngestError::TreeDigestMismatch {
+                    expected: expected_tree.clone(),
+                    actual: actual_tree,
+                });
+            }
+            fs::write(staging.join(".tapid-tree"), expected_tree.as_str())?;
+            self.staged.push((expected_tree.clone(), staging.clone()));
+            Ok(staging.clone())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
+    }
+
+    /// Copies and verifies a tree in private staging. The returned path is not
+    /// visible under the shared `trees/` namespace until `publish` is called.
+    pub fn stage_verified_tree(
+        &mut self,
+        digest: &ArtifactDigest,
+        source: &Path,
+    ) -> Result<PathBuf, IngestError> {
+        if let Some((_, staged)) = self.staged.iter().find(|(existing, _)| existing == digest) {
+            return Ok(staged.clone());
+        }
+        let actual = tapid_archive::canonical_tree_digest(source)?;
+        if actual != digest.as_str() {
+            return Err(IngestError::TreeDigestMismatch {
+                expected: digest.clone(),
+                actual,
+            });
+        }
+        let staging = create_private_staging_dir(&self.store.root, "transaction-tree")?;
+        let result = (|| {
+            copy_tree_contents(source, &staging)?;
+            let staged_digest = tapid_archive::canonical_tree_digest(&staging)?;
+            if staged_digest != digest.as_str() {
+                return Err(IngestError::TreeDigestMismatch {
+                    expected: digest.clone(),
+                    actual: staged_digest,
+                });
+            }
+            fs::write(staging.join(".tapid-tree"), digest.as_str())?;
+            self.staged.push((digest.clone(), staging.clone()));
+            Ok(staging.clone())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
+    }
+
+    /// Publishes staged trees under an exclusive lock. The returned guard must
+    /// remain alive through project activation; dropping it rolls back only the
+    /// trees introduced by this transaction while readers remain blocked.
+    pub fn publish(self) -> Result<StorePublication, IngestError> {
+        self.publish_inner(None)
+    }
+
+    pub fn publish_for_lifecycle(
+        self,
+        coordinator: &Path,
+    ) -> Result<StorePublication, IngestError> {
+        self.publish_inner(Some(coordinator))
+    }
+
+    fn publish_inner(
+        mut self,
+        coordinator: Option<&Path>,
+    ) -> Result<StorePublication, IngestError> {
+        let file = lock_file(&self.store.root, true).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot acquire store publication lock: {error}"),
+            )
+        })?;
+        let trees_dir = self.store.root.join("trees");
+        let created_trees_dir = !trees_dir.exists() && !self.staged.is_empty();
+        let mut new_digests = Vec::new();
+        for (digest, _) in &self.staged {
+            let destination = trees_dir.join(digest.as_str());
+            if destination.exists() {
+                self.store.verified_tree_path_unlocked(digest)?;
+            } else {
+                new_digests.push(digest.as_str().to_owned());
+            }
+        }
+        for (digest, staged) in &self.staged {
+            let destination = trees_dir.join(digest.as_str());
+            if !destination.exists() {
+                sync_tree(staged)?;
+            }
+        }
+        let pending_journal = match coordinator {
+            Some(coordinator) => Some(write_store_journal(
+                &self.store.root,
+                coordinator,
+                &new_digests,
+                created_trees_dir,
+            )?),
+            None => None,
+        };
+        let mut published = Vec::new();
+        let mut staged_paths = Vec::new();
+        for (digest, staged) in &self.staged {
+            let destination = trees_dir.join(digest.as_str());
+            let operation = if destination.exists() {
+                self.store.verified_tree_path_unlocked(digest).map(|_| {
+                    let _ = fs::remove_dir_all(staged);
+                    staged_paths.push((staged.clone(), destination.clone()));
+                })
+            } else {
+                fs::create_dir_all(destination.parent().expect("tree destination has parent"))
+                    .map_err(IngestError::from)
+                    .and_then(|()| fs::rename(staged, &destination).map_err(IngestError::from))
+                    .map(|()| {
+                        published.push(destination.clone());
+                        staged_paths.push((staged.clone(), destination.clone()));
+                    })
+            };
+            if let Err(error) = operation {
+                for path in &published {
+                    match fs::remove_dir_all(path) {
+                        Ok(()) => {}
+                        Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => {}
+                        Err(cleanup) => return Err(IngestError::Io(cleanup)),
+                    }
+                }
+                if trees_dir.exists() {
+                    sync_directory(&trees_dir)?;
+                }
+                if created_trees_dir {
+                    match fs::remove_dir(&trees_dir) {
+                        Ok(()) => {}
+                        Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => {}
+                        Err(cleanup) => return Err(IngestError::Io(cleanup)),
+                    }
+                    sync_directory(&self.store.root)?;
+                }
+                if let Some(journal) = &pending_journal {
+                    remove_store_journal(journal)?;
+                }
+                return Err(error);
+            }
+        }
+        let sync_result = if trees_dir.exists() {
+            sync_directory(&trees_dir).and_then(|()| {
+                if created_trees_dir {
+                    sync_directory(&self.store.root)
+                } else {
+                    Ok(())
+                }
+            })
+        } else {
+            Ok(())
+        };
+        if let Err(error) = sync_result {
+            for path in &published {
+                match fs::remove_dir_all(path) {
+                    Ok(()) => {}
+                    Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => {}
+                    Err(cleanup) => return Err(IngestError::Io(cleanup)),
+                }
+            }
+            if trees_dir.exists() {
+                sync_directory(&trees_dir)?;
+            }
+            if created_trees_dir {
+                match fs::remove_dir(&trees_dir) {
+                    Ok(()) => {}
+                    Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => {}
+                    Err(cleanup) => return Err(IngestError::Io(cleanup)),
+                }
+                sync_directory(&self.store.root)?;
+            }
+            if let Some(journal) = &pending_journal {
+                remove_store_journal(journal)?;
+            }
+            return Err(error.into());
+        }
+        self.staged.clear();
+        Ok(StorePublication {
+            _file: file,
+            published,
+            staged_paths,
+            trees_dir,
+            created_trees_dir,
+            pending_journal,
+            committed: false,
+        })
+    }
+}
+
+impl Drop for StoreTransaction {
+    fn drop(&mut self) {
+        for (_, path) in &self.staged {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+impl Drop for StorePublication {
+    fn drop(&mut self) {
+        if !self.committed {
+            for path in &self.published {
+                let _ = fs::remove_dir_all(path);
+            }
+            if self.created_trees_dir {
+                let _ = fs::remove_dir(&self.trees_dir);
+            }
+        }
+    }
+}
+
+impl StorePublication {
+    pub fn resolve_path(&self, staged_or_existing: &Path) -> PathBuf {
+        self.staged_paths
+            .iter()
+            .find_map(|(staged, published)| {
+                (staged == staged_or_existing).then(|| published.clone())
+            })
+            .unwrap_or_else(|| staged_or_existing.to_owned())
+    }
+
+    pub fn rollback(mut self) -> Result<(), IngestError> {
+        let mut first_error = None;
+        for path in &self.published {
+            match fs::remove_dir_all(path) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound && first_error.is_none() => {
+                    first_error = Some(IngestError::Io(error));
+                }
+                _ => {}
+            }
+        }
+        if self.created_trees_dir {
+            match fs::remove_dir(&self.trees_dir) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound && first_error.is_none() => {
+                    first_error = Some(IngestError::Io(error));
+                }
+                _ => {}
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        if self.trees_dir.exists() {
+            sync_directory(&self.trees_dir)?;
+        }
+        if self.created_trees_dir {
+            sync_directory(
+                self.trees_dir
+                    .parent()
+                    .expect("store trees directory has a parent"),
+            )?;
+        }
+        if let Some(journal) = &self.pending_journal {
+            remove_store_journal(journal)?;
+        }
+        self.committed = true;
+        Ok(())
+    }
+
+    pub fn commit(mut self) -> Result<(), IngestError> {
+        self.committed = true;
+        if let Some(journal) = &self.pending_journal {
+            remove_store_journal(journal)?;
+        }
+        Ok(())
+    }
+}
+
+fn sync_tree(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged verified tree is not a regular directory",
+        ));
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        let metadata = fs::symlink_metadata(&child)?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            sync_tree(&child)?;
+        } else if metadata.is_file() {
+            #[cfg(windows)]
+            if metadata.permissions().readonly() {
+                // Archive extraction and verified-tree copying sync file contents before
+                // applying read-only permissions; opening these files for flushing fails.
+                continue;
+            }
+            #[cfg(windows)]
+            let sync = OpenOptions::new().write(true).open(&child);
+            #[cfg(not(windows))]
+            let sync = OpenOptions::new().read(true).open(&child);
+            sync.and_then(|file| file.sync_all()).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("cannot sync staged store file {}: {error}", child.display()),
+                )
+            })?;
+        } else if !metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged verified tree contains an unsupported file type",
+            ));
+        }
+    }
+    sync_directory(path)
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    let sync = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0x1 | 0x2 | 0x4)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .and_then(|directory| directory.sync_all())
+    };
+    #[cfg(not(windows))]
+    let sync = File::open(path).and_then(|directory| directory.sync_all());
+    sync.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot sync store directory {}: {error}", path.display()),
+        )
+    })
+}
+
+const STORE_JOURNAL: &str = ".tapid-transaction.json";
+const STORE_JOURNAL_MAX: u64 = 1024 * 1024;
+// Lifecycle coordinator embeds base64 manifest and lockfile snapshots (each <= 32 MiB).
+const COORDINATOR_MAX: u64 = 96 * 1024 * 1024;
+
+fn write_store_journal(
+    root: &Path,
+    coordinator: &Path,
+    created: &[String],
+    created_trees_dir: bool,
+) -> Result<PathBuf, IngestError> {
+    let coordinator = coordinator.canonicalize()?;
+    let metadata = fs::symlink_metadata(&coordinator)?;
+    if !metadata.file_type().is_file() || metadata.len() > COORDINATOR_MAX {
+        return Err(
+            io::Error::new(io::ErrorKind::InvalidData, "invalid lifecycle coordinator").into(),
+        );
+    }
+    let coordinator_record: serde_json::Value = serde_json::from_slice(&fs::read(&coordinator)?)
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid lifecycle coordinator: {error}"),
+            )
+        })?;
+    if coordinator_record
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || coordinator_record
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            != Some("Prepared")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "lifecycle coordinator is not prepared",
+        )
+        .into());
+    }
+    let coordinator_text = coordinator.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "lifecycle coordinator path is not UTF-8",
+        )
+    })?;
+    let record = serde_json::json!({
+        "version": 1,
+        "coordinator": coordinator_text,
+        "owner": coordinator_record.get("owner").and_then(serde_json::Value::as_str).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "lifecycle coordinator lacks owner")
+        })?,
+        "created": created,
+        "created_trees_dir": created_trees_dir,
+    });
+    let path = root.join(STORE_JOURNAL);
+    let temp = root.join(format!(
+        "{STORE_JOURNAL}.{}-{}.tmp",
+        std::process::id(),
+        unique_nonce()
+    ));
+    let bytes = serde_json::to_vec(&record)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let write_result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, &path)?;
+        sync_directory(root)?;
+        Ok::<(), io::Error>(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    write_result?;
+    Ok(path)
+}
+
+fn recover_store_journal(root: &Path) -> io::Result<()> {
+    let path = root.join(STORE_JOURNAL);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store transaction journal is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.len() > STORE_JOURNAL_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "store transaction journal is oversized",
+        ));
+    }
+    let record: serde_json::Value = serde_json::from_slice(&fs::read(&path)?).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("malformed store transaction journal: {error}"),
+        )
+    })?;
+    if record.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported store transaction journal version",
+        ));
+    }
+    let coordinator = record
+        .get("coordinator")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store transaction journal lacks coordinator",
+            )
+        })?;
+    let coordinator_path = Path::new(coordinator);
+    if !coordinator_path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "store coordinator path is not absolute",
+        ));
+    }
+    let owner = record
+        .get("owner")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store transaction journal lacks owner",
+            )
+        })?;
+    let coordinator_parent = coordinator_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "store coordinator path has no project directory",
+        )
+    })?;
+    let project_gone = match fs::symlink_metadata(coordinator_parent) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error),
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store coordinator project path is not a regular directory",
+            ));
+        }
+        Ok(_) => false,
+    };
+    let committed = if project_gone {
+        false
+    } else {
+        if coordinator_path
+            .canonicalize()
+            .map(|canonical| canonical != coordinator_path)
+            .unwrap_or(true)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store coordinator path is unavailable or noncanonical",
+            ));
+        }
+        let coordinator_meta = fs::symlink_metadata(coordinator_path)?;
+        if !coordinator_meta.file_type().is_file() || coordinator_meta.len() > COORDINATOR_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid store transaction coordinator",
+            ));
+        }
+        let decision: serde_json::Value = serde_json::from_slice(&fs::read(coordinator_path)?)
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("malformed lifecycle coordinator: {error}"),
+                )
+            })?;
+        if decision.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+            || decision.get("owner").and_then(serde_json::Value::as_str) != Some(owner)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store coordinator identity mismatch",
+            ));
+        }
+        match decision.get("state").and_then(serde_json::Value::as_str) {
+            Some("Prepared") => false,
+            Some("Committed") => true,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unknown lifecycle transaction decision",
+                ));
+            }
+        }
+    };
+    let created_trees_dir = record
+        .get("created_trees_dir")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store transaction journal lacks trees-directory baseline",
+            )
+        })?;
+    if !committed {
+        let created = record
+            .get("created")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "store journal lacks created tree list",
+                )
+            })?;
+        for digest_text in created {
+            let digest_text = digest_text.as_str().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid tree digest in store journal",
+                )
+            })?;
+            let digest = digest_text
+                .parse::<ArtifactDigest>()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            let tree = root.join("trees").join(digest.as_str());
+            match fs::symlink_metadata(&tree) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+                Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "refusing to remove non-directory transaction tree",
+                    ));
+                }
+                Ok(_) => {
+                    let actual = tapid_archive::canonical_tree_digest(&tree).map_err(|error| {
+                        io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                    })?;
+                    let marker = fs::read(tree.join(".tapid-tree"))?;
+                    if actual != digest.as_str() || marker != digest.as_str().as_bytes() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "refusing to remove unverified transaction tree",
+                        ));
+                    }
+                    fs::remove_dir_all(&tree)?;
+                }
+            }
+        }
+    }
+    if !committed {
+        let trees = root.join("trees");
+        if trees.exists() {
+            sync_directory(&trees)?;
+        }
+        if created_trees_dir {
+            match fs::remove_dir(&trees) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            sync_directory(root)?;
+        }
+    }
+    remove_store_journal(&path).map_err(|error| io::Error::other(error.to_string()))
+}
+
+fn remove_store_journal(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            if let Some(parent) = path.parent() {
+                sync_directory(parent)?;
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn lock_file(root: &Path, exclusive: bool) -> io::Result<File> {
+    fs::create_dir_all(root)?;
+    let path = root.join(".store.lock");
+    let open = || -> io::Result<File> {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "store lock path is not a regular file",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+    };
+    if exclusive {
+        let file = open()?;
+        FileExt::lock(&file)?;
+        if let Err(error) = recover_store_journal(root) {
+            let _ = FileExt::unlock(&file);
+            return Err(error);
+        }
+        return Ok(file);
+    }
+    loop {
+        let file = open()?;
+        FileExt::lock_shared(&file)?;
+        if !root.join(STORE_JOURNAL).exists() {
+            return Ok(file);
+        }
+        let _ = FileExt::unlock(&file);
+        drop(file);
+
+        let recovery_lock = open()?;
+        FileExt::lock(&recovery_lock)?;
+        let recovery = recover_store_journal(root);
+        let _ = FileExt::unlock(&recovery_lock);
+        recovery?;
+    }
+}
+
 fn digest_bytes(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
@@ -889,6 +1560,179 @@ mod tests {
             unique_nonce()
         ))
     }
+
+    fn make_marked_tree(root: &Path, contents: &str) -> ArtifactDigest {
+        let tree = root.join("trees").join(unique_nonce().to_string());
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(tree.join("package.json"), contents).unwrap();
+        let digest = tapid_archive::canonical_tree_digest(&tree)
+            .unwrap()
+            .parse::<ArtifactDigest>()
+            .unwrap();
+        fs::write(tree.join(".tapid-tree"), digest.as_str()).unwrap();
+        let destination = root.join("trees").join(digest.as_str());
+        fs::rename(&tree, &destination).unwrap();
+        digest
+    }
+
+    fn coordinator(project: &Path, state: &str) -> PathBuf {
+        fs::create_dir_all(project).unwrap();
+        let path = project.join(".tapid-lifecycle-journal.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 1,
+                "owner": "123-deadbeef\\n",
+                "state": state,
+                "manifest_existed": true,
+                "manifest": "e30=",
+                "lock_existed": false,
+                "lock": "",
+                "marker_existed": false,
+                "node_modules_existed": false,
+                "store_root": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn prepared_coordinator_recovery_removes_only_transaction_created_tree() {
+        let root = root();
+        let project = root.with_extension("project");
+        let store_root = root.join("store");
+        fs::create_dir_all(&store_root).unwrap();
+        let old_digest = make_marked_tree(&store_root, "old baseline");
+        let created_digest = make_marked_tree(&store_root, "new transaction");
+        let coordinator = coordinator(&project, "Prepared");
+        write_store_journal(
+            &store_root,
+            &coordinator,
+            &[created_digest.as_str().to_owned()],
+            false,
+        )
+        .unwrap();
+
+        Store::new(&store_root).recover_transactions().unwrap();
+
+        assert!(store_root.join("trees").join(old_digest.as_str()).exists());
+        assert!(
+            !store_root
+                .join("trees")
+                .join(created_digest.as_str())
+                .exists()
+        );
+        assert!(!store_root.join(STORE_JOURNAL).exists());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn committed_coordinator_recovery_keeps_published_tree() {
+        let root = root();
+        let project = root.with_extension("project");
+        let store_root = root.join("store");
+        fs::create_dir_all(&store_root).unwrap();
+        let digest = make_marked_tree(&store_root, "committed tree");
+        let coordinator = coordinator(&project, "Prepared");
+        write_store_journal(
+            &store_root,
+            &coordinator,
+            &[digest.as_str().to_owned()],
+            false,
+        )
+        .unwrap();
+        let mut decision: serde_json::Value =
+            serde_json::from_slice(&fs::read(&coordinator).unwrap()).unwrap();
+        decision["state"] = serde_json::Value::String("Committed".into());
+        fs::write(&coordinator, decision.to_string()).unwrap();
+
+        Store::new(&store_root).recover_transactions().unwrap();
+
+        assert!(store_root.join("trees").join(digest.as_str()).exists());
+        assert!(!store_root.join(STORE_JOURNAL).exists());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn coordinator_larger_than_store_journal_limit_is_supported() {
+        let root = root();
+        let project = root.with_extension("large-coordinator-project");
+        let store_root = root.join("store");
+        fs::create_dir_all(&store_root).unwrap();
+        let digest = make_marked_tree(&store_root, "large coordinator transaction");
+        let coordinator = coordinator(&project, "Prepared");
+        let mut decision: serde_json::Value =
+            serde_json::from_slice(&fs::read(&coordinator).unwrap()).unwrap();
+        decision["padding"] = serde_json::Value::String("x".repeat(2 * 1024 * 1024));
+        fs::write(&coordinator, decision.to_string()).unwrap();
+
+        write_store_journal(
+            &store_root,
+            &coordinator,
+            &[digest.as_str().to_owned()],
+            false,
+        )
+        .unwrap();
+        Store::new(&store_root).recover_transactions().unwrap();
+
+        assert!(!store_root.join("trees").join(digest.as_str()).exists());
+        assert!(!store_root.join(STORE_JOURNAL).exists());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn missing_project_directory_rolls_back_orphaned_transaction() {
+        let root = root();
+        let project = root.with_extension("orphaned-project");
+        let store_root = root.join("store");
+        fs::create_dir_all(&store_root).unwrap();
+        let digest = make_marked_tree(&store_root, "orphaned transaction");
+        let coordinator = coordinator(&project, "Prepared");
+        write_store_journal(
+            &store_root,
+            &coordinator,
+            &[digest.as_str().to_owned()],
+            false,
+        )
+        .unwrap();
+        fs::remove_dir_all(&project).unwrap();
+
+        Store::new(&store_root).recover_transactions().unwrap();
+
+        assert!(!store_root.join("trees").join(digest.as_str()).exists());
+        assert!(!store_root.join(STORE_JOURNAL).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_coordinator_fails_closed_without_deleting_tree() {
+        let root = root();
+        let project = root.with_extension("project");
+        let store_root = root.join("store");
+        fs::create_dir_all(&store_root).unwrap();
+        let digest = make_marked_tree(&store_root, "do not delete");
+        let coordinator = coordinator(&project, "Prepared");
+        write_store_journal(
+            &store_root,
+            &coordinator,
+            &[digest.as_str().to_owned()],
+            false,
+        )
+        .unwrap();
+        fs::remove_file(&coordinator).unwrap();
+
+        assert!(Store::new(&store_root).recover_transactions().is_err());
+        assert!(store_root.join("trees").join(digest.as_str()).exists());
+        assert!(store_root.join(STORE_JOURNAL).exists());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(project);
+    }
+
     #[test]
     fn streams_verifies_and_atomically_activates() {
         let root = root();
@@ -944,6 +1788,160 @@ mod tests {
             store.ingest(&expected, Cursor::new(b"expected")),
             Err(IngestError::DigestMismatch { .. })
         ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn transaction_stages_tree_without_publishing_it_and_rolls_back_on_drop() {
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"transactional").unwrap();
+        let digest = tapid_archive::canonical_tree_digest(&source)
+            .unwrap()
+            .parse::<ArtifactDigest>()
+            .unwrap();
+        let store = Store::new(root.join("store"));
+        let mut transaction = StoreTransaction::new(store.clone());
+
+        let staged = transaction.stage_verified_tree(&digest, &source).unwrap();
+        let published = store.root().join("trees").join(digest.as_str());
+        assert!(staged.is_dir());
+        assert!(!published.exists());
+        let publication = transaction.publish().unwrap();
+        assert!(published.is_dir());
+        drop(publication);
+        assert!(!published.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verified_tree_lookup_does_not_deadlock_when_caller_holds_read_guard() {
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"{\"name\":\"guarded\"}").unwrap();
+        let digest: ArtifactDigest = tapid_archive::canonical_tree_digest(&source)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let store = Store::new(&root);
+        store.activate_verified_tree(&digest, &source).unwrap();
+        let _guard = store.read_guard().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker_store = store.clone();
+        std::thread::spawn(move || {
+            let result = worker_store.verified_tree_path(&digest);
+            let _ = sent.send(result.is_ok());
+        });
+
+        assert!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("verified-tree lookup blocked while a read guard was held")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn store_readers_cannot_observe_trees_that_will_be_rolled_back() {
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"hidden-until-commit").unwrap();
+        let digest = tapid_archive::canonical_tree_digest(&source)
+            .unwrap()
+            .parse::<ArtifactDigest>()
+            .unwrap();
+        let store = Store::new(root.join("store"));
+        let mut transaction = store.transaction();
+        transaction.stage_verified_tree(&digest, &source).unwrap();
+        let publication = transaction.publish().unwrap();
+        let reader_store = store.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let visible = reader_store.verified_tree_path(&digest).is_ok();
+            result_tx.send(visible).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_millis(40))
+                .is_err()
+        );
+        drop(publication);
+        assert!(
+            !result_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+        );
+        reader.join().unwrap();
+        assert!(!store.root().join("trees").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn transaction_commit_keeps_new_tree_published() {
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"committed").unwrap();
+        let digest = tapid_archive::canonical_tree_digest(&source)
+            .unwrap()
+            .parse::<ArtifactDigest>()
+            .unwrap();
+        let store = Store::new(root.join("store"));
+        let mut transaction = StoreTransaction::new(store.clone());
+        transaction.stage_verified_tree(&digest, &source).unwrap();
+
+        transaction.publish().unwrap().commit().unwrap();
+
+        assert!(store.verified_tree_path(&digest).is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn transaction_rollback_never_removes_a_preexisting_tree() {
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("package.json"), b"preexisting").unwrap();
+        let digest = tapid_archive::canonical_tree_digest(&source)
+            .unwrap()
+            .parse::<ArtifactDigest>()
+            .unwrap();
+        let store = Store::new(root.join("store"));
+        store.activate_verified_tree(&digest, &source).unwrap();
+        let mut transaction = StoreTransaction::new(store.clone());
+        transaction.stage_verified_tree(&digest, &source).unwrap();
+
+        transaction.publish().unwrap();
+
+        assert!(store.verified_tree_path(&digest).is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_tree_flushes_read_only_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = root();
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("read-only");
+        fs::write(&file, b"verified bytes").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+
+        assert!(sync_tree(&root).is_ok());
         let _ = fs::remove_dir_all(root);
     }
 
