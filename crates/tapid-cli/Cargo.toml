@@ -18,7 +18,7 @@ tapid-lockfile = { version = "0.0.9", path = "../tapid-lockfile" }
 tapid-manifest = { version = "0.0.7", path = "../tapid-manifest" }
 tapid-core = { version = "0.0.5", path = "../tapid-core" }
 tapid-linker = { version = "0.0.5", path = "../tapid-linker" }
-tapid-store = { version = "0.0.5", path = "../tapid-store" }
+tapid-store = { version = "0.0.6", path = "../tapid-store" }
 tapid-archive = { version = "0.0.4", path = "../tapid-archive" }
 tapid-registry-client = { version = "0.0.5", path = "../tapid-registry-client" }
 tapid-resolver = { version = "0.0.5", path = "../tapid-resolver" }
