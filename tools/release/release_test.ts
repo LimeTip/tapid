@@ -313,8 +313,13 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   const protectedJob = workflow.indexOf("\n  publish:");
   const authStep = workflow.indexOf("Authenticate to crates.io with OIDC");
   const publishStep = workflow.indexOf("Publish missing crates one at a time");
+  const approvalRecheck = workflow.indexOf("Recheck public release and installer smoke after approval");
   assert(planStep >= 0 && planStep < packageGate && packageGate < protectedJob);
-  assert(protectedJob < authStep && authStep < publishStep);
+  assert(protectedJob < approvalRecheck && approvalRecheck < authStep && authStep < publishStep);
+  const approvalGate = workflow.slice(approvalRecheck, authStep);
+  assert(approvalGate.includes('gh release view "$TAG"'));
+  assert(approvalGate.includes("release-public-smoke.yml/runs?event=release"));
+  assert(approvalGate.includes('test "$successful_jobs" -eq 3'));
   const publisher = await text("tools/release/publish.ts");
   assertEquals(publisher.match(/cwd: workspaceDir/g)?.length, 2);
   assert(workflow.includes('cd "$TAG_SOURCE" && cargo package --workspace --locked'));
