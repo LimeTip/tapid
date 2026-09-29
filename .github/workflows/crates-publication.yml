@@ -206,7 +206,11 @@ jobs:
         run: |
           set -euo pipefail
           INSTALL_ROOT="$RUNNER_TEMP/tapid-clean-install"
-          cargo install tapid --version "$VERSION" --locked --root "$INSTALL_ROOT"
+          for attempt in 1 2 3 4 5 6; do
+            cargo install tapid --version "$VERSION" --locked --root "$INSTALL_ROOT" && break
+            test "$attempt" -lt 6 || exit 1
+            sleep $((attempt * 10))
+          done
           ACTUAL="$("$INSTALL_ROOT/bin/tapid" --version)"
           test "$ACTUAL" = "tapid $VERSION" || {
             echo "clean Cargo install returned unexpected version: $ACTUAL" >&2

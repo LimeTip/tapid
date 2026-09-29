@@ -334,6 +334,10 @@ test("crates publication uses trusted publishing and native Cargo", async () => 
   assert(workflow.includes("CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}"));
 
   assert(workflow.includes("CARGO_HOME: ${{ runner.temp }}/clean-cargo-home"));
+  assert(workflow.includes("for attempt in 1 2 3 4 5 6; do"));
+  assert(workflow.includes('cargo install tapid --version "$VERSION" --locked --root "$INSTALL_ROOT" && break'));
+  assert(workflow.includes('test "$attempt" -lt 6 || exit 1'));
+  assert(workflow.includes("sleep $((attempt * 10))"));
 });
 
 /** Ensure PR smoke validates its exact head without becoming release evidence. */
