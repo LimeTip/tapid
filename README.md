@@ -46,7 +46,16 @@ tapid i is-char
 
 ## Current package-management implementation
 
-The consumer workflow exercises deterministic dependency resolution, npm metadata and artifact retrieval, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline/frozen replay, and suppression of dependency lifecycle scripts. This is a bounded npm-compatible subset, not full npm or pnpm compatibility. Experimental root-script execution exists as a separate feature, but it is not Tapid's runtime or package-management focus; see [ADR 0005](docs/adr/0005-default-on-root-script-sandbox.md) for its current status and limitations.
+The consumer workflow exercises deterministic dependency resolution, npm metadata and artifact retrieval, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline/frozen replay, and suppression of dependency lifecycle scripts. This is a bounded npm-compatible subset, not full npm or pnpm compatibility.
+
+The package-management toolchain also includes:
+
+- `init`, `install`/`i`, `add`, `remove`, and `update` for project manifests and dependencies.
+- `outdated` to compare locked versions with registry metadata, and `prune` to remove unreachable managed packages.
+- A content-addressed local store and lockfile replay for offline installs, with transactional activation of managed `node_modules`.
+- Safe archive extraction and integrity checks, plus generated package `bin` shims. Dependency lifecycle scripts are suppressed during installation.
+
+These controls improve repeatability and reject certain mismatches, but they do not currently detect vulnerable or malicious packages or authenticate publishers. See [Supported subset and limitations](#supported-subset-and-limitations) for exact behavior. Experimental root-script execution is separate and not the product focus; see [ADR 0005](docs/adr/0005-default-on-root-script-sandbox.md) for its status and limitations.
 
 For a clean checkout, build Tapid and create the consumer fixture used by CI:
 
