@@ -86,6 +86,22 @@ Native macOS 26 cannot run that ManagedTree profile. The backend rejects it befo
 
 ## Current consumer workflow
 
+### Synthetic news-site npm baseline
+
+`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/TypeScript workload used to establish a repeatable npm CI baseline. It contains no Tapid comparison, private code, customer information, or secrets. The fixture pins Next.js, React, React DOM, and TypeScript exactly and commits its npm v3 lockfile. From the repository root, run:
+
+```bash
+cd examples/news-site-consumer
+node --version
+npm --version
+npm ci
+npm run build
+npm test
+npm start
+```
+
+The server listens on `http://127.0.0.1:3000`; `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Next.js build output is written to `examples/news-site-consumer/.next/` (ignored via the fixture-local `.gitignore`). CI runs this sequence on Ubuntu 24.04 with Node.js 22, records the Node.js and npm versions, and polls the endpoint before asserting the marker.
+
 The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, root-script policy selection, argument forwarding, and lifecycle suppression. Experimental native macOS 26 Restricted execution is available; ManagedTree and non-macOS native containment remain unavailable.
 
 For a clean checkout, build Tapid and create the readable consumer fixture through the same helper used by CI:
