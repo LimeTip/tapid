@@ -7,7 +7,13 @@
 [![License](https://img.shields.io/crates/l/tapid)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
-Tapid is a JavaScript and TypeScript package manager written in Rust. It provides deterministic dependency installation, verified package storage, Node-compatible `node_modules` materialization, lockfile replay, and explicit root-script execution. The current implementation targets a small, explicit npm-compatible subset. Development releases are available from GitHub Releases; production support is not yet available.
+Tapid is a security-focused JavaScript and TypeScript **package manager**, written in Rust. It resolves dependencies, checks downloaded bytes against registry-declared integrity metadata by default, stores verified content, and materializes a reproducible `node_modules` tree from `tapid.lock`. Tapid is not a JavaScript runtime: today its primary compatibility target is the Node.js/npm ecosystem, and projects use their own runtime to execute code. Tapid's package format and install workflow are designed around that ecosystem; using Deno or Bun is a future compatibility goal, not a guarantee of current support. The current implementation covers a small, explicit npm-compatible subset. Development releases are available from GitHub Releases; production support is not yet available.
+
+## Scope: secure package installation
+
+Tapid focuses on safer dependency selection and installation: use explicit package identities and integrity checks, make installs deterministic and recoverable, and build toward clearer version comparisons and stronger trust evidence. Vulnerability intelligence, publisher/provenance signals, and human audit attestations are product goals—not capabilities to assume are implemented today. Check [Supported subset and limitations](#supported-subset-and-limitations) for current guarantees.
+
+Tapid does not replace Node.js, Deno, Bun, or another JavaScript runtime. The installed `node_modules` layout is intended for Node.js-compatible projects. We aim to support projects using other runtimes where their package conventions are compatible, but runtime-specific compatibility must be validated rather than assumed.
 
 ## Install Tapid
 
@@ -36,66 +42,20 @@ tapid init
 tapid i is-char
 ```
 
-The desired flow for a development script is to add a `dev` entry to `package.json`, check in its permissions in `tapid.toml`, then run:
+`tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`. Use your project's runtime and its tooling to run scripts. The experimental `tapid run` command is a separate, Node.js-only script launcher; it does not provide a runtime or select Deno/Bun.
 
-```bash
-tapid run dev
-```
+## Current package-management implementation
 
-`tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`.
+The consumer workflow exercises deterministic dependency resolution, npm metadata and artifact retrieval, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline/frozen replay, and suppression of dependency lifecycle scripts. This is a bounded npm-compatible subset, not full npm or pnpm compatibility. Experimental root-script execution exists as a separate feature, but it is not Tapid's runtime or package-management focus; see [ADR 0005](docs/adr/0005-default-on-root-script-sandbox.md) for its current status and limitations.
 
-ADR 0005 separates authority containment from lifecycle ownership. The implemented schema requires compatible profiles to select **Restricted** explicitly with `assurance = "restricted"`: requested filesystem and network restrictions must be installed before spawn, descendants retain those restrictions, and the child receives explicit environment, `PATH`, and descriptor state. Omitting `assurance` preserves the legacy-safe **ManagedTree** contract rather than silently weakening an existing strict profile. ManagedTree additionally requires race-free kernel- or VM-owned descendants, a complete cleanup/kill boundary, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before spawn.
-
-macOS 26 has an experimental Restricted backend implemented with Apple's deprecated/private native Seatbelt APIs. It runs behavioral Seatbelt probes before project spawn and fails closed when a requested dimension is unavailable. Linux, Windows, and native macOS ManagedTree remain unsupported. No `--no-sandbox` escape exists.
-
-For example, a Next.js development server needs project writes and network access but does not need ambient credentials:
-
-```toml
-[run.defaults]
-read = ["."]
-write = []
-network = false
-environment = []
-subprocess = true
-
-[run.scripts.dev]
-assurance = "restricted"
-write = ["."]
-network = true
-environment = ["NODE_ENV"]
-```
-
-This profile is runnable on the experimental macOS 26 Restricted backend. It intentionally requests no timeout, output, process-count, or memory limit because that backend rejects those unenforceable dimensions. `write = ["."]` permits project-local generated files; narrow it after observing actual writes. `network = true` is unrestricted networking under the portable boolean schema, including listen and connect behavior. `--hostname` and `--port` below are application arguments, not Tapid policy. `environment` names variables that may be copied from the caller when present; it does not import the rest of the caller's environment:
-
-```bash
-tapid run dev -- --hostname 127.0.0.1 --port 3001
-```
-
-An existing strict profile that omits `assurance` remains ManagedTree. Such a profile may request tree-wide limits separately:
-
-```toml
-[run.scripts.ci]
-# assurance omitted intentionally: legacy-safe ManagedTree
-timeout_seconds = 900
-max_output_bytes = 67108864
-max_processes = 64
-max_memory_bytes = 2147483648
-```
-
-Native macOS 26 cannot run that ManagedTree profile. The backend rejects it before spawn rather than silently downgrading it to Restricted.
-
-## Current consumer workflow
-
-The consumer path supports validated fixture replay and bounded live npm metadata and artifact retrieval. It exercises deterministic transitive resolution, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline and frozen replay, root-script policy selection, argument forwarding, and lifecycle suppression. Experimental native macOS 26 Restricted execution is available; ManagedTree and non-macOS native containment remain unavailable.
-
-For a clean checkout, build Tapid and create the readable consumer fixture through the same helper used by CI:
+For a clean checkout, build Tapid and create the consumer fixture used by CI:
 
 ```text
 cargo build -p tapid
 node tests/fixtures/create_consumer_project.js
 ```
 
-The helper writes `TAPID_FIXTURE_PROJECT` to the `GITHUB_ENV` file supplied by CI. For a local smoke test, set that variable yourself and run the generated project path:
+The helper writes `TAPID_FIXTURE_PROJECT` to the `GITHUB_ENV` file supplied by CI. For a local package-install smoke test, set that variable yourself and run:
 
 ```bash
 export GITHUB_ENV="$(mktemp)"
@@ -103,19 +63,9 @@ node tests/fixtures/create_consumer_project.js
 . "$GITHUB_ENV"
 export TAPID_FIXTURE=1
 target/debug/tapid install --offline --frozen --project-dir "$TAPID_FIXTURE_PROJECT"
-target/debug/tapid run --project-dir "$TAPID_FIXTURE_PROJECT" test -- forwarded 0
 ```
 
 The non-fixture online path requests abbreviated npm install metadata and requires registry-declared SHA-512 integrity by default. Unsupported npm range syntax and malformed historical metadata are filtered or rejected fail-closed according to their scope. Live JSR installation remains unverified. Do not treat fixture replay or one successful npm project as evidence of complete npm compatibility.
-
-The accepted invocation remains `tapid run <SCRIPT> -- <ARGS...>`. Values after the first `--` are forwarded in order to the selected script; the separator itself is not forwarded, and Tapid does not reinterpret forwarded values as Tapid options or policy. The integrated ADR 0005 path reads the merged policy, constructs a minimal environment with a controlled `PATH`, and calls a backend only after preflight proves every requested restriction. Restricted profiles run on the experimental macOS 26 backend; omitted `assurance` remains fail-closed ManagedTree.
-
-Use a project directory explicitly when running outside the project directory:
-
-```text
-tapid install --project-dir ./example
-tapid run --project-dir ./example test -- --runInBand
-```
 
 ## Installation details
 
@@ -189,6 +139,8 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - Exact, bare major and minor, caret, tilde, and selected whitespace-separated comparison requirements are supported. Full npm range syntax, aliases, tags, git, file, workspace linking, and automatic peer placement are not complete.
 - `add`, `remove`, and range-preserving `update` are available for the current package, with `--dev`, `--optional`, `--peer`, and explicit `--latest` mutation modes. `add --peer` records only a declaration; registry package peer requirements are validated against compatible direct project roots and recorded in peer contexts in lockfile/materialization identities. Missing or incompatible providers fail closed transactionally. Nested/ancestor peer-provider lookup and multiple contexts for one exact package instance remain unsupported. `outdated` is read-only during normal operation and reports lockfile versions and registry metadata; if it finds a durable interrupted-transaction journal, it recovers project state before reporting. `prune` replays the validated lockfile atomically to remove unreachable managed output. Lifecycle commands operate on the manifest in `--project-dir` by default, or a named member selected with `--workspace <name>`. Workspace linking and `workspace:` protocol installation remain unsupported and fail closed with a precise diagnostic before mutation.
 - Lifecycle mutations are all-or-nothing across the manifest, lockfile, verified store, and managed `node_modules` activation. Resolution, integrity, archive, peer, workspace, and materialization failures preserve the prior state; verified trees are not committed to the shared store until project activation succeeds. Durable recovery journals let the next lifecycle command, including `outdated`, restore the prior state after a crash before commit or finish cleanup after a committed operation.
+- The live npm path requires registry-declared SHA-512 integrity by default and verifies downloaded bytes against that digest. This integrity check matches bytes to registry metadata; it does not authenticate the publisher, prove the user intended that package, or establish the archive's package identity independently of the metadata. The explicit `--allow-unverified-registry-artifacts` compatibility exception permits missing integrity and is online-only.
+- Vulnerability intelligence, package malware scanning, publisher/provenance verification, and human audit attestations are not implemented. A verified archive is not necessarily safe or vulnerability-free.
 - Lifecycle scripts from dependencies never run during install. There is no approval workflow yet.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
