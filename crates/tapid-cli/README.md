@@ -79,7 +79,9 @@ Both flags require `tapid.lock` and all referenced verified trees. Replay valida
 
 `--frozen` currently selects the same no-network replay path as `--offline`. It does not yet implement the complete npm frozen-lockfile policy.
 
-## Run and `.bin`
+## Experimental Node.js root-script runner and `.bin` handling
+
+`tapid run` is a separate root-script launcher, not Tapid's package-management core and not a general JavaScript runtime selector. It currently launches Node.js scripts only. It cannot select Bun, Deno, or another runtime; use the runtime's own tooling for those projects. Its execution-containment feature is experimental and supported only on the documented platform/configuration combinations.
 
 ```text
 tapid run init
