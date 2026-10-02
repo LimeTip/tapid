@@ -244,12 +244,6 @@ pub(crate) fn run_with_manifest(
             Some(path) => path.to_owned(),
             None => default_store_root()?,
         });
-        if let Some(journal) = lifecycle_journal.as_mut() {
-            store
-                .recover_transactions()
-                .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
-            journal.set_store_root(store.root())?;
-        }
         let (lock, mut input, trees, store_transaction) = online::resolve_and_fetch(
             &project_dir,
             &manifest,
@@ -257,6 +251,9 @@ pub(crate) fn run_with_manifest(
             registry_fixture,
             allow_unverified_registry_artifacts,
         )?;
+        if let Some(journal) = lifecycle_journal.as_mut() {
+            journal.set_store_root(store.root())?;
+        }
         let lock_json = match lock.to_json() {
             Ok(value) => value,
             Err(error) => return Err(format!("cannot serialize lockfile: {error}")),

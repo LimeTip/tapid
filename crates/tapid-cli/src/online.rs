@@ -679,9 +679,7 @@ pub fn resolve_and_fetch(
     ),
     String,
 > {
-    let mut store_transaction = store.transaction();
     let fixture = fixture_path.map(fixture).transpose()?;
-    fs::create_dir_all(store.root()).map_err(|e| format!("cannot create store: {e}"))?;
     let mut fixture_records = BTreeMap::<(String, String, String), PackageRecord>::new();
     if let Some(f) = &fixture {
         for p in &f.packages {
@@ -729,18 +727,17 @@ pub fn resolve_and_fetch(
         }
     }
     let mut roots = Vec::new();
-    for map in [
-        manifest.dependencies(),
-        manifest.dev_dependencies(),
-        manifest.optional_dependencies(),
+    for (kind, map) in [
+        ("dependencies", manifest.dependencies()),
+        ("devDependencies", manifest.dev_dependencies()),
+        ("optionalDependencies", manifest.optional_dependencies()),
     ] {
         for (name, range) in map {
             let (registry, package) = dep_parts(name)?;
-            roots.push(Dependency::new(
-                registry,
-                package,
-                range.parse::<Requirement>().map_err(|e| e.to_string())?,
-            ));
+            let requirement = range.parse::<Requirement>().map_err(|error| {
+                format!("invalid {kind} dependency '{name}' range '{range}': {error}")
+            })?;
+            roots.push(Dependency::new(registry, package, requirement));
         }
     }
     let metadata_transport = if fixture.is_none() {
@@ -769,6 +766,11 @@ pub fn resolve_and_fetch(
             )
         }
     })?;
+    store
+        .recover_transactions()
+        .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
+    fs::create_dir_all(store.root()).map_err(|e| format!("cannot create store: {e}"))?;
+    let mut store_transaction = store.transaction();
     let mut lock = Lockfile::new(&root_digest(project)?).map_err(|e| e.to_string())?;
     let empty_peer = tapid_core::PeerContext::default();
     let mut platform_contexts = BTreeMap::new();
