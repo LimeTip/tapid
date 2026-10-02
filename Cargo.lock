@@ -1604,6 +1604,8 @@ name = "tapid-resolver"
 version = "0.0.5"
 dependencies = [
  "proptest",
+ "semver",
+ "serde_json",
  "tapid-core",
  "tapid-registry-client",
 ]
