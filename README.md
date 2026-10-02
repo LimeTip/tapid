@@ -9,11 +9,37 @@
 
 Tapid is a security-focused JavaScript and TypeScript **package manager**, written in Rust. It resolves dependencies, checks downloaded bytes against registry-declared integrity metadata by default, stores verified content, and materializes a reproducible `node_modules` tree from `tapid.lock`. Tapid is not a JavaScript runtime: today its primary compatibility target is the Node.js/npm ecosystem, and projects use their own runtime to execute code. Tapid's package format and install workflow are designed around that ecosystem; using Deno or Bun is a future compatibility goal, not a guarantee of current support. The current implementation covers a small, explicit npm-compatible subset. Development releases are available from GitHub Releases; production support is not yet available.
 
-## Scope: secure package installation
+## What Tapid manages
 
-Tapid focuses on safer dependency selection and installation: use explicit package identities and integrity checks, make installs deterministic and recoverable, and build toward clearer version comparisons and stronger trust evidence. Vulnerability intelligence, publisher/provenance signals, and human audit attestations are product goals—not capabilities to assume are implemented today. Check [Supported subset and limitations](#supported-subset-and-limitations) for current guarantees.
+Tapid focuses on safer dependency selection and installation: it uses explicit package identities and integrity checks, and makes installs deterministic and recoverable. Vulnerability intelligence, publisher/provenance signals, and human audit attestations are product goals—not capabilities to assume are implemented today. Check [Supported subset and limitations](#supported-subset-and-limitations) for current guarantees.
 
-Tapid does not replace Node.js, Deno, Bun, or another JavaScript runtime. The installed `node_modules` layout is intended for Node.js-compatible projects. We aim to support projects using other runtimes where their package conventions are compatible, but runtime-specific compatibility must be validated rather than assumed.
+Tapid does not replace Node.js, Deno, Bun, or another JavaScript runtime. The installed `node_modules` layout is intended for Node.js-compatible projects. Runtime-specific compatibility with other runtimes must be validated rather than assumed.
+
+A `tapid.lock` records the root manifest digest, exact selected package identities, registry-declared artifact integrity, unpacked tree digests, and dependency edges. For example, a package entry is shaped like this (digest values shortened for readability):
+
+```json
+{
+  "lockfile_version": 6,
+  "root_manifest_digest": "sha256-…",
+  "resolver_version": "0",
+  "linker_version": "0",
+  "roots": ["https://registry.npmjs.org|is-char@1.0.0|peer=-|platform=-"],
+  "packages": {
+    "https://registry.npmjs.org|is-char@1.0.0|peer=-|platform=-": {
+      "registry": "https://registry.npmjs.org",
+      "name": "is-char",
+      "version": "1.0.0",
+      "artifact_integrity": "sha512-…",
+      "registry_integrity_declared": true,
+      "unpacked_digest": "sha256-…",
+      "tree_digest": "sha256-…",
+      "dependencies": {}
+    }
+  }
+}
+```
+
+The lockfile pins what was selected and supports verified replay; registry integrity verifies downloaded bytes against registry metadata, not publisher identity or package safety.
 
 ## Install Tapid
 
