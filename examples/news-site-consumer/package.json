@@ -3,23 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "next build",
+    "build": "node --check server.mjs",
     "test": "node --test test-fixture.mjs",
-    "start": "next start --hostname 127.0.0.1 --port 3000"
+    "start": "node server.mjs"
   },
   "dependencies": {
-    "next": "15.5.27",
-    "react": "19.1.1",
-    "react-dom": "19.1.1"
-  },
-  "devDependencies": {
-    "@types/node": "22.15.30",
-    "@types/react": "19.1.8",
-    "@types/react-dom": "19.1.7",
-    "typescript": "5.9.3"
-  },
-  "overrides": {
-    "postcss": "8.5.23",
-    "sharp": "0.35.4"
+    "hono": "4.11.4"
   }
 }

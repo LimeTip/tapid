@@ -1,0 +1,23 @@
+{
+  "lockfileVersion": 6,
+  "rootManifestDigest": "sha256-c8e4bb8c57b7ccb4faf431a35a644a130d07d80a1485773eb750adbe7e15eb6f",
+  "resolverVersion": "0",
+  "linkerVersion": "0",
+  "roots": [
+    "https://registry.npmjs.org|hono@4.11.4|peer=-|platform=os=;cpu=;libc="
+  ],
+  "packages": {
+    "https://registry.npmjs.org|hono@4.11.4|peer=-|platform=os=;cpu=;libc=": {
+      "registry": "https://registry.npmjs.org",
+      "name": "hono",
+      "version": "4.11.4",
+      "artifactIntegrity": "sha512-U7tt8JsyrxSRKspfhtLET79pU8K+tInj5QZXs1jSugO1Vq5dFj3kmZsRldo29mTBfcjDRVRXrEZ6LS63Cog9ZA==",
+      "registryIntegrityDeclared": true,
+      "unpackedDigest": "sha256-efc74676274740b51a5b464c0f1e85ab4d52c6b0c0c870a1026e6dba81ac9495",
+      "treeDigest": "sha256-efc74676274740b51a5b464c0f1e85ab4d52c6b0c0c870a1026e6dba81ac9495",
+      "artifactUrl": "https://registry.npmjs.org/hono/-/hono-4.11.4.tgz",
+      "platformContext": "os=;cpu=;libc=",
+      "dependencies": {}
+    }
+  }
+}

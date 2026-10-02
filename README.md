@@ -74,21 +74,19 @@ tapid i is-char
 
 The consumer workflow exercises deterministic dependency resolution, npm metadata and artifact retrieval, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline/frozen replay, and suppression of dependency lifecycle scripts. This is a bounded npm-compatible subset, not full npm or pnpm compatibility.
 
-### Synthetic news-site npm baseline
+### Tapid-managed synthetic news-site fixture
 
-`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/TypeScript workload used to establish a repeatable npm CI baseline. It contains no Tapid comparison, private code, customer information, or secrets. The fixture pins Next.js, React, React DOM, and TypeScript exactly and commits its npm v3 lockfile. From the repository root, run:
+`examples/news-site-consumer` is a public, synthetic server-rendered Hono/Node.js workload used to verify Tapid installation in a realistic consumer project. It contains no private code, customer information, or secrets. The fixture pins Hono exactly and commits its `tapid.lock`. From the repository root, run:
 
 ```bash
 cd examples/news-site-consumer
-node --version
-npm --version
-npm ci
-npm run build
-npm test
-npm start
+tapid install
+node --check app.mjs server.mjs
+node --test test-fixture.mjs
+node server.mjs
 ```
 
-The server listens on `http://127.0.0.1:3000`; `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Next.js build output is written to `examples/news-site-consumer/.next/` (ignored via the fixture-local `.gitignore`). CI runs this sequence on Ubuntu 24.04 with Node.js 22, records the Node.js and npm versions, and polls the endpoint before asserting the marker.
+The server listens on `http://127.0.0.1:3000`; `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. CI runs this sequence on Ubuntu 24.04 with Node.js 22 and Tapid built from the checked-out source, then polls the endpoint before asserting the marker.
 
 The package-management toolchain also includes:
 
