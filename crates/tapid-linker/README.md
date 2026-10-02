@@ -13,4 +13,8 @@
 
 `plan_shims` selects Unix symlinks or Windows command and PowerShell wrappers. The planner validates that each bin target is a regular file inside its verified tree. The CLI materializes the plan during staged install and atomically activates the managed layout.
 
+Windows collisions are checked against the actual output paths produced by replacing the command's extension with `.cmd` and `.ps1`: `Tool`/`tool`, `tool`/`tool.cmd`, and `tool.cmd`/`tool.ps1` must not compete for those outputs. Comparison uses non-expanding BMP uppercase mappings over UTF-16 units; surrogate units remain unchanged. This catches ASCII and tested Unicode cases (including sigma variants), but Rust's Unicode mapping is not a query of a Windows volume's upcase table. It is not a universal NTFS, case-sensitive-directory, or filesystem-alias guarantee. Unix planning keeps exact path equality, including non-UTF-8 paths, without imposing Windows extension or case folding.
+
+The CLI's native Windows materialization regression runs in the existing Windows CI job. It verifies both wrapper formats for a noncolliding control and rejection before any shim write for case, extension, and sigma collisions, preserving sentinel output files. It does not execute wrappers or claim exhaustive filesystem casing coverage.
+
 This crate does not execute scripts, enforce a process sandbox, authenticate registries, or itself mutate the filesystem. Runtime platform checks remain required. Other platforms have no supported link strategy in this release.
