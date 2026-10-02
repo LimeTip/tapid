@@ -81,7 +81,10 @@ impl FromStr for Requirement {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let raw = s.trim();
         if raw.is_empty() {
-            return Err(ResolveError::InvalidRequirement(s.into()));
+            return Ok(Self {
+                raw: raw.into(),
+                clauses: vec![RequirementClause::AnyStable],
+            });
         }
         let mut clauses = Vec::new();
         for clause in raw.split("||") {
@@ -89,15 +92,64 @@ impl FromStr for Requirement {
             if clause.is_empty() {
                 return Err(ResolveError::UnsupportedRange(raw.into()));
             }
-            if clause == "*" {
+            if clause == "*" || clause.eq_ignore_ascii_case("x") {
                 clauses.push(RequirementClause::AnyStable);
                 continue;
             }
             let mut comparators = Vec::new();
+            if let Some(comparators_for_wildcard) = parse_x_range(clause) {
+                if comparators_for_wildcard.is_empty() {
+                    clauses.push(RequirementClause::AnyStable);
+                } else {
+                    clauses.push(RequirementClause::Comparators(comparators_for_wildcard));
+                }
+                continue;
+            }
             let tokens = clause.split_whitespace().collect::<Vec<_>>();
+            if let Some((lower, upper)) =
+                tokens.as_slice().split_first().and_then(|(first, rest)| {
+                    if rest.first() == Some(&"-") && rest.len() == 2 {
+                        Some((*first, rest[1]))
+                    } else {
+                        None
+                    }
+                })
+            {
+                let Some(lower) = parse_requirement_base(RequirementOperator::GreaterEqual, lower)
+                else {
+                    return Err(ResolveError::UnsupportedRange(raw.into()));
+                };
+                let Some(upper) = parse_requirement_base(RequirementOperator::LessEqual, upper)
+                else {
+                    return Err(ResolveError::UnsupportedRange(raw.into()));
+                };
+                comparators.push(RequirementComparator {
+                    op: RequirementOperator::GreaterEqual,
+                    base: lower,
+                });
+                comparators.push(RequirementComparator {
+                    op: RequirementOperator::LessEqual,
+                    base: upper,
+                });
+                clauses.push(RequirementClause::Comparators(comparators));
+                continue;
+            }
             let mut index = 0;
             while index < tokens.len() {
                 let token = tokens[index];
+                let separated_wildcard_comparators = separated_operator(token)
+                    .and_then(|_| tokens.get(index + 1).copied())
+                    .and_then(|value| parse_x_range(&format!("{token}{value}")));
+                if let Some(wildcard_comparators) = separated_wildcard_comparators {
+                    comparators.extend(wildcard_comparators);
+                    index += 2;
+                    continue;
+                }
+                if let Some(wildcard_comparators) = parse_x_range(token) {
+                    comparators.extend(wildcard_comparators);
+                    index += 1;
+                    continue;
+                }
                 let (op, value) = if let Some(op) = separated_operator(token) {
                     index += 1;
                     let Some(value) = tokens.get(index).copied() else {
@@ -129,6 +181,97 @@ impl Requirement {
     }
 }
 
+fn parse_x_range(clause: &str) -> Option<Vec<RequirementComparator>> {
+    let (op, value) = requirement_token(clause);
+    let value = value.strip_prefix('v').unwrap_or(value);
+    let value = if let Some((version, build)) = value.split_once('+') {
+        semver::BuildMetadata::new(build).ok()?;
+        version
+    } else {
+        value
+    };
+    let parts = value.split('.').collect::<Vec<_>>();
+    let wildcard_at = parts
+        .iter()
+        .position(|part| matches!(part.to_ascii_lowercase().as_str(), "x" | "*"));
+    let wildcard_at = wildcard_at?;
+    if parts[wildcard_at..]
+        .iter()
+        .any(|part| !matches!(part.to_ascii_lowercase().as_str(), "x" | "*"))
+    {
+        return None;
+    }
+    if parts[..wildcard_at].iter().any(|part| {
+        part.is_empty()
+            || !part.bytes().all(|b| b.is_ascii_digit())
+            || (part.len() > 1 && part.starts_with('0'))
+    }) {
+        return None;
+    }
+    let supported_op = matches!(
+        op,
+        RequirementOperator::Exact
+            | RequirementOperator::Caret
+            | RequirementOperator::Tilde
+            | RequirementOperator::Greater
+            | RequirementOperator::GreaterEqual
+            | RequirementOperator::Less
+            | RequirementOperator::LessEqual
+    );
+    if !supported_op {
+        return None;
+    }
+    if wildcard_at == 0 {
+        return Some(match op {
+            RequirementOperator::Greater | RequirementOperator::Less => {
+                vec![RequirementComparator {
+                    op: RequirementOperator::Less,
+                    base: RequirementBase {
+                        version: PackageVersion::stable(0, 0, 0),
+                        precision: RequirementPrecision::Full,
+                    },
+                }]
+            }
+            _ => Vec::new(),
+        });
+    }
+
+    let prefix = parts[..wildcard_at].join(".");
+    let lower = parse_requirement_base(RequirementOperator::GreaterEqual, &prefix)?;
+    let lower_comparator = RequirementComparator {
+        op: RequirementOperator::GreaterEqual,
+        base: lower.clone(),
+    };
+    let partial_upper = RequirementBase {
+        version: partial_upper_bound(&lower.version, lower.precision)?,
+        precision: RequirementPrecision::Full,
+    };
+    let less_than = |base| RequirementComparator {
+        op: RequirementOperator::Less,
+        base,
+    };
+
+    Some(match op {
+        RequirementOperator::Greater => vec![RequirementComparator {
+            op: RequirementOperator::GreaterEqual,
+            base: partial_upper,
+        }],
+        RequirementOperator::GreaterEqual => vec![lower_comparator],
+        RequirementOperator::Less => vec![less_than(lower)],
+        RequirementOperator::LessEqual => vec![less_than(partial_upper)],
+        RequirementOperator::Caret => vec![
+            lower_comparator,
+            less_than(RequirementBase {
+                version: caret_upper_bound(&lower)?,
+                precision: RequirementPrecision::Full,
+            }),
+        ],
+        RequirementOperator::Tilde | RequirementOperator::Exact => {
+            vec![lower_comparator, less_than(partial_upper)]
+        }
+    })
+}
+
 fn separated_operator(token: &str) -> Option<RequirementOperator> {
     match token {
         "~" => Some(RequirementOperator::Tilde),
@@ -136,6 +279,7 @@ fn separated_operator(token: &str) -> Option<RequirementOperator> {
         ">=" => Some(RequirementOperator::GreaterEqual),
         "<" => Some(RequirementOperator::Less),
         "<=" => Some(RequirementOperator::LessEqual),
+        "=" => Some(RequirementOperator::Exact),
         _ => None,
     }
 }
@@ -174,46 +318,45 @@ fn parse_requirement_base(op: RequirementOperator, value: &str) -> Option<Requir
     #[cfg(test)]
     REQUIREMENT_BASE_PARSE_COUNT.with(|count| count.set(count.get() + 1));
 
-    value
-        .parse::<PackageVersion>()
-        .ok()
-        .map(|version| RequirementBase {
-            version,
+    let value = value.strip_prefix('v').unwrap_or(value);
+    if let Ok(mut version) = semver::Version::parse(value) {
+        version.build = semver::BuildMetadata::EMPTY;
+        return Some(RequirementBase {
+            version: version.to_string().parse().ok()?,
             precision: RequirementPrecision::Full,
+        });
+    }
+    let components = value.split('.').collect::<Vec<_>>();
+    if !matches!(components.len(), 1 | 2)
+        || components.iter().any(|component| {
+            component.is_empty()
+                || !component.bytes().all(|byte| byte.is_ascii_digit())
+                || (component.len() > 1 && component.starts_with('0'))
         })
-        .or_else(|| {
-            let components = value.split('.').collect::<Vec<_>>();
-            if !matches!(components.len(), 1 | 2)
-                || components.iter().any(|component| {
-                    component.is_empty()
-                        || !component.bytes().all(|byte| byte.is_ascii_digit())
-                        || (component.len() > 1 && component.starts_with('0'))
-                })
-                || (!matches!(
-                    op,
-                    RequirementOperator::Exact
-                        | RequirementOperator::Tilde
-                        | RequirementOperator::Greater
-                        | RequirementOperator::GreaterEqual
-                        | RequirementOperator::Less
-                        | RequirementOperator::LessEqual
-                ) && !(op == RequirementOperator::Caret && components.len() == 1))
-            {
-                return None;
-            }
-            let major = components[0].parse().ok()?;
-            let minor = components
-                .get(1)
-                .map_or(Some(0), |value| value.parse().ok())?;
-            Some(RequirementBase {
-                version: PackageVersion::stable(major, minor, 0),
-                precision: if components.len() == 1 {
-                    RequirementPrecision::Major
-                } else {
-                    RequirementPrecision::Minor
-                },
-            })
-        })
+        || (!matches!(
+            op,
+            RequirementOperator::Exact
+                | RequirementOperator::Tilde
+                | RequirementOperator::Greater
+                | RequirementOperator::GreaterEqual
+                | RequirementOperator::Less
+                | RequirementOperator::LessEqual
+        ) && !(op == RequirementOperator::Caret && matches!(components.len(), 1 | 2)))
+    {
+        return None;
+    }
+    let major = components[0].parse().ok()?;
+    let minor = components
+        .get(1)
+        .map_or(Some(0), |value| value.parse().ok())?;
+    Some(RequirementBase {
+        version: PackageVersion::stable(major, minor, 0),
+        precision: if components.len() == 1 {
+            RequirementPrecision::Major
+        } else {
+            RequirementPrecision::Minor
+        },
+    })
 }
 
 /// Normalized metadata supplied by a registry adapter. The resolver never fetches it.
@@ -577,6 +720,25 @@ fn partial_upper_bound(
     }
 }
 
+fn caret_upper_bound(base: &RequirementBase) -> Option<PackageVersion> {
+    if base.precision == RequirementPrecision::Major || base.version.major() > 0 {
+        base.version
+            .major()
+            .checked_add(1)
+            .map(|major| PackageVersion::stable(major, 0, 0))
+    } else if base.precision == RequirementPrecision::Minor || base.version.minor() > 0 {
+        base.version
+            .minor()
+            .checked_add(1)
+            .map(|minor| PackageVersion::stable(0, minor, 0))
+    } else {
+        base.version
+            .patch()
+            .checked_add(1)
+            .map(|patch| PackageVersion::stable(0, 0, patch))
+    }
+}
+
 fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> bool {
     requirement.clauses.iter().any(|clause| match clause {
         RequirementClause::AnyStable => version.prerelease().is_none(),
@@ -604,49 +766,23 @@ fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> b
                                     && version.minor() == base.minor()
                             }
                         },
-                        RequirementOperator::Caret => {
-                            if comparator.base.precision == RequirementPrecision::Major {
-                                return base
-                                    .major()
-                                    .checked_add(1)
-                                    .map(|major| {
-                                        let upper = PackageVersion::stable(major, 0, 0);
-                                        version >= base && version < &upper
-                                    })
-                                    .unwrap_or(version >= base);
-                            }
-                            if base.major() > 0 {
-                                return base
-                                    .major()
-                                    .checked_add(1)
-                                    .map(|major| {
-                                        let upper = PackageVersion::stable(major, 0, 0);
-                                        version >= base && version < &upper
-                                    })
-                                    .unwrap_or(version >= base);
-                            }
-                            if base.minor() > 0 {
-                                return base
-                                    .minor()
-                                    .checked_add(1)
-                                    .map(|minor| {
-                                        let upper = PackageVersion::stable(0, minor, 0);
-                                        version >= base && version < &upper
-                                    })
-                                    .unwrap_or(
-                                        version >= base
-                                            && version.major() == 0
-                                            && version.minor() == base.minor(),
-                                    );
-                            }
-                            base.patch()
-                                .checked_add(1)
-                                .map(|patch| {
-                                    let upper = PackageVersion::stable(0, 0, patch);
-                                    version >= base && version < &upper
-                                })
-                                .unwrap_or(version == base)
-                        }
+                        RequirementOperator::Caret => caret_upper_bound(&comparator.base)
+                            .map(|upper| version >= base && version < &upper)
+                            .unwrap_or_else(|| {
+                                if comparator.base.precision == RequirementPrecision::Major
+                                    || base.major() > 0
+                                {
+                                    version >= base && version.major() == base.major()
+                                } else if comparator.base.precision == RequirementPrecision::Minor
+                                    || base.minor() > 0
+                                {
+                                    version >= base
+                                        && version.major() == base.major()
+                                        && version.minor() == base.minor()
+                                } else {
+                                    version == base
+                                }
+                            }),
                         RequirementOperator::Tilde => {
                             version >= base
                                 && version.major() == base.major()
@@ -875,6 +1011,32 @@ mod tests {
                 requirement.parse::<Requirement>(),
                 Err(ResolveError::UnsupportedRange(_))
             ));
+        }
+    }
+
+    #[test]
+    fn npm_wildcard_and_hyphen_ranges_match_bounds() {
+        let any: Requirement = "x".parse().unwrap();
+        assert!(any.matches(&"1.2.3".parse().unwrap()));
+        assert!(!any.matches(&"1.2.3-beta.1".parse().unwrap()));
+
+        let hyphen: Requirement = "1.2.0 - 2.0.0".parse().unwrap();
+        assert!(!hyphen.matches(&"1.1.9".parse().unwrap()));
+        assert!(hyphen.matches(&"1.2.0".parse().unwrap()));
+        assert!(hyphen.matches(&"2.0.0".parse().unwrap()));
+        assert!(!hyphen.matches(&"2.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn npm_x_ranges_match_major_minor_and_all_wildcards() {
+        for (range, yes, no) in [
+            ("1.x", "1.9.0", "2.0.0"),
+            ("1.2.*", "1.2.9", "1.3.0"),
+            ("*.*", "9.0.0", "1.0.0-beta.1"),
+        ] {
+            let requirement: Requirement = range.parse().unwrap();
+            assert!(requirement.matches(&yes.parse().unwrap()), "{range}");
+            assert!(!requirement.matches(&no.parse().unwrap()), "{range}");
         }
     }
 
