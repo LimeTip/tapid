@@ -1,3 +1,4 @@
 node_modules/
+.next/
 .tapid-activation.lock
 .tapid-managed
