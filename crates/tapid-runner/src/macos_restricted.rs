@@ -1488,13 +1488,25 @@ fn spawn_reader<R: Read + Send + 'static>(
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(count) => {
-                    if output_bytes
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                            used.checked_add(count)
-                                .filter(|total| *total <= INTERNAL_OUTPUT_CEILING)
-                        })
-                        .is_err()
-                    {
+                    let mut used = output_bytes.load(Ordering::Acquire);
+                    let reserved = loop {
+                        let Some(total) = used
+                            .checked_add(count)
+                            .filter(|total| *total <= INTERNAL_OUTPUT_CEILING)
+                        else {
+                            break false;
+                        };
+                        match output_bytes.compare_exchange_weak(
+                            used,
+                            total,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => break true,
+                            Err(actual) => used = actual,
+                        }
+                    };
+                    if !reserved {
                         overflow.store(true, Ordering::Release);
                         break;
                     }
