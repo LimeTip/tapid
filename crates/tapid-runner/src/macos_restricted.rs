@@ -1489,7 +1489,7 @@ fn spawn_reader<R: Read + Send + 'static>(
                 Ok(0) => break,
                 Ok(count) => {
                     if output_bytes
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                        .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                             used.checked_add(count)
                                 .filter(|total| *total <= INTERNAL_OUTPUT_CEILING)
                         })
