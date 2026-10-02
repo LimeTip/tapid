@@ -1,0 +1,13 @@
+{
+  "name": "tapid-news-site-consumer-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node --check server.mjs",
+    "test": "node --test test-fixture.mjs",
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "hono": "4.11.4"
+  }
+}

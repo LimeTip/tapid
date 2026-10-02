@@ -1,0 +1,3 @@
+node_modules/
+.tapid-activation.lock
+.tapid-managed
