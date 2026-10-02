@@ -76,7 +76,7 @@ The consumer workflow exercises deterministic dependency resolution, npm metadat
 
 ### Tapid-managed synthetic news-site fixture
 
-`examples/news-site-consumer` is a public, synthetic server-rendered Hono/Node.js workload used to verify Tapid installation in a realistic consumer project. It contains no private code, customer information, or secrets. The fixture pins Hono exactly and commits its `tapid.lock`. From the repository root, run:
+`examples/news-site-consumer` is a public, synthetic Hono/Node.js application used to verify Tapid's package installation in a consumer project. Tapid resolves and installs the pinned Hono dependency; Node.js is the runtime that serves the application and runs its tests. Tapid does not build or run the site. The fixture contains no private code, customer information, or secrets, and commits its `tapid.lock`. From the repository root, run:
 
 ```bash
 cd examples/news-site-consumer
