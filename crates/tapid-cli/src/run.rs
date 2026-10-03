@@ -35,6 +35,8 @@ pub enum RunPreparationError {
     InvalidManagedBin,
     InvalidNodeRuntime,
     MissingNodeRuntime,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    WindowsSystemDirectoryUnavailable,
     DuplicateEnvironmentName(String),
     ReservedPath,
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -58,6 +60,9 @@ impl fmt::Display for RunPreparationError {
             Self::MissingNodeRuntime => f.write_str(
                 "cannot discover an executable named node or node.exe on the invoking host PATH",
             ),
+            Self::WindowsSystemDirectoryUnavailable => {
+                f.write_str("cannot resolve the trusted Windows system directory")
+            }
             Self::DuplicateEnvironmentName(name) => write!(
                 f,
                 "run policy contains case-equivalent environment names: {name}"
@@ -150,7 +155,18 @@ pub fn prepare_execution_request(
         .into_iter()
         .chain([runtime_bin])
         .collect::<Vec<_>>();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let search_directories = {
+        let mut directories = std::iter::once(runtime_bin)
+            .chain(managed_bin)
+            .collect::<Vec<_>>();
+        let system32 = windows_system_directory()?;
+        if !directories.iter().any(|directory| directory == &system32) {
+            directories.push(system32);
+        }
+        directories
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
     let search_directories = std::iter::once(runtime_bin)
         .chain(managed_bin)
         .collect::<Vec<_>>();
@@ -201,6 +217,33 @@ fn discover_node_runtime(host_path: Option<&OsStr>) -> Result<PathBuf, RunPrepar
         }
     }
     Err(RunPreparationError::MissingNodeRuntime)
+}
+
+#[cfg(windows)]
+fn windows_system_directory() -> Result<PathBuf, RunPreparationError> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = vec![0u16; 260];
+    for _ in 0..2 {
+        // SAFETY: the buffer is writable and its size fits the API's u32 capacity.
+        let length =
+            unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+        if length == 0 || length > 32_767 {
+            return Err(RunPreparationError::WindowsSystemDirectoryUnavailable);
+        }
+        if length < buffer.len() {
+            let path = PathBuf::from(OsString::from_wide(&buffer[..length]));
+            let canonical = fs::canonicalize(path)
+                .map_err(|_| RunPreparationError::WindowsSystemDirectoryUnavailable)?;
+            return canonical
+                .is_dir()
+                .then_some(canonical)
+                .ok_or(RunPreparationError::WindowsSystemDirectoryUnavailable);
+        }
+        buffer.resize(length.saturating_add(1), 0);
+    }
+    Err(RunPreparationError::WindowsSystemDirectoryUnavailable)
 }
 
 fn canonical_node_executable(path: &Path) -> Result<PathBuf, RunPreparationError> {

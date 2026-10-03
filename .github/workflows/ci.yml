@@ -66,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-2025]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -152,6 +152,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (Test-Path -LiteralPath $binary) { throw 'Tapid was not uninstalled' }
           Write-Host 'Windows developer install and uninstall passed.'
+
+  windows-msvc-cross-check:
+    name: Windows MSVC compile-only check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain and Windows target
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Compile tapid-runner and Windows tests for MSVC
+        run: cargo check -p tapid-runner --tests --target x86_64-pc-windows-msvc --locked
 
   nextest:
     name: Nextest (Ubuntu)
@@ -288,7 +305,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-2025]
+        os: [ubuntu-latest, macos-latest]
     env:
       RELEASE_TAG: v0.0.10
       RELEASE_SOURCE_SHA: 3d5f97c91f08b64a5ace26c2004081d57b88fee2

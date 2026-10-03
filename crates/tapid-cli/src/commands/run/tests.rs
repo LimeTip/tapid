@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn child_output_is_forwarded_to_its_matching_stream_without_text_conversion() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    forward_child_output(
+        &[0x66, 0x00, 0x6f],
+        &[0x65, 0x72, 0x72],
+        &mut stdout,
+        &mut stderr,
+    )
+    .unwrap();
+    assert_eq!(stdout, [0x66, 0x00, 0x6f]);
+    assert_eq!(stderr, b"err");
+}
+
+#[test]
 fn nonzero_and_limit_terminations_map_to_stable_cli_exits() {
     #[cfg(not(windows))]
     assert_eq!(

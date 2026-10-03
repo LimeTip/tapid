@@ -3,7 +3,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -248,7 +248,26 @@ fn receipt_value(outcome: &tapid_runner::ExecutionOutcome) -> serde_json::Value 
     })
 }
 
+fn forward_child_output(
+    child_stdout: &[u8],
+    child_stderr: &[u8],
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> io::Result<()> {
+    stdout.write_all(child_stdout)?;
+    stdout.flush()?;
+    stderr.write_all(child_stderr)?;
+    stderr.flush()
+}
+
 fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> ExitCode {
+    let output_error = forward_child_output(
+        outcome.stdout(),
+        outcome.stderr(),
+        &mut io::stdout(),
+        &mut io::stderr(),
+    )
+    .err();
     let value = receipt_value(outcome);
     if machine {
         eprintln!("\n{value}");
@@ -257,6 +276,10 @@ fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> Ex
             "\nsandbox receipt: {}",
             serde_json::to_string_pretty(&value).expect("receipt JSON values are serializable")
         );
+    }
+    if let Some(error) = output_error {
+        eprintln!("error: failed to forward root package script output: {error}");
+        return ExitCode::from(1);
     }
     match outcome.termination() {
         tapid_runner::Termination::TimedOut => {
