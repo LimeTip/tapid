@@ -74,19 +74,26 @@ tapid i is-char
 
 The consumer workflow exercises deterministic dependency resolution, npm metadata and artifact retrieval, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline/frozen replay, and suppression of dependency lifecycle scripts. This is a bounded npm-compatible subset, not full npm or pnpm compatibility.
 
-### Tapid-managed synthetic news-site fixture
+### Synthetic news-site compatibility fixture
 
-`examples/news-site-consumer` is a public, synthetic Hono/Node.js application used to verify Tapid's package installation in a consumer project. Tapid resolves and installs the pinned Hono dependency; Node.js is the runtime that serves the application and runs its tests. Tapid does not build or run the site. The fixture contains no private code, customer information, or secrets, and commits its `tapid.lock`. From the repository root, run:
+`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/React/TypeScript application for evaluating package-manager compatibility on a representative news-site workload. The route at `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Its npm-generated `package-lock.json` (lockfile v3) is the reference install. After installing that reference tree with `npm ci`, Tapid—not npm or a direct Node command—runs the fixture's `build`, `test`, and `start` scripts. Lockfile generation used Node.js v26.10.0 / npm 11.19.1; CI uses Ubuntu 24.04 / Node.js 22 and records its toolchain versions. The fixture contains no private code, customer information, credentials, or proprietary assets. From the repository root:
 
 ```bash
+cargo build --locked --bin tapid
 cd examples/news-site-consumer
-tapid install
-node --check app.mjs server.mjs
-node --test test-fixture.mjs
-node server.mjs
+npm ci
+mkdir -p .tmp
+export NEXT_TELEMETRY_DISABLED=1
+export TMPDIR="$PWD/.tmp"
+tapid() { ../../target/debug/tapid "$@"; }
+tapid run build
+tapid run test
+tapid run start
+# In another terminal:
+curl --fail http://127.0.0.1:3000/acceptance
 ```
 
-The server listens on `http://127.0.0.1:3000`; `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. CI runs this sequence on Ubuntu 24.04 with Node.js 22 and Tapid built from the checked-out source, then polls the endpoint before asserting the marker.
+The expected response is `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Next.js production output is stored in the ignored `.next/` directory; `.tmp/` and `node_modules/` are also generated and ignored. The checked-in `tapid.toml` requests Restricted execution, with build output and temporary files limited to fixture-local paths. This verifies Tapid script execution against the npm reference install; Tapid-managed dependency installation/replay and package-graph parity remain separate acceptance requirements.
 
 The package-management toolchain also includes:
 
@@ -96,23 +103,6 @@ The package-management toolchain also includes:
 - Safe archive extraction and integrity checks, plus generated package `bin` shims. Dependency lifecycle scripts are suppressed during installation.
 
 These controls improve repeatability and reject certain mismatches, but they do not currently detect vulnerable or malicious packages or authenticate publishers. See [Supported subset and limitations](#supported-subset-and-limitations) for exact behavior. Experimental root-script execution is separate and not the product focus; see [ADR 0005](docs/adr/0005-default-on-root-script-sandbox.md) for its status and limitations.
-
-For a clean checkout, build Tapid and create the consumer fixture used by CI:
-
-```text
-cargo build -p tapid
-node tests/fixtures/create_consumer_project.js
-```
-
-The helper writes `TAPID_FIXTURE_PROJECT` to the `GITHUB_ENV` file supplied by CI. For a local package-install smoke test, set that variable yourself and run:
-
-```bash
-export GITHUB_ENV="$(mktemp)"
-node tests/fixtures/create_consumer_project.js
-. "$GITHUB_ENV"
-export TAPID_FIXTURE=1
-target/debug/tapid install --offline --frozen --project-dir "$TAPID_FIXTURE_PROJECT"
-```
 
 The non-fixture online path requests abbreviated npm install metadata and requires registry-declared SHA-512 integrity by default. Unsupported npm range syntax and malformed historical metadata are filtered or rejected fail-closed according to their scope. Live JSR installation remains unverified. Do not treat fixture replay or one successful npm project as evidence of complete npm compatibility.
 

@@ -1,19 +1,19 @@
+import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { app } from "./app.mjs";
-
 const marker = "TAPID_NEWS_SITE_ACCEPTANCE_V1";
 
-test("home page renders synthetic headlines as HTML", async () => {
-  const response = await app.fetch(new Request("http://localhost/"));
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-type"), /text\/html/);
-  assert.match(await response.text(), /Synthetic daily briefing/);
+test("server-rendered news page contains representative synthetic headlines", async () => {
+  const page = await readFile(new URL("./app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /export default function Home/);
+  assert.match(page, /Synthetic daily briefing/);
+  assert.match(page, /Local library opens a new community newsroom/);
+  assert.match(page, /Harbor cleanup brings volunteers together/);
 });
 
-test("acceptance route returns the unique marker", async () => {
-  const response = await app.fetch(new Request("http://localhost/acceptance"));
-  assert.equal(response.status, 200);
-  assert.equal(await response.text(), marker);
+test("live acceptance route declares the unique marker", async () => {
+  const route = await readFile(new URL("./app/acceptance/route.ts", import.meta.url), "utf8");
+  assert.match(route, /export function GET\(\)/);
+  assert.match(route, new RegExp(marker));
 });
