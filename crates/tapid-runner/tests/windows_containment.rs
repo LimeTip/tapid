@@ -258,7 +258,9 @@ fn windows_disabled_subprocess_policy_prevents_child_process_creation() {
 #[test]
 fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths() {
     let root = temporary_project("runtime-child-process");
-    let executable = std::env::current_exe().expect("containment test executable path");
+    let executable =
+        fs::canonicalize(std::env::current_exe().expect("containment test executable path"))
+            .expect("canonical containment test executable path");
     let executable_directory = executable.parent().expect("test executable directory");
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
     let system32 = fs::canonicalize(PathBuf::from(system_root).join("System32")).unwrap();
