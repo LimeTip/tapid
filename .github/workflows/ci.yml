@@ -43,8 +43,8 @@ jobs:
           target/debug/tapid --version
       - name: Install npm reference tree
         run: npm ci --prefix examples/news-site-consumer
-      - name: Prepare project-local temporary storage
-        run: mkdir -p examples/news-site-consumer/.tmp
+      - name: Prepare project-local build and temporary storage
+        run: mkdir -p examples/news-site-consumer/.next examples/news-site-consumer/.tmp
       - name: Build and test via Tapid
         run: |
           target/debug/tapid run build --project-dir examples/news-site-consumer
