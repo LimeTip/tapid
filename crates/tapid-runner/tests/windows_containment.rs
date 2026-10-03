@@ -4,6 +4,7 @@ use std::{
     ffi::OsString,
     fs,
     path::PathBuf,
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tapid_runner::{
@@ -257,29 +258,57 @@ fn windows_disabled_subprocess_policy_prevents_child_process_creation() {
 #[test]
 fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths() {
     let root = temporary_project("runtime-child-process");
+    let executable = std::env::current_exe().expect("containment test executable path");
+    let executable_directory = executable.parent().expect("test executable directory");
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
-    let system32 = PathBuf::from(system_root).join("System32");
-    let command = format!(
-        r#"cd /d "{}" & cmd.exe /D /S /C echo CHILD_PROCESS_MARKER"#,
-        system32.display()
-    );
-    let request = command_request_with_flags(
-        &root,
-        &command,
-        ExecutionLimits::new(Some(10), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
-        true,
-        false,
-    );
-    let outcome =
-        execute(&request).expect("runtime subprocess should remain within the Job Object");
+    let system32 = fs::canonicalize(PathBuf::from(system_root).join("System32")).unwrap();
+    let request = ExecutionRequest::builder(executable.as_os_str())
+        .args([
+            OsString::from("--exact"),
+            OsString::from("windows_child_process_probe_helper"),
+            OsString::from("--nocapture"),
+        ])
+        .executable_search_path(executable_directory)
+        .executable_search_path(&system32)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(10), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
+            true,
+            false,
+        ))
+        .build()
+        .unwrap();
+    let outcome = execute(&request).expect("probe process should remain within the Job Object");
     assert_eq!(
         outcome.termination(),
         &Termination::Exited(0),
-        "stderr: {}",
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(outcome.stdout()),
         String::from_utf8_lossy(outcome.stderr())
     );
-    assert!(String::from_utf8_lossy(outcome.stdout()).contains("CHILD_PROCESS_MARKER"));
+    assert!(
+        String::from_utf8_lossy(outcome.stdout()).contains("CHILD_PROCESS_MARKER"),
+        "child process did not produce its marker"
+    );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn windows_child_process_probe_helper() {
+    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
+    let child = PathBuf::from(system_root).join("System32").join("cmd.exe");
+    let status = Command::new(&child)
+        .args(["/D", "/S", "/C", "echo CHILD_PROCESS_MARKER"])
+        .status()
+        .unwrap_or_else(|error| {
+            panic!(
+                "CreateProcess for {} failed: kind={:?}, raw_os_error={:?}, error={error}",
+                child.display(),
+                error.kind(),
+                error.raw_os_error()
+            )
+        });
+    assert!(status.success(), "child exited with {status}");
 }
 
 #[test]
