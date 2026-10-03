@@ -76,19 +76,24 @@ The consumer workflow exercises deterministic dependency resolution, npm metadat
 
 ### Synthetic news-site compatibility fixture
 
-`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/React/TypeScript application for evaluating package-manager compatibility on a representative news-site workload. The route at `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. It contains no private code, customer information, credentials, or proprietary assets. Its npm-generated `package-lock.json` (lockfile v3) pins exact dependency versions. Lockfile generation and local verification used Node.js v26.10.0 / npm 11.19.1; CI runs the baseline on Ubuntu 24.04 with Node.js 22 and records the exact CI toolchain versions in its job log. Reproduce the npm baseline from the repository root:
+`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/React/TypeScript application for evaluating package-manager compatibility on a representative news-site workload. The route at `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Its npm-generated `package-lock.json` (lockfile v3) is the reference install. After installing that reference tree with `npm ci`, Tapid—not npm or a direct Node command—runs the fixture's `build`, `test`, and `start` scripts. Lockfile generation used Node.js v26.10.0 / npm 11.19.1; CI uses Ubuntu 24.04 / Node.js 22 and records its toolchain versions. The fixture contains no private code, customer information, credentials, or proprietary assets. From the repository root:
 
 ```bash
+cargo build --locked --bin tapid
 cd examples/news-site-consumer
 npm ci
-npm run build
-npm test
-npm start
+mkdir -p .tmp
+export NEXT_TELEMETRY_DISABLED=1
+export TMPDIR="$PWD/.tmp"
+tapid() { ../../target/debug/tapid "$@"; }
+tapid run build
+tapid run test
+tapid run start
 # In another terminal:
 curl --fail http://127.0.0.1:3000/acceptance
 ```
 
-The expected response is `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Next.js production build output is stored in the fixture's ignored `.next/` directory; `node_modules/` is also generated and ignored. This is the npm baseline only: Tapid lockfile import, online/frozen/offline replay, and package-graph parity remain gated on implementation work tracked by #151–#156 and are not claimed by this job.
+The expected response is `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Next.js production output is stored in the ignored `.next/` directory; `.tmp/` and `node_modules/` are also generated and ignored. The checked-in `tapid.toml` requests Restricted execution, with build output and temporary files limited to fixture-local paths. This verifies Tapid script execution against the npm reference install; Tapid-managed dependency installation/replay and package-graph parity remain separate acceptance requirements.
 
 The package-management toolchain also includes:
 
