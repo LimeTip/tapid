@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::{fs, path::Path};
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
-use tapid_lockfile::Lockfile;
+use tapid_lockfile::{Lockfile, LockfilePackageSource};
 use tapid_manifest::{DependencyKind, PackageManifest, Workspace};
 use tapid_registry_client::{HttpsTransport, JsrRegistry, NpmRegistry};
 use tapid_resolver::Requirement;
@@ -149,6 +149,28 @@ pub(crate) fn resolve_workspace(
     }
     let workspace = Workspace::discover(project_dir)?;
     let manifest = workspace.select(selector)?.clone();
+    if selector.is_some() {
+        let member_names = workspace
+            .members()
+            .iter()
+            .map(|member| member.name())
+            .collect::<std::collections::BTreeSet<_>>();
+        for dependencies in [
+            manifest.dependencies(),
+            manifest.dev_dependencies(),
+            manifest.optional_dependencies(),
+            manifest.peer_dependencies(),
+        ] {
+            if let Some((name, requirement)) = dependencies
+                .iter()
+                .find(|(name, _)| member_names.contains(name.as_str()))
+            {
+                return Err(format!(
+                    "selected workspace member dependency {name}@{requirement} is not yet integrated with workspace linking; refusing registry fallback"
+                ));
+            }
+        }
+    }
     for dependencies in [
         manifest.dependencies(),
         manifest.dev_dependencies(),
@@ -333,7 +355,13 @@ pub(crate) fn outdated_report(
         let (origin, package_name) = crate::online::dep_parts(&identity)?;
         let locked_version = locked
             .iter()
-            .filter(|(key, _)| key.registry == origin && key.name == package_name)
+            .filter(|(key, _)| {
+                matches!(
+                    &key.source,
+                    LockfilePackageSource::Registry(registry)
+                        if registry == &origin && key.name == package_name
+                )
+            })
             .map(|(key, _)| key.version.clone())
             .max();
         let versions = match registry_fixture {

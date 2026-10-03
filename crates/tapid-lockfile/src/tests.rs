@@ -1,4 +1,4 @@
-use super::{LocalWorkspaceSource, LockedPackage, Lockfile, VERSION};
+use super::{LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfile, VERSION};
 use proptest::prelude::*;
 
 #[test]
@@ -11,6 +11,71 @@ fn local_workspace_source_has_a_canonical_identity_and_rejects_escape_paths() {
         "workspace:packages/web:@tapid/web@1.2.3".parse().unwrap()
     );
     assert!(LocalWorkspaceSource::new("../outside", "@tapid/web", "1.2.3").is_err());
+}
+
+#[test]
+fn workspace_dependency_cycles_roundtrip_without_registry_identity() {
+    let mut first = LockedWorkspacePackage::new(
+        LocalWorkspaceSource::new("packages/first", "first", "1.0.0").unwrap(),
+        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .unwrap();
+    let mut second = LockedWorkspacePackage::new(
+        LocalWorkspaceSource::new("packages/second", "second", "1.0.0").unwrap(),
+        "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    )
+    .unwrap();
+    first.add_dependency("second", &second.key()).unwrap();
+    second.add_dependency("first", &first.key()).unwrap();
+    let first_key = first.key();
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile.insert_graph([], [first, second]).unwrap();
+    lockfile.set_roots([first_key.clone()]).unwrap();
+
+    let serialized = lockfile.to_json().unwrap();
+    let replayed = Lockfile::from_json(&serialized).unwrap();
+    assert_eq!(replayed.to_json().unwrap(), serialized);
+    assert_eq!(
+        replayed.workspace_packages()[&first_key]
+            .dependencies()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn workspace_package_lock_identity_roundtrips_roots_and_dependency_edges() {
+    let source = LocalWorkspaceSource::new("packages/web", "@tapid/web", "1.2.3").unwrap();
+    let workspace = LockedWorkspacePackage::new(
+        source.clone(),
+        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .unwrap();
+    let workspace_key = workspace.key();
+    let mut consumer = package_fixture();
+    consumer
+        .add_dependency("@tapid/web", &workspace_key)
+        .unwrap();
+    let consumer_key = consumer.key();
+
+    let mut lockfile =
+        Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+    lockfile.insert_workspace_package(workspace).unwrap();
+    lockfile.insert_package(consumer).unwrap();
+    lockfile.set_roots([workspace_key.clone()]).unwrap();
+
+    let json = lockfile.to_json().unwrap();
+    assert!(json.contains("workspacePackages"));
+    let replayed = Lockfile::from_json(&json).unwrap();
+    assert_eq!(replayed.roots(), &[workspace_key.clone()]);
+    assert_eq!(
+        replayed.packages()[&consumer_key].dependencies()["@tapid/web"],
+        workspace_key
+    );
+    assert_eq!(replayed.to_json().unwrap(), json);
 }
 
 #[test]
@@ -352,7 +417,7 @@ fn replay_validation_accepts_uppercase_root_manifest_digest() {
 }
 
 #[test]
-fn provenance_uses_schema_6_while_v4_remains_readable() {
+fn provenance_uses_schema_7_while_v4_and_v6_remain_readable() {
     let mut lockfile =
         Lockfile::new("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             .unwrap();
@@ -365,7 +430,11 @@ fn provenance_uses_schema_6_while_v4_remains_readable() {
     lockfile.set_roots([package.key()]).unwrap();
     let current = lockfile.to_json().unwrap();
     let mut current_value: serde_json::Value = serde_json::from_str(&current).unwrap();
-    assert_eq!(current_value["lockfileVersion"], 6);
+    assert_eq!(current_value["lockfileVersion"], 7);
+
+    let mut schema_six = current_value.clone();
+    schema_six["lockfileVersion"] = 6.into();
+    assert!(Lockfile::from_json(&serde_json::to_string(&schema_six).unwrap()).is_ok());
 
     let mut rootless_current = current_value.clone();
     rootless_current.as_object_mut().unwrap().remove("roots");

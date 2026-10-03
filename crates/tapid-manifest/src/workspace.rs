@@ -33,7 +33,24 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn discover(project_dir: &Path) -> Result<Self, String> {
+        let project_dir = fs::canonicalize(project_dir).map_err(|error| {
+            format!(
+                "cannot resolve workspace root {}: {error}",
+                project_dir.display()
+            )
+        })?;
+        if !project_dir.is_dir() {
+            return Err(format!(
+                "workspace root is not a directory: {}",
+                project_dir.display()
+            ));
+        }
         let root_path = project_dir.join("package.json");
+        let root_metadata = fs::symlink_metadata(&root_path)
+            .map_err(|error| format!("cannot inspect workspace root manifest: {error}"))?;
+        if !root_metadata.file_type().is_file() {
+            return Err("workspace root package.json must be a regular file".to_owned());
+        }
         let root_text = read_file(&root_path)?;
         let root = PackageManifest::parse(&root_text).map_err(|error| error.to_string())?;
         let document: Value = serde_json::from_str(&root_text)
@@ -41,15 +58,40 @@ impl Workspace {
         let patterns = workspace_patterns(&document)?;
         let mut paths = Vec::new();
         for pattern in patterns {
-            paths.extend(expand_pattern(project_dir, &pattern)?);
+            paths.extend(expand_pattern(&project_dir, &pattern)?);
         }
         paths.sort();
         paths.dedup();
         let mut members = Vec::new();
         for path in paths {
-            let text = read_file(&path)?;
-            let manifest = PackageManifest::parse(&text)
-                .map_err(|error| format!("invalid workspace member {}: {error}", path.display()))?;
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                format!(
+                    "cannot inspect workspace manifest {}: {error}",
+                    path.display()
+                )
+            })?;
+            if !metadata.file_type().is_file() {
+                return Err(format!(
+                    "workspace manifest must be a regular file, not a symlink: {}",
+                    path.display()
+                ));
+            }
+            let canonical = fs::canonicalize(&path).map_err(|error| {
+                format!(
+                    "cannot resolve workspace manifest {}: {error}",
+                    path.display()
+                )
+            })?;
+            if !canonical.starts_with(&project_dir) {
+                return Err(format!(
+                    "workspace member escapes workspace root: {}",
+                    path.display()
+                ));
+            }
+            let text = read_file(&canonical)?;
+            let manifest = PackageManifest::parse(&text).map_err(|error| {
+                format!("invalid workspace member {}: {error}", canonical.display())
+            })?;
             if members
                 .iter()
                 .any(|member: &WorkspaceMember| member.name == manifest.name().to_string())
@@ -62,7 +104,7 @@ impl Workspace {
             }
             members.push(WorkspaceMember {
                 name: manifest.name().to_string(),
-                path,
+                path: canonical,
                 manifest,
             });
         }
@@ -160,11 +202,16 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
                 for entry in entries {
                     let entry = entry
                         .map_err(|error| format!("cannot inspect workspace directory: {error}"))?;
-                    if entry
+                    let file_type = entry
                         .file_type()
-                        .map_err(|error| error.to_string())?
-                        .is_dir()
-                    {
+                        .map_err(|error| format!("cannot inspect workspace directory: {error}"))?;
+                    if file_type.is_symlink() {
+                        return Err(format!(
+                            "workspace glob encountered a symlink, which is unsupported: {}",
+                            entry.path().display()
+                        ));
+                    }
+                    if file_type.is_dir() {
                         next.push(entry.path());
                     }
                 }

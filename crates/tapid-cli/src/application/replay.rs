@@ -63,10 +63,16 @@ pub(crate) fn replay_input(
         keep: false,
     };
     let typed_packages = lock.packages_typed().map_err(|e| e.to_string())?;
-    let typed_keys = typed_packages
+    let mut typed_keys = typed_packages
         .iter()
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
+    typed_keys.extend(
+        lock.workspace_packages_typed()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|(key, _)| key),
+    );
     let root_keys = replay_root_keys(lock, manifest, &typed_keys)?;
     let package_total = typed_packages.len();
     for (index, (key, package)) in typed_packages.iter().enumerate() {
@@ -86,8 +92,10 @@ pub(crate) fn replay_input(
         snapshots.paths.push(tree.clone());
         let peer = context::parse_peer(&key.peer_context)?;
         let platform = context::parse_platform(&key.platform_context)?;
-        let id =
-            PackageInstanceId::new(key.registry.clone(), key.name.clone(), key.version.clone());
+        let registry = key.source.registry().cloned().ok_or_else(|| {
+            format!("workspace source unexpectedly appeared as a registry artifact: {encoded}")
+        })?;
+        let id = PackageInstanceId::new(registry, key.name.clone(), key.version.clone());
         let instance = PackageInstance {
             id,
             peer_context: peer,
@@ -99,14 +107,34 @@ pub(crate) fn replay_input(
         trees.insert(encoded, tree);
         instances.push(instance);
     }
-    let roots = root_keys
+    let mut roots = root_keys
         .iter()
+        .filter(|root| {
+            root.parse::<tapid_lockfile::LockfilePackageKey>()
+                .is_ok_and(|key| key.source.registry().is_some())
+        })
         .map(|root| {
             keys.get(root)
                 .cloned()
                 .ok_or_else(|| format!("missing root package target {root}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    for workspace_package in lock.workspace_packages().values() {
+        for target in workspace_package.dependencies().values() {
+            let target_key = target
+                .parse::<tapid_lockfile::LockfilePackageKey>()
+                .map_err(|error| error.to_string())?;
+            if target_key.source.registry().is_some() {
+                roots.push(
+                    keys.get(target)
+                        .cloned()
+                        .ok_or_else(|| format!("missing workspace dependency target {target}"))?,
+                );
+            }
+        }
+    }
+    roots.sort();
+    roots.dedup();
     let mut edges = Vec::new();
     for (key, package) in &typed_packages {
         let encoded = key.to_string();
@@ -139,10 +167,14 @@ fn replay_root_keys(
     let root_identities = replay_root_identities(manifest)?;
     let optional_only = optional_only_root_identities(manifest)?;
     if root_identities.is_empty() {
-        return if lock.roots().is_empty() && typed_keys.is_empty() {
-            Ok(Vec::new())
+        let has_registry_root = lock.roots().iter().any(|root| {
+            root.parse::<tapid_lockfile::LockfilePackageKey>()
+                .is_ok_and(|key| key.source.registry().is_some())
+        });
+        return if has_registry_root {
+            Err("lockfile has registry roots but the manifest has no direct dependencies".into())
         } else {
-            Err("lockfile has packages or roots but the manifest has no direct dependencies".into())
+            Ok(lock.roots().to_vec())
         };
     }
 
@@ -153,7 +185,8 @@ fn replay_root_keys(
                 let candidates = typed_keys
                     .iter()
                     .filter(|key| {
-                        (&key.registry, &key.name) == (&identity.0, &identity.1)
+                        key.source.registry() == Some(&identity.0)
+                            && key.name == identity.1
                             && replay_root_matches(&root_identities, key)
                     })
                     .collect::<Vec<_>>();
@@ -187,20 +220,36 @@ fn replay_root_keys(
         .map(|key| (key.to_string(), key))
         .collect::<BTreeMap<_, _>>();
     let mut matched = BTreeMap::new();
+    let mut matched_workspace = std::collections::BTreeSet::new();
     for root in lock.roots() {
         let key = typed_by_key
             .get(root)
             .ok_or_else(|| format!("missing root package target {root}"))?;
+        if key.source.workspace().is_some() {
+            if !workspace_root_matches(key) {
+                return Err(format!(
+                    "lockfile workspace root {root} has inconsistent package identity"
+                ));
+            }
+            let identity = online::dep_parts(key.name.as_str())?;
+            matched_workspace.insert(identity);
+            continue;
+        }
         if !replay_root_matches(&root_identities, key) {
             return Err(format!(
                 "lockfile root {root} does not satisfy a direct manifest dependency"
             ));
         }
-        *matched
-            .entry((key.registry.clone(), key.name.clone()))
-            .or_insert(0_usize) += 1;
+        if let Some(registry) = key.source.registry() {
+            *matched
+                .entry((registry.clone(), key.name.clone()))
+                .or_insert(0_usize) += 1;
+        }
     }
     for identity in root_identities.keys() {
+        if matched_workspace.contains(identity) {
+            continue;
+        }
         if optional_only.contains(identity) && !matched.contains_key(identity) {
             continue;
         }
@@ -212,6 +261,12 @@ fn replay_root_keys(
         }
     }
     Ok(lock.roots().to_vec())
+}
+
+fn workspace_root_matches(key: &tapid_lockfile::LockfilePackageKey) -> bool {
+    key.source.workspace().is_some_and(|source| {
+        source.name() == key.name.as_str() && source.version() == key.version.to_string()
+    })
 }
 
 fn optional_only_root_identities(
@@ -251,6 +306,9 @@ pub(crate) fn replay_root_identities(
     ] {
         for (name, requirement) in map {
             let (registry, package) = online::dep_parts(name)?;
+            if requirement.starts_with("workspace:") {
+                continue;
+            }
             identities
                 .entry((registry, package))
                 .or_insert_with(Vec::new)
@@ -267,8 +325,9 @@ pub(crate) fn replay_root_matches(
     >,
     key: &tapid_lockfile::LockfilePackageKey,
 ) -> bool {
-    roots
-        .get(&(key.registry.clone(), key.name.clone()))
+    key.source
+        .registry()
+        .and_then(|registry| roots.get(&(registry.clone(), key.name.clone())))
         .is_some_and(|requirements| {
             requirements
                 .iter()

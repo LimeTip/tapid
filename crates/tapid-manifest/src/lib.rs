@@ -67,6 +67,60 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_workspace_glob_symlinks_instead_of_silently_omitting_members() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("workspace-symlink");
+        let outside = unique_temp_dir("workspace-symlink-outside");
+        std::fs::create_dir_all(root.join("packages")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            outside.join("package.json"),
+            r#"{"name":"outside","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        symlink(&outside, root.join("packages/escape")).unwrap();
+
+        let error = Workspace::discover(&root).unwrap_err();
+        assert!(error.contains("symlink"), "unexpected error: {error}");
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn rejects_duplicate_package_names_across_distinct_workspace_members() {
+        let root = unique_temp_dir("workspace-duplicate-name");
+        for member in ["packages/first", "packages/second"] {
+            std::fs::create_dir_all(root.join(member)).unwrap();
+            std::fs::write(
+                root.join(member).join("package.json"),
+                r#"{"name":"shared","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+
+        let error = Workspace::discover(&root).unwrap_err();
+        assert!(
+            error.contains("duplicate workspace package name"),
+            "{error}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn discovers_object_workspace_packages_and_rejects_unknown_selection() {
         let root = unique_temp_dir("workspace-object");
@@ -85,7 +139,7 @@ mod tests {
         let workspace = Workspace::discover(&root).unwrap();
         assert_eq!(
             workspace.members()[0].path(),
-            root.join("apps/web/package.json")
+            std::fs::canonicalize(root.join("apps/web/package.json")).unwrap()
         );
         assert!(workspace.select(Some("missing")).is_err());
         std::fs::remove_dir_all(root).unwrap();

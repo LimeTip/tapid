@@ -34,12 +34,31 @@ fn report_materialization_completion(total: usize, report: impl FnOnce(usize, us
     }
 }
 
+#[cfg(test)]
 pub(crate) fn materialize_stage(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
     input: &LayoutInput,
     trees: &BTreeMap<String, PathBuf>,
     sources_are_verified_snapshots: bool,
+) -> Result<(), String> {
+    materialize_stage_with_workspace_links(
+        stage,
+        plan,
+        input,
+        trees,
+        sources_are_verified_snapshots,
+        &tapid_linker::WorkspaceLinkPlan::default(),
+    )
+}
+
+pub(crate) fn materialize_stage_with_workspace_links(
+    stage: &Path,
+    plan: &tapid_linker::MaterializationPlan,
+    input: &LayoutInput,
+    trees: &BTreeMap<String, PathBuf>,
+    sources_are_verified_snapshots: bool,
+    workspace_links: &tapid_linker::WorkspaceLinkPlan,
 ) -> Result<(), String> {
     fs::create_dir_all(stage.join("node_modules")).map_err(|e| e.to_string())?;
     let mut by_source = BTreeMap::new();
@@ -94,9 +113,67 @@ pub(crate) fn materialize_stage(
         }
     }
     materialize_package_shims(stage, plan)?;
+    materialize_workspace_links(stage, workspace_links)?;
     report_materialization_completion(materialization_total, |completed, total| {
         eprintln!("Materialization progress: {completed}/{total}");
     });
+    Ok(())
+}
+
+fn materialize_workspace_links(
+    stage: &Path,
+    links: &tapid_linker::WorkspaceLinkPlan,
+) -> Result<(), String> {
+    let project_root = stage
+        .parent()
+        .ok_or_else(|| "workspace staging directory is not project-local".to_owned())?;
+    let project_root = fs::canonicalize(project_root)
+        .map_err(|error| format!("cannot resolve workspace project root: {error}"))?;
+    for link in &links.links {
+        let target = stage
+            .join("node_modules")
+            .join(link.name.as_str().split('/').collect::<PathBuf>());
+        if !target.starts_with(stage) {
+            return Err(format!(
+                "workspace link target escapes stage: {}",
+                target.display()
+            ));
+        }
+        let source = fs::canonicalize(&link.source).map_err(|error| {
+            format!(
+                "cannot resolve workspace source {}: {error}",
+                link.source.display()
+            )
+        })?;
+        if !source.starts_with(&project_root)
+            || source == project_root
+            || !source.join("package.json").is_file()
+        {
+            return Err(format!(
+                "workspace source is not a contained package directory: {}",
+                source.display()
+            ));
+        }
+        let parent = target
+            .parent()
+            .ok_or("workspace link target has no parent")?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let final_parent = project_root
+            .join("node_modules")
+            .join(link.name.as_str().split('/').collect::<PathBuf>())
+            .parent()
+            .ok_or("workspace link target has no parent")?
+            .to_path_buf();
+        let relative_source = relative_path(&final_parent, &source);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&relative_source, &target)
+            .map_err(|error| format!("cannot create workspace link: {error}"))?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&source, &target)
+            .map_err(|error| format!("cannot create workspace link: {error}"))?;
+        #[cfg(not(any(unix, windows)))]
+        return Err("workspace package links are unsupported on this platform".to_owned());
+    }
     Ok(())
 }
 

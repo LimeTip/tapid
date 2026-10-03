@@ -22,6 +22,7 @@ pub enum LockfileError {
     },
     DanglingRoot(String),
     MissingRoots,
+    WorkspaceIdentityRequiresCurrentVersion,
     MissingRegistryIntegrityProvenance(String),
     UnverifiedRegistryArtifact(String),
     NonCanonicalRoots,
@@ -75,6 +76,10 @@ impl fmt::Display for LockfileError {
             }
             Self::DanglingRoot(root) => write!(f, "lockfile has dangling root package {root}"),
             Self::MissingRoots => write!(f, "current lockfile schema requires exact root packages"),
+            Self::WorkspaceIdentityRequiresCurrentVersion => write!(
+                f,
+                "workspace package identities require the current lockfile schema"
+            ),
             Self::MissingRegistryIntegrityProvenance(package) => write!(
                 f,
                 "current lockfile schema requires registry integrity provenance for {package}"

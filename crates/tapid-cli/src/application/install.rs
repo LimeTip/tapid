@@ -250,13 +250,14 @@ pub(crate) fn run_with_manifest(
             Some(path) => path.to_owned(),
             None => default_store_root()?,
         });
-        let (lock, mut input, trees, store_transaction) = online::resolve_and_fetch(
-            &project_dir,
-            &manifest,
-            &store,
-            registry_fixture,
-            allow_unverified_registry_artifacts,
-        )?;
+        let (lock, mut input, trees, store_transaction, workspace_links) =
+            online::resolve_and_fetch(
+                &project_dir,
+                &manifest,
+                &store,
+                registry_fixture,
+                allow_unverified_registry_artifacts,
+            )?;
         if lifecycle_journal.is_none() {
             lifecycle_journal = Some(
                 crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
@@ -310,6 +311,7 @@ pub(crate) fn run_with_manifest(
             &project_dir,
             input,
             trees,
+            workspace_links,
             &activation_lock,
             lifecycle_journal.is_some(),
         ) {
@@ -377,6 +379,21 @@ pub(crate) fn run_with_manifest(
     if let Err(error) = lock.validate_replay(&current_manifest_digest) {
         return Err(format!("invalid lockfile {}: {error}", lock_path.display()));
     }
+    let workspace = online::workspace_materialization(&project_dir)?;
+    let current_workspace = workspace
+        .locked
+        .iter()
+        .map(|package| (package.key(), package.manifest_digest().to_owned()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let locked_workspace = lock
+        .workspace_packages()
+        .iter()
+        .map(|(key, package)| (key.clone(), package.manifest_digest().to_owned()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if current_workspace != locked_workspace {
+        return Err("workspace membership or member manifest changed; regenerate tapid.lock with an online install".to_owned());
+    }
+    validate_workspace_dependency_edges(&workspace, &lock)?;
     let store = Store::new(match store_root {
         Some(path) => path.to_owned(),
         None => default_store_root()?,
@@ -393,6 +410,7 @@ pub(crate) fn run_with_manifest(
         &project_dir,
         input,
         trees,
+        online::workspace_materialization(&project_dir)?.links,
         true,
         &activation_lock,
         lifecycle_journal.is_some(),
@@ -410,10 +428,111 @@ pub(crate) fn run_with_manifest(
     })
 }
 
+fn validate_workspace_dependency_edges(
+    workspace: &online::WorkspaceMaterialization,
+    lock: &Lockfile,
+) -> Result<(), String> {
+    for current in &workspace.locked {
+        let key = current.key();
+        let locked = lock
+            .workspace_packages()
+            .get(&key)
+            .ok_or_else(|| format!("lockfile is missing workspace package {key}"))?;
+        let mut expected_names = std::collections::BTreeSet::new();
+        for (name, target) in current.dependencies() {
+            expected_names.insert(name.clone());
+            if locked.dependencies().get(name) != Some(target) {
+                return Err(format!(
+                    "lockfile workspace dependency '{name}' for {key} does not match the current local workspace graph"
+                ));
+            }
+            let target_key = target
+                .parse::<tapid_lockfile::LockfilePackageKey>()
+                .map_err(|error| error.to_string())?;
+            if target_key.source.workspace().is_none()
+                || !lock.workspace_packages().contains_key(target)
+            {
+                return Err(format!(
+                    "lockfile workspace dependency '{name}' for {key} does not target a workspace package"
+                ));
+            }
+        }
+        for dependency in workspace
+            .registry_dependencies
+            .iter()
+            .filter(|dependency| dependency.member_key == key)
+        {
+            let name = dependency.package.to_string();
+            expected_names.insert(name.clone());
+            let target = locked.dependencies().get(&name).ok_or_else(|| {
+                format!(
+                    "lockfile omits workspace member dependency '{}' from {key}",
+                    dependency.manifest_name
+                )
+            })?;
+            let target_key = target
+                .parse::<tapid_lockfile::LockfilePackageKey>()
+                .map_err(|error| error.to_string())?;
+            if target_key.source.registry() != Some(&dependency.registry)
+                || target_key.name != dependency.package
+                || !dependency.requirement.matches(&target_key.version)
+                || !lock.packages().contains_key(target)
+            {
+                return Err(format!(
+                    "lockfile target for workspace member dependency '{}' does not satisfy its registry, name, and version requirement",
+                    dependency.manifest_name
+                ));
+            }
+        }
+        let actual_names = locked
+            .dependencies()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if actual_names != expected_names {
+            return Err(format!(
+                "lockfile workspace dependency edges for {key} do not match the current member manifest"
+            ));
+        }
+    }
+    for peer in &workspace.peer_dependencies {
+        let provider_found = match &peer.provider {
+            online::WorkspacePeerProvider::Workspace { key, version } => {
+                let target_key = key
+                    .parse::<tapid_lockfile::LockfilePackageKey>()
+                    .map_err(|error| error.to_string())?;
+                target_key.version == *version
+                    && lock.workspace_packages().contains_key(key)
+                    && workspace.locked.iter().any(|member| member.key() == *key)
+            }
+            online::WorkspacePeerProvider::Registry { registry, package } => {
+                lock.roots().iter().any(|key| {
+                    key.parse::<tapid_lockfile::LockfilePackageKey>()
+                        .ok()
+                        .is_some_and(|target| {
+                            target.source.registry() == Some(registry)
+                                && target.name == *package
+                                && peer.requirement.matches(&target.version)
+                                && lock.packages().contains_key(key)
+                        })
+                })
+            }
+        };
+        if !provider_found {
+            return Err(format!(
+                "lockfile has no provider satisfying workspace member peer dependency '{}' from {}",
+                peer.manifest_name, peer.member_key
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn materialize_install(
     project_dir: &Path,
     input: LayoutInput,
     trees: BTreeMap<String, PathBuf>,
+    workspace_links: tapid_linker::WorkspaceLinkPlan,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
 ) -> Result<(), String> {
@@ -421,6 +540,7 @@ fn materialize_install(
         project_dir,
         input,
         trees,
+        workspace_links,
         false,
         activation_lock,
         preserve_previous,
@@ -431,6 +551,7 @@ fn materialize_with_lock(
     project_dir: &Path,
     input: LayoutInput,
     trees: BTreeMap<String, PathBuf>,
+    workspace_links: tapid_linker::WorkspaceLinkPlan,
     replayed: bool,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
@@ -463,16 +584,22 @@ fn materialize_with_lock(
             return Err(error);
         }
     };
-    let result =
-        crate::filesystem::tree::materialize_stage(&stage, &plan, &input, &trees, replayed)
-            .and_then(|_| {
-                crate::filesystem::activation::activate_node_modules_with_lock(
-                    project_dir,
-                    &stage,
-                    activation_lock,
-                    preserve_previous,
-                )
-            });
+    let result = crate::filesystem::tree::materialize_stage_with_workspace_links(
+        &stage,
+        &plan,
+        &input,
+        &trees,
+        replayed,
+        &workspace_links,
+    )
+    .and_then(|_| {
+        crate::filesystem::activation::activate_node_modules_with_lock(
+            project_dir,
+            &stage,
+            activation_lock,
+            preserve_previous,
+        )
+    });
     if replayed {
         crate::application::replay::cleanup_replay_snapshots(&trees);
     }

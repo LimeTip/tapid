@@ -205,6 +205,29 @@ fn mutate_and_install(
         common.workspace.as_deref(),
     )?;
     let plan = planner(&manifest)?;
+    if common.workspace.is_some() {
+        let workspace = tapid_manifest::Workspace::discover(&common.project_dir)?;
+        let workspace_names = workspace
+            .members()
+            .iter()
+            .map(|member| member.name())
+            .collect::<std::collections::BTreeSet<_>>();
+        for dependency_map in [
+            plan.manifest.dependencies(),
+            plan.manifest.dev_dependencies(),
+            plan.manifest.optional_dependencies(),
+            plan.manifest.peer_dependencies(),
+        ] {
+            if let Some(name) = dependency_map
+                .keys()
+                .find(|name| workspace_names.contains(name.as_str()))
+            {
+                return Err(format!(
+                    "selected workspace member dependency '{name}' cannot yet be linked from member lifecycle operations; refusing registry fallback"
+                ));
+            }
+        }
+    }
     crate::application::install::run_with_manifest(
         &project_dir,
         Some(&plan.manifest),
