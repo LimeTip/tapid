@@ -68,7 +68,7 @@ tapid init
 tapid i is-char
 ```
 
-`tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`. Use your project's runtime and its tooling to run scripts. The experimental `tapid run` command is a separate, Node.js-only script launcher; it does not provide a runtime or select Deno/Bun.
+`tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`. Use your project's runtime and tooling to run scripts. The experimental `tapid run` command is a separate, Node.js-only script launcher; it does not provide a runtime or select Deno/Bun. On Linux and macOS, an explicit `assurance = "restricted"` profile asks the native backend to limit the script's configured filesystem and network authority; this is not full process-tree management or a guarantee that arbitrary code is safe. See the [CLI guide](crates/tapid-cli/README.md#experimental-root-script-containment) for the limits and setup.
 
 ## Current package-management implementation
 
@@ -193,7 +193,7 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - Lifecycle scripts from dependencies never run during install. There is no approval workflow yet.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
-- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; ManagedTree, resource-limit profiles, and Linux/Windows native backends remain unavailable. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
+- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock and seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. ManagedTree, configured resource-limit profiles, Windows native containment, and the broader Linux Restricted probe matrix remain unsupported or pending. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
 
 ## Development
 

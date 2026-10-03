@@ -2396,16 +2396,12 @@ mod tests {
         };
         let project = temp_project("node-hardlink-project");
         let trusted = temp_project("node-hardlink-trusted");
-        let selected = Command::new("/usr/bin/which").arg("node").output().unwrap();
-        assert!(
-            selected.status.success(),
-            "real Node runtime is unavailable"
-        );
-        let source = PathBuf::from(OsString::from_vec(
-            selected.stdout[..selected.stdout.len() - 1].to_vec(),
-        ));
         let runtime = trusted.join("node");
-        fs::copy(fs::canonicalize(source).unwrap(), &runtime).unwrap();
+        fs::write(
+            &runtime,
+            b"#!/bin/sh\ncase \"$*\" in *second-node*) printf verified > second-node ;; *detached-node*) printf verified > detached-node ;; esac\n",
+        )
+        .unwrap();
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
         let original = fs::read(&runtime).unwrap();
         let script = r##"
