@@ -57,7 +57,7 @@ iwr -useb https://tapid.dev/install.ps1 | iex
 
 These commands install the latest published Tapid release from the immutable GitHub release assets published by `LimeTip/tapid` and verify the selected archive against its `SHA256SUMS` entry. See [installation details](#installation-details) for release selection, contributor source builds, alternate repositories, and uninstall instructions.
 
-Tapid is a package manager: it manages packages and lockfiles, and is not a runtime. Node executes Node.js code; workerd executes Workers code; Wrangler owns Workers workflows and deployment. The optional `tapid run` convenience launches Node-backed project scripts; it is not required to install or replay packages and does not establish runtime, Workers, or deployment support. See [Production adoption gate](docs/production-adoption.md) for the current development-only status, exact pending support matrix, release policy, required evidence, and canary/rollback procedure.
+Tapid is a package manager: it manages packages and lockfiles, and is not a runtime. Node executes Node.js code; workerd executes Workers code; Wrangler owns Workers workflows and deployment. The optional `tapid run` convenience invokes a project script through the platform shell, with Node executing any Node.js programs the script calls. It is not required to install or replay packages and does not establish runtime, Workers, or deployment support. See [Production adoption gate](docs/production-adoption.md) for the current development-only status, exact pending support matrix, release policy, required evidence, and canary/rollback procedure.
 
 ## Quick start
 
