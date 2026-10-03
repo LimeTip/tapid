@@ -1,5 +1,15 @@
 #![cfg(windows)]
 use super::*;
+use std::sync::{Mutex, MutexGuard};
+
+// Windows exposes no compare-and-swap DACL update; serialize Tapid's ACL transactions within this process.
+static WINDOWS_ACL_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_acl_mutations() -> Result<MutexGuard<'static, ()>, ExecutionError> {
+    WINDOWS_ACL_MUTATION_LOCK
+        .lock()
+        .map_err(|_| unsupported_acl("serialize filesystem ACL updates", 6))
+}
 
 /// Temporarily grants an AppContainer SID access to a directory subtree and restores the
 /// original DACL before releasing the held directory handle.
@@ -38,6 +48,7 @@ impl WindowsPathAcl {
         kind: FilesystemGrantKind,
         allow_execute: bool,
     ) -> Result<Self, ExecutionError> {
+        let _transaction = lock_acl_mutations()?;
         let mut parent_grants = Vec::new();
         if matches!(
             kind,
@@ -46,14 +57,14 @@ impl WindowsPathAcl {
             let parent = path.parent().ok_or_else(|| {
                 unsupported_acl("filesystem grant target has no parent directory", 87)
             })?;
-            parent_grants.push(Self::grant_directory_listing(parent, sid)?);
+            parent_grants.push(Self::grant_directory_listing_unlocked(parent, sid)?);
         }
         let mut grant = Self::grant_inner(path, sid, access, kind, false, allow_execute)?;
         grant.parent_grants = parent_grants;
         Ok(grant)
     }
 
-    pub fn grant_directory_listing(
+    fn grant_directory_listing_unlocked(
         path: &std::path::Path,
         sid: windows_sys::Win32::Foundation::PSID,
     ) -> Result<Self, ExecutionError> {
@@ -338,6 +349,11 @@ impl WindowsPathAcl {
     }
 
     pub fn restore(&mut self) -> Result<(), ExecutionError> {
+        let _transaction = lock_acl_mutations()?;
+        self.restore_unlocked()
+    }
+
+    fn restore_unlocked(&mut self) -> Result<(), ExecutionError> {
         use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
         use windows_sys::Win32::Security::Authorization::{
             EXPLICIT_ACCESS_W, GetSecurityInfo, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SE_FILE_OBJECT,
@@ -463,7 +479,7 @@ impl WindowsPathAcl {
             }
         }
         for parent_grant in self.parent_grants.iter_mut().rev() {
-            if let Err(error) = parent_grant.restore() {
+            if let Err(error) = parent_grant.restore_unlocked() {
                 if restore_error.is_none() {
                     restore_error = Some(error);
                 }

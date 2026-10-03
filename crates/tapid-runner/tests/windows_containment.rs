@@ -314,6 +314,45 @@ fn windows_child_process_probe_helper() {
 }
 
 #[test]
+fn windows_node_runtime_can_spawn_a_child_inside_the_appcontainer() {
+    let Some(node) = std::env::var_os("TAPID_TEST_NODE").map(PathBuf::from) else {
+        eprintln!("skipping: TAPID_TEST_NODE is not set");
+        return;
+    };
+    let node = fs::canonicalize(node).unwrap();
+    let runtime_bin = node.parent().unwrap().to_path_buf();
+    let system32 = fs::canonicalize(
+        PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot is required"))
+            .join("System32"),
+    )
+    .unwrap();
+    let root = temporary_project("node-child-process");
+    let script = r#"const { spawnSync } = require('node:child_process'); const child = spawnSync(process.execPath, ['--version'], { encoding: 'utf8', stdio: 'inherit' }); if (child.error) { console.error(JSON.stringify({ code: child.error.code, errno: child.error.errno, syscall: child.error.syscall, message: child.error.message })); process.exit(1); } process.stdout.write(child.stdout || ''); process.stderr.write(child.stderr || ''); process.exit(child.status ?? 1);"#;
+    let request = ExecutionRequest::builder(node.as_os_str())
+        .args([OsString::from("-e"), OsString::from(script)])
+        .executable_search_paths([runtime_bin.as_path(), system32.as_path()])
+        .trusted_node_runtime(&node)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(15), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
+            true,
+            false,
+        ))
+        .build()
+        .unwrap();
+    let outcome = execute(&request).expect("Node child-process probe must be contained");
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(outcome.stdout()),
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert!(String::from_utf8_lossy(outcome.stdout()).starts_with('v'));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn windows_node_runtime_can_be_launched_directly_when_test_runtime_is_configured() {
     let Some(local_app_data) = std::env::var_os("TAPID_TEST_LOCALAPPDATA").map(PathBuf::from)
     else {
