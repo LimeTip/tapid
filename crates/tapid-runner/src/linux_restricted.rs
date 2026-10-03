@@ -511,10 +511,6 @@ fn completion_for(preflight: &ValidatedPreflight) -> Result<CompletionEvidence, 
     )
 }
 
-pub(super) fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
-    super::execute_with_backend(request, &PlatformBackend)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +520,10 @@ mod tests {
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
+        super::super::execute_with_backend(request, &PlatformBackend)
+    }
 
     fn root() -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
