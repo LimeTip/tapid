@@ -144,9 +144,10 @@ pub struct HttpResponse {
 pub struct HttpsTransport {
     client: reqwest::blocking::Client,
     allowed_origins: Vec<Origin>,
+    credentials: Vec<(Origin, reqwest::header::HeaderValue)>,
     max_response_bytes: usize,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Origin {
     scheme: String,
     host: String,
@@ -262,6 +263,29 @@ impl HttpsTransport {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        Self::new_authenticated(
+            allowed_origins,
+            std::iter::empty::<(String, String)>(),
+            timeout,
+            max_response_bytes,
+        )
+    }
+
+    /// Creates a bounded HTTPS transport with bearer credentials bound to exact origins.
+    /// Credentials are attached only to requests for their configured origin; redirects
+    /// remain restricted to that same origin.
+    pub fn new_authenticated<I, S, C, O>(
+        allowed_origins: I,
+        credentials: C,
+        timeout: Duration,
+        max_response_bytes: usize,
+    ) -> Result<Self, TransportError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        C: IntoIterator<Item = (O, String)>,
+        O: AsRef<str>,
+    {
         let allowed_origins = allowed_origins
             .into_iter()
             .map(|s| Origin::parse(s.as_ref()))
@@ -271,6 +295,20 @@ impl HttpsTransport {
                 "non-empty origins and positive response limit required".into(),
             ));
         }
+        let credentials = credentials
+            .into_iter()
+            .map(|(origin, token)| {
+                let origin = Origin::parse(origin.as_ref())?;
+                if !allowed_origins.contains(&origin) || token.is_empty() {
+                    return Err(TransportError::OriginNotAllowed(origin.host));
+                }
+                let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|_| {
+                        TransportError::InvalidResponse("invalid registry credential".into())
+                    })?;
+                Ok((origin, value))
+            })
+            .collect::<Result<Vec<_>, TransportError>>()?;
         let policy = reqwest::redirect::Policy::custom({
             let allowed = allowed_origins.clone();
             move |attempt| {
@@ -292,9 +330,46 @@ impl HttpsTransport {
         Ok(Self {
             client,
             allowed_origins,
+            credentials,
             max_response_bytes,
         })
     }
+    /// Creates metadata transport with additional registry origins and exact-origin credentials.
+    pub fn authenticated_metadata(
+        extra_origins: impl IntoIterator<Item = String>,
+        credentials: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, TransportError> {
+        let origins = STANDARD_ALLOWED_ORIGINS
+            .into_iter()
+            .map(str::to_owned)
+            .chain(extra_origins)
+            .collect::<Vec<_>>();
+        Self::new_authenticated(
+            origins,
+            credentials,
+            Duration::from_secs(20),
+            STANDARD_METADATA_MAX_RESPONSE_BYTES,
+        )
+    }
+
+    /// Creates artifact transport with additional registry origins and exact-origin credentials.
+    pub fn authenticated_artifact(
+        extra_origins: impl IntoIterator<Item = String>,
+        credentials: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, TransportError> {
+        let origins = STANDARD_ALLOWED_ORIGINS
+            .into_iter()
+            .map(str::to_owned)
+            .chain(extra_origins)
+            .collect::<Vec<_>>();
+        Self::new_authenticated(
+            origins,
+            credentials,
+            Duration::from_secs(20),
+            STANDARD_ARTIFACT_MAX_RESPONSE_BYTES,
+        )
+    }
+
     /// Creates the bounded transport used for registry metadata.
     pub fn standard() -> Result<Self, TransportError> {
         Self::new(
@@ -311,6 +386,14 @@ impl HttpsTransport {
             Duration::from_secs(20),
             STANDARD_ARTIFACT_MAX_RESPONSE_BYTES,
         )
+    }
+
+    fn authorization_for(&self, url: &Url) -> Option<&reqwest::header::HeaderValue> {
+        let origin = Origin::of(url);
+        self.credentials
+            .iter()
+            .find(|(configured, _)| configured == &origin)
+            .map(|(_, value)| value)
     }
 
     fn get_internal(
@@ -334,6 +417,9 @@ impl HttpsTransport {
         execute_bounded_get(
             || {
                 let mut request = self.client.get(parsed.clone());
+                if let Some(credential) = self.authorization_for(&parsed) {
+                    request = request.header(reqwest::header::AUTHORIZATION, credential);
+                }
                 if let Some(value) = &accept {
                     request = request.header(reqwest::header::ACCEPT, value);
                 }
@@ -400,6 +486,71 @@ impl HttpTransport for HttpsTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorization_header_is_selected_only_for_exact_origin() {
+        let transport = HttpsTransport::new_authenticated(
+            ["https://private.example", "https://public.example"],
+            [("https://private.example", "opaque-token".to_owned())],
+            Duration::from_secs(1),
+            1024,
+        )
+        .unwrap();
+        let private = Url::parse("https://private.example/package").unwrap();
+        let other_port = Url::parse("https://private.example:444/package").unwrap();
+        let public = Url::parse("https://public.example/package").unwrap();
+        assert_eq!(
+            transport
+                .authorization_for(&private)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer opaque-token")
+        );
+        assert!(transport.authorization_for(&other_port).is_none());
+        assert!(transport.authorization_for(&public).is_none());
+    }
+
+    #[test]
+    fn credentials_are_bound_to_exact_origin_and_invalid_values_are_rejected() {
+        let transport = HttpsTransport::new_authenticated(
+            ["https://private.example", "https://public.example"],
+            [("https://private.example", "opaque-token".to_owned())],
+            Duration::from_secs(1),
+            1024,
+        )
+        .unwrap();
+        let private = Origin::parse("https://private.example").unwrap();
+        let public = Origin::parse("https://public.example").unwrap();
+        assert!(
+            transport
+                .credentials
+                .iter()
+                .any(|(origin, _)| origin == &private)
+        );
+        assert!(
+            !transport
+                .credentials
+                .iter()
+                .any(|(origin, _)| origin == &public)
+        );
+        assert!(
+            HttpsTransport::new_authenticated(
+                ["https://private.example"],
+                [("https://private.example", "bad\nvalue".to_owned())],
+                Duration::from_secs(1),
+                1024,
+            )
+            .is_err()
+        );
+        assert!(
+            HttpsTransport::new_authenticated(
+                ["https://private.example"],
+                [("https://other.example", "opaque-token".to_owned())],
+                Duration::from_secs(1),
+                1024,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn malformed_configured_origins_are_rejected() {

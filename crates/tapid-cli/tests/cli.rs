@@ -54,6 +54,113 @@ fn cleanup(path: PathBuf) {
 }
 
 #[test]
+fn missing_private_registry_credentials_fail_before_committing_manifest_changes() {
+    let dir = temp_dir("missing-registry-credential");
+    let original = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), original).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_MISSING'\n",
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let output = run_with_isolated_path(
+        &dir,
+        &[
+            "add",
+            "@acme/private@1.0.0",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+        OsStr::new(""),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("TAPID_ISSUE164_MISSING"), "{stderr}");
+    assert!(!stderr.contains("secret"), "{stderr}");
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        original.as_bytes()
+    );
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
+    cleanup(dir);
+}
+
+#[test]
+fn scoped_registry_routing_selects_private_and_default_origins_and_replays_offline() {
+    let dir = temp_dir("scoped-registry-routing");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"@acme/private":"1.0.0","left-pad":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.default]\nurl='https://mirror.example'\n[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_OFFLINE_ONLY'\n",
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://packages.example","name":"@acme/private","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}},{{"registry":"https://mirror.example","name":"left-pad","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock_json = fs::read_to_string(dir.join("tapid.lock")).unwrap();
+    let lock: serde_json::Value = serde_json::from_str(&lock_json).unwrap();
+    let registries = lock["packages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|package| package["registry"].as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        registries,
+        ["https://mirror.example", "https://packages.example"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let replay = run_with_isolated_path(
+        &dir,
+        &[
+            "install",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+        OsStr::new(""),
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    cleanup(dir);
+}
+
+#[test]
 fn lifecycle_commands_are_exposed_as_cli_commands() {
     let dir = temp_dir("lifecycle-help");
     let output = run(&dir, &["--help"]);

@@ -676,6 +676,7 @@ pub fn resolve_and_fetch(
     store: &Store,
     fixture_path: Option<&Path>,
     allow_missing_integrity: bool,
+    registry_config: &crate::registry::RegistryConfig,
 ) -> Result<
     (
         Lockfile,
@@ -733,22 +734,32 @@ pub fn resolve_and_fetch(
         }
     }
     let mut roots = Vec::new();
+    let mut routed_packages = Vec::new();
     for (kind, map) in [
         ("dependencies", manifest.dependencies()),
         ("devDependencies", manifest.dev_dependencies()),
         ("optionalDependencies", manifest.optional_dependencies()),
     ] {
         for (name, range) in map {
-            let (registry, package) = dep_parts(name)?;
+            let (registry, package) = registry_config.identity_for_spec(name)?;
+            if !name.starts_with("jsr:") {
+                routed_packages.push(package.to_string());
+            }
             let requirement = range.parse::<Requirement>().map_err(|error| {
                 format!("invalid {kind} dependency '{name}' range '{range}': {error}")
             })?;
             roots.push(Dependency::new(registry, package, requirement));
         }
     }
+    let configured_origins = registry_config.configured_origins();
+    let credentials = if fixture.is_none() {
+        registry_config.credentials_for(&routed_packages)?
+    } else {
+        Vec::new()
+    };
     let metadata_transport = if fixture.is_none() {
         Some(
-            HttpsTransport::standard()
+            HttpsTransport::authenticated_metadata(configured_origins.clone(), credentials.clone())
                 .map_err(|error| format!("cannot create registry transport: {error}"))?,
         )
     } else {
@@ -785,7 +796,7 @@ pub fn resolve_and_fetch(
     let mut instances = Vec::new();
     let artifact_transport = if fixture.is_none() {
         Some(
-            HttpsTransport::standard_artifact()
+            HttpsTransport::authenticated_artifact(configured_origins, credentials)
                 .map_err(|error| format!("cannot create registry transport: {error}"))?,
         )
     } else {
