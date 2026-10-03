@@ -8,6 +8,16 @@ static TEST_LAUNCHER_INIT: extern "C" fn() = {
     init
 };
 
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static TEST_LAUNCHER_INIT_LINUX: extern "C" fn() = {
+    extern "C" fn init() {
+        tapid_runner::initialize_or_dispatch_private_launcher();
+    }
+    init
+};
+
 #[path = "../src/run.rs"]
 #[allow(dead_code)]
 mod run;
@@ -45,8 +55,11 @@ fn project() -> (PathBuf, PathBuf) {
 #[test]
 fn prepared_request_uses_npm_shell_exact_arguments_and_controlled_search_directories() {
     let (project, runtime) = project();
-    let config =
-        RunConfig::parse_toml("[run.scripts.dev]\nenvironment = [\"PUBLIC_VALUE\"]\n").unwrap();
+    let config = RunConfig::parse_toml(
+        "[run.defaults]\nassurance = \"restricted\"\n\n[run.scripts.dev]\nenvironment = [\"PUBLIC_VALUE\"]\n",
+    )
+    .unwrap();
+    let allow_process_memory_stats = cfg!(target_os = "linux");
     let mut ambient = BTreeMap::new();
     ambient.insert("PUBLIC_VALUE".into(), "declared".into());
     ambient.insert("SECRET_TOKEN".into(), "must-not-escape".into());
@@ -65,10 +78,15 @@ fn prepared_request_uses_npm_shell_exact_arguments_and_controlled_search_directo
         run::HostExecutionEnvironment {
             node_runtime: Some(&runtime),
             path: None,
+            allow_process_memory_stats,
             allowlisted: &ambient,
         },
     )
     .unwrap();
+    assert_eq!(
+        prepared.request().allow_process_memory_stats(),
+        allow_process_memory_stats
+    );
 
     #[cfg(unix)]
     {
@@ -151,6 +169,7 @@ fn dependency_free_project_without_managed_bin_is_accepted() {
         run::HostExecutionEnvironment {
             node_runtime: Some(&runtime),
             path: None,
+            allow_process_memory_stats: false,
             allowlisted: &BTreeMap::new(),
         },
     )
@@ -188,6 +207,7 @@ fn missing_managed_bin_does_not_accept_an_unsafe_parent() {
             run::HostExecutionEnvironment {
                 node_runtime: Some(&runtime),
                 path: None,
+                allow_process_memory_stats: false,
                 allowlisted: &BTreeMap::new(),
             },
         )
@@ -219,6 +239,7 @@ fn preexisting_managed_bin_symlink_outside_project_is_rejected() {
         run::HostExecutionEnvironment {
             node_runtime: Some(&runtime),
             path: None,
+            allow_process_memory_stats: false,
             allowlisted: &BTreeMap::new(),
         },
     )
@@ -255,6 +276,7 @@ fn relative_host_path_entry_cannot_select_a_project_controlled_node() {
         run::HostExecutionEnvironment {
             node_runtime: None,
             path: Some(relative_runtime.as_os_str()),
+            allow_process_memory_stats: false,
             allowlisted: &BTreeMap::new(),
         },
     )
@@ -288,6 +310,7 @@ fn arbitrary_executable_filename_is_not_accepted_as_node() {
         run::HostExecutionEnvironment {
             node_runtime: Some(&fake),
             path: None,
+            allow_process_memory_stats: false,
             allowlisted: &BTreeMap::new(),
         },
     )
@@ -418,6 +441,7 @@ fn local_bin_wins_over_runtime_tools_but_node_stays_verified() {
             run::HostExecutionEnvironment {
                 node_runtime: Some(&runtime),
                 path: Some(OsStr::new(caller_path)),
+                allow_process_memory_stats: false,
                 allowlisted: &BTreeMap::new(),
             },
         )
