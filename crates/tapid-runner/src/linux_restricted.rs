@@ -1,6 +1,6 @@
 use super::{
     AssuranceLevel, BackendIdentity, CleanupConfidence, CompletionEvidence, ContainmentSupport,
-    DimensionEvidence, EnforcementDimensions, EnforcementReceipt, ExecutionBackend, ExecutionError,
+    EnforcementDimensions, EnforcementReceipt, ExecutionBackend, ExecutionError,
     ExecutionErrorCategory, ExecutionLifecycle, ExecutionOutcome, ExecutionRequest,
     FilesystemAccess, FilesystemBindings, FilesystemGrantKind, OwnedExecutionAttempt,
     PreparationError, ResolvedSandboxPolicy, RuntimeFilesystemAdditions, Termination,
@@ -61,10 +61,10 @@ const PRIVATE_REPORT_READY: u32 = 1;
 const PRIVATE_REPORT_SETUP_ERROR: u32 = 2;
 const PRIVATE_REPORT_EXEC_ERROR: u32 = 3;
 const LIMITATIONS: &[&str] = &[
-    "Restricted only; ManagedTree and configured resource limits remain unsupported",
     "Landlock grants use path bindings checked against held filesystem identities before setup",
+    "configured per-tree timeout, output, process-count, and memory limits are unsupported without writable cgroup v2 delegation",
     "network-disabled policy denies Internet socket creation, connection, binding, listening, accepts, sendto, and recvfrom; AF_UNIX socketpairs with sendmsg/recvmsg and shutdown remain available for local runtime IPC; enabled networking is unrestricted",
-    "Restricted does not own or guarantee cleanup of detached descendants",
+    "Restricted does not own or guarantee cleanup of detached descendants; ManagedTree cleanup relies on the kernel PID namespace boundary",
     "standard streams remain connected; other inherited descriptors are closed",
 ];
 
@@ -540,6 +540,12 @@ fn private_launcher_setup(
             .ok_or_else(|| io::Error::other("missing subprocess flag"))?,
         "subprocess flag",
     )?;
+    let allow_proc_read = parse_private_bool(
+        arguments
+            .next()
+            .ok_or_else(|| io::Error::other("missing private procfs read flag"))?,
+        "private procfs read flag",
+    )?;
     let ruleset = parse_private_number::<libc::c_int>(
         arguments
             .next()
@@ -600,7 +606,9 @@ fn private_launcher_setup(
         ));
     }
     establish_private_read_only_procfs(parent_pid_namespace, parent_mount_namespace)?;
-    add_private_procfs_read_rule(ruleset)?;
+    if allow_proc_read {
+        add_private_procfs_read_rule(ruleset)?;
+    }
     let filter = seccomp_filter(network, subprocess)
         .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error.to_string()))?;
     install_restrictions(ruleset, &filter, Some(report_fd))?;
@@ -653,7 +661,7 @@ pub(crate) fn dispatch_private_launcher() {
         return;
     }
     let report_fd = arguments
-        .get(4)
+        .get(5)
         .and_then(|value| value.to_str())
         .and_then(|value| value.parse::<libc::c_int>().ok());
     private_launcher_entry(arguments, report_fd);
@@ -788,6 +796,11 @@ fn private_memory_stats_command(
         } else {
             "0"
         })
+        .arg(if request.allow_process_memory_stats() {
+            "1"
+        } else {
+            "0"
+        })
         .arg(LANDLOCK_RULESET_FD.to_string())
         .arg(PRIVATE_REPORT_FD.to_string())
         .arg(parent_pid_namespace.0.to_string())
@@ -918,8 +931,22 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
             EnforcementDimensions::none(),
         )
     };
-    if request.policy().assurance() != AssuranceLevel::Restricted {
-        return unsupported("Linux ManagedTree containment is unavailable");
+    if request.policy().assurance() == AssuranceLevel::ManagedTree {
+        let limits = request.policy().limits();
+        if limits.timeout_seconds().is_some()
+            || limits.max_output_bytes().is_some()
+            || limits.max_processes().is_some()
+            || limits.max_memory_bytes().is_some()
+        {
+            return unsupported(
+                "Linux ManagedTree does not support configured resource limits without writable per-tree cgroups",
+            );
+        }
+        if request.private_launcher_executable().is_none() || locate_unshare().is_err() {
+            return unsupported(
+                "Linux ManagedTree requires the initialized private launcher and util-linux unshare",
+            );
+        }
     }
     if landlock_abi().is_none_or(|abi| abi < 3) {
         return unsupported("Landlock ABI 3 or newer is unavailable");
@@ -960,7 +987,10 @@ struct LinuxLifecycle<'a> {
 impl ExecutionLifecycle for LinuxLifecycle<'_> {
     fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError> {
         let allow_process_memory_stats = self.request.allow_process_memory_stats();
-        let (mut command, private_report) = if allow_process_memory_stats {
+        let use_private_pid_namespace = self.request.policy().assurance()
+            == AssuranceLevel::ManagedTree
+            || allow_process_memory_stats;
+        let (mut command, private_report) = if use_private_pid_namespace {
             let (command, report) = private_memory_stats_command(&self.request, &self.ruleset.0)?;
             (command, Some(report))
         } else {
@@ -1082,11 +1112,25 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
 }
 
 fn completion_for(preflight: &ValidatedPreflight) -> Result<CompletionEvidence, ExecutionError> {
+    let required = EnforcementDimensions::completion_required(preflight.support.requested());
+    let managed = required.process_tree_membership();
     CompletionEvidence::checked(
         preflight,
-        EnforcementDimensions::completion_required(preflight.support.requested()),
-        Vec::<DimensionEvidence>::new(),
-        CleanupConfidence::NotGuaranteed,
+        required.clone(),
+        if managed {
+            evidence_for_dimensions(
+                &required,
+                "kernel PID namespace teardown after ManagedTree init exits",
+                &[],
+            )
+        } else {
+            Vec::new()
+        },
+        if managed {
+            CleanupConfidence::KernelOwnedComplete
+        } else {
+            CleanupConfidence::NotGuaranteed
+        },
     )
 }
 
@@ -1094,8 +1138,8 @@ fn completion_for(preflight: &ValidatedPreflight) -> Result<CompletionEvidence, 
 mod tests {
     use super::*;
     use crate::{
-        AssuranceLevel, ExecutionErrorCategory, ExecutionLimits, ExecutionRequest,
-        FilesystemPolicy, SandboxMode, SandboxPolicy, Termination,
+        AssuranceLevel, CleanupConfidence, ExecutionErrorCategory, ExecutionLimits,
+        ExecutionRequest, FilesystemPolicy, SandboxMode, SandboxPolicy, Termination,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1133,6 +1177,19 @@ mod tests {
             AssuranceLevel::Restricted,
             FilesystemPolicy::new(vec![".".into()], write).unwrap(),
             network,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap()
+    }
+
+    fn managed_tree(_root: &std::path::Path, write: Vec<String>) -> SandboxPolicy {
+        SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::ManagedTree,
+            FilesystemPolicy::new(vec![".".into()], write).unwrap(),
+            false,
             vec![],
             true,
             ExecutionLimits::default(),
@@ -1375,20 +1432,55 @@ mod tests {
     }
 
     #[test]
-    fn managed_tree_stays_fail_closed_before_target_execution() {
+    fn managed_tree_rejects_unavailable_memory_limits_before_target_execution() {
         let root = root();
-        let marker = root.join("marker");
-        let req = request(
-            &root,
-            &format!("touch '{}'", marker.display()),
-            SandboxPolicy::default(),
-        );
+        let marker = root.join("must-not-run");
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::ManagedTree,
+            FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(None, None, None, Some(64 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap();
+        let req = request(&root, &format!("touch '{}'", marker.display()), policy);
         let error = execute(&req).unwrap_err();
         assert_eq!(
             error.category(),
             ExecutionErrorCategory::UnsupportedContainment
         );
         assert!(!marker.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_tree_executes_and_records_kernel_owned_cleanup() {
+        let root = root();
+        let req = request(
+            &root,
+            &format!(
+                "(sleep 1; echo survived > '{}') & exit 0",
+                root.join("descendant-survived").display()
+            ),
+            managed_tree(&root, vec![".".into()]),
+        );
+        let outcome = execute(&req).expect("ManagedTree should be supported when namespaces work");
+        assert_eq!(outcome.termination(), &Termination::Exited(0));
+        assert_eq!(
+            outcome.enforcement().assurance(),
+            AssuranceLevel::ManagedTree
+        );
+        assert_eq!(
+            outcome.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        assert!(
+            !root.join("descendant-survived").exists(),
+            "a descendant ran after the ManagedTree init exited"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
