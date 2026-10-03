@@ -1187,6 +1187,7 @@ pub struct ExecutionOutcome {
     termination: Termination,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    process_memory_stats_hint: bool,
     enforcement: EnforcementReceipt,
     completion: CompletionEvidence,
 }
@@ -1226,6 +1227,7 @@ impl ExecutionOutcome {
             termination,
             stdout,
             stderr,
+            process_memory_stats_hint: false,
             enforcement,
             completion,
         })
@@ -1305,6 +1307,15 @@ impl ExecutionOutcome {
     }
     pub fn stderr(&self) -> &[u8] {
         &self.stderr
+    }
+    /// Whether stderr matched the known libuv process-memory-stat permission failure.
+    pub fn process_memory_stats_hint(&self) -> bool {
+        self.process_memory_stats_hint
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_process_memory_stats_hint(mut self, hint: bool) -> Self {
+        self.process_memory_stats_hint = hint;
+        self
     }
     pub fn enforcement(&self) -> &EnforcementReceipt {
         &self.enforcement
@@ -1529,6 +1540,7 @@ pub struct ExecutionRequest {
     executable_search_paths: Vec<PathBuf>,
     trusted_node_runtime: Option<TrustedNodeRuntime>,
     windows_verbatim_arguments: bool,
+    allow_process_memory_stats: bool,
     project_root: PathBuf,
     policy: SandboxPolicy,
     environment: BTreeMap<OsString, OsString>,
@@ -1542,6 +1554,7 @@ impl ExecutionRequest {
             executable_search_paths: Vec::new(),
             trusted_node_runtime: None,
             windows_verbatim_arguments: false,
+            allow_process_memory_stats: false,
             project_root: PathBuf::from("."),
             policy: SandboxPolicy::default(),
             environment: BTreeMap::new(),
@@ -1585,6 +1598,18 @@ impl ExecutionRequest {
     }
     pub fn policy(&self) -> &SandboxPolicy {
         &self.policy
+    }
+
+    /// Whether the caller explicitly requested process-memory statistics through isolated procfs.
+    pub fn allow_process_memory_stats(&self) -> bool {
+        self.allow_process_memory_stats
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn private_launcher_executable(&self) -> Option<&Path> {
+        self.launcher
+            .as_ref()
+            .and_then(|launcher| launcher.executable.as_deref())
     }
 
     /// Explicit caller-provided environment.
@@ -1638,6 +1663,27 @@ impl ExecutionRequest {
 
     fn validate(&self) -> Result<(), ExecutionError> {
         self.validate_windows_verbatim_boundary()?;
+        #[cfg(not(target_os = "linux"))]
+        if self.allow_process_memory_stats {
+            return Err(invalid_request(
+                "process memory statistics opt-in is supported only by the Linux Restricted backend",
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        if self.allow_process_memory_stats
+            && (self.policy.mode() != SandboxMode::Required
+                || self.policy.assurance() != AssuranceLevel::Restricted)
+        {
+            return Err(invalid_request(
+                "process memory statistics opt-in requires required sandbox mode and Linux Restricted assurance",
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        if self.allow_process_memory_stats && self.private_launcher_executable().is_none() {
+            return Err(invalid_request(
+                "process memory statistics opt-in requires early private-launcher initialization",
+            ));
+        }
         let program_units =
             validate_os_value("execution program", &self.program, MAX_PROGRAM_UNITS)?;
         if self.program.is_empty() {
@@ -1743,6 +1789,7 @@ pub struct ExecutionRequestBuilder {
     executable_search_paths: Vec<PathBuf>,
     trusted_node_runtime: Option<PathBuf>,
     windows_verbatim_arguments: bool,
+    allow_process_memory_stats: bool,
     project_root: PathBuf,
     policy: SandboxPolicy,
     environment: BTreeMap<OsString, OsString>,
@@ -1782,6 +1829,12 @@ impl ExecutionRequestBuilder {
     /// Requires the Windows adapter to use `CommandExt::raw_arg` or an equivalent verbatim seam.
     pub fn windows_verbatim_arguments(mut self, enabled: bool) -> Self {
         self.windows_verbatim_arguments = enabled;
+        self
+    }
+
+    /// Enables read-only procfs access inside a private PID/mount namespace for this process and its descendants.
+    pub fn allow_process_memory_stats(mut self, enabled: bool) -> Self {
+        self.allow_process_memory_stats = enabled;
         self
     }
 
@@ -1845,6 +1898,7 @@ impl ExecutionRequestBuilder {
             executable_search_paths: self.executable_search_paths,
             trusted_node_runtime,
             windows_verbatim_arguments: self.windows_verbatim_arguments,
+            allow_process_memory_stats: self.allow_process_memory_stats,
             project_root: self.project_root,
             policy: self.policy,
             environment: self.environment,
@@ -2573,7 +2627,11 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
 #[path = "macos_restricted.rs"]
 mod platform_backend;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+#[path = "linux_restricted.rs"]
+mod platform_backend;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod platform_backend {
     use super::{
         BackendIdentity, ContainmentSupport, EnforcementDimensions, ExecutionBackend,
@@ -2613,7 +2671,7 @@ mod platform_backend {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) use platform_backend::dispatch_private_launcher;
 
 #[cfg(test)]
@@ -2871,6 +2929,71 @@ mod tests {
                 PathBuf::from("/project/node_modules/.bin"),
                 PathBuf::from("/runtime/bin")
             ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_memory_stats_access_requires_linux_restricted_sandbox() {
+        let default = ExecutionRequest::builder("node").build().unwrap();
+        assert!(!default.allow_process_memory_stats());
+
+        assert!(
+            ExecutionRequest::builder("node")
+                .policy(required_policy())
+                .allow_process_memory_stats(true)
+                .build()
+                .is_err(),
+            "ManagedTree must not accept the Restricted-only opt-in"
+        );
+        let disabled_restricted = SandboxPolicy::new_with_assurance(
+            SandboxMode::Disabled,
+            AssuranceLevel::Restricted,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            ExecutionRequest::builder("node")
+                .policy(disabled_restricted)
+                .allow_process_memory_stats(true)
+                .build()
+                .is_err(),
+            "Disabled mode must not accept an opt-in that it cannot enforce"
+        );
+
+        let restricted = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::Restricted,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let opted_in = ExecutionRequest::builder("node")
+            .policy(restricted)
+            .allow_process_memory_stats(true)
+            .build()
+            .unwrap();
+        assert!(opted_in.allow_process_memory_stats());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn process_memory_stats_access_is_rejected_off_linux() {
+        let error = ExecutionRequest::builder("node")
+            .allow_process_memory_stats(true)
+            .build()
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only by the Linux Restricted backend")
         );
     }
 

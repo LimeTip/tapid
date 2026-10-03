@@ -204,14 +204,20 @@ pub(crate) fn run_with_manifest(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(format!("cannot preserve tapid.lock for recovery: {error}")),
     };
-    let mut lifecycle_journal = Some(
-        crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
-            &project_dir,
-            activation_lock.owner_line(),
-            &original_manifest,
-            original_lock.as_deref(),
-        )?,
-    );
+    let lifecycle_journal_required_before_resolution =
+        offline || frozen || manifest_override.is_some() || package.is_some();
+    let mut lifecycle_journal = if lifecycle_journal_required_before_resolution {
+        Some(
+            crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
+                &project_dir,
+                activation_lock.owner_line(),
+                &original_manifest,
+                original_lock.as_deref(),
+            )?,
+        )
+    } else {
+        None
+    };
     let mut manifest_transaction = None;
     let manifest = if let Some(updated) = manifest_override {
         if package.is_some() {
@@ -244,12 +250,6 @@ pub(crate) fn run_with_manifest(
             Some(path) => path.to_owned(),
             None => default_store_root()?,
         });
-        if let Some(journal) = lifecycle_journal.as_mut() {
-            store
-                .recover_transactions()
-                .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
-            journal.set_store_root(store.root())?;
-        }
         let (lock, mut input, trees, store_transaction) = online::resolve_and_fetch(
             &project_dir,
             &manifest,
@@ -257,6 +257,19 @@ pub(crate) fn run_with_manifest(
             registry_fixture,
             allow_unverified_registry_artifacts,
         )?;
+        if lifecycle_journal.is_none() {
+            lifecycle_journal = Some(
+                crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
+                    &project_dir,
+                    activation_lock.owner_line(),
+                    &original_manifest,
+                    original_lock.as_deref(),
+                )?,
+            );
+        }
+        if let Some(journal) = lifecycle_journal.as_mut() {
+            journal.set_store_root(store.root())?;
+        }
         let lock_json = match lock.to_json() {
             Ok(value) => value,
             Err(error) => return Err(format!("cannot serialize lockfile: {error}")),

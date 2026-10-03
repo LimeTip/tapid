@@ -1,0 +1,15 @@
+[run.defaults]
+assurance = "restricted"
+read = ["."]
+environment = ["HOME", "NEXT_TELEMETRY_DISABLED", "TMPDIR"]
+subprocess = true
+
+[run.scripts.build]
+write = [".next", ".tmp"]
+
+[run.scripts.test]
+write = [".tmp"]
+
+[run.scripts.start]
+write = [".tmp"]
+network = true

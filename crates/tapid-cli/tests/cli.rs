@@ -634,6 +634,61 @@ fn lifecycle_add_rolls_back_manifest_when_resolution_fails() {
 }
 
 #[test]
+fn lifecycle_add_rejects_invalid_fetched_range_without_state_changes() {
+    let dir = temp_dir("lifecycle-invalid-fetched-range");
+    let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(dir.join("tapid.lock"), "old lock bytes\n").unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
+    fs::write(dir.join("node_modules/KEEP"), "user data").unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","artifact":"unused","dependencies":{"broken":"not a valid range"}}]}"#,
+    )
+    .unwrap();
+    let store = dir.join("previously-nonexistent-store");
+
+    let output = run(
+        &dir,
+        &[
+            "add",
+            "parent@1.0.0",
+            "--allow-unverified-registry-artifacts",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("dependency broken"), "{stderr}");
+    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("tapid.lock")).unwrap(),
+        b"old lock bytes\n"
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/KEEP")).unwrap(),
+        b"user data"
+    );
+    assert_eq!(
+        fs::read(dir.join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1\n"
+    );
+    assert!(!store.exists());
+    assert!(!dir.join(".tapid-lifecycle-journal.json").exists());
+    cleanup(dir);
+}
+
+#[test]
 fn add_peer_records_only_peer_requirement() {
     let dir = temp_dir("peer-cli-transaction");
     let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
@@ -810,6 +865,69 @@ fn install_rolls_back_when_a_required_peer_provider_is_missing() {
         .map(|entry| entry.unwrap().file_name())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(trees_after, trees_before);
+    cleanup(dir);
+}
+
+#[test]
+fn invalid_fetched_dependency_range_does_not_create_store_state() {
+    let dir = temp_dir("invalid-fetched-range-no-store");
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"parent":"1.0.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","artifact":"unused","dependencies":{"broken":"not a valid range"}}]}"#,
+    )
+    .unwrap();
+    let store = dir.join("previously-nonexistent-store");
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--allow-unverified-registry-artifacts",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("dependency broken"), "{stderr}");
+    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
+    cleanup(dir);
+}
+
+#[test]
+fn invalid_online_root_range_does_not_create_store_state() {
+    let dir = temp_dir("invalid-range-no-store");
+    let manifest =
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"broken":"not a valid range"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let store = dir.join("previously-nonexistent-store");
+
+    let output = run(&dir, &["install", "--store-dir", store.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("broken"), "{stderr}");
+    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
     cleanup(dir);
 }
 
@@ -1488,6 +1606,174 @@ fn run_requires_checked_in_configuration_before_execution() {
         "error: required run configuration is missing: tapid.toml\n"
     );
     assert!(output.stdout.is_empty());
+    cleanup(dir);
+}
+
+#[test]
+fn run_accepts_process_memory_stats_opt_in_and_aliases() {
+    let dir = temp_dir("run-process-memory-stats-arg");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"build":"exit 0"}}"#,
+    )
+    .unwrap();
+
+    for flag in [
+        "--allow-process-memory-stats",
+        "--allow-procfs",
+        "--allow-memory-read",
+    ] {
+        let output = run(
+            &dir,
+            &[
+                "run",
+                "build",
+                flag,
+                "--node-runtime",
+                env!("CARGO_BIN_EXE_tapid"),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "flag {flag}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "error: required run configuration is missing: tapid.toml\n",
+            "flag {flag} was not parsed as a Tapid option"
+        );
+        assert!(output.stdout.is_empty());
+    }
+    cleanup(dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn run_prints_libuv_process_memory_opt_in_hint_once() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir("run-process-memory-stats-hint");
+    fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"build":"node"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[run.defaults]\nassurance = \"restricted\"\nread = [\".\"]\nsubprocess = true\n\n[run.scripts.build]\n",
+    )
+    .unwrap();
+    let runtime_dir = dir.join("runtime");
+    fs::create_dir(&runtime_dir).unwrap();
+    let fake_node = runtime_dir.join("node");
+    fs::write(
+        &fake_node,
+        "#!/bin/sh\nprintf '%s\\n' 'RUN_MARKER [Error: EACCES: permission denied, uv_resident_set_memory]' >&2\nexit 19\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_node, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = run(
+        &dir,
+        &[
+            "run",
+            "build",
+            "--node-runtime",
+            fake_node.to_str().unwrap(),
+        ],
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(19), "{stderr}");
+    assert_eq!(stderr.matches("RUN_MARKER").count(), 1, "{stderr}");
+    assert_eq!(
+        stderr
+            .matches("retry with --allow-process-memory-stats")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("aliases: --allow-memory-read, --allow-procfs"),
+        "{stderr}"
+    );
+    cleanup(dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn run_memory_stats_opt_in_uses_private_procfs_or_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir("run-process-memory-stats-opt-in");
+    fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"probe":"node"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[run.defaults]\nassurance = \"restricted\"\nread = [\".\"]\nsubprocess = true\nenvironment = [\"TAPID_TEST_HOST_PID\"]\n\n[run.scripts.probe]\n",
+    )
+    .unwrap();
+    let runtime_dir = dir.join("runtime");
+    fs::create_dir(&runtime_dir).unwrap();
+    let fake_node = runtime_dir.join("node");
+    fs::write(
+        &fake_node,
+        "#!/bin/sh\n/bin/cat /proc/self/statm\nstatus=$?\nif [ \"$status\" -ne 0 ]; then exit \"$status\"; fi\nif [ -r \"/proc/$TAPID_TEST_HOST_PID/statm\" ]; then exit 43; fi\nif printf x > /proc/self/comm; then exit 44; fi\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_node, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let host_pid = std::process::id().to_string();
+    let arguments = [
+        "run",
+        "probe",
+        "--allow-process-memory-stats",
+        "--node-runtime",
+        fake_node.to_str().unwrap(),
+    ];
+    let is_root = unsafe { libc::geteuid() == 0 };
+    let can_use_sudo = !is_root
+        && Command::new("sudo")
+            .args(["-n", "true"])
+            .output()
+            .is_ok_and(|output| output.status.success());
+    let output = if can_use_sudo {
+        Command::new("sudo")
+            .args(["-n", "--", "env"])
+            .arg(format!("TAPID_TEST_HOST_PID={host_pid}"))
+            .arg(env!("CARGO_BIN_EXE_tapid"))
+            .args(arguments)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+    } else {
+        run_with_env(&dir, &arguments, "TAPID_TEST_HOST_PID", &host_pid)
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && stderr.contains("unsupported-containment") {
+        assert!(
+            stdout.is_empty(),
+            "child ran before fail-closed rejection: {stdout}"
+        );
+        cleanup(dir);
+        return;
+    }
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    let stats = stdout.split_whitespace().collect::<Vec<_>>();
+    assert!(!stats.is_empty(), "expected process stats, stdout={stdout}");
+    assert!(
+        stats.iter().all(|field| field.parse::<u64>().is_ok()),
+        "stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("private PID and mount namespaces"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("procfs read-only"), "{stderr}");
     cleanup(dir);
 }
 

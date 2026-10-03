@@ -284,9 +284,8 @@ fn usable_versions(packages: Vec<PackageRecord>) -> Vec<PackageVersionMetadata> 
                 let name = name
                     .parse::<PackageName>()
                     .map_err(|error: tapid_core::DomainError| error.to_string())?;
-                let requirement = requirement
-                    .parse::<Requirement>()
-                    .map_err(|error| error.to_string())?;
+                let requirement =
+                    parse_registry_requirement(name.as_str(), "dependency", requirement)?;
                 Ok((name, requirement))
             })
             .collect::<Result<BTreeMap<PackageName, Requirement>, String>>();
@@ -310,6 +309,19 @@ struct NormalizedRecord {
 
 type NormalizedRecords = BTreeMap<PackageRecordKey, Result<NormalizedRecord, String>>;
 
+fn parse_registry_requirement(
+    name: &str,
+    kind: &str,
+    requirement: &str,
+) -> Result<Requirement, String> {
+    if requirement.trim().is_empty() {
+        return Err(format!("{kind} {name} has an empty requirement"));
+    }
+    requirement.parse::<Requirement>().map_err(|error| {
+        format!("{kind} {name} has unsupported requirement {requirement}: {error}")
+    })
+}
+
 fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String> {
     if !current_platform_matches(&package.platform) {
         return Err("version is incompatible with the current platform".to_owned());
@@ -323,9 +335,7 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
                     .map_err(|error: tapid_core::DomainError| {
                         format!("dependency {name} has an unsupported name: {error}")
                     })?;
-            let parsed_requirement = requirement.parse::<Requirement>().map_err(|error| {
-                format!("dependency {name} has unsupported requirement {requirement}: {error}")
-            })?;
+            let parsed_requirement = parse_registry_requirement(name, "dependency", requirement)?;
             Ok((parsed_name, parsed_requirement))
         })
         .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
@@ -338,9 +348,8 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
                     .map_err(|error: tapid_core::DomainError| {
                         format!("peer dependency {name} has an unsupported name: {error}")
                     })?;
-            let parsed_requirement = requirement.parse::<Requirement>().map_err(|error| {
-                format!("peer dependency {name} has unsupported requirement {requirement}: {error}")
-            })?;
+            let parsed_requirement =
+                parse_registry_requirement(name, "peer dependency", requirement)?;
             Ok((parsed_name, parsed_requirement))
         })
         .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
@@ -359,11 +368,8 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
                     .map_err(|error: tapid_core::DomainError| {
                         format!("optional dependency {name} has an unsupported name: {error}")
                     })?;
-            let parsed_requirement = requirement.parse::<Requirement>().map_err(|error| {
-                format!(
-                    "optional dependency {name} has unsupported requirement {requirement}: {error}"
-                )
-            })?;
+            let parsed_requirement =
+                parse_registry_requirement(name, "optional dependency", requirement)?;
             Ok((parsed_name, parsed_requirement))
         })
         .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
@@ -679,9 +685,7 @@ pub fn resolve_and_fetch(
     ),
     String,
 > {
-    let mut store_transaction = store.transaction();
     let fixture = fixture_path.map(fixture).transpose()?;
-    fs::create_dir_all(store.root()).map_err(|e| format!("cannot create store: {e}"))?;
     let mut fixture_records = BTreeMap::<(String, String, String), PackageRecord>::new();
     if let Some(f) = &fixture {
         for p in &f.packages {
@@ -729,18 +733,17 @@ pub fn resolve_and_fetch(
         }
     }
     let mut roots = Vec::new();
-    for map in [
-        manifest.dependencies(),
-        manifest.dev_dependencies(),
-        manifest.optional_dependencies(),
+    for (kind, map) in [
+        ("dependencies", manifest.dependencies()),
+        ("devDependencies", manifest.dev_dependencies()),
+        ("optionalDependencies", manifest.optional_dependencies()),
     ] {
         for (name, range) in map {
             let (registry, package) = dep_parts(name)?;
-            roots.push(Dependency::new(
-                registry,
-                package,
-                range.parse::<Requirement>().map_err(|e| e.to_string())?,
-            ));
+            let requirement = range.parse::<Requirement>().map_err(|error| {
+                format!("invalid {kind} dependency '{name}' range '{range}': {error}")
+            })?;
+            roots.push(Dependency::new(registry, package, requirement));
         }
     }
     let metadata_transport = if fixture.is_none() {
@@ -769,6 +772,11 @@ pub fn resolve_and_fetch(
             )
         }
     })?;
+    store
+        .recover_transactions()
+        .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
+    fs::create_dir_all(store.root()).map_err(|e| format!("cannot create store: {e}"))?;
+    let mut store_transaction = store.transaction();
     let mut lock = Lockfile::new(&root_digest(project)?).map_err(|e| e.to_string())?;
     let empty_peer = tapid_core::PeerContext::default();
     let mut platform_contexts = BTreeMap::new();
@@ -1316,6 +1324,17 @@ mod tests {
 
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].version.to_string(), "4.0.5");
+    }
+
+    #[test]
+    fn production_normalization_rejects_empty_registry_dependency_ranges() {
+        let package = record("3.0.1", Some(""));
+        let error = match normalize_record(&package) {
+            Ok(_) => panic!("empty registry dependency ranges must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("dependency"));
+        assert!(error.contains("empty requirement"));
     }
 
     #[test]

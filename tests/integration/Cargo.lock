@@ -1276,6 +1276,7 @@ dependencies = [
 name = "tapid-resolver"
 version = "0.0.5"
 dependencies = [
+ "semver",
  "tapid-core",
  "tapid-registry-client",
 ]

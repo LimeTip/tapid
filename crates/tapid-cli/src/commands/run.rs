@@ -21,6 +21,9 @@ pub(crate) struct Args {
     /// Emit the versioned receipt as one JSON line on stderr after child output.
     #[arg(long)]
     pub(crate) receipt_json: bool,
+    /// Linux Restricted only: create a private PID/mount namespace with read-only procfs for process-memory statistics.
+    #[arg(long, visible_aliases = ["allow-procfs", "allow-memory-read"])]
+    pub(crate) allow_process_memory_stats: bool,
     /// Arguments forwarded after `--` to the script.
     #[arg(last = true)]
     pub(crate) arguments: Vec<OsString>,
@@ -127,6 +130,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
             node_runtime: args.node_runtime.as_deref(),
             path: host_path.as_deref(),
             allowlisted: &ambient_environment,
+            allow_process_memory_stats: args.allow_process_memory_stats,
         },
     ) {
         Ok(prepared) => prepared,
@@ -256,6 +260,11 @@ fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> Ex
         eprintln!(
             "\nsandbox receipt: {}",
             serde_json::to_string_pretty(&value).expect("receipt JSON values are serializable")
+        );
+    }
+    if outcome.process_memory_stats_hint() {
+        eprintln!(
+            "hint: this script appears to need process memory statistics blocked by the sandbox; if you trust it, retry with --allow-process-memory-stats (aliases: --allow-memory-read, --allow-procfs)"
         );
     }
     match outcome.termination() {

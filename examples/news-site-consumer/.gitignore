@@ -1,0 +1,5 @@
+node_modules/
+.next/
+.tmp/
+.tapid-activation.lock
+.tapid-managed

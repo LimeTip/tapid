@@ -79,6 +79,7 @@ pub struct HostExecutionEnvironment<'a> {
     pub node_runtime: Option<&'a Path>,
     pub path: Option<&'a OsStr>,
     pub allowlisted: &'a BTreeMap<String, OsString>,
+    pub allow_process_memory_stats: bool,
 }
 
 /// Constructs the exact request accepted by `tapid-runner` without consulting ambient `PATH`.
@@ -170,6 +171,7 @@ pub fn prepare_execution_request(
         .windows_verbatim_arguments(cfg!(windows))
         .executable_search_paths(search_directories.iter().cloned())
         .trusted_node_runtime(&node_runtime)
+        .allow_process_memory_stats(host.allow_process_memory_stats)
         .project_root(project_dir)
         .policy(policy)
         .envs(environment)
