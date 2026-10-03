@@ -112,7 +112,7 @@ Install derives executable shims from verified package `bin` metadata. Unix uses
 
 - Dependency lifecycle scripts are disabled during every install path.
 - Root scripts run only after the explicit `tapid run` command.
-- Root-script execution is wired to fail-closed preflight. macOS 26 has an experimental Restricted backend using deprecated/private native Seatbelt APIs; ManagedTree, resource-limit profiles, and Linux/Windows native backends remain unavailable.
+- Root-script execution is wired to fail-closed preflight. macOS 26 has an experimental Restricted backend using deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock/seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. ManagedTree, configured resource-limit profiles, Windows native containment, and the broader Linux Restricted probe matrix remain unsupported or pending.
 - Full npm CLI/package-specifier compatibility is not implemented: tags, aliases, git/file/workspace specs, peer semantics, workspaces, and complete optional-dependency and lockfile behavior remain out of scope. Range satisfaction is differential-tested against pinned node-semver 7.8.5 for the documented grammar in `crates/tapid-resolver/README.md`.
 - `add`, `remove`, `update`, `prune`, script approval, private-registry authentication, and package publishing are outside this slice.
 - JSR installation remains fail-closed unless metadata provides both an HTTPS npm tarball URL and a valid SHA-512 SRI value. Live JSR integrity behavior is unsupported and unverified.
