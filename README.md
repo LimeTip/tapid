@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/crates/l/tapid)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
-Tapid is a security-focused JavaScript and TypeScript **package manager**, written in Rust. It resolves dependencies, checks downloaded bytes against registry-declared integrity metadata by default, stores verified content, and materializes a reproducible `node_modules` tree from `tapid.lock`. Tapid is not a JavaScript runtime: today its primary compatibility target is the Node.js/npm ecosystem, and projects use their own runtime to execute code. Tapid's package format and install workflow are designed around that ecosystem; using Deno or Bun is a future compatibility goal, not a guarantee of current support. The current implementation covers a small, explicit npm-compatible subset. Development releases are available from GitHub Releases; production support is not yet available.
+Tapid is a security-focused JavaScript and TypeScript **package manager**, written in Rust. It resolves dependencies, checks downloaded bytes against registry-declared integrity metadata by default, stores verified content, and materializes a reproducible `node_modules` tree from `tapid.lock`. Tapid is not a JavaScript runtime: today its primary compatibility target is the Node.js/npm ecosystem, and projects use their own runtime to execute code. Tapid's package format and install workflow are designed around that ecosystem; using Deno or Bun is a future compatibility goal, not a guarantee of current support. The current implementation covers a small, explicit npm-compatible subset. Development releases are available from GitHub Releases; production support is not yet available. See the [production adoption gate](docs/production-adoption.md) for the evidence required before any release or platform can be called production-supported.
 
 ## What Tapid manages
 
@@ -56,6 +56,8 @@ iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
 These commands install the latest published Tapid release from the immutable GitHub release assets published by `LimeTip/tapid` and verify the selected archive against its `SHA256SUMS` entry. See [installation details](#installation-details) for release selection, contributor source builds, alternate repositories, and uninstall instructions.
+
+Tapid is a package manager: it manages packages and lockfiles, and is not a runtime. Node executes Node.js code; workerd executes Workers code; Wrangler owns Workers workflows and deployment. The optional `tapid run` convenience launches Node-backed project scripts; it is not required to install or replay packages and does not establish runtime, Workers, or deployment support. See [Production adoption gate](docs/production-adoption.md) for the current development-only status, exact pending support matrix, release policy, required evidence, and canary/rollback procedure.
 
 ## Quick start
 
