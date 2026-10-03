@@ -68,7 +68,7 @@ tapid init
 tapid i is-char
 ```
 
-`tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`. Use your project's runtime and its tooling to run scripts. The experimental `tapid run` command is a separate, Node.js-only script launcher; it does not provide a runtime or select Deno/Bun.
+`tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`. Use your project's runtime and tooling to run scripts. The experimental `tapid run` command is a separate, Node.js-only script launcher; it does not provide a runtime or select Deno/Bun. On Linux and macOS, an explicit `assurance = "restricted"` profile asks the native backend to limit the script's configured filesystem and network authority; this is not full process-tree management or a guarantee that arbitrary code is safe. See the [CLI guide](crates/tapid-cli/README.md#experimental-root-script-containment) for the limits and setup.
 
 ## Current package-management implementation
 

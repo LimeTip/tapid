@@ -92,7 +92,23 @@ tapid run dev --node-runtime /absolute/path/to/node -- --hostname 127.0.0.1 --po
 
 Values after the first `--` are forwarded in order to the selected script; the separator is not forwarded and those values are not parsed as Tapid options. Missing scripts fail with exit code `1`. Clap parsing errors use exit code `2`.
 
-The command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. In the configuration schema, `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution: requested filesystem/network authority, explicit environment/PATH and descriptor hygiene, and descendant propagation must be established before spawn. Restricted provides no cleanup guarantee, although a backend may report best-effort cleanup it actually attempted or observed. Omitting `assurance` preserves the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. The schema and experimental macOS Restricted backend are implemented; unsupported required dimensions fail before the shell starts.
+## Experimental root-script containment
+
+`tapid run` still invokes Node.js; Tapid is not a JavaScript runtime. A script profile with `assurance = "restricted"` asks the platform backend to apply filesystem and network restrictions before the script starts and propagate those restrictions to child processes. For example:
+
+```toml
+[run.scripts.test]
+assurance = "restricted"
+read = ["."]
+write = ["build"]
+network = false
+```
+
+Paths are project-relative. Grant only the access the script needs: `network = false` denies network socket creation/traffic, while `network = true` allows unrestricted networking. The backend also constructs a limited child environment and closes unrelated inherited descriptors.
+
+Restricted is an authority boundary, **not** full process-tree management or a promise that arbitrary script code is safe. Tapid does not guarantee cleanup or termination of detached descendants. Configured timeout, output, process-count, and memory limits are unsupported. A requested restriction the backend cannot enforce causes the run to fail before the target starts; Tapid does not silently run it without containment. Linux Restricted uses Landlock and seccomp and requires kernel support; it has targeted Ubuntu 24.04.5 x86_64 validation. macOS Restricted is experimental and uses deprecated/private Seatbelt APIs.
+
+The command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution. Omitting `assurance` retains the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before the shell starts.
 
 The command constructs a minimal environment rather than preserving inherited variables: `PATH` is reserved and cannot be allowlisted, while other declared names are retrieved individually from the caller only when present. Windows environment-name matching is case-insensitive and case-equivalent allowlist duplicates are rejected. The current `network` field is boolean: `true` grants unrestricted networking. `--hostname`, `--port`, and other forwarded application arguments do not constrain authority; declared listen/connect scopes remain future work.
 
