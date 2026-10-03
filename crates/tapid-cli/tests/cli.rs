@@ -504,6 +504,86 @@ fn workspace_protocol_add_fails_closed_before_registry_or_project_mutation() {
 }
 
 #[test]
+fn install_rejects_unsupported_workspace_manifest_before_mutating_project_or_store() {
+    use std::collections::BTreeSet;
+    use tapid_store::Store;
+
+    let dir = temp_dir("workspace-manifest-install-fail-closed");
+    let root_manifest = r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"local":"workspace:*"}}"#;
+    fs::write(dir.join("package.json"), root_manifest).unwrap();
+    fs::create_dir_all(dir.join("packages/local")).unwrap();
+    fs::write(
+        dir.join("packages/local/package.json"),
+        r#"{"name":"local","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.lock"), "old lock bytes\\n").unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\\n").unwrap();
+    fs::write(dir.join("node_modules/KEEP"), "user data").unwrap();
+
+    let store_dir = dir.join("store");
+    let store = Store::new(&store_dir);
+    let prior_source = dir.join("prior-store-tree");
+    fs::create_dir_all(&prior_source).unwrap();
+    fs::write(prior_source.join("package.json"), "prior store tree").unwrap();
+    let prior_digest = tapid_archive::canonical_tree_digest(&prior_source)
+        .unwrap()
+        .parse::<tapid_core::ArtifactDigest>()
+        .unwrap();
+    store
+        .activate_verified_tree(&prior_digest, &prior_source)
+        .unwrap();
+    let store_entries_before = fs::read_dir(&store_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<BTreeSet<_>>();
+
+    let output = run(
+        &dir,
+        &["install", "--store-dir", store_dir.to_str().unwrap()],
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        !dir.join(".tapid-activation.lock").exists(),
+        "rejected manifest must not create activation state"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported workspace dependency reference: local@workspace:*")
+            && stderr.contains("workspace linking is not implemented"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        root_manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("tapid.lock")).unwrap(),
+        b"old lock bytes\\n"
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/KEEP")).unwrap(),
+        b"user data"
+    );
+    assert_eq!(
+        fs::read(dir.join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1\\n"
+    );
+    assert!(!dir.join(".tapid-activation.lock").exists());
+    assert_eq!(
+        fs::read_dir(&store_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>(),
+        store_entries_before
+    );
+    assert!(store.verified_tree_path(&prior_digest).is_ok());
+    cleanup(dir);
+}
+
+#[test]
 fn npm_and_jsr_registry_identities_remain_distinct_for_related_packages() {
     let dir = temp_dir("npm-jsr-distinct-identities");
     let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"is-char":"1.0.0","jsr:@arvid/is-char":"1.0.0"}}"#;

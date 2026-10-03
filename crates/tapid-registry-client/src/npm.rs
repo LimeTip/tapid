@@ -3,7 +3,7 @@ use crate::{
     RegistryClientError, RegistryKind, RegistryPackageId, artifact::download_artifact,
     transport::request_url_is_safe,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
 use url::Url;
 
@@ -217,6 +217,10 @@ fn parse_npm(
         let artifact_url = artifact_url.to_owned();
         let mut dependencies = parse_dependencies(version_entry.get("dependencies"))?;
         let peer_dependencies = parse_dependencies(version_entry.get("peerDependencies"))?;
+        let optional_peer_dependencies = parse_optional_peer_dependencies(
+            &peer_dependencies,
+            version_entry.get("peerDependenciesMeta"),
+        )?;
         let optional_dependencies = parse_dependencies(version_entry.get("optionalDependencies"))?;
         dependencies.retain(|name, _| !optional_dependencies.contains_key(name));
         let platform = match (
@@ -233,6 +237,7 @@ fn parse_npm(
             integrity,
             dependencies,
             peer_dependencies,
+            optional_peer_dependencies,
             optional_dependencies,
             platform,
             registry_kind: RegistryKind::Npm,
@@ -302,6 +307,44 @@ fn parse_dependencies(
             Ok((package, requirement.to_owned()))
         })
         .collect()
+}
+
+fn parse_optional_peer_dependencies(
+    peer_dependencies: &BTreeMap<PackageName, String>,
+    value: Option<&serde_json::Value>,
+) -> Result<BTreeSet<PackageName>, RegistryClientError> {
+    let Some(value) = value else {
+        return Ok(BTreeSet::new());
+    };
+    let metadata = value.as_object().ok_or_else(|| {
+        RegistryClientError::Metadata(MetadataError::InvalidDependency(
+            "peerDependenciesMeta".into(),
+        ))
+    })?;
+    peer_dependencies
+        .keys()
+        .filter_map(|name| {
+            let value = metadata.get(name.as_str())?;
+            Some((name, value))
+        })
+        .map(|(name, value)| {
+            let entry = value.as_object().ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::InvalidDependency(format!(
+                    "peerDependenciesMeta.{name}"
+                )))
+            })?;
+            match entry.get("optional") {
+                None | Some(serde_json::Value::Bool(false)) => Ok(None),
+                Some(serde_json::Value::Bool(true)) => Ok(Some(name.clone())),
+                Some(_) => Err(RegistryClientError::Metadata(
+                    MetadataError::InvalidDependency(format!(
+                        "peerDependenciesMeta.{name}.optional"
+                    )),
+                )),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|values| values.into_iter().flatten().collect())
 }
 
 #[cfg(test)]
@@ -433,6 +476,26 @@ mod tests {
             !artifacts[0]
                 .dependencies
                 .contains_key(&"host".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn npm_metadata_preserves_optional_peer_dependencies() {
+        let body = br#"{"name":"plugin","versions":{"1.0.0":{"name":"plugin","version":"1.0.0","peerDependencies":{"optional-host":"^2.0.0","required-host":"^3.0.0"},"peerDependenciesMeta":{"optional-host":{"optional":true}},"dist":{"tarball":"https://cdn.example/plugin.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/plugin"), origin)
+            .fetch("plugin")
+            .unwrap();
+
+        assert!(
+            artifacts[0]
+                .optional_peer_dependencies
+                .contains(&"optional-host".parse().unwrap())
+        );
+        assert!(
+            !artifacts[0]
+                .optional_peer_dependencies
+                .contains(&"required-host".parse().unwrap())
         );
     }
 

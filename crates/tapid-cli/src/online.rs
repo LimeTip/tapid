@@ -47,6 +47,8 @@ struct FixturePackage {
     dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "peerDependencies")]
     peer_dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "optionalPeerDependencies")]
+    optional_peer_dependencies: BTreeSet<String>,
 }
 #[derive(Debug, Deserialize)]
 struct Fixture {
@@ -62,6 +64,7 @@ struct PackageRecord {
     artifact: String,
     dependencies: BTreeMap<String, String>,
     peer_dependencies: BTreeMap<String, String>,
+    optional_peer_dependencies: BTreeSet<String>,
     optional_dependencies: BTreeMap<String, String>,
     platform: PackagePlatform,
     fixture: bool,
@@ -146,6 +149,11 @@ fn remote_records(
                 .peer_dependencies
                 .into_iter()
                 .map(|(n, r)| (n.to_string(), r))
+                .collect(),
+            optional_peer_dependencies: a
+                .optional_peer_dependencies
+                .into_iter()
+                .map(|name| name.to_string())
                 .collect(),
             optional_dependencies: a
                 .optional_dependencies
@@ -295,6 +303,7 @@ fn usable_versions(packages: Vec<PackageRecord>) -> Vec<PackageVersionMetadata> 
                 version: package.version,
                 dependencies,
                 peer_dependencies: BTreeMap::new(),
+                optional_peer_dependencies: BTreeSet::new(),
             });
         }
     }
@@ -353,11 +362,30 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
             Ok((parsed_name, parsed_requirement))
         })
         .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
+    let optional_peer_dependencies = package
+        .optional_peer_dependencies
+        .iter()
+        .map(|name| {
+            name.parse::<PackageName>()
+                .map_err(|error: tapid_core::DomainError| {
+                    format!("optional peer dependency {name} has an unsupported name: {error}")
+                })
+        })
+        .collect::<Result<BTreeSet<PackageName>, String>>()?;
+    if let Some(name) = optional_peer_dependencies
+        .iter()
+        .find(|name| !peer_dependencies.contains_key(*name))
+    {
+        return Err(format!(
+            "optional peer metadata refers to undeclared peer {name}"
+        ));
+    }
     let metadata = PackageVersionMetadata {
         name: package.name.clone(),
         version: package.version.clone(),
         dependencies,
         peer_dependencies: peer_dependencies.clone(),
+        optional_peer_dependencies,
     };
     let optional_dependencies = package
         .optional_dependencies
@@ -670,6 +698,29 @@ where
     }
 }
 
+pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependency>, String> {
+    let mut roots = Vec::new();
+    for (kind, map) in [
+        ("dependencies", manifest.dependencies()),
+        ("devDependencies", manifest.dev_dependencies()),
+        ("optionalDependencies", manifest.optional_dependencies()),
+    ] {
+        for (name, range) in map {
+            if range.starts_with("workspace:") {
+                return Err(format!(
+                    "unsupported workspace dependency reference: {name}@{range}; workspace linking is not implemented"
+                ));
+            }
+            let (registry, package) = dep_parts(name)?;
+            let requirement = range.parse::<Requirement>().map_err(|error| {
+                format!("invalid {kind} dependency '{name}' range '{range}': {error}")
+            })?;
+            roots.push(Dependency::new(registry, package, requirement));
+        }
+    }
+    Ok(roots)
+}
+
 pub fn resolve_and_fetch(
     project: &Path,
     manifest: &PackageManifest,
@@ -725,6 +776,7 @@ pub fn resolve_and_fetch(
                     artifact: p.artifact.clone(),
                     dependencies: p.dependencies.clone(),
                     peer_dependencies: p.peer_dependencies.clone(),
+                    optional_peer_dependencies: p.optional_peer_dependencies.clone(),
                     optional_dependencies: BTreeMap::new(),
                     platform: PackagePlatform::unrestricted(),
                     fixture: true,
@@ -732,20 +784,7 @@ pub fn resolve_and_fetch(
             );
         }
     }
-    let mut roots = Vec::new();
-    for (kind, map) in [
-        ("dependencies", manifest.dependencies()),
-        ("devDependencies", manifest.dev_dependencies()),
-        ("optionalDependencies", manifest.optional_dependencies()),
-    ] {
-        for (name, range) in map {
-            let (registry, package) = dep_parts(name)?;
-            let requirement = range.parse::<Requirement>().map_err(|error| {
-                format!("invalid {kind} dependency '{name}' range '{range}': {error}")
-            })?;
-            roots.push(Dependency::new(registry, package, requirement));
-        }
-    }
+    let roots = manifest_roots(manifest)?;
     let metadata_transport = if fixture.is_none() {
         Some(
             HttpsTransport::standard()
@@ -1193,6 +1232,7 @@ mod tests {
                 .map(|(name, requirement)| ((*name).into(), (*requirement).into()))
                 .collect(),
             peer_dependencies: BTreeMap::new(),
+            optional_peer_dependencies: BTreeSet::new(),
             optional_dependencies: BTreeMap::new(),
             platform: PackagePlatform::unrestricted(),
             fixture: false,
@@ -1202,12 +1242,17 @@ mod tests {
     #[test]
     fn fixture_metadata_preserves_peer_dependencies_separately() {
         let fixture: Fixture = serde_json::from_str(
-            r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","artifact":"base64:AA==","dependencies":{"runtime":"^1.0.0"},"peerDependencies":{"host":"^2.0.0"}}]}"#,
+            r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","artifact":"base64:AA==","dependencies":{"runtime":"^1.0.0"},"peerDependencies":{"host":"^2.0.0"},"optionalPeerDependencies":["host"]}]}"#,
         )
         .unwrap();
 
         assert_eq!(fixture.packages[0].dependencies["runtime"], "^1.0.0");
         assert_eq!(fixture.packages[0].peer_dependencies["host"], "^2.0.0");
+        assert!(
+            fixture.packages[0]
+                .optional_peer_dependencies
+                .contains("host")
+        );
         assert!(!fixture.packages[0].dependencies.contains_key("host"));
     }
 
@@ -1224,6 +1269,35 @@ mod tests {
             normalized.metadata.peer_dependencies[&"host".parse().unwrap()].raw,
             "^1.0.0"
         );
+    }
+
+    #[test]
+    fn normalization_preserves_optional_peer_markers() {
+        let mut record = named_record("plugin", "1.0.0", &[]);
+        record
+            .peer_dependencies
+            .insert("host".into(), "^2.0.0".into());
+        record.optional_peer_dependencies.insert("host".into());
+
+        let normalized = normalize_record(&record).unwrap();
+        assert!(
+            normalized
+                .metadata
+                .optional_peer_dependencies
+                .contains(&"host".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn normalization_rejects_optional_marker_for_undeclared_peer() {
+        let mut record = named_record("plugin", "1.0.0", &[]);
+        record.optional_peer_dependencies.insert("host".into());
+
+        let error = match normalize_record(&record) {
+            Err(error) => error,
+            Ok(_) => panic!("optional marker for an undeclared peer was accepted"),
+        };
+        assert!(error.contains("optional peer metadata refers to undeclared peer host"));
     }
 
     #[test]

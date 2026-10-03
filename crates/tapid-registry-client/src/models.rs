@@ -1,6 +1,9 @@
 use crate::MetadataError;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 use tapid_core::{PackageIntegrity, PackageName, PackageVersion, RegistryOrigin};
 use url::Url;
 
@@ -177,6 +180,8 @@ pub struct RegistryArtifact {
     pub integrity: Option<PackageIntegrity>,
     pub dependencies: BTreeMap<PackageName, String>,
     pub peer_dependencies: BTreeMap<PackageName, String>,
+    /// Peer declarations marked optional by npm's `peerDependenciesMeta`.
+    pub optional_peer_dependencies: BTreeSet<PackageName>,
     pub optional_dependencies: BTreeMap<PackageName, String>,
     pub platform: PackagePlatform,
     pub registry_kind: RegistryKind,

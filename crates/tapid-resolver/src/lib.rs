@@ -371,6 +371,8 @@ pub struct PackageVersionMetadata {
     /// Peer requirements declared by this exact version. These are never merged
     /// into `dependencies` and are retained for context validation.
     pub peer_dependencies: BTreeMap<PackageName, Requirement>,
+    /// Peer requirements explicitly marked optional by the registry.
+    pub optional_peer_dependencies: BTreeSet<PackageName>,
 }
 
 /// Normalized deterministic package records belonging to one registry origin.
@@ -605,6 +607,9 @@ pub fn resolve_graph(
         let mut context = PeerContext::default();
         for (peer, requirement) in &package.peer_dependencies {
             let provider = root_providers.get(&(id.registry.clone(), peer.clone()));
+            if provider.is_none() && package.optional_peer_dependencies.contains(peer) {
+                continue;
+            }
             if !provider.is_some_and(|version| requirement.matches(version)) {
                 return Err(ResolveError::PeerDependency {
                     package: id.to_string(),
@@ -837,6 +842,7 @@ pub fn resolve(
                     version: p.identity.version.clone(),
                     dependencies: BTreeMap::new(),
                     peer_dependencies: BTreeMap::new(),
+                    optional_peer_dependencies: BTreeSet::new(),
                 })
                 .collect(),
         })
@@ -898,6 +904,7 @@ mod tests {
                 .map(|(n, r)| (n.parse().unwrap(), req(r)))
                 .collect(),
             peer_dependencies: BTreeMap::new(),
+            optional_peer_dependencies: BTreeSet::new(),
         }
     }
     fn registry(url: &str, packages: Vec<PackageVersionMetadata>) -> RegistryMetadata {
@@ -1266,12 +1273,91 @@ mod tests {
     }
 
     #[test]
+    fn optional_peer_dependency_allows_missing_direct_provider() {
+        let mut plugin = package("plugin", "1.0.0", &[]);
+        let peer: PackageName = "host".parse().unwrap();
+        plugin.peer_dependencies = BTreeMap::from([(peer.clone(), req("^2.0.0"))]);
+        plugin.optional_peer_dependencies = BTreeSet::from([peer]);
+        let metadata = registry("https://registry.npmjs.org", vec![plugin]);
+        let result = resolve_graph(
+            &[dep("https://registry.npmjs.org", "plugin", "1.0.0")],
+            &[metadata],
+            Default::default(),
+        )
+        .unwrap();
+        let plugin_id = RegistryPackageId::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            "plugin".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+        );
+        assert_eq!(
+            result.peer_contexts.get(&plugin_id),
+            Some(&PeerContext::default())
+        );
+    }
+
+    #[test]
+    fn optional_peer_dependency_binds_a_compatible_direct_provider() {
+        let mut plugin = package("plugin", "1.0.0", &[]);
+        let peer: PackageName = "host".parse().unwrap();
+        plugin.peer_dependencies = BTreeMap::from([(peer.clone(), req("^2.0.0"))]);
+        plugin.optional_peer_dependencies = BTreeSet::from([peer]);
+        let metadata = registry(
+            "https://registry.npmjs.org",
+            vec![plugin, package("host", "2.4.0", &[])],
+        );
+        let result = resolve_graph(
+            &[
+                dep("https://registry.npmjs.org", "plugin", "1.0.0"),
+                dep("https://registry.npmjs.org", "host", "^2.0.0"),
+            ],
+            &[metadata],
+            Default::default(),
+        )
+        .unwrap();
+        let plugin_id = RegistryPackageId::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            "plugin".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+        );
+        let expected_context =
+            PeerContext::default().with("host".parse().unwrap(), "2.4.0".parse().unwrap());
+        assert_eq!(
+            result.peer_contexts.get(&plugin_id),
+            Some(&expected_context)
+        );
+    }
+
+    #[test]
+    fn optional_peer_dependency_rejects_an_incompatible_direct_provider() {
+        let mut plugin = package("plugin", "1.0.0", &[]);
+        let peer: PackageName = "host".parse().unwrap();
+        plugin.peer_dependencies = BTreeMap::from([(peer.clone(), req("^2.0.0"))]);
+        plugin.optional_peer_dependencies = BTreeSet::from([peer]);
+        let metadata = registry(
+            "https://registry.npmjs.org",
+            vec![plugin, package("host", "3.0.0", &[])],
+        );
+        let error = resolve_graph(
+            &[
+                dep("https://registry.npmjs.org", "plugin", "1.0.0"),
+                dep("https://registry.npmjs.org", "host", "3.0.0"),
+            ],
+            &[metadata],
+            Default::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ResolveError::PeerDependency { .. }));
+    }
+
+    #[test]
     fn preserves_peer_requirements_separately_from_ordinary_dependencies() {
         let peer: PackageVersionMetadata = PackageVersionMetadata {
             name: "plugin".parse().unwrap(),
             version: "1.0.0".parse().unwrap(),
             dependencies: BTreeMap::from([("runtime".parse().unwrap(), req("^1.0.0"))]),
             peer_dependencies: BTreeMap::from([("react".parse().unwrap(), req("^18.0.0"))]),
+            optional_peer_dependencies: BTreeSet::new(),
         };
 
         assert!(peer.dependencies.contains_key(&"runtime".parse().unwrap()));
@@ -1289,12 +1375,14 @@ mod tests {
             version: "10.0.0".parse().unwrap(),
             dependencies: BTreeMap::new(),
             peer_dependencies: BTreeMap::new(),
+            optional_peer_dependencies: BTreeSet::new(),
         };
         let second = PackageVersionMetadata {
             name: "pkg".parse().unwrap(),
             version: "2.0.0".parse().unwrap(),
             dependencies: BTreeMap::new(),
             peer_dependencies: BTreeMap::new(),
+            optional_peer_dependencies: BTreeSet::new(),
         };
 
         assert_eq!(available(&[&first, &second]), vec!["2.0.0", "10.0.0"]);
@@ -1314,6 +1402,7 @@ mod tests {
                     ("a-child".parse().unwrap(), req("1.0.0")),
                 ]),
                 peer_dependencies: BTreeMap::new(),
+                optional_peer_dependencies: BTreeSet::new(),
             }],
         )
         .unwrap();
