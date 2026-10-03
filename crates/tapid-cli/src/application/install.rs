@@ -176,6 +176,11 @@ pub(crate) fn run_with_manifest(
             ));
         }
     };
+    let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
+    online::manifest_roots(&preflight_manifest)?;
+    if let Some(updated) = manifest_override {
+        online::manifest_roots(updated)?;
+    }
     if offline || frozen {
         let lock_path = project_dir.join("tapid.lock");
         if lock_path.is_file() {

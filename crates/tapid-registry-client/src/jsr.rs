@@ -165,6 +165,7 @@ fn parse_jsr(
             integrity: Some(integrity),
             dependencies,
             peer_dependencies,
+            optional_peer_dependencies: std::collections::BTreeSet::new(),
             optional_dependencies: BTreeMap::new(),
             platform: crate::PackagePlatform::unrestricted(),
             registry_kind: RegistryKind::Jsr,

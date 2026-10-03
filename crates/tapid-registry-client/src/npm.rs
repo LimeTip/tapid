@@ -3,11 +3,12 @@ use crate::{
     RegistryClientError, RegistryKind, RegistryPackageId, artifact::download_artifact,
     transport::request_url_is_safe,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
 use url::Url;
 
 const NPM_INSTALL_V1_ACCEPT: &str = "application/vnd.npm.install-v1+json";
+const NPM_FULL_METADATA_ACCEPT: &str = "application/json";
 
 /// Read-only npm metadata and artifact client over an injected transport.
 pub struct NpmRegistry<T> {
@@ -47,12 +48,22 @@ impl<T: HttpTransport> NpmRegistry<T> {
             // decides whether the missing package is relevant.
             return Ok(Vec::new());
         }
-        parse_npm(
-            &self.origin,
-            &name,
-            json_response(&response)?,
-            allow_missing_integrity,
-        )
+        let abbreviated_body = json_response(&response)?;
+        if !needs_full_libc_metadata(abbreviated_body, &name)? {
+            return parse_npm(
+                &self.origin,
+                &name,
+                abbreviated_body,
+                allow_missing_integrity,
+            );
+        }
+        let full_response = self
+            .transport
+            .get_with_accept(&url, NPM_FULL_METADATA_ACCEPT)
+            .map_err(RegistryClientError::Transport)?;
+        let full_body = json_response(&full_response)?;
+        let enriched_body = merge_full_libc_metadata(abbreviated_body, full_body, &name)?;
+        parse_npm(&self.origin, &name, &enriched_body, allow_missing_integrity)
     }
     /// Downloads one validated artifact URL through this registry's transport policy.
     pub fn download_artifact(
@@ -81,6 +92,152 @@ fn json_response(response: &HttpResponse) -> Result<&[u8], RegistryClientError> 
         ));
     }
     Ok(&response.body)
+}
+
+fn needs_full_libc_metadata(
+    body: &[u8],
+    expected_name: &PackageName,
+) -> Result<bool, RegistryClientError> {
+    let root = json_object(body).map_err(RegistryClientError::Metadata)?;
+    if root
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|name| name != expected_name.to_string())
+    {
+        return Err(RegistryClientError::Metadata(
+            MetadataError::ConflictingField("name".into()),
+        ));
+    }
+    let Some(versions) = root.get("versions").and_then(serde_json::Value::as_object) else {
+        return Ok(false);
+    };
+    for entry in versions.values() {
+        let Some(entry) = entry.as_object() else {
+            return Ok(false);
+        };
+        if entry.contains_key("libc") {
+            continue;
+        }
+        let (Ok(os), Ok(cpu)) = (
+            parse_platform_list(entry.get("os"), "os"),
+            parse_platform_list(entry.get("cpu"), "cpu"),
+        ) else {
+            continue;
+        };
+        let may_run_on_linux = os.is_empty()
+            || os.iter().any(|platform| platform == "linux")
+            || (!os.iter().any(|platform| !platform.starts_with('!'))
+                && !os.iter().any(|platform| platform == "!linux"));
+        if may_run_on_linux && (!os.is_empty() || !cpu.is_empty()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn merge_full_libc_metadata(
+    abbreviated_body: &[u8],
+    full_body: &[u8],
+    expected_name: &PackageName,
+) -> Result<Vec<u8>, RegistryClientError> {
+    let mut abbreviated = json_object(abbreviated_body).map_err(RegistryClientError::Metadata)?;
+    let full = json_object(full_body).map_err(RegistryClientError::Metadata)?;
+    let expected_name = expected_name.to_string();
+    for root in [&abbreviated, &full] {
+        if root
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name != expected_name)
+        {
+            return Err(RegistryClientError::Metadata(
+                MetadataError::ConflictingField("name".into()),
+            ));
+        }
+    }
+    let full_versions = full
+        .get("versions")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            RegistryClientError::Metadata(MetadataError::MissingField("versions".into()))
+        })?;
+    let abbreviated_versions = abbreviated
+        .get_mut("versions")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            RegistryClientError::Metadata(MetadataError::InvalidJson(
+                "versions must be an object".into(),
+            ))
+        })?;
+    for (version, value) in abbreviated_versions {
+        let Some(entry) = value.as_object_mut() else {
+            return Err(RegistryClientError::Metadata(MetadataError::InvalidJson(
+                "version entry must be an object".into(),
+            )));
+        };
+        if entry.contains_key("libc") {
+            continue;
+        }
+        let (Ok(os), Ok(cpu)) = (
+            parse_platform_list(entry.get("os"), "os"),
+            parse_platform_list(entry.get("cpu"), "cpu"),
+        ) else {
+            continue;
+        };
+        let may_run_on_linux = os.is_empty()
+            || os.iter().any(|platform| platform == "linux")
+            || (!os.iter().any(|platform| !platform.starts_with('!'))
+                && !os.iter().any(|platform| platform == "!linux"));
+        if !may_run_on_linux || (os.is_empty() && cpu.is_empty()) {
+            continue;
+        }
+        let full_entry = full_versions
+            .get(version)
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::MissingField(format!(
+                    "versions.{version}"
+                )))
+            })?;
+        if full_entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name != expected_name)
+            || full_entry
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                != Some(version.as_str())
+        {
+            return Err(RegistryClientError::Metadata(
+                MetadataError::ConflictingField("version".into()),
+            ));
+        }
+        let abbreviated_dist = entry
+            .get("dist")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::MissingField("dist".into()))
+            })?;
+        let full_dist = full_entry
+            .get("dist")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::MissingField("dist".into()))
+            })?;
+        for field in ["tarball", "integrity"] {
+            if abbreviated_dist.get(field) != full_dist.get(field) {
+                return Err(RegistryClientError::Metadata(
+                    MetadataError::ConflictingField(format!("dist.{field}")),
+                ));
+            }
+        }
+        if let Some(libc) = full_entry.get("libc") {
+            parse_platform_list(Some(libc), "libc")?;
+            entry.insert("libc".into(), libc.clone());
+        }
+    }
+    serde_json::to_vec(&abbreviated).map_err(|error| {
+        RegistryClientError::Metadata(MetadataError::InvalidJson(error.to_string()))
+    })
 }
 
 fn json_object(body: &[u8]) -> Result<serde_json::Map<String, serde_json::Value>, MetadataError> {
@@ -217,6 +374,10 @@ fn parse_npm(
         let artifact_url = artifact_url.to_owned();
         let mut dependencies = parse_dependencies(version_entry.get("dependencies"))?;
         let peer_dependencies = parse_dependencies(version_entry.get("peerDependencies"))?;
+        let optional_peer_dependencies = parse_optional_peer_dependencies(
+            &peer_dependencies,
+            version_entry.get("peerDependenciesMeta"),
+        )?;
         let optional_dependencies = parse_dependencies(version_entry.get("optionalDependencies"))?;
         dependencies.retain(|name, _| !optional_dependencies.contains_key(name));
         let platform = match (
@@ -233,6 +394,7 @@ fn parse_npm(
             integrity,
             dependencies,
             peer_dependencies,
+            optional_peer_dependencies,
             optional_dependencies,
             platform,
             registry_kind: RegistryKind::Npm,
@@ -304,6 +466,44 @@ fn parse_dependencies(
         .collect()
 }
 
+fn parse_optional_peer_dependencies(
+    peer_dependencies: &BTreeMap<PackageName, String>,
+    value: Option<&serde_json::Value>,
+) -> Result<BTreeSet<PackageName>, RegistryClientError> {
+    let Some(value) = value else {
+        return Ok(BTreeSet::new());
+    };
+    let metadata = value.as_object().ok_or_else(|| {
+        RegistryClientError::Metadata(MetadataError::InvalidDependency(
+            "peerDependenciesMeta".into(),
+        ))
+    })?;
+    peer_dependencies
+        .keys()
+        .filter_map(|name| {
+            let value = metadata.get(name.as_str())?;
+            Some((name, value))
+        })
+        .map(|(name, value)| {
+            let entry = value.as_object().ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::InvalidDependency(format!(
+                    "peerDependenciesMeta.{name}"
+                )))
+            })?;
+            match entry.get("optional") {
+                None | Some(serde_json::Value::Bool(false)) => Ok(None),
+                Some(serde_json::Value::Bool(true)) => Ok(Some(name.clone())),
+                Some(_) => Err(RegistryClientError::Metadata(
+                    MetadataError::InvalidDependency(format!(
+                        "peerDependenciesMeta.{name}.optional"
+                    )),
+                )),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|values| values.into_iter().flatten().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +534,33 @@ mod tests {
         }
     }
 
+    struct LibcFallbackFake {
+        abbreviated: Vec<u8>,
+        full: Vec<u8>,
+        url: String,
+        accepts: std::sync::Mutex<Vec<String>>,
+    }
+    impl HttpTransport for LibcFallbackFake {
+        fn get(&self, _url: &str) -> Result<HttpResponse, TransportError> {
+            panic!("npm metadata must use accept-aware requests")
+        }
+
+        fn get_with_accept(&self, url: &str, accept: &str) -> Result<HttpResponse, TransportError> {
+            assert_eq!(url, self.url);
+            self.accepts.lock().unwrap().push(accept.to_owned());
+            let body = match accept {
+                NPM_INSTALL_V1_ACCEPT => self.abbreviated.clone(),
+                "application/json" => self.full.clone(),
+                other => panic!("unexpected Accept header: {other}"),
+            };
+            Ok(HttpResponse {
+                status: 200,
+                content_type: Some("application/json".into()),
+                body,
+            })
+        }
+    }
+
     struct AcceptAwareFake {
         body: Vec<u8>,
         url: String,
@@ -352,6 +579,69 @@ mod tests {
                 body: self.body.clone(),
             })
         }
+    }
+
+    #[test]
+    fn npm_metadata_uses_full_packument_libc_when_abbreviated_metadata_omits_it() {
+        let abbreviated = br#"{"name":"@img/sharp-linuxmusl-arm64","versions":{"0.35.5":{"name":"@img/sharp-linuxmusl-arm64","version":"0.35.5","os":["linux"],"cpu":["arm64"],"dist":{"tarball":"https://cdn.example/sharp-musl.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let full = br#"{"name":"@img/sharp-linuxmusl-arm64","versions":{"0.35.5":{"name":"@img/sharp-linuxmusl-arm64","version":"0.35.5","os":["linux"],"cpu":["arm64"],"libc":["musl"],"dist":{"tarball":"https://cdn.example/sharp-musl.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let url = "https://registry.npmjs.org/@img%2Fsharp-linuxmusl-arm64";
+        let transport = LibcFallbackFake {
+            abbreviated: abbreviated.to_vec(),
+            full: full.to_vec(),
+            url: url.into(),
+            accepts: std::sync::Mutex::new(Vec::new()),
+        };
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let artifacts = NpmRegistry::new(&transport, origin)
+            .fetch("@img/sharp-linuxmusl-arm64")
+            .unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].platform.libc, ["musl"]);
+        assert_eq!(
+            *transport.accepts.lock().unwrap(),
+            [NPM_INSTALL_V1_ACCEPT, "application/json"]
+        );
+    }
+
+    #[test]
+    fn npm_metadata_rejects_full_libc_response_with_different_artifact_identity() {
+        let package = "@img/sharp-linuxmusl-arm64";
+        let integrity = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+        let body = |tarball: &str, include_libc: bool| {
+            let mut version = serde_json::json!({
+                "name": package,
+                "version": "0.35.5",
+                "os": ["linux"],
+                "cpu": ["arm64"],
+                "dist": {"tarball": tarball, "integrity": integrity}
+            });
+            if include_libc {
+                version["libc"] = serde_json::json!(["musl"]);
+            }
+            serde_json::to_vec(&serde_json::json!({
+                "name": package,
+                "versions": {"0.35.5": version}
+            }))
+            .unwrap()
+        };
+        let transport = LibcFallbackFake {
+            abbreviated: body("https://cdn.example/sharp-musl.tgz", false),
+            full: body("https://cdn.example/other.tgz", true),
+            url: "https://registry.npmjs.org/@img%2Fsharp-linuxmusl-arm64".into(),
+            accepts: std::sync::Mutex::new(Vec::new()),
+        };
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let error = NpmRegistry::new(&transport, origin)
+            .fetch(package)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RegistryClientError::Metadata(MetadataError::ConflictingField(field))
+                if field == "dist.tarball"
+        ));
     }
 
     #[test]
@@ -433,6 +723,26 @@ mod tests {
             !artifacts[0]
                 .dependencies
                 .contains_key(&"host".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn npm_metadata_preserves_optional_peer_dependencies() {
+        let body = br#"{"name":"plugin","versions":{"1.0.0":{"name":"plugin","version":"1.0.0","peerDependencies":{"optional-host":"^2.0.0","required-host":"^3.0.0"},"peerDependenciesMeta":{"optional-host":{"optional":true}},"dist":{"tarball":"https://cdn.example/plugin.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let artifacts = NpmRegistry::new(fake(body, "https://registry.npmjs.org/plugin"), origin)
+            .fetch("plugin")
+            .unwrap();
+
+        assert!(
+            artifacts[0]
+                .optional_peer_dependencies
+                .contains(&"optional-host".parse().unwrap())
+        );
+        assert!(
+            !artifacts[0]
+                .optional_peer_dependencies
+                .contains(&"required-host".parse().unwrap())
         );
     }
 

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -276,12 +276,14 @@ fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
                     .into_iter()
                     .collect(),
                 peer_dependencies: BTreeMap::new(),
+                optional_peer_dependencies: BTreeSet::new(),
             },
             PackageVersionMetadata {
                 name: "dep".parse().unwrap(),
                 version: "1.0.0".parse().unwrap(),
                 dependencies: BTreeMap::new(),
                 peer_dependencies: BTreeMap::new(),
+                optional_peer_dependencies: BTreeSet::new(),
             },
         ],
     )

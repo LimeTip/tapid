@@ -41,10 +41,40 @@ jobs:
           node --version
           npm --version
           target/debug/tapid --version
-      - name: Install npm reference tree
-        run: npm ci --prefix examples/news-site-consumer
       - name: Prepare project-local build and temporary storage
         run: mkdir -p examples/news-site-consumer/.next examples/news-site-consumer/.tmp
+      - name: Install npm reference tree
+        run: |
+          mkdir -p "$RUNNER_TEMP/news-site-npm-reference"
+          cp examples/news-site-consumer/package.json examples/news-site-consumer/package-lock.json "$RUNNER_TEMP/news-site-npm-reference/"
+          npm ci --prefix "$RUNNER_TEMP/news-site-npm-reference"
+      - name: Install fixture with Tapid and verify replays
+        shell: bash
+        run: |
+          set -euo pipefail
+          project=examples/news-site-consumer
+          target/debug/tapid install --project-dir "$project"
+          lock_hash=$(sha256sum "$project/tapid.lock" | cut -d' ' -f1)
+          target/debug/tapid install --frozen --project-dir "$project"
+          target/debug/tapid install --offline --frozen --project-dir "$project"
+          test "$(sha256sum "$project/tapid.lock" | cut -d' ' -f1)" = "$lock_hash"
+      - name: Compare installed dependency graphs
+        run: |
+          python3 scripts/compare-news-site-package-graphs.py \
+            --npm-root "$RUNNER_TEMP/news-site-npm-reference" \
+            --tapid-root examples/news-site-consumer \
+            --json "$RUNNER_TEMP/news-site-package-graph.json" \
+            --text "$RUNNER_TEMP/news-site-package-graph.txt"
+      - name: Retain dependency graph comparison
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: news-site-package-graph
+          path: |
+            ${{ runner.temp }}/news-site-package-graph.json
+            ${{ runner.temp }}/news-site-package-graph.txt
+          retention-days: 30
+          if-no-files-found: warn
       - name: Build and test via Tapid
         run: |
           sudo -n -- env PATH="$PATH" TMPDIR="$TMPDIR" NEXT_TELEMETRY_DISABLED=1 \
