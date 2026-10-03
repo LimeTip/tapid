@@ -47,7 +47,8 @@ jobs:
         run: mkdir -p examples/news-site-consumer/.next examples/news-site-consumer/.tmp
       - name: Build and test via Tapid
         run: |
-          target/debug/tapid run build --allow-process-memory-stats --project-dir examples/news-site-consumer
+          sudo -n -- env PATH="$PATH" TMPDIR="$TMPDIR" NEXT_TELEMETRY_DISABLED=1 \
+            target/debug/tapid run build --allow-process-memory-stats --project-dir examples/news-site-consumer
           target/debug/tapid run test --project-dir examples/news-site-consumer
       - name: Start via Tapid and assert acceptance marker
         shell: bash

@@ -1582,7 +1582,7 @@ fn run_prints_libuv_process_memory_opt_in_hint_once() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn run_memory_stats_opt_in_allows_descendant_reads_with_private_procfs() {
+fn run_memory_stats_opt_in_uses_private_procfs_or_fails_closed() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = temp_dir("run-process-memory-stats-opt-in");
@@ -1608,23 +1608,44 @@ fn run_memory_stats_opt_in_allows_descendant_reads_with_private_procfs() {
     fs::set_permissions(&fake_node, fs::Permissions::from_mode(0o755)).unwrap();
 
     let host_pid = std::process::id().to_string();
-    let output = run_with_env(
-        &dir,
-        &[
-            "run",
-            "probe",
-            "--allow-process-memory-stats",
-            "--node-runtime",
-            fake_node.to_str().unwrap(),
-        ],
-        "TAPID_TEST_HOST_PID",
-        &host_pid,
-    );
+    let arguments = [
+        "run",
+        "probe",
+        "--allow-process-memory-stats",
+        "--node-runtime",
+        fake_node.to_str().unwrap(),
+    ];
+    let is_root = unsafe { libc::geteuid() == 0 };
+    let can_use_sudo = !is_root
+        && Command::new("sudo")
+            .args(["-n", "true"])
+            .output()
+            .is_ok_and(|output| output.status.success());
+    let output = if can_use_sudo {
+        Command::new("sudo")
+            .args(["-n", "--", "env"])
+            .arg(format!("TAPID_TEST_HOST_PID={host_pid}"))
+            .arg(env!("CARGO_BIN_EXE_tapid"))
+            .args(arguments)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+    } else {
+        run_with_env(&dir, &arguments, "TAPID_TEST_HOST_PID", &host_pid)
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && stderr.contains("unsupported-containment") {
+        assert!(
+            stdout.is_empty(),
+            "child ran before fail-closed rejection: {stdout}"
+        );
+        cleanup(dir);
+        return;
+    }
     assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
-    let stats = stdout.trim().split_whitespace().collect::<Vec<_>>();
+    let stats = stdout.split_whitespace().collect::<Vec<_>>();
     assert!(!stats.is_empty(), "expected process stats, stdout={stdout}");
     assert!(
         stats.iter().all(|field| field.parse::<u64>().is_ok()),

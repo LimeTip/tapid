@@ -434,7 +434,7 @@ fn establish_private_read_only_procfs(
     if unsafe {
         libc::mount(
             std::ptr::null(),
-            b"/\0".as_ptr().cast(),
+            c"/".as_ptr(),
             std::ptr::null(),
             libc::MS_REC | libc::MS_PRIVATE,
             std::ptr::null(),
@@ -446,7 +446,7 @@ fn establish_private_read_only_procfs(
     if unsafe {
         libc::mount(
             std::ptr::null(),
-            b"/proc\0".as_ptr().cast(),
+            c"/proc".as_ptr(),
             std::ptr::null(),
             libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
             std::ptr::null(),
@@ -456,7 +456,7 @@ fn establish_private_read_only_procfs(
         return Err(io::Error::last_os_error());
     }
     let mut proc_stats: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(b"/proc\0".as_ptr().cast(), &mut proc_stats) } != 0 {
+    if unsafe { libc::statvfs(c"/proc".as_ptr(), &mut proc_stats) } != 0 {
         return Err(io::Error::last_os_error());
     }
     if proc_stats.f_flag & libc::ST_RDONLY as libc::c_ulong == 0 {
@@ -676,7 +676,11 @@ fn parse_private_report(mut report: UnixStream) -> Result<(), ExecutionError> {
         ));
     }
     let mut ready = false;
-    for frame in bytes.chunks_exact(PRIVATE_REPORT_FRAME_BYTES) {
+    let (frames, remainder) = bytes.as_chunks::<PRIVATE_REPORT_FRAME_BYTES>();
+    if !remainder.is_empty() {
+        return Err(unsupported("private procfs setup report was invalid"));
+    }
+    for frame in frames {
         if &frame[..4] != PRIVATE_REPORT_MAGIC {
             return Err(unsupported("private procfs setup report was invalid"));
         }
@@ -724,6 +728,24 @@ fn locate_unshare() -> Result<std::path::PathBuf, ExecutionError> {
     ))
 }
 
+fn unshare_namespace_arguments(is_root: bool) -> Vec<&'static str> {
+    let mut arguments = Vec::with_capacity(8);
+    if !is_root {
+        arguments.extend(["--user", "--map-root-user"]);
+    }
+    arguments.extend([
+        "--mount",
+        "--pid",
+        "--fork",
+        "--kill-child",
+        "--mount-proc",
+        "--propagation",
+        "private",
+        "--",
+    ]);
+    arguments
+}
+
 fn duplicate_fd_above_private_range(fd: libc::c_int) -> Result<OwnedFd, ExecutionError> {
     let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, PRIVATE_REPORT_FD + 1) };
     if duplicate < 0 {
@@ -757,18 +779,7 @@ fn private_memory_stats_command(
     let report_copy = duplicate_fd_above_private_range(report_writer.as_raw_fd())?;
     let mut command = Command::new(unshare);
     command
-        .args([
-            OsStr::new("--user"),
-            OsStr::new("--map-root-user"),
-            OsStr::new("--mount"),
-            OsStr::new("--pid"),
-            OsStr::new("--fork"),
-            OsStr::new("--kill-child"),
-            OsStr::new("--mount-proc"),
-            OsStr::new("--propagation"),
-            OsStr::new("private"),
-            OsStr::new("--"),
-        ])
+        .args(unshare_namespace_arguments(unsafe { libc::geteuid() == 0 }))
         .arg(launcher)
         .arg(PRIVATE_LAUNCHER_MARKER)
         .arg(if request.policy().network() { "1" } else { "0" })
@@ -1083,8 +1094,8 @@ fn completion_for(preflight: &ValidatedPreflight) -> Result<CompletionEvidence, 
 mod tests {
     use super::*;
     use crate::{
-        AssuranceLevel, ExecutionLimits, ExecutionRequest, FilesystemPolicy, SandboxMode,
-        SandboxPolicy, Termination,
+        AssuranceLevel, ExecutionErrorCategory, ExecutionLimits, ExecutionRequest,
+        FilesystemPolicy, SandboxMode, SandboxPolicy, Termination,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1199,6 +1210,27 @@ mod tests {
     }
 
     #[test]
+    fn root_namespace_launch_does_not_create_an_unprivileged_user_namespace() {
+        assert_eq!(
+            unshare_namespace_arguments(true),
+            [
+                "--mount",
+                "--pid",
+                "--fork",
+                "--kill-child",
+                "--mount-proc",
+                "--propagation",
+                "private",
+                "--",
+            ]
+        );
+        assert_eq!(
+            &unshare_namespace_arguments(false)[..2],
+            &["--user", "--map-root-user"]
+        );
+    }
+
+    #[test]
     fn default_policy_keeps_current_process_memory_stats_denied() {
         let root = root();
         let req = ExecutionRequest::builder("/bin/cat")
@@ -1225,8 +1257,15 @@ mod tests {
             .allow_process_memory_stats(true)
             .build()
             .unwrap();
-        let outcome = execute(&req).unwrap();
-        assert_eq!(outcome.termination(), &Termination::Exited(0));
+        match execute(&req) {
+            Ok(outcome) => assert_eq!(outcome.termination(), &Termination::Exited(0)),
+            Err(error) => {
+                assert_eq!(
+                    error.category(),
+                    ExecutionErrorCategory::UnsupportedContainment
+                );
+            }
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1246,8 +1285,15 @@ mod tests {
             .allow_process_memory_stats(true)
             .build()
             .unwrap();
-        let outcome = execute(&req).unwrap();
-        assert_eq!(outcome.termination(), &Termination::Exited(0));
+        match execute(&req) {
+            Ok(outcome) => assert_eq!(outcome.termination(), &Termination::Exited(0)),
+            Err(error) => {
+                assert_eq!(
+                    error.category(),
+                    ExecutionErrorCategory::UnsupportedContainment
+                );
+            }
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
