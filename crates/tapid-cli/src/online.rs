@@ -114,19 +114,72 @@ fn fixture(path: &Path) -> Result<Fixture, String> {
     Ok(f)
 }
 
+fn metadata_transport_for_package<'a>(
+    cache: &'a mut BTreeMap<String, (Option<String>, HttpsTransport)>,
+    registry_config: &crate::registry::RegistryConfig,
+    registry: &RegistryOrigin,
+    name: &PackageName,
+    allowed_origins: &[String],
+) -> Result<&'a HttpsTransport, String> {
+    let (origin, token) = if registry.to_string() == JSR {
+        (registry.to_string(), None)
+    } else {
+        let route = registry_config.route(name.as_str())?;
+        if route.origin != *registry {
+            return Err(format!(
+                "registry identity mismatch for package {name}: selected {}, requested {registry}",
+                route.origin
+            ));
+        }
+        (route.origin.to_string(), route.token)
+    };
+    if cache.contains_key(&origin) {
+        let cached_token = &cache
+            .get(&origin)
+            .expect("metadata transport cache key exists")
+            .0;
+        if cached_token != &token {
+            return Err("conflicting credentials configured for registry origin".into());
+        }
+        return Ok(&cache
+            .get(&origin)
+            .expect("metadata transport cache key exists")
+            .1);
+    }
+    let credentials = token
+        .as_ref()
+        .map(|token| vec![(origin.clone(), token.clone())])
+        .unwrap_or_default();
+    let transport = HttpsTransport::authenticated_metadata(allowed_origins.to_vec(), credentials)
+        .map_err(|error| format!("cannot create registry transport: {error}"))?;
+    cache.insert(origin.clone(), (token, transport));
+    Ok(&cache
+        .get(&origin)
+        .expect("metadata transport was just inserted")
+        .1)
+}
+
 fn remote_records(
     transport: &HttpsTransport,
+    registry_config: &crate::registry::RegistryConfig,
     registry: &RegistryOrigin,
     name: &PackageName,
     allow_missing_integrity: bool,
 ) -> Result<Vec<PackageRecord>, String> {
+    if registry.to_string() != JSR {
+        let route = registry_config.route(name.as_str())?;
+        if route.origin != *registry {
+            return Err(format!(
+                "registry identity mismatch for package {name}: selected {}, requested {registry}",
+                route.origin
+            ));
+        }
+    }
     let artifacts: Vec<RegistryArtifact> = if registry.to_string() == JSR {
         JsrRegistry::new(transport, registry.clone()).fetch(&name.to_string())
-    } else if registry.to_string() == NPM {
+    } else {
         NpmRegistry::new(transport, registry.clone())
             .fetch_with_options(&name.to_string(), allow_missing_integrity)
-    } else {
-        return Err(format!("unsupported registry origin: {registry}"));
     }
     .map_err(|e| format!("cannot fetch metadata for {registry}:{name}: {e}"))?;
     Ok(artifacts
@@ -676,6 +729,7 @@ pub fn resolve_and_fetch(
     store: &Store,
     fixture_path: Option<&Path>,
     allow_missing_integrity: bool,
+    registry_config: &crate::registry::RegistryConfig,
 ) -> Result<
     (
         Lockfile,
@@ -739,21 +793,15 @@ pub fn resolve_and_fetch(
         ("optionalDependencies", manifest.optional_dependencies()),
     ] {
         for (name, range) in map {
-            let (registry, package) = dep_parts(name)?;
+            let (registry, package) = registry_config.identity_for_spec(name)?;
             let requirement = range.parse::<Requirement>().map_err(|error| {
                 format!("invalid {kind} dependency '{name}' range '{range}': {error}")
             })?;
             roots.push(Dependency::new(registry, package, requirement));
         }
     }
-    let metadata_transport = if fixture.is_none() {
-        Some(
-            HttpsTransport::standard()
-                .map_err(|error| format!("cannot create registry transport: {error}"))?,
-        )
-    } else {
-        None
-    };
+    let configured_origins = registry_config.configured_origins();
+    let mut metadata_transports = BTreeMap::<String, (Option<String>, HttpsTransport)>::new();
     let (resolution, mut records) = resolve_with_fetch(&roots, |registry, name| {
         if fixture.is_some() {
             Ok(fixture_records
@@ -762,16 +810,33 @@ pub fn resolve_and_fetch(
                 .cloned()
                 .collect())
         } else {
+            let transport = metadata_transport_for_package(
+                &mut metadata_transports,
+                registry_config,
+                registry,
+                name,
+                &configured_origins,
+            )?;
             remote_records(
-                metadata_transport
-                    .as_ref()
-                    .expect("remote metadata transport"),
+                transport,
+                registry_config,
                 registry,
                 name,
                 allow_missing_integrity,
             )
         }
     })?;
+    let artifact_packages = resolution
+        .selected
+        .iter()
+        .filter(|id| id.registry.to_string() != JSR)
+        .map(|id| id.name.to_string())
+        .collect::<Vec<_>>();
+    let credentials = if fixture.is_none() {
+        registry_config.credentials_for(&artifact_packages)?
+    } else {
+        Vec::new()
+    };
     store
         .recover_transactions()
         .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
@@ -785,7 +850,7 @@ pub fn resolve_and_fetch(
     let mut instances = Vec::new();
     let artifact_transport = if fixture.is_none() {
         Some(
-            HttpsTransport::standard_artifact()
+            HttpsTransport::authenticated_artifact(configured_origins.clone(), credentials)
                 .map_err(|error| format!("cannot create registry transport: {error}"))?,
         )
     } else {
@@ -806,10 +871,16 @@ pub fn resolve_and_fetch(
         let record = if let Some(p) = records.get(&key3) {
             p.clone()
         } else {
+            let transport = metadata_transport_for_package(
+                &mut metadata_transports,
+                registry_config,
+                &id.registry,
+                &id.name,
+                &configured_origins,
+            )?;
             let fetched = remote_records(
-                metadata_transport
-                    .as_ref()
-                    .expect("remote metadata transport"),
+                transport,
+                registry_config,
                 &id.registry,
                 &id.name,
                 allow_missing_integrity,
@@ -1052,6 +1123,29 @@ pub fn resolve_and_fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn custom_private_origins_use_the_npm_metadata_protocol() {
+        let registry: RegistryOrigin = "https://127.0.0.1:9".parse().unwrap();
+        let transport =
+            HttpsTransport::authenticated_metadata([registry.to_string()], std::iter::empty())
+                .unwrap();
+        let config = crate::registry::RegistryConfig::from_toml(
+            "[registries.default]\nurl='https://127.0.0.1:9'\n",
+        )
+        .unwrap();
+        let error = remote_records(
+            &transport,
+            &config,
+            &registry,
+            &"private-package".parse().unwrap(),
+            false,
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("cannot fetch metadata"), "{error}");
+        assert!(!error.contains("unsupported registry origin"), "{error}");
+    }
+
     #[test]
     fn artifact_progress_is_emitted_at_bounded_completion_checkpoints() {
         let checkpoints = (1..=625)

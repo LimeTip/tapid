@@ -250,12 +250,14 @@ pub(crate) fn run_with_manifest(
             Some(path) => path.to_owned(),
             None => default_store_root()?,
         });
+        let registry_config = crate::registry::RegistryConfig::load(&project_dir)?;
         let (lock, mut input, trees, store_transaction) = online::resolve_and_fetch(
             &project_dir,
             &manifest,
             &store,
             registry_fixture,
             allow_unverified_registry_artifacts,
+            &registry_config,
         )?;
         if lifecycle_journal.is_none() {
             lifecycle_journal = Some(
@@ -387,8 +389,14 @@ pub(crate) fn run_with_manifest(
             .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
         journal.set_store_root(store.root())?;
     }
-    let (input, trees) =
-        crate::application::replay::replay_input(&lock, &manifest, &store, report_replay_progress)?;
+    let registry_config = crate::registry::RegistryConfig::load(&project_dir)?;
+    let (input, trees) = crate::application::replay::replay_input(
+        &lock,
+        &manifest,
+        &store,
+        &registry_config,
+        report_replay_progress,
+    )?;
     let replayed = materialize_with_lock(
         &project_dir,
         input,

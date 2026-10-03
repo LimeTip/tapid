@@ -18,5 +18,8 @@ serde_json = "1"
 tapid-core = { version = "0.0.5", path = "../tapid-core" }
 url = "2"
 
+[dev-dependencies]
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+
 [lib]
 path = "src/lib.rs"

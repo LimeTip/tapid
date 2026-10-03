@@ -327,6 +327,8 @@ impl RunConfig {
 #[serde(default, deny_unknown_fields)]
 struct ConfigDocument {
     run: RunSection,
+    #[serde(default, rename = "registries")]
+    _registries: Option<toml::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -637,6 +639,21 @@ mod tests {
 
         let malformed = RunConfig::parse_toml("[run.defaults]\nnetwork = \"yes\"").unwrap_err();
         assert_eq!(malformed.category(), ConfigErrorCategory::Malformed);
+    }
+
+    #[test]
+    fn accepts_registry_configuration_alongside_strict_run_policy() {
+        let config = RunConfig::parse_toml(
+            "[registries.default]\nurl='https://mirror.example'\n[run.scripts.dev]\nnetwork=false\n",
+        )
+        .unwrap();
+        assert!(!config.exact_profile("dev").unwrap().network());
+
+        let error = RunConfig::parse_toml(
+            "[registries.default]\nurl='https://mirror.example'\n[run.defaults]\nunknown=true\n",
+        )
+        .unwrap_err();
+        assert_eq!(error.category(), ConfigErrorCategory::UnknownKey);
     }
 
     #[test]
