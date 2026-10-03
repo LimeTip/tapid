@@ -14,7 +14,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
 const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
@@ -62,7 +63,7 @@ const PRIVATE_REPORT_SETUP_ERROR: u32 = 2;
 const PRIVATE_REPORT_EXEC_ERROR: u32 = 3;
 const LIMITATIONS: &[&str] = &[
     "Landlock grants use path bindings checked against held filesystem identities before setup",
-    "configured per-tree timeout, output, process-count, and memory limits are unsupported without writable cgroup v2 delegation",
+    "configured output, process-count, and memory limits are unsupported without writable per-tree cgroup v2 delegation; ManagedTree timeouts kill the namespace supervisor and rely on kernel --kill-child cleanup",
     "network-disabled policy denies Internet socket creation, connection, binding, listening, accepts, sendto, and recvfrom; AF_UNIX socketpairs with sendmsg/recvmsg and shutdown remain available for local runtime IPC; enabled networking is unrestricted",
     "Restricted does not own or guarantee cleanup of detached descendants; ManagedTree cleanup relies on the kernel PID namespace boundary",
     "standard streams remain connected; other inherited descriptors are closed",
@@ -933,13 +934,12 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
     };
     if request.policy().assurance() == AssuranceLevel::ManagedTree {
         let limits = request.policy().limits();
-        if limits.timeout_seconds().is_some()
-            || limits.max_output_bytes().is_some()
+        if limits.max_output_bytes().is_some()
             || limits.max_processes().is_some()
             || limits.max_memory_bytes().is_some()
         {
             return unsupported(
-                "Linux ManagedTree does not support configured resource limits without writable per-tree cgroups",
+                "Linux ManagedTree does not support configured output, process-count, or memory limits without per-tree kernel controllers",
             );
         }
         if request.private_launcher_executable().is_none() || locate_unshare().is_err() {
@@ -952,10 +952,11 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
         return unsupported("Landlock ABI 3 or newer is unavailable");
     }
     let limits = request.policy().limits();
-    if limits.timeout_seconds().is_some()
-        || limits.max_output_bytes().is_some()
-        || limits.max_processes().is_some()
-        || limits.max_memory_bytes().is_some()
+    if request.policy().assurance() == AssuranceLevel::Restricted
+        && (limits.timeout_seconds().is_some()
+            || limits.max_output_bytes().is_some()
+            || limits.max_processes().is_some()
+            || limits.max_memory_bytes().is_some())
     {
         return unsupported("Linux Restricted does not enforce configured resource limits");
     }
@@ -984,6 +985,60 @@ struct LinuxLifecycle<'a> {
     filter: Vec<libc::sock_filter>,
     termination: Option<Termination>,
 }
+
+fn wait_for_supervisor(
+    child: &mut Child,
+    timeout_seconds: Option<u64>,
+) -> Result<(ExitStatus, bool), ExecutionError> {
+    let Some(timeout_seconds) = timeout_seconds else {
+        return child.wait().map(|status| (status, false)).map_err(|error| {
+            ExecutionError::new(
+                ExecutionErrorCategory::Spawn,
+                format!("cannot wait for restricted project script: {error}"),
+            )
+        });
+    };
+    let timeout = Duration::from_secs(timeout_seconds);
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            ExecutionError::new(
+                ExecutionErrorCategory::Spawn,
+                format!("cannot poll ManagedTree namespace supervisor: {error}"),
+            )
+        })? {
+            return Ok((status, false));
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            if let Err(kill_error) = child.kill() {
+                if let Some(status) = child.try_wait().map_err(|error| {
+                    ExecutionError::new(
+                        ExecutionErrorCategory::Spawn,
+                        format!("cannot inspect ManagedTree supervisor after kill error: {error}"),
+                    )
+                })? {
+                    return Ok((status, false));
+                }
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::Timeout,
+                    format!(
+                        "cannot kill ManagedTree namespace supervisor at timeout: {kill_error}"
+                    ),
+                ));
+            }
+            let status = child.wait().map_err(|error| {
+                ExecutionError::new(
+                    ExecutionErrorCategory::Timeout,
+                    format!("cannot reap timed-out ManagedTree supervisor: {error}"),
+                )
+            })?;
+            return Ok((status, true));
+        }
+        std::thread::sleep(Duration::from_millis(10).min(timeout.saturating_sub(elapsed)));
+    }
+}
+
 impl ExecutionLifecycle for LinuxLifecycle<'_> {
     fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError> {
         let allow_process_memory_stats = self.request.allow_process_memory_stats();
@@ -1046,12 +1101,8 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             let _ = output.flush();
             Ok::<bool, io::Error>(denied)
         });
-        let status = child.wait().map_err(|e| {
-            ExecutionError::new(
-                ExecutionErrorCategory::Spawn,
-                format!("cannot wait for restricted project script: {e}"),
-            )
-        })?;
+        let (status, timed_out) =
+            wait_for_supervisor(&mut child, self.request.policy().limits().timeout_seconds())?;
         let memory_stats_denied = stderr_reader
             .join()
             .map_err(|_| {
@@ -1069,7 +1120,9 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
         if let Some(report) = private_report {
             parse_private_report(report)?;
         }
-        self.termination = Some(if let Some(code) = status.code() {
+        self.termination = Some(if timed_out {
+            Termination::TimedOut
+        } else if let Some(code) = status.code() {
             Termination::Exited(code)
         } else {
             Termination::Signaled(status.signal().unwrap_or(0))
@@ -1080,16 +1133,17 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
         } else {
             ""
         };
+        let mechanism = if requested.process_tree_membership() {
+            "Landlock and seccomp before target exec; target is PID 1 in a private namespace; timeout kills the util-linux supervisor and the kernel kills namespace descendants"
+        } else {
+            &format!(
+                "Landlock and seccomp restrictions installed before target exec{process_memory_stats_evidence}"
+            )
+        };
         let receipt = EnforcementReceipt::checked(
             self.preflight,
             requested.clone(),
-            evidence_for_dimensions(
-                requested,
-                &format!(
-                    "Landlock and seccomp restrictions installed before target exec{process_memory_stats_evidence}"
-                ),
-                LIMITATIONS,
-            ),
+            evidence_for_dimensions(requested, mechanism, LIMITATIONS),
         )?;
         let completion = completion_for(self.preflight)?;
         Ok(Box::new(
@@ -1452,6 +1506,61 @@ mod tests {
             ExecutionErrorCategory::UnsupportedContainment
         );
         assert!(!marker.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn supervisor_timeout_kills_pid_namespace_descendants() {
+        let root = root();
+        let marker = root.join("survived-supervisor-timeout");
+        let unshare = locate_unshare().unwrap();
+        let mut command = Command::new(unshare);
+        command
+            .args(unshare_namespace_arguments(unsafe { libc::geteuid() == 0 }))
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!("sleep 2; touch '{}'", marker.display()))
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let (status, timed_out) = wait_for_supervisor(&mut child, Some(1)).unwrap();
+        assert!(timed_out);
+        assert!(!status.success());
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            !marker.exists(),
+            "a namespace descendant survived supervisor timeout"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_tree_timeout_kills_namespace_and_remaining_descendants() {
+        let root = root();
+        let marker = root.join("descendant-after-timeout");
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::ManagedTree,
+            FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(Some(1), None, None, None).unwrap(),
+        )
+        .unwrap();
+        let req = request(
+            &root,
+            &format!("sleep 2; touch '{}'", marker.display()),
+            policy,
+        );
+        let outcome = execute(&req).unwrap();
+        assert_eq!(outcome.termination(), &Termination::TimedOut);
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        assert!(
+            !marker.exists(),
+            "timed-out descendant survived the kernel cleanup boundary"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
