@@ -814,6 +814,45 @@ fn install_rolls_back_when_a_required_peer_provider_is_missing() {
 }
 
 #[test]
+fn invalid_fetched_dependency_range_does_not_create_store_state() {
+    let dir = temp_dir("invalid-fetched-range-no-store");
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"parent":"1.0.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","artifact":"unused","dependencies":{"broken":"not a valid range"}}]}"#,
+    )
+    .unwrap();
+    let store = dir.join("previously-nonexistent-store");
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--allow-unverified-registry-artifacts",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("dependency broken"), "{stderr}");
+    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
+    cleanup(dir);
+}
+
+#[test]
 fn invalid_online_root_range_does_not_create_store_state() {
     let dir = temp_dir("invalid-range-no-store");
     let manifest =
