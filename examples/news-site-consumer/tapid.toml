@@ -6,11 +6,9 @@ subprocess = true
 
 [run.scripts.build]
 write = [".next", ".tmp"]
-network = true
 
 [run.scripts.test]
 write = [".tmp"]
-network = true
 
 [run.scripts.start]
 write = [".tmp"]
