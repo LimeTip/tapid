@@ -906,9 +906,13 @@ impl ExecutionBackend for PlatformBackend {
     }
 }
 
-fn backend_identity() -> BackendIdentity {
+fn backend_identity(assurance: AssuranceLevel) -> BackendIdentity {
+    let name = match assurance {
+        AssuranceLevel::Restricted => "tapid-runner/linux-landlock-seccomp-restricted",
+        AssuranceLevel::ManagedTree => "tapid-runner/linux-landlock-seccomp-managed-tree",
+    };
     BackendIdentity::new(
-        "tapid-runner/linux-landlock-seccomp-restricted",
+        name,
         format!(
             "{}; Landlock ABI {}",
             env!("CARGO_PKG_VERSION"),
@@ -921,7 +925,7 @@ fn backend_identity() -> BackendIdentity {
 
 pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupport {
     let requested = EnforcementDimensions::requested_by(request.policy());
-    let identity = backend_identity();
+    let identity = backend_identity(request.policy().assurance());
     let unsupported = |reason: &str| {
         ContainmentSupport::unsupported(
             identity.clone(),
@@ -1482,6 +1486,18 @@ mod tests {
         let outcome = execute(&req).unwrap();
         assert_ne!(outcome.termination(), &Termination::Exited(0));
         assert!(!outside.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_tree_support_reports_managed_tree_backend_identity() {
+        let root = root();
+        let req = request(&root, "true", managed_tree(&root, vec![]));
+        let support = containment_support(&req);
+        assert_eq!(
+            support.backend().name(),
+            "tapid-runner/linux-landlock-seccomp-managed-tree"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
