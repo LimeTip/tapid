@@ -7,9 +7,12 @@ const JSR: &str = "https://jsr.io";
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RegistryDocument {
     #[serde(default)]
     registries: BTreeMap<String, RegistryEntry>,
+    #[serde(default, rename = "run")]
+    _run: Option<toml::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -158,20 +161,68 @@ impl RegistryConfig {
         &self,
         packages: &[String],
     ) -> Result<Vec<(String, String)>, String> {
+        self.credentials_for_with_env(packages, |name| env::var(name).ok())
+    }
+
+    fn credentials_for_with_env(
+        &self,
+        packages: &[String],
+        mut read_env: impl FnMut(&str) -> Option<String>,
+    ) -> Result<Vec<(String, String)>, String> {
         let mut credentials = BTreeMap::new();
         for package in packages {
-            let route = self.route(package)?;
+            let route = self.route_with_env(package, &mut read_env)?;
             if let Some(token) = route.token {
-                credentials.insert(route.origin.to_string(), token);
+                insert_credential(&mut credentials, route.origin.to_string(), token)?;
             }
         }
         Ok(credentials.into_iter().collect())
     }
 
+    pub(crate) fn credential_environment_names(&self) -> Vec<String> {
+        self.routes
+            .values()
+            .filter_map(|entry| entry.token_env.clone())
+            .collect()
+    }
+
+    pub(crate) fn allowlist_contains_registry_credentials(
+        &self,
+        names: &[String],
+        case_insensitive: bool,
+    ) -> bool {
+        self.routes.values().any(|entry| {
+            entry.token_env.as_ref().is_some_and(|credential_name| {
+                names.iter().any(|name| {
+                    if case_insensitive {
+                        name.eq_ignore_ascii_case(credential_name)
+                    } else {
+                        name == credential_name
+                    }
+                })
+            })
+        })
+    }
+
     #[cfg(test)]
-    fn from_toml(input: &str) -> Result<Self, String> {
+    pub(crate) fn from_toml(input: &str) -> Result<Self, String> {
         Self::parse(input)
     }
+}
+
+fn insert_credential(
+    credentials: &mut BTreeMap<String, String>,
+    origin: String,
+    token: String,
+) -> Result<(), String> {
+    if credentials
+        .get(&origin)
+        .is_some_and(|existing| existing != &token)
+    {
+        return Err("conflicting credentials configured for registry origin".into());
+    }
+    credentials.insert(origin, token);
+    Ok(())
 }
 
 fn valid_scope(value: &str) -> bool {
@@ -254,6 +305,89 @@ mod tests {
             })
             .unwrap();
         assert!(public.token.is_none());
+    }
+
+    #[test]
+    fn scoped_credentials_do_not_inherit_the_default_entry() {
+        let config = RegistryConfig::from_toml(
+            "[registries.default]\nurl='https://mirror.example'\ntoken-env='DEFAULT_TOKEN'\n[registries.'@acme']\nurl='https://packages.example'\n",
+        )
+        .unwrap();
+        let private = config
+            .route_with_env("@acme/widget", |_| panic!("scope has no credential source"))
+            .unwrap();
+        assert_eq!(private.origin.to_string(), "https://packages.example");
+        assert!(private.token.is_none());
+        let public = config
+            .route_with_env("public-package", |name| {
+                assert_eq!(name, "DEFAULT_TOKEN");
+                Some("default-token".into())
+            })
+            .unwrap();
+        assert_eq!(public.token.as_deref(), Some("default-token"));
+    }
+
+    #[test]
+    fn run_configuration_is_accepted_but_unknown_top_level_tables_are_rejected() {
+        assert!(RegistryConfig::from_toml("[run.defaults]\nnetwork=false\n").is_ok());
+        assert!(
+            RegistryConfig::from_toml("[registry.default]\nurl='https://mirror.example'\n")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn conflicting_tokens_for_one_origin_fail_without_disclosure() {
+        let config = RegistryConfig::from_toml(
+            "[registries.'@acme']\nurl='https://shared.example'\ntoken-env='TOKEN_A'\n[registries.'@contoso']\nurl='https://shared.example'\ntoken-env='TOKEN_B'\n",
+        )
+        .unwrap();
+        let error = config
+            .credentials_for_with_env(&["@acme/a".into(), "@contoso/b".into()], |name| {
+                Some(match name {
+                    "TOKEN_A" => "private-value-a".to_owned(),
+                    "TOKEN_B" => "private-value-b".to_owned(),
+                    _ => unreachable!(),
+                })
+            })
+            .err()
+            .unwrap();
+        assert!(error.contains("conflicting"));
+        assert!(!error.contains("private-value"));
+    }
+
+    #[test]
+    fn credentials_for_reads_only_the_selected_package_routes() {
+        let config = RegistryConfig::from_toml(
+            "[registries.'@direct']\nurl='https://direct.example'\ntoken-env='DIRECT_TOKEN'\n[registries.'@unrelated']\nurl='https://unrelated.example'\ntoken-env='UNRELATED_TOKEN'\n",
+        )
+        .unwrap();
+        let credentials = config
+            .credentials_for_with_env(&["@direct/root".into()], |name| match name {
+                "DIRECT_TOKEN" => Some("direct-value".to_owned()),
+                "UNRELATED_TOKEN" => panic!("unselected route credential must not be read"),
+                _ => unreachable!(),
+            })
+            .unwrap();
+        assert_eq!(
+            credentials,
+            vec![("https://direct.example".into(), "direct-value".into())]
+        );
+    }
+
+    #[test]
+    fn registry_credentials_cannot_be_allowlisted_for_child_processes() {
+        let config = RegistryConfig::from_toml(
+            "[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ACME_TOKEN'\n",
+        )
+        .unwrap();
+        assert!(
+            config.allowlist_contains_registry_credentials(&["TAPID_ACME_TOKEN".into()], false,)
+        );
+        assert!(
+            config.allowlist_contains_registry_credentials(&["tapid_acme_token".into()], true,)
+        );
+        assert!(!config.allowlist_contains_registry_credentials(&["OTHER_VALUE".into()], false,));
     }
 
     #[test]

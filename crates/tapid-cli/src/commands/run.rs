@@ -103,11 +103,30 @@ pub(crate) fn run(args: Args) -> ExitCode {
         );
         return ExitCode::from(1);
     }
-    let ambient_environment = match crate::run::read_allowlisted_environment(
+    let registry_config = match crate::registry::RegistryConfig::load(&project_dir) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let registry_credential_names = registry_config.credential_environment_names();
+    if registry_config.allowlist_contains_registry_credentials(
         config
             .exact_profile(&args.script)
             .expect("exact profile was checked")
             .environment(),
+        cfg!(windows),
+    ) {
+        eprintln!("error: registry credential environment variables cannot be passed to scripts");
+        return ExitCode::from(1);
+    }
+    let ambient_environment = match crate::run::read_allowlisted_environment_with_denied(
+        config
+            .exact_profile(&args.script)
+            .expect("exact profile was checked")
+            .environment(),
+        &registry_credential_names,
     ) {
         Ok(environment) => environment,
         Err(error) => {

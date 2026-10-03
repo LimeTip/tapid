@@ -58,6 +58,25 @@ tapid install --registry-fixture ./fixture.json --project-dir ./example
 
 The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 6 locks, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
 
+## Private npm registry routing (development feature)
+
+Registry routing is configured in the project-root `tapid.toml`. With no `[registries]` entries, plain npm package names continue to resolve from `https://registry.npmjs.org`. A matching scope overrides `default`; otherwise `default` applies, then the public npm registry is the fallback. `npm:` aliases use the same scope routing. `jsr:` packages retain their JSR identity and are not routed through npm settings.
+
+```toml
+[registries.default]
+url = "https://npm-mirror.example"
+
+[registries."@acme"]
+url = "https://packages.acme.example"
+token-env = "TAPID_ACME_NPM_TOKEN"
+```
+
+`url` must be a canonical HTTPS origin without a path, query, fragment, or embedded user information. `token-env` is the name of an environment variable, never the credential value. Tapid reads that variable only when resolving packages routed to that entry. Scope configuration takes precedence over the default entry, including its credential source; a scope without `token-env` does not inherit the default entry's token. If a selected private route requires a missing or empty token, installation fails closed without falling back to another registry. Without `token-env`, the selected origin is used without bearer authentication. Credentials are attached only to requests for the exact configured origin, and redirects to another origin are rejected.
+
+The only supported credential provider is an environment variable selected by `token-env`. For local use, populate it through an operating-system secret manager or a protected shell environment; in CI, map the corresponding CI secret into the install job's environment. Do not put literal tokens in configuration, command arguments, scripts, or logs. Tapid does not implicitly read `.npmrc`, npm configuration variables, or home-directory credentials. Registry selection order is: exact package scope, then `[registries.default]`, then the public npm registry. Credential selection follows only the chosen entry and has no implicit cross-entry fallback. This initial feature does not implement credential helper or file providers.
+
+Do not put tokens in `package.json`, `tapid.toml`, command-line arguments, or `tapid.lock`. Offline/frozen replay uses the registry identities already pinned in the lockfile and does not require credentials or contact a registry. Registry credentials are excluded from root-script environments even if a run policy tries to allowlist the corresponding variable. Private-registry support is under development and is not a production-support claim.
+
 ## Legacy registry identities
 
 Locks containing noncanonical persisted registry origins (such as uppercase hosts

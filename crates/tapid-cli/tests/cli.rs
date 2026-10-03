@@ -64,6 +64,14 @@ fn missing_private_registry_credentials_fail_before_committing_manifest_changes(
     )
     .unwrap();
     let store = dir.join("store");
+    let previous_lock = b"previous lock bytes";
+    let previous_node_modules = b"previous installed tree marker";
+    let previous_store = b"pre-existing verified store marker";
+    fs::write(dir.join("tapid.lock"), previous_lock).unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join("node_modules/previous.txt"), previous_node_modules).unwrap();
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("previous.txt"), previous_store).unwrap();
     let output = run_with_isolated_path(
         &dir,
         &[
@@ -78,6 +86,49 @@ fn missing_private_registry_credentials_fail_before_committing_manifest_changes(
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("TAPID_ISSUE164_MISSING"), "{stderr}");
     assert!(!stderr.contains("secret"), "{stderr}");
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        original.as_bytes()
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), previous_lock);
+    assert_eq!(
+        fs::read(dir.join("node_modules/previous.txt")).unwrap(),
+        previous_node_modules
+    );
+    assert_eq!(
+        fs::read(store.join("previous.txt")).unwrap(),
+        previous_store
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn invalid_private_registry_credentials_are_redacted_and_fail_transactionally() {
+    let dir = temp_dir("invalid-registry-credential");
+    let original = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), original).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_INVALID'\n",
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let invalid_secret = "synthetic-invalid-secret\nwith-newline";
+    let output = run_with_env(
+        &dir,
+        &[
+            "add",
+            "@acme/private@1.0.0",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+        "TAPID_ISSUE164_INVALID",
+        invalid_secret,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid registry credential"), "{stderr}");
+    assert!(!stderr.contains("synthetic-invalid-secret"), "{stderr}");
     assert_eq!(
         fs::read(dir.join("package.json")).unwrap(),
         original.as_bytes()
@@ -157,6 +208,34 @@ fn scoped_registry_routing_selects_private_and_default_origins_and_replays_offli
         "{}",
         String::from_utf8_lossy(&replay.stderr)
     );
+    cleanup(dir);
+}
+
+#[test]
+fn registry_credential_environment_variables_are_denied_to_root_scripts() {
+    let dir = temp_dir("registry-credential-child-env");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"test":"printf child-started"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_CHILD_SECRET'\n[run.scripts.test]\nenvironment=['TAPID_ISSUE164_CHILD_SECRET']\n",
+    )
+    .unwrap();
+    let secret = "synthetic-secret-value";
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(["run", "test", "--project-dir"])
+        .arg(&dir)
+        .env("TAPID_ISSUE164_CHILD_SECRET", secret)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("registry credential"), "{stderr}");
+    assert!(!stderr.contains(secret), "{stderr}");
     cleanup(dir);
 }
 

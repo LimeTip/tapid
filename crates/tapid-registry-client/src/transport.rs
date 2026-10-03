@@ -792,6 +792,28 @@ mod tests {
     }
 
     #[test]
+    fn cross_origin_redirect_is_rejected_even_when_destination_is_allowed_and_has_no_auth() {
+        let source = "https://private.example";
+        let destination = "https://cdn.example";
+        let transport = HttpsTransport::new_authenticated(
+            [source, destination],
+            [(source, "source-only-token".to_owned())],
+            Duration::from_secs(1),
+            1024,
+        )
+        .unwrap();
+        let previous = Url::parse("https://private.example/package").unwrap();
+        let next = Url::parse("https://cdn.example/archive").unwrap();
+        assert!(!redirect_is_allowed(
+            &previous,
+            &next,
+            &transport.allowed_origins,
+            1
+        ));
+        assert!(transport.authorization_for(&next).is_none());
+    }
+
+    #[test]
     fn redirect_policy_permits_only_the_same_allowed_origin() {
         let allowed = vec![Origin::parse("https://registry.example.test").unwrap()];
         let previous = Url::parse("https://registry.example.test/package").unwrap();
