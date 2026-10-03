@@ -101,7 +101,31 @@ jobs:
       - name: Verify native Windows shim materialization collision guard
         if: runner.os == 'Windows'
         run: cargo test -p tapid --lib --locked native_windows_shim_materialization_rejects_collisions_before_writes
+      - name: Run tests in namespace-capable Ubuntu container
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          node_bin="$(dirname "$(command -v node)")"
+          docker run --rm --platform linux/amd64 \
+            --cap-add SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TOOL_CACHE:$RUNNER_TOOL_CACHE:ro" \
+            -e "RUSTFLAGS=$RUSTFLAGS" \
+            -e "PATH=$node_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            -w /work \
+            ubuntu:24.04 \
+            bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev util-linux >/dev/null
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+              source /root/.cargo/env
+              export CARGO_TARGET_DIR=/tmp/tapid-target
+              cargo test --workspace --all-features --locked
+            '
       - name: Run tests
+        if: runner.os != 'Linux'
         run: cargo test --workspace --all-features --locked
       - name: Install documentation runner Python
         if: runner.os != 'Windows'
@@ -170,14 +194,39 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install Node.js for runner tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Install cargo-nextest
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
           tool: cargo-nextest
-      - name: Run tests with nextest
-        run: cargo nextest run --workspace --all-features --locked
+      - name: Run tests with nextest in namespace-capable Ubuntu container
+        shell: bash
+        run: |
+          node_bin="$(dirname "$(command -v node)")"
+          docker run --rm --platform linux/amd64 \
+            --cap-add SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$HOME/.cargo/bin/cargo-nextest:/usr/local/bin/cargo-nextest:ro" \
+            -v "$RUNNER_TOOL_CACHE:$RUNNER_TOOL_CACHE:ro" \
+            -e "RUSTFLAGS=$RUSTFLAGS" \
+            -e "PATH=$node_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            -w /work \
+            ubuntu:24.04 \
+            bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev util-linux >/dev/null
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+              source /root/.cargo/env
+              export CARGO_TARGET_DIR=/tmp/tapid-nextest-target
+              cargo nextest run --workspace --all-features --locked
+            '
 
   coverage:
     name: Coverage (Ubuntu)
@@ -189,14 +238,40 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install Node.js for runner tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
           tool: cargo-llvm-cov
-      - name: Generate LCOV coverage report
-        run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+      - name: Generate LCOV coverage report in namespace-capable Ubuntu container
+        shell: bash
+        run: |
+          node_bin="$(dirname "$(command -v node)")"
+          docker run --rm --platform linux/amd64 \
+            --cap-add SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$HOME/.cargo/bin/cargo-llvm-cov:/usr/local/bin/cargo-llvm-cov:ro" \
+            -v "$RUNNER_TOOL_CACHE:$RUNNER_TOOL_CACHE:ro" \
+            -e "RUSTFLAGS=$RUSTFLAGS" \
+            -e "PATH=$node_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            -w /work \
+            ubuntu:24.04 \
+            bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev util-linux >/dev/null
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+              source /root/.cargo/env
+              rustup component add llvm-tools-preview
+              export CARGO_TARGET_DIR=/tmp/tapid-coverage-target
+              cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+            '
       - name: Upload LCOV coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
