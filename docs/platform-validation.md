@@ -1,6 +1,6 @@
 # Root-script platform validation
 
-ADR 0005 CLI wiring and experimental macOS Restricted containment are integrated. Native behavioral controls gate support, and accepted executions produce checked enforcement receipts. ManagedTree, resource-limit profiles, and Linux/Windows native containment remain unsupported. Local dirty-tree results are development evidence, not the clean-commit platform acceptance record required below.
+ADR 0005 CLI wiring, experimental macOS Restricted containment, and a Linux Restricted Landlock/seccomp backend are integrated. Native behavioral controls gate support, and accepted executions produce checked enforcement receipts. ManagedTree, resource-limit profiles, and Windows native containment remain unsupported. Ubuntu 24.04 x86_64 local-VM acceptance is still pending; hosted-runner results do not substitute for that requested validation. Local dirty-tree results are development evidence, not the clean-commit platform acceptance record required below.
 
 A platform may be marked Restricted only after the Restricted probe set passes through `tapid run <SCRIPT> -- <ARGS...>` at the exact integrated commit. ManagedTree requires the Restricted probes plus the ManagedTree-only probes. A unit test of policy declarations, backend availability, compilation, a generated native profile, or a successful allowed operation is insufficient.
 
@@ -94,7 +94,7 @@ Native ManagedTree remains unsupported. Process groups are escapable with `setsi
 
 ### Linux
 
-The planned Restricted design combines Landlock filesystem rules, `no_new_privs`, seccomp, and explicit environment/descriptor construction. Enhancements depend on runtime kernel and feature probes. Record the Landlock ABI and handled access rights, seccomp policy, privilege transition, network mechanism, and unavailable features. A container or hosted runner that cannot establish a required dimension must fail before spawn.
+The implemented Restricted design combines Landlock filesystem rules, `no_new_privs`, seccomp, and explicit environment/descriptor construction. Runtime support depends on kernel feature probes. Record the Landlock ABI and handled access rights, seccomp policy, privilege transition, network mechanism, and unavailable features. A system that cannot establish a required dimension must fail before spawn. The exact Ubuntu 24.04 x86_64 local-VM acceptance run remains outstanding.
 
 ManagedTree additionally requires proven namespace ownership and cgroup delegation. Record namespace membership, cgroup version/controllers/delegation, assignment ordering, cleanup ownership, and tree-wide accounting. Running inside a container or cgroup does not itself prove Tapid owns the boundary.
 
@@ -109,7 +109,7 @@ ManagedTree additionally requires a non-breakaway Job Object assigned before unt
 | Platform/backend | Restricted status | ManagedTree status | Native evidence |
 |---|---|---|---|
 | macOS 26 native Seatbelt | Experimental Restricted support; profiles with resource limits fail closed | Native support unavailable | Native macOS 26 behavioral suite and exact CLI HTTP acceptance |
-| Linux Landlock/`no_new_privs`/seccomp | Planned; runtime capability-dependent | Planned only with proven namespaces and cgroup delegation | No integrated evidence recorded |
+| Linux Landlock/`no_new_privs`/seccomp | Implemented for Restricted; runtime capability-dependent; Ubuntu 24.04 x86_64 local-VM acceptance pending | Unsupported pending proven namespaces and cgroup delegation | Hosted Linux tests and consumer checks run; local VM evidence pending |
 | Windows AppContainer or LPAC plus Job Object | Planned; not implemented or validated | Planned only with non-breakaway pre-execution Job assignment and tree-wide limits | No integrated evidence recorded |
 | Strict Linux VM through macOS Virtualization.framework | Optional future backend with Linux VM semantics | Future investigation | No implementation or evidence recorded |
 

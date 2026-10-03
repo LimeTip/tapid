@@ -340,6 +340,7 @@ impl ExecutionBackend for PlatformBackend {
             "/lib64",
             "/etc/ld.so.cache",
             "/etc/ssl/certs",
+            "/etc/ssl/openssl.cnf",
             "/etc/localtime",
         ]
         .into_iter()
@@ -580,6 +581,22 @@ mod tests {
             outcome.enforcement().assurance(),
             AssuranceLevel::Restricted
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_allowlist_includes_openssl_configuration_when_present() {
+        let root = root();
+        let req = request(&root, "true", restricted(&root, vec![], false));
+        let additions = PlatformBackend.runtime_filesystem_additions(&req).unwrap();
+        if Path::new("/etc/ssl/openssl.cnf").exists() {
+            assert!(
+                additions
+                    .read
+                    .iter()
+                    .any(|grant| grant.path == Path::new("/etc/ssl/openssl.cnf"))
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -23,6 +23,7 @@ const releaseContracts = new Map([
 const releaseTag = args[3];
 assert.ok(!releaseTag || releaseContracts.has(releaseTag), 'unreviewed root-script release');
 const legacy = releaseTag && releaseContracts.get(releaseTag) === 'legacy-uncontained';
+const nativeRestricted = !legacy && (process.platform === 'darwin' || (!releaseTag && process.platform === 'linux'));
 const lifecycleMarker = path.join(project, 'LIFECYCLE_SHOULD_NOT_RUN');
 const startMarker = 'TAPID_FIXTURE_STARTED=';
 assert.ok(['darwin', 'linux', 'win32'].includes(process.platform), 'unsupported validation host');
@@ -70,7 +71,7 @@ for (const test of cases) {
   );
   const output = result.stdout + result.stderr;
   const receipts = result.stderr.split(/\r?\n/).filter(line => line.startsWith('{')).map(line => JSON.parse(line));
-  if (!legacy && process.platform === 'win32') {
+  if (!legacy && !nativeRestricted) {
     assert.equal(result.status, 1, 'unsupported native containment must fail closed');
     assert.match(result.stderr, /unsupported-containment/);
     assert.match(result.stderr, /no process was started and no enforcement receipt was issued/);
@@ -103,8 +104,8 @@ for (const test of cases) {
 }
 console.log(legacy
   ? `${releaseTag}: legacy uncontained forwarding, environment, exit codes and lifecycle suppression passed; no containment claim.`
-  : process.platform === 'linux'
+  : nativeRestricted && process.platform === 'linux'
   ? 'Linux native Restricted: install, lifecycle suppression, child marker, exact forwarding, environment and exit codes passed.'
-  : process.platform === 'darwin'
+  : nativeRestricted && process.platform === 'darwin'
   ? 'macOS native Restricted: install, lifecycle suppression, child marker, exact forwarding, environment and exit codes passed.'
   : `${process.platform}: install, lifecycle suppression, unsupported containment, no target marker and no receipt passed.`);
