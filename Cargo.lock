@@ -1582,6 +1582,7 @@ version = "0.0.5"
 dependencies = [
  "httpdate",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tapid-core",

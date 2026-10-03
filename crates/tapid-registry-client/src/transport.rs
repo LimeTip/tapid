@@ -251,6 +251,18 @@ fn redirect_is_allowed(
         && allowed.contains(&Origin::of(next))
 }
 
+fn exact_origin_redirect_policy(allowed: Vec<Origin>) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().last().is_some_and(|previous| {
+            redirect_is_allowed(previous, attempt.url(), &allowed, attempt.previous().len())
+        }) {
+            attempt.follow()
+        } else {
+            attempt.error("redirect rejected by exact-origin policy")
+        }
+    })
+}
+
 impl HttpsTransport {
     /// Creates a credential-free HTTPS transport with exact-origin, timeout, redirect,
     /// and response-size controls.
@@ -309,18 +321,7 @@ impl HttpsTransport {
                 Ok((origin, value))
             })
             .collect::<Result<Vec<_>, TransportError>>()?;
-        let policy = reqwest::redirect::Policy::custom({
-            let allowed = allowed_origins.clone();
-            move |attempt| {
-                if attempt.previous().last().is_some_and(|previous| {
-                    redirect_is_allowed(previous, attempt.url(), &allowed, attempt.previous().len())
-                }) {
-                    attempt.follow()
-                } else {
-                    attempt.error("redirect rejected by exact-origin policy")
-                }
-            }
-        });
+        let policy = exact_origin_redirect_policy(allowed_origins.clone());
         let client = reqwest::blocking::Client::builder()
             .user_agent("tapid/0.0.2")
             .timeout(timeout)
@@ -486,6 +487,217 @@ impl HttpTransport for HttpsTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NpmRegistry;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::Arc,
+        thread,
+    };
+
+    fn local_tls_server_config() -> Arc<rustls::ServerConfig> {
+        // Public, self-signed test fixture only; never use this key outside tests.
+        let certificate = rustls::pki_types::CertificateDer::from(
+            include_bytes!("../tests/fixtures/local-test-cert.der").to_vec(),
+        );
+        let private_key =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+                include_bytes!("../tests/fixtures/local-test-key.der").to_vec(),
+            ));
+        Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], private_key)
+            .unwrap(),
+        )
+    }
+
+    #[derive(Debug)]
+    struct CapturedHeaders {
+        authorization: Option<String>,
+        accept: Option<String>,
+    }
+
+    fn serve_one_tls_response(
+        listener: TcpListener,
+        config: Arc<rustls::ServerConfig>,
+        status: &'static str,
+        extra_headers: String,
+        body: Vec<u8>,
+    ) -> thread::JoinHandle<CapturedHeaders> {
+        thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let (socket, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("local TLS test server failed to accept request: {error}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let connection = rustls::ServerConnection::new(config).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            loop {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            let header = |name: &str| {
+                request
+                    .lines()
+                    .find(|line| {
+                        line.split_once(':')
+                            .is_some_and(|(header, _)| header.eq_ignore_ascii_case(name))
+                    })
+                    .and_then(|line| line.split_once(':'))
+                    .map(|(_, value)| value.trim().to_owned())
+            };
+            let captured = CapturedHeaders {
+                authorization: header("authorization"),
+                accept: header("accept"),
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+            captured
+        })
+    }
+
+    fn local_authenticated_transport(
+        origins: &[String],
+        credentials: Vec<(String, String)>,
+    ) -> HttpsTransport {
+        let timeout = Duration::from_secs(2);
+        let mut transport =
+            HttpsTransport::new_authenticated(origins, credentials, timeout, 4096).unwrap();
+        let allowed_origins = transport.allowed_origins.clone();
+        let policy = exact_origin_redirect_policy(allowed_origins);
+        // The fixture uses a self-signed certificate. This test-only client skips
+        // certificate validation so assertions focus on auth and redirect policy;
+        // production transports retain normal certificate validation.
+        transport.client = reqwest::blocking::Client::builder()
+            .user_agent("tapid/0.0.2")
+            .timeout(timeout)
+            .redirect(policy)
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        transport
+    }
+
+    #[test]
+    fn authenticated_https_request_sends_token_to_local_private_registry() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = format!("https://{address}");
+        let packument = serde_json::json!({
+            "name": "private-package",
+            "versions": {
+                "1.0.0": {
+                    "name": "private-package",
+                    "version": "1.0.0",
+                    "dist": {
+                        "tarball": format!("{origin}/private-package-1.0.0.tgz"),
+                        "integrity": "sha512-tH3+Kn/2Ov5s20Oa2RA4rncViMGbN3RSoFjn0u4mmF9j/iGEDUlR4zsFuvu8dWM73cKf2LLQpkI5jICwZtdydA=="
+                    }
+                }
+            }
+        })
+        .to_string()
+        .into_bytes();
+        let server = serve_one_tls_response(
+            listener,
+            local_tls_server_config(),
+            "200 OK",
+            "Content-Type: application/json\r\n".into(),
+            packument,
+        );
+        let transport = local_authenticated_transport(
+            std::slice::from_ref(&origin),
+            vec![(origin.clone(), "fixture-private-token".into())],
+        );
+        let registry = NpmRegistry::new(&transport, origin.parse().unwrap());
+
+        let artifacts = registry.fetch("private-package").unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].identity.name.to_string(), "private-package");
+        assert!(artifacts[0].integrity.is_some());
+        assert_eq!(
+            artifacts[0].artifact_url,
+            format!("{origin}/private-package-1.0.0.tgz")
+        );
+        let headers = server.join().unwrap();
+        assert_eq!(
+            headers.authorization.as_deref(),
+            Some("Bearer fixture-private-token")
+        );
+        assert_eq!(
+            headers.accept.as_deref(),
+            Some("application/vnd.npm.install-v1+json")
+        );
+    }
+
+    #[test]
+    fn authenticated_redirect_to_another_local_origin_is_rejected_before_contacting_it() {
+        let source_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source_address = source_listener.local_addr().unwrap();
+        let source_origin = format!("https://{source_address}");
+        let destination_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination_listener.set_nonblocking(true).unwrap();
+        let destination_address = destination_listener.local_addr().unwrap();
+        let destination_origin = format!("https://{destination_address}");
+        let source_server = serve_one_tls_response(
+            source_listener,
+            local_tls_server_config(),
+            "302 Found",
+            format!("Location: {destination_origin}/steal\r\n"),
+            Vec::new(),
+        );
+        let transport = local_authenticated_transport(
+            &[source_origin.clone(), destination_origin],
+            vec![(source_origin.clone(), "fixture-private-token".into())],
+        );
+
+        let error = transport
+            .get(&format!("{source_origin}/package"))
+            .unwrap_err();
+
+        assert!(matches!(error, TransportError::Http(message) if message.contains("redirect")));
+        assert_eq!(
+            source_server.join().unwrap().authorization.as_deref(),
+            Some("Bearer fixture-private-token")
+        );
+        assert!(matches!(
+            destination_listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
 
     #[test]
     fn authorization_header_is_selected_only_for_exact_origin() {
