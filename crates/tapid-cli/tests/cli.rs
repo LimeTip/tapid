@@ -634,6 +634,61 @@ fn lifecycle_add_rolls_back_manifest_when_resolution_fails() {
 }
 
 #[test]
+fn lifecycle_add_rejects_invalid_fetched_range_without_state_changes() {
+    let dir = temp_dir("lifecycle-invalid-fetched-range");
+    let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(dir.join("tapid.lock"), "old lock bytes\n").unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
+    fs::write(dir.join("node_modules/KEEP"), "user data").unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","artifact":"unused","dependencies":{"broken":"not a valid range"}}]}"#,
+    )
+    .unwrap();
+    let store = dir.join("previously-nonexistent-store");
+
+    let output = run(
+        &dir,
+        &[
+            "add",
+            "parent@1.0.0",
+            "--allow-unverified-registry-artifacts",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("dependency broken"), "{stderr}");
+    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("tapid.lock")).unwrap(),
+        b"old lock bytes\n"
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/KEEP")).unwrap(),
+        b"user data"
+    );
+    assert_eq!(
+        fs::read(dir.join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1\n"
+    );
+    assert!(!store.exists());
+    assert!(!dir.join(".tapid-lifecycle-journal.json").exists());
+    cleanup(dir);
+}
+
+#[test]
 fn add_peer_records_only_peer_requirement() {
     let dir = temp_dir("peer-cli-transaction");
     let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
