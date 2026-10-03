@@ -421,11 +421,23 @@ fn insert_records(
     records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &mut NormalizedRecords,
     metadata: &mut Vec<RegistryMetadata>,
+    overrides: &BTreeMap<PackageName, Requirement>,
     packages: Vec<PackageRecord>,
 ) -> Result<(), String> {
     let mut inserted_keys = BTreeSet::new();
     let mut inserted_names = BTreeMap::<String, BTreeSet<PackageName>>::new();
-    for package in packages {
+    for mut package in packages {
+        if package.registry.to_string() == NPM {
+            for (name, requirement) in overrides {
+                let name = name.to_string();
+                if let Some(dependency) = package.dependencies.get_mut(&name) {
+                    *dependency = requirement.raw.clone();
+                }
+                if let Some(dependency) = package.optional_dependencies.get_mut(&name) {
+                    *dependency = requirement.raw.clone();
+                }
+            }
+        }
         let registry = package.registry.to_string();
         let key = (
             registry.clone(),
@@ -578,7 +590,19 @@ fn report_metadata_progress(fetches: usize) {
 
 /// Resolves incrementally, fetching metadata only when the resolver reaches a
 /// package on its currently selected graph.
-fn resolve_with_fetch<F>(roots: &[Dependency], mut fetch: F) -> Result<ResolvedRecords, String>
+#[cfg(test)]
+fn resolve_with_fetch<F>(roots: &[Dependency], fetch: F) -> Result<ResolvedRecords, String>
+where
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
+{
+    resolve_with_overrides(roots, &BTreeMap::new(), fetch)
+}
+
+fn resolve_with_overrides<F>(
+    roots: &[Dependency],
+    overrides: &BTreeMap<PackageName, Requirement>,
+    mut fetch: F,
+) -> Result<ResolvedRecords, String>
 where
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
@@ -624,6 +648,7 @@ where
                             &mut records,
                             &mut normalized,
                             &mut metadata,
+                            overrides,
                             fetch(&registry, &name)?,
                         )?;
                     }
@@ -657,6 +682,7 @@ where
                         &mut records,
                         &mut normalized,
                         &mut metadata,
+                        overrides,
                         fetch(&registry, &name)?,
                     )?;
                 }
@@ -690,6 +716,7 @@ where
                     &mut records,
                     &mut normalized,
                     &mut metadata,
+                    overrides,
                     fetch(&registry, &name)?,
                 )?;
             }
@@ -698,7 +725,48 @@ where
     }
 }
 
+pub(crate) fn manifest_overrides(
+    manifest: &PackageManifest,
+) -> Result<BTreeMap<PackageName, Requirement>, String> {
+    let mut overrides = BTreeMap::new();
+    for (name, range) in manifest.overrides() {
+        if name.starts_with("jsr:") {
+            return Err(format!(
+                "unsupported override target '{name}': npm registry package names only are supported"
+            ));
+        }
+        let selector_name = name.strip_prefix("npm:").unwrap_or(name);
+        let has_version_selector = if let Some(scoped) = selector_name.strip_prefix('@') {
+            scoped.contains('@')
+        } else {
+            selector_name.contains('@')
+        };
+        if has_version_selector {
+            return Err(format!(
+                "unsupported override selector '{name}': version-qualified selectors are not supported"
+            ));
+        }
+        let (registry, package) = dep_parts(name)?;
+        if registry.to_string() != NPM {
+            return Err(format!(
+                "unsupported override target '{name}': npm registry package names only are supported"
+            ));
+        }
+        let requirement = range
+            .parse::<Requirement>()
+            .map_err(|error| format!("invalid override '{name}' range '{range}': {error}"))?;
+        match overrides.insert(package.clone(), requirement.clone()) {
+            Some(previous) if previous != requirement => {
+                return Err(format!("conflicting override declarations for '{package}'"));
+            }
+            _ => {}
+        }
+    }
+    Ok(overrides)
+}
+
 pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependency>, String> {
+    let overrides = manifest_overrides(manifest)?;
     let mut roots = Vec::new();
     for (kind, map) in [
         ("dependencies", manifest.dependencies()),
@@ -716,6 +784,20 @@ pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependenc
                 format!("invalid {kind} dependency '{name}' range '{range}': {error}")
             })?;
             roots.push(Dependency::new(registry, package, requirement));
+        }
+    }
+    for dependency in &roots {
+        if dependency.registry.to_string() == NPM
+            && overrides
+                .get(&dependency.name)
+                .is_some_and(|override_requirement| {
+                    override_requirement.raw != dependency.requirement.raw
+                })
+        {
+            return Err(format!(
+                "unsupported direct dependency override for '{}': npm requires the override range to match the declared dependency range",
+                dependency.name
+            ));
         }
     }
     Ok(roots)
@@ -784,6 +866,7 @@ pub fn resolve_and_fetch(
             );
         }
     }
+    let overrides = manifest_overrides(manifest)?;
     let roots = manifest_roots(manifest)?;
     let metadata_transport = if fixture.is_none() {
         Some(
@@ -793,24 +876,25 @@ pub fn resolve_and_fetch(
     } else {
         None
     };
-    let (resolution, mut records) = resolve_with_fetch(&roots, |registry, name| {
-        if fixture.is_some() {
-            Ok(fixture_records
-                .values()
-                .filter(|package| &package.registry == registry && &package.name == name)
-                .cloned()
-                .collect())
-        } else {
-            remote_records(
-                metadata_transport
-                    .as_ref()
-                    .expect("remote metadata transport"),
-                registry,
-                name,
-                allow_missing_integrity,
-            )
-        }
-    })?;
+    let (resolution, mut records) =
+        resolve_with_overrides(&roots, &overrides, |registry, name| {
+            if fixture.is_some() {
+                Ok(fixture_records
+                    .values()
+                    .filter(|package| &package.registry == registry && &package.name == name)
+                    .cloned()
+                    .collect())
+            } else {
+                remote_records(
+                    metadata_transport
+                        .as_ref()
+                        .expect("remote metadata transport"),
+                    registry,
+                    name,
+                    allow_missing_integrity,
+                )
+            }
+        })?;
     store
         .recover_transactions()
         .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
@@ -1100,6 +1184,67 @@ mod tests {
         assert_eq!(checkpoints.first(), Some(&1));
         assert_eq!(checkpoints.last(), Some(&625));
         assert!(checkpoints.len() <= 14);
+    }
+
+    #[test]
+    fn manifest_overrides_rejects_version_qualified_selectors() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","overrides":{"typescript@*":"$typescript"}}"#,
+        )
+        .unwrap();
+
+        let error = manifest_overrides(&manifest).unwrap_err();
+        assert!(error.contains("unsupported override selector"));
+        assert!(error.contains("typescript@*"));
+    }
+
+    #[test]
+    fn manifest_roots_rejects_conflicting_direct_dependency_override() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"postcss":"8.4.31"},"overrides":{"postcss":"8.5.28"}}"#,
+        )
+        .unwrap();
+
+        let error = manifest_roots(&manifest).unwrap_err();
+        assert!(error.contains("unsupported direct dependency override"));
+        assert!(error.contains("postcss"));
+    }
+
+    #[test]
+    fn root_override_replaces_a_transitive_dependency_requirement() {
+        let root = Dependency::new(
+            NPM.parse().unwrap(),
+            "next".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+        );
+        let overrides = BTreeMap::from([("postcss".parse().unwrap(), "8.5.28".parse().unwrap())]);
+        let (resolution, records) =
+            resolve_with_overrides(&[root], &overrides, |_, name| {
+                match name.to_string().as_str() {
+                    "next" => Ok(vec![named_record(
+                        "next",
+                        "1.0.0",
+                        &[("postcss", "8.4.31")],
+                    )]),
+                    "postcss" => Ok(vec![
+                        named_record("postcss", "8.4.31", &[]),
+                        named_record("postcss", "8.5.28", &[]),
+                    ]),
+                    _ => panic!("unexpected metadata request for {name}"),
+                }
+            })
+            .unwrap();
+
+        assert!(resolution.selected.iter().any(|package| {
+            package.name.to_string() == "postcss" && package.version.to_string() == "8.5.28"
+        }));
+        assert!(!resolution.selected.iter().any(|package| {
+            package.name.to_string() == "postcss" && package.version.to_string() == "8.4.31"
+        }));
+        assert_eq!(
+            records[&(NPM.into(), "next".into(), "1.0.0".into())].dependencies["postcss"],
+            "8.5.28"
+        );
     }
 
     #[test]
