@@ -3492,14 +3492,23 @@ mod tests {
         assert!(support.backend().deprecation().is_some());
         #[cfg(not(target_os = "macos"))]
         assert!(support.backend().deprecation().is_none());
-        assert_eq!(support.enforceable(), &EnforcementDimensions::none());
         assert!(support.requested().filesystem_read());
         assert!(support.requested().filesystem_write());
         assert!(support.requested().network());
         assert!(support.requested().environment_sanitization());
         assert!(support.requested().descendant_lifecycle());
         assert!(!support.requested().resource_limits());
-        assert!(support.unsupported_reason().is_some());
+        if support.is_supported() {
+            assert_eq!(support.enforceable(), support.requested());
+            assert!(support.unsupported_reason().is_none());
+        } else {
+            assert_eq!(support.enforceable(), &EnforcementDimensions::none());
+            assert!(
+                support
+                    .unsupported_reason()
+                    .is_some_and(|reason| !reason.is_empty())
+            );
+        }
     }
 
     #[test]
