@@ -244,6 +244,8 @@ fn seccomp_filter(
             libc::SYS_io_uring_setup,
         ];
         if !network {
+            // Node/libuv uses getsockname to classify inherited socket-backed stdio.
+            // Keep metadata queries available; socket creation and traffic remain denied.
             denied.extend([
                 libc::SYS_socket,
                 libc::SYS_socketpair,
@@ -259,8 +261,6 @@ fn seccomp_filter(
                 libc::SYS_sendmmsg,
                 libc::SYS_recvmmsg,
                 libc::SYS_shutdown,
-                libc::SYS_getsockname,
-                libc::SYS_getpeername,
             ]);
         }
         if !subprocess {
@@ -456,7 +456,9 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             .current_dir(self.request.project_root())
             .env_clear()
             .envs(&self.preflight.child_environment)
-            .stdin(Stdio::null());
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
         let ruleset = self.ruleset.0.try_clone().map_err(|e| {
             ExecutionError::new(
                 ExecutionErrorCategory::Spawn,
