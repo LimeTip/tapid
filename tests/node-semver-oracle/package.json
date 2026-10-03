@@ -1,0 +1,12 @@
+{
+  "name": "tapid-node-semver-oracle",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned npm semver range-satisfaction oracle for resolver compatibility tests",
+  "scripts": {
+    "test": "node oracle.mjs"
+  },
+  "devDependencies": {
+    "semver": "7.8.5"
+  }
+}

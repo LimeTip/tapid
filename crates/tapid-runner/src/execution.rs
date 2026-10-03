@@ -2573,7 +2573,11 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
 #[path = "macos_restricted.rs"]
 mod platform_backend;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+#[path = "linux_restricted.rs"]
+mod platform_backend;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod platform_backend {
     use super::{
         BackendIdentity, ContainmentSupport, EnforcementDimensions, ExecutionBackend,
