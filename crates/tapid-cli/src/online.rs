@@ -47,6 +47,8 @@ struct FixturePackage {
     dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "peerDependencies")]
     peer_dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "optionalPeerDependencies")]
+    optional_peer_dependencies: BTreeSet<String>,
 }
 #[derive(Debug, Deserialize)]
 struct Fixture {
@@ -62,6 +64,7 @@ struct PackageRecord {
     artifact: String,
     dependencies: BTreeMap<String, String>,
     peer_dependencies: BTreeMap<String, String>,
+    optional_peer_dependencies: BTreeSet<String>,
     optional_dependencies: BTreeMap<String, String>,
     platform: PackagePlatform,
     fixture: bool,
@@ -225,6 +228,11 @@ fn remote_records(
                 .into_iter()
                 .map(|(n, r)| (n.to_string(), r))
                 .collect(),
+            optional_peer_dependencies: a
+                .optional_peer_dependencies
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect(),
             optional_dependencies: a
                 .optional_dependencies
                 .into_iter()
@@ -373,6 +381,7 @@ fn usable_versions(packages: Vec<PackageRecord>) -> Vec<PackageVersionMetadata> 
                 version: package.version,
                 dependencies,
                 peer_dependencies: BTreeMap::new(),
+                optional_peer_dependencies: BTreeSet::new(),
             });
         }
     }
@@ -431,11 +440,30 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
             Ok((parsed_name, parsed_requirement))
         })
         .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
+    let optional_peer_dependencies = package
+        .optional_peer_dependencies
+        .iter()
+        .map(|name| {
+            name.parse::<PackageName>()
+                .map_err(|error: tapid_core::DomainError| {
+                    format!("optional peer dependency {name} has an unsupported name: {error}")
+                })
+        })
+        .collect::<Result<BTreeSet<PackageName>, String>>()?;
+    if let Some(name) = optional_peer_dependencies
+        .iter()
+        .find(|name| !peer_dependencies.contains_key(*name))
+    {
+        return Err(format!(
+            "optional peer metadata refers to undeclared peer {name}"
+        ));
+    }
     let metadata = PackageVersionMetadata {
         name: package.name.clone(),
         version: package.version.clone(),
         dependencies,
         peer_dependencies: peer_dependencies.clone(),
+        optional_peer_dependencies,
     };
     let optional_dependencies = package
         .optional_dependencies
@@ -471,6 +499,7 @@ fn insert_records<F>(
     records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &mut NormalizedRecords,
     metadata: &mut Vec<RegistryMetadata>,
+    overrides: &BTreeMap<PackageName, Requirement>,
     packages: Vec<PackageRecord>,
     registry_for_dependency: &mut F,
 ) -> Result<(), String>
@@ -479,7 +508,18 @@ where
 {
     let mut inserted_keys = BTreeSet::new();
     let mut inserted_names = BTreeMap::<String, BTreeSet<PackageName>>::new();
-    for package in packages {
+    for mut package in packages {
+        if package.registry.to_string() == NPM {
+            for (name, requirement) in overrides {
+                let name = name.to_string();
+                if let Some(dependency) = package.dependencies.get_mut(&name) {
+                    *dependency = requirement.raw.clone();
+                }
+                if let Some(dependency) = package.optional_dependencies.get_mut(&name) {
+                    *dependency = requirement.raw.clone();
+                }
+            }
+        }
         let registry = package.registry.to_string();
         let key = (
             registry.clone(),
@@ -639,12 +679,43 @@ fn resolve_with_fetch<F>(roots: &[Dependency], fetch: F) -> Result<ResolvedRecor
 where
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
-    resolve_with_fetch_routed(roots, |parent, _| Ok(parent.clone()), fetch)
+    resolve_with_fetch_routed_and_overrides(
+        roots,
+        |parent, _| Ok(parent.clone()),
+        &BTreeMap::new(),
+        fetch,
+    )
 }
 
+#[cfg(test)]
+fn resolve_with_overrides<F>(
+    roots: &[Dependency],
+    overrides: &BTreeMap<PackageName, Requirement>,
+    fetch: F,
+) -> Result<ResolvedRecords, String>
+where
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
+{
+    resolve_with_fetch_routed_and_overrides(roots, |parent, _| Ok(parent.clone()), overrides, fetch)
+}
+
+#[cfg(test)]
 fn resolve_with_fetch_routed<R, F>(
     roots: &[Dependency],
+    registry_for_dependency: R,
+    fetch: F,
+) -> Result<ResolvedRecords, String>
+where
+    R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
+{
+    resolve_with_fetch_routed_and_overrides(roots, registry_for_dependency, &BTreeMap::new(), fetch)
+}
+
+fn resolve_with_fetch_routed_and_overrides<R, F>(
+    roots: &[Dependency],
     mut registry_for_dependency: R,
+    overrides: &BTreeMap<PackageName, Requirement>,
     mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
@@ -694,6 +765,7 @@ where
                             &mut records,
                             &mut normalized,
                             &mut metadata,
+                            overrides,
                             fetch(&registry, &name)?,
                             &mut registry_for_dependency,
                         )?;
@@ -728,6 +800,7 @@ where
                         &mut records,
                         &mut normalized,
                         &mut metadata,
+                        overrides,
                         fetch(&registry, &name)?,
                         &mut registry_for_dependency,
                     )?;
@@ -762,6 +835,7 @@ where
                     &mut records,
                     &mut normalized,
                     &mut metadata,
+                    overrides,
                     fetch(&registry, &name)?,
                     &mut registry_for_dependency,
                 )?;
@@ -769,6 +843,84 @@ where
             Err(error) => return Err(format!("resolution failed: {error}")),
         }
     }
+}
+
+pub(crate) fn manifest_overrides(
+    manifest: &PackageManifest,
+) -> Result<BTreeMap<PackageName, Requirement>, String> {
+    let mut overrides = BTreeMap::new();
+    for (name, range) in manifest.overrides() {
+        if name.starts_with("jsr:") {
+            return Err(format!(
+                "unsupported override target '{name}': npm registry package names only are supported"
+            ));
+        }
+        let selector_name = name.strip_prefix("npm:").unwrap_or(name);
+        let has_version_selector = if let Some(scoped) = selector_name.strip_prefix('@') {
+            scoped.contains('@')
+        } else {
+            selector_name.contains('@')
+        };
+        if has_version_selector {
+            return Err(format!(
+                "unsupported override selector '{name}': version-qualified selectors are not supported"
+            ));
+        }
+        let (registry, package) = dep_parts(name)?;
+        if registry.to_string() != NPM {
+            return Err(format!(
+                "unsupported override target '{name}': npm registry package names only are supported"
+            ));
+        }
+        let requirement = range
+            .parse::<Requirement>()
+            .map_err(|error| format!("invalid override '{name}' range '{range}': {error}"))?;
+        match overrides.insert(package.clone(), requirement.clone()) {
+            Some(previous) if previous != requirement => {
+                return Err(format!("conflicting override declarations for '{package}'"));
+            }
+            _ => {}
+        }
+    }
+    Ok(overrides)
+}
+
+pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependency>, String> {
+    let overrides = manifest_overrides(manifest)?;
+    let mut roots = Vec::new();
+    for (kind, map) in [
+        ("dependencies", manifest.dependencies()),
+        ("devDependencies", manifest.dev_dependencies()),
+        ("optionalDependencies", manifest.optional_dependencies()),
+    ] {
+        for (name, range) in map {
+            if range.starts_with("workspace:") {
+                return Err(format!(
+                    "unsupported workspace dependency reference: {name}@{range}; workspace linking is not implemented"
+                ));
+            }
+            let (registry, package) = dep_parts(name)?;
+            let requirement = range.parse::<Requirement>().map_err(|error| {
+                format!("invalid {kind} dependency '{name}' range '{range}': {error}")
+            })?;
+            roots.push(Dependency::new(registry, package, requirement));
+        }
+    }
+    for dependency in &roots {
+        if dependency.registry.to_string() == NPM
+            && overrides
+                .get(&dependency.name)
+                .is_some_and(|override_requirement| {
+                    override_requirement.raw != dependency.requirement.raw
+                })
+        {
+            return Err(format!(
+                "unsupported direct dependency override for '{}': npm requires the override range to match the declared dependency range",
+                dependency.name
+            ));
+        }
+    }
+    Ok(roots)
 }
 
 pub fn resolve_and_fetch(
@@ -827,6 +979,7 @@ pub fn resolve_and_fetch(
                     artifact: p.artifact.clone(),
                     dependencies: p.dependencies.clone(),
                     peer_dependencies: p.peer_dependencies.clone(),
+                    optional_peer_dependencies: p.optional_peer_dependencies.clone(),
                     optional_dependencies: BTreeMap::new(),
                     platform: PackagePlatform::unrestricted(),
                     fixture: true,
@@ -834,25 +987,28 @@ pub fn resolve_and_fetch(
             );
         }
     }
-    let mut roots = Vec::new();
-    for (kind, map) in [
-        ("dependencies", manifest.dependencies()),
-        ("devDependencies", manifest.dev_dependencies()),
-        ("optionalDependencies", manifest.optional_dependencies()),
-    ] {
-        for (name, range) in map {
-            let (registry, package) = registry_config.identity_for_spec(name)?;
-            let requirement = range.parse::<Requirement>().map_err(|error| {
-                format!("invalid {kind} dependency '{name}' range '{range}': {error}")
-            })?;
-            roots.push(Dependency::new(registry, package, requirement));
-        }
-    }
+    let overrides = manifest_overrides(manifest)?;
+    let roots = manifest_roots(manifest)?
+        .into_iter()
+        .map(|dependency| {
+            if dependency.registry.to_string() == JSR {
+                Ok(dependency)
+            } else {
+                let origin = registry_config.origin_for_name(&dependency.name)?;
+                Ok(Dependency::new(
+                    origin,
+                    dependency.name,
+                    dependency.requirement,
+                ))
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let configured_origins = registry_config.configured_origins();
     let mut metadata_transports = BTreeMap::<(String, String), HttpsTransport>::new();
-    let (resolution, mut records) = resolve_with_fetch_routed(
+    let (resolution, mut records) = resolve_with_fetch_routed_and_overrides(
         &roots,
         |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
+        &overrides,
         |registry, name| {
             if fixture.is_some() {
                 Ok(fixture_records
@@ -878,6 +1034,7 @@ pub fn resolve_and_fetch(
             }
         },
     )?;
+
     store
         .recover_transactions()
         .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
@@ -1402,6 +1559,67 @@ url='https://packages.acme.example'
     }
 
     #[test]
+    fn manifest_overrides_rejects_version_qualified_selectors() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","overrides":{"typescript@*":"$typescript"}}"#,
+        )
+        .unwrap();
+
+        let error = manifest_overrides(&manifest).unwrap_err();
+        assert!(error.contains("unsupported override selector"));
+        assert!(error.contains("typescript@*"));
+    }
+
+    #[test]
+    fn manifest_roots_rejects_conflicting_direct_dependency_override() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"postcss":"8.4.31"},"overrides":{"postcss":"8.5.28"}}"#,
+        )
+        .unwrap();
+
+        let error = manifest_roots(&manifest).unwrap_err();
+        assert!(error.contains("unsupported direct dependency override"));
+        assert!(error.contains("postcss"));
+    }
+
+    #[test]
+    fn root_override_replaces_a_transitive_dependency_requirement() {
+        let root = Dependency::new(
+            NPM.parse().unwrap(),
+            "next".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+        );
+        let overrides = BTreeMap::from([("postcss".parse().unwrap(), "8.5.28".parse().unwrap())]);
+        let (resolution, records) =
+            resolve_with_overrides(&[root], &overrides, |_, name| {
+                match name.to_string().as_str() {
+                    "next" => Ok(vec![named_record(
+                        "next",
+                        "1.0.0",
+                        &[("postcss", "8.4.31")],
+                    )]),
+                    "postcss" => Ok(vec![
+                        named_record("postcss", "8.4.31", &[]),
+                        named_record("postcss", "8.5.28", &[]),
+                    ]),
+                    _ => panic!("unexpected metadata request for {name}"),
+                }
+            })
+            .unwrap();
+
+        assert!(resolution.selected.iter().any(|package| {
+            package.name.to_string() == "postcss" && package.version.to_string() == "8.5.28"
+        }));
+        assert!(!resolution.selected.iter().any(|package| {
+            package.name.to_string() == "postcss" && package.version.to_string() == "8.4.31"
+        }));
+        assert_eq!(
+            records[&(NPM.into(), "next".into(), "1.0.0".into())].dependencies["postcss"],
+            "8.5.28"
+        );
+    }
+
+    #[test]
     fn wide_required_frontier_rebuilds_metadata_only_once_per_wave() {
         RESOLVER_METADATA_BUILD_COUNT.set(0);
         let registry: RegistryOrigin = NPM.parse().unwrap();
@@ -1531,6 +1749,7 @@ url='https://packages.acme.example'
                 .map(|(name, requirement)| ((*name).into(), (*requirement).into()))
                 .collect(),
             peer_dependencies: BTreeMap::new(),
+            optional_peer_dependencies: BTreeSet::new(),
             optional_dependencies: BTreeMap::new(),
             platform: PackagePlatform::unrestricted(),
             fixture: false,
@@ -1540,12 +1759,17 @@ url='https://packages.acme.example'
     #[test]
     fn fixture_metadata_preserves_peer_dependencies_separately() {
         let fixture: Fixture = serde_json::from_str(
-            r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","artifact":"base64:AA==","dependencies":{"runtime":"^1.0.0"},"peerDependencies":{"host":"^2.0.0"}}]}"#,
+            r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","artifact":"base64:AA==","dependencies":{"runtime":"^1.0.0"},"peerDependencies":{"host":"^2.0.0"},"optionalPeerDependencies":["host"]}]}"#,
         )
         .unwrap();
 
         assert_eq!(fixture.packages[0].dependencies["runtime"], "^1.0.0");
         assert_eq!(fixture.packages[0].peer_dependencies["host"], "^2.0.0");
+        assert!(
+            fixture.packages[0]
+                .optional_peer_dependencies
+                .contains("host")
+        );
         assert!(!fixture.packages[0].dependencies.contains_key("host"));
     }
 
@@ -1562,6 +1786,35 @@ url='https://packages.acme.example'
             normalized.metadata.peer_dependencies[&"host".parse().unwrap()].raw,
             "^1.0.0"
         );
+    }
+
+    #[test]
+    fn normalization_preserves_optional_peer_markers() {
+        let mut record = named_record("plugin", "1.0.0", &[]);
+        record
+            .peer_dependencies
+            .insert("host".into(), "^2.0.0".into());
+        record.optional_peer_dependencies.insert("host".into());
+
+        let normalized = normalize_record(&record).unwrap();
+        assert!(
+            normalized
+                .metadata
+                .optional_peer_dependencies
+                .contains(&"host".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn normalization_rejects_optional_marker_for_undeclared_peer() {
+        let mut record = named_record("plugin", "1.0.0", &[]);
+        record.optional_peer_dependencies.insert("host".into());
+
+        let error = match normalize_record(&record) {
+            Err(error) => error,
+            Ok(_) => panic!("optional marker for an undeclared peer was accepted"),
+        };
+        assert!(error.contains("optional peer metadata refers to undeclared peer host"));
     }
 
     #[test]

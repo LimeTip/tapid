@@ -3,6 +3,7 @@ assurance = "restricted"
 read = ["."]
 environment = ["HOME", "NEXT_TELEMETRY_DISABLED", "TMPDIR"]
 subprocess = true
+network = false
 
 [run.scripts.build]
 write = [".next", ".tmp"]
