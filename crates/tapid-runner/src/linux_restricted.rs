@@ -15,7 +15,12 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+#[path = "linux_restricted/cgroup.rs"]
+mod cgroup;
 
 const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
 const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
@@ -58,6 +63,7 @@ const CAP_SYS_ADMIN: u32 = 21;
 const PRIVATE_LAUNCHER_MARKER: &str = "--tapid-private-linux-procfs-v1";
 const LANDLOCK_RULESET_FD: libc::c_int = 198;
 const PRIVATE_REPORT_FD: libc::c_int = 199;
+const CGROUP_PROCS_FD: libc::c_int = 200;
 const PRIVATE_REPORT_MAGIC: &[u8; 4] = b"TPMS";
 const PRIVATE_REPORT_FRAME_BYTES: usize = 12;
 const PRIVATE_REPORT_READY: u32 = 1;
@@ -65,7 +71,7 @@ const PRIVATE_REPORT_SETUP_ERROR: u32 = 2;
 const PRIVATE_REPORT_EXEC_ERROR: u32 = 3;
 const LIMITATIONS: &[&str] = &[
     "Landlock grants use path bindings checked against held filesystem identities before setup",
-    "configured output, process-count, and memory limits are unsupported without writable per-tree cgroup v2 delegation; ManagedTree timeouts kill the namespace supervisor and rely on kernel --kill-child cleanup",
+    "configured process-count and memory limits require an explicitly delegated cgroup v2 subtree named by TAPID_CGROUP_ROOT; the backend reads back pids.max and memory.max and uses cgroup.kill plus PID-namespace teardown for cleanup",
     "mount namespace setup leaves existing root propagation unchanged and is supported only when the root mount has no shared propagation group",
     "network-disabled policy denies Internet socket creation, connection, binding, listening, accepts, sendto, and recvfrom; AF_UNIX socketpairs with sendmsg/recvmsg and shutdown remain available for local runtime IPC; enabled networking is unrestricted",
     "Restricted does not own or guarantee cleanup of detached descendants; ManagedTree cleanup relies on the kernel PID namespace boundary",
@@ -639,11 +645,23 @@ fn private_launcher_setup(
             "mount namespace inode",
         )?,
     );
+    let cgroup_procs_fd = parse_private_number::<libc::c_int>(
+        arguments
+            .next()
+            .ok_or_else(|| io::Error::other("missing cgroup process descriptor"))?,
+        "cgroup process descriptor",
+    )?;
     let program = arguments
         .next()
         .ok_or_else(|| io::Error::other("missing target program"))?;
     let program_arguments = arguments.collect::<Vec<_>>();
-    if ruleset < 3 || report_fd < 3 || ruleset == report_fd {
+    if ruleset < 3
+        || report_fd < 3
+        || ruleset == report_fd
+        || (cgroup_procs_fd != -1 && cgroup_procs_fd < 3)
+        || cgroup_procs_fd == ruleset
+        || cgroup_procs_fd == report_fd
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "invalid private launcher descriptors",
@@ -663,6 +681,9 @@ fn private_launcher_setup(
         add_private_procfs_read_rule(ruleset)?;
     } else {
         verify_private_namespaces(parent_pid_namespace, parent_mount_namespace)?;
+    }
+    if cgroup_procs_fd >= 3 {
+        cgroup::write_current_pid_to_cgroup(cgroup_procs_fd)?;
     }
     let filter = seccomp_filter(network, subprocess)
         .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error.to_string()))?;
@@ -873,6 +894,7 @@ fn duplicate_fd_above_private_range(fd: libc::c_int) -> Result<OwnedFd, Executio
 fn private_memory_stats_command(
     request: &ExecutionRequest,
     ruleset: &OwnedFd,
+    cgroup: Option<&cgroup::ExecutionCgroup>,
 ) -> Result<(Command, UnixStream), ExecutionError> {
     let launcher = request
         .private_launcher_executable()
@@ -890,6 +912,9 @@ fn private_memory_stats_command(
     })?;
     let ruleset_copy = duplicate_fd_above_private_range(ruleset.as_raw_fd())?;
     let report_copy = duplicate_fd_above_private_range(report_writer.as_raw_fd())?;
+    let cgroup_copy = cgroup
+        .map(|cgroup| duplicate_fd_above_private_range(cgroup.processes_fd()))
+        .transpose()?;
     let mut command = Command::new(unshare);
     command
         .args(unshare_namespace_arguments(
@@ -915,21 +940,31 @@ fn private_memory_stats_command(
         .arg(parent_pid_namespace.1.to_string())
         .arg(parent_mount_namespace.0.to_string())
         .arg(parent_mount_namespace.1.to_string())
+        .arg(
+            cgroup_copy
+                .as_ref()
+                .map_or(-1, |_| CGROUP_PROCS_FD)
+                .to_string(),
+        )
         .arg(request.program())
         .args(request.arguments());
     let ruleset_source = ruleset_copy.as_raw_fd();
     let report_source = report_copy.as_raw_fd();
+    let cgroup_source = cgroup_copy.as_ref().map_or(-1, |fd| fd.as_raw_fd());
     unsafe {
         command.pre_exec(move || {
-            let _keep_open = (&ruleset_copy, &report_copy);
+            let _keep_open = (&ruleset_copy, &report_copy, &cgroup_copy);
             if libc::dup2(ruleset_source, LANDLOCK_RULESET_FD) < 0
                 || libc::dup2(report_source, PRIVATE_REPORT_FD) < 0
+                || (cgroup_source >= 0 && libc::dup2(cgroup_source, CGROUP_PROCS_FD) < 0)
             {
                 return Err(io::Error::last_os_error());
             }
-            for fd in [LANDLOCK_RULESET_FD, PRIVATE_REPORT_FD] {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+            let mut descriptors = [LANDLOCK_RULESET_FD, PRIVATE_REPORT_FD, CGROUP_PROCS_FD];
+            let descriptor_count = if cgroup_source >= 0 { 3 } else { 2 };
+            for fd in &mut descriptors[..descriptor_count] {
+                let flags = libc::fcntl(*fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
                     return Err(io::Error::last_os_error());
                 }
             }
@@ -1008,6 +1043,7 @@ impl ExecutionBackend for PlatformBackend {
                 ruleset,
                 filter,
                 termination: None,
+                supervisor: None,
             }),
         ))
     }
@@ -1045,13 +1081,13 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
     };
     if request.policy().assurance() == AssuranceLevel::ManagedTree {
         let limits = request.policy().limits();
-        if limits.max_output_bytes().is_some()
-            || limits.max_processes().is_some()
-            || limits.max_memory_bytes().is_some()
+        if (limits.max_processes().is_some() || limits.max_memory_bytes().is_some())
+            && let Err(reason) =
+                cgroup::ExecutionCgroup::probe(limits.max_processes(), limits.max_memory_bytes())
         {
-            return unsupported(
-                "Linux ManagedTree does not support configured output, process-count, or memory limits without per-tree kernel controllers",
-            );
+            return unsupported(&format!(
+                "Linux ManagedTree resource limits require a usable delegated cgroup v2 subtree: {reason}"
+            ));
         }
         if request.private_launcher_executable().is_none() || locate_unshare().is_err() {
             return unsupported(
@@ -1107,21 +1143,40 @@ struct LinuxLifecycle<'a> {
     ruleset: LandlockRuleset,
     filter: Vec<libc::sock_filter>,
     termination: Option<Termination>,
+    supervisor: Option<Child>,
+}
+
+fn terminate_supervisor(child: &mut Child) -> io::Result<ExitStatus> {
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+    if let Err(kill_error) = child.kill() {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        return Err(kill_error);
+    }
+    child.wait()
 }
 
 fn wait_for_supervisor(
     child: &mut Child,
     timeout_seconds: Option<u64>,
-) -> Result<(ExitStatus, bool), ExecutionError> {
-    let Some(timeout_seconds) = timeout_seconds else {
-        return child.wait().map(|status| (status, false)).map_err(|error| {
-            ExecutionError::new(
-                ExecutionErrorCategory::Spawn,
-                format!("cannot wait for restricted project script: {error}"),
-            )
-        });
-    };
-    let timeout = Duration::from_secs(timeout_seconds);
+    output_exceeded: Option<&AtomicBool>,
+    cgroup: Option<&cgroup::ExecutionCgroup>,
+) -> Result<(ExitStatus, bool, bool, bool, bool), ExecutionError> {
+    if timeout_seconds.is_none() && output_exceeded.is_none() && cgroup.is_none() {
+        return child
+            .wait()
+            .map(|status| (status, false, false, false, false))
+            .map_err(|error| {
+                ExecutionError::new(
+                    ExecutionErrorCategory::Spawn,
+                    format!("cannot wait for restricted project script: {error}"),
+                )
+            });
+    }
+    let timeout = timeout_seconds.map(Duration::from_secs);
     let started = Instant::now();
     loop {
         if let Some(status) = child.try_wait().map_err(|error| {
@@ -1130,46 +1185,115 @@ fn wait_for_supervisor(
                 format!("cannot poll ManagedTree namespace supervisor: {error}"),
             )
         })? {
-            return Ok((status, false));
+            return Ok((status, false, false, false, false));
         }
-        let elapsed = started.elapsed();
-        if elapsed >= timeout {
-            if let Err(kill_error) = child.kill() {
-                if let Some(status) = child.try_wait().map_err(|error| {
-                    ExecutionError::new(
-                        ExecutionErrorCategory::Spawn,
-                        format!("cannot inspect ManagedTree supervisor after kill error: {error}"),
-                    )
-                })? {
-                    return Ok((status, false));
-                }
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::Timeout,
-                    format!(
-                        "cannot kill ManagedTree namespace supervisor at timeout: {kill_error}"
-                    ),
-                ));
-            }
-            let status = child.wait().map_err(|error| {
+        let output_hit = output_exceeded.is_some_and(|flag| flag.load(Ordering::Acquire));
+        let timed_out = timeout.is_some_and(|limit| started.elapsed() >= limit);
+        let (process_limit_hit, memory_limit_hit) = if let Some(cgroup) = cgroup {
+            let process_hit = cgroup
+                .process_limit_exceeded()
+                .map_err(|reason| ExecutionError::new(ExecutionErrorCategory::Internal, reason))?;
+            let memory_hit = cgroup
+                .memory_limit_exceeded()
+                .map_err(|reason| ExecutionError::new(ExecutionErrorCategory::Internal, reason))?;
+            (process_hit, memory_hit)
+        } else {
+            (false, false)
+        };
+        if output_hit || timed_out || process_limit_hit || memory_limit_hit {
+            let status = terminate_supervisor(child).map_err(|error| {
+                let category = if timed_out {
+                    ExecutionErrorCategory::Timeout
+                } else if output_hit {
+                    ExecutionErrorCategory::OutputLimit
+                } else {
+                    ExecutionErrorCategory::Internal
+                };
                 ExecutionError::new(
-                    ExecutionErrorCategory::Timeout,
-                    format!("cannot reap timed-out ManagedTree supervisor: {error}"),
+                    category,
+                    format!("cannot terminate ManagedTree namespace supervisor: {error}"),
                 )
             })?;
-            return Ok((status, true));
+            return Ok((
+                status,
+                timed_out,
+                output_hit,
+                process_limit_hit,
+                memory_limit_hit,
+            ));
         }
-        std::thread::sleep(Duration::from_millis(10).min(timeout.saturating_sub(elapsed)));
+        std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[derive(Default)]
+struct CapturedOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    total_bytes: u64,
+    exceeded: bool,
+}
+
+impl CapturedOutput {
+    fn push(&mut self, stdout: bool, bytes: &[u8], max_bytes: u64) -> usize {
+        let remaining = max_bytes.saturating_sub(self.total_bytes);
+        let accepted = bytes
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        if stdout {
+            self.stdout.extend_from_slice(&bytes[..accepted]);
+        } else {
+            self.stderr.extend_from_slice(&bytes[..accepted]);
+        }
+        self.total_bytes += accepted as u64;
+        self.exceeded |= accepted < bytes.len();
+        accepted
+    }
+}
+
+fn capture_output_chunk(
+    captured: Option<&Arc<Mutex<CapturedOutput>>>,
+    stdout: bool,
+    bytes: &[u8],
+    max_bytes: Option<u64>,
+) -> io::Result<(usize, bool)> {
+    let (Some(captured), Some(max_bytes)) = (captured, max_bytes) else {
+        return Ok((bytes.len(), false));
+    };
+    let mut captured = captured
+        .lock()
+        .map_err(|_| io::Error::other("output capture lock was poisoned"))?;
+    let accepted = captured.push(stdout, bytes, max_bytes);
+    Ok((accepted, captured.exceeded))
 }
 
 impl ExecutionLifecycle for LinuxLifecycle<'_> {
     fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError> {
         let allow_process_memory_stats = self.request.allow_process_memory_stats();
+        let limits = &self.preflight.policy.limits;
+        let cgroup = if self.request.policy().assurance() == AssuranceLevel::ManagedTree
+            && (limits.max_processes().is_some() || limits.max_memory_bytes().is_some())
+        {
+            Some(
+                cgroup::ExecutionCgroup::create(
+                    limits.max_processes(),
+                    limits.max_memory_bytes(),
+                )
+                .map_err(|reason| {
+                    unsupported(&format!(
+                        "cannot configure ManagedTree cgroup v2 limits before execution: {reason}"
+                    ))
+                })?,
+            )
+        } else {
+            None
+        };
         let use_private_pid_namespace = self.request.policy().assurance()
             == AssuranceLevel::ManagedTree
             || allow_process_memory_stats;
         let (mut command, private_report) = if use_private_pid_namespace {
-            let (command, report) = private_memory_stats_command(&self.request, &self.ruleset.0)?;
+            let (command, report) =
+                private_memory_stats_command(&self.request, &self.ruleset.0, cgroup.as_ref())?;
             (command, Some(report))
         } else {
             let mut command = Command::new(self.request.program());
@@ -1186,26 +1310,74 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             }
             (command, None)
         };
+        let output_limit = self.preflight.policy.limits.max_output_bytes();
+        let captured = output_limit.map(|_| Arc::new(Mutex::new(CapturedOutput::default())));
+        let output_exceeded = output_limit.map(|_| Arc::new(AtomicBool::new(false)));
         command
             .current_dir(self.request.project_root())
             .env_clear()
             .envs(&self.preflight.child_environment)
             .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
+            .stdout(if output_limit.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|e| {
+        self.supervisor = Some(command.spawn().map_err(|e| {
             ExecutionError::new(
                 ExecutionErrorCategory::Spawn,
                 format!("cannot launch restricted project script: {e}"),
             )
-        })?;
+        })?);
         drop(command);
-        let mut child_stderr = child
+        let stdout_reader = self
+            .supervisor
+            .as_mut()
+            .expect("supervisor is set before its streams are read")
+            .stdout
+            .take()
+            .map(|child_stdout| {
+                let stdout_capture = captured.clone();
+                let stdout_limit = output_limit;
+                let stdout_exceeded_flag = output_exceeded.clone();
+                std::thread::spawn(move || {
+                    let mut child_stdout = child_stdout;
+                    let mut output = io::stdout().lock();
+                    let mut buffer = [0_u8; 4096];
+                    loop {
+                        let count = child_stdout.read(&mut buffer)?;
+                        if count == 0 {
+                            break;
+                        }
+                        let (accepted, exceeded) = capture_output_chunk(
+                            stdout_capture.as_ref(),
+                            true,
+                            &buffer[..count],
+                            stdout_limit,
+                        )?;
+                        if exceeded && let Some(flag) = stdout_exceeded_flag.as_ref() {
+                            flag.store(true, Ordering::Release);
+                        }
+                        let _ = output.write_all(&buffer[..accepted]);
+                    }
+                    let _ = output.flush();
+                    Ok::<(), io::Error>(())
+                })
+            });
+        let child_stderr = self
+            .supervisor
+            .as_mut()
+            .expect("supervisor is set before its streams are read")
             .stderr
             .take()
             .expect("stderr was configured as a pipe");
+        let stderr_capture = captured.clone();
+        let stderr_limit = output_limit;
+        let stderr_exceeded_flag = output_exceeded.clone();
         let stderr_reader = std::thread::spawn(move || {
             const DETECTION_WINDOW: usize = 128;
+            let mut child_stderr = child_stderr;
             let mut output = io::stderr().lock();
             let mut carry = Vec::with_capacity(DETECTION_WINDOW);
             let mut buffer = [0_u8; 4096];
@@ -1215,7 +1387,16 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
                 if count == 0 {
                     break;
                 }
-                let _ = output.write_all(&buffer[..count]);
+                let (accepted, exceeded) = capture_output_chunk(
+                    stderr_capture.as_ref(),
+                    false,
+                    &buffer[..count],
+                    stderr_limit,
+                )?;
+                if exceeded && let Some(flag) = stderr_exceeded_flag.as_ref() {
+                    flag.store(true, Ordering::Release);
+                }
+                let _ = output.write_all(&buffer[..accepted]);
                 let mut window = std::mem::take(&mut carry);
                 window.extend_from_slice(&buffer[..count]);
                 denied |= is_process_memory_stats_permission_error(&window);
@@ -1224,8 +1405,56 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             let _ = output.flush();
             Ok::<bool, io::Error>(denied)
         });
-        let (status, timed_out) =
-            wait_for_supervisor(&mut child, self.request.policy().limits().timeout_seconds())?;
+        let (
+            status,
+            timed_out,
+            output_hit_during_wait,
+            process_limit_hit_during_wait,
+            memory_limit_hit_during_wait,
+        ) = wait_for_supervisor(
+            self.supervisor
+                .as_mut()
+                .expect("supervisor is set before waiting"),
+            self.request.policy().limits().timeout_seconds(),
+            output_exceeded.as_deref(),
+            cgroup.as_ref(),
+        )?;
+        self.supervisor.take();
+        let process_limit_exceeded = process_limit_hit_during_wait
+            || cgroup
+                .as_ref()
+                .map(cgroup::ExecutionCgroup::process_limit_exceeded)
+                .transpose()
+                .map_err(|reason| ExecutionError::new(ExecutionErrorCategory::Internal, reason))?
+                .unwrap_or(false);
+        let memory_limit_exceeded = memory_limit_hit_during_wait
+            || cgroup
+                .as_ref()
+                .map(cgroup::ExecutionCgroup::memory_limit_exceeded)
+                .transpose()
+                .map_err(|reason| ExecutionError::new(ExecutionErrorCategory::Internal, reason))?
+                .unwrap_or(false);
+        if let Some(cgroup) = cgroup {
+            cgroup
+                .cleanup()
+                .map_err(|reason| ExecutionError::new(ExecutionErrorCategory::Internal, reason))?;
+        }
+        if let Some(stdout_reader) = stdout_reader {
+            stdout_reader
+                .join()
+                .map_err(|_| {
+                    ExecutionError::new(
+                        ExecutionErrorCategory::Internal,
+                        "stdout capture reader panicked",
+                    )
+                })?
+                .map_err(|error| {
+                    ExecutionError::new(
+                        ExecutionErrorCategory::Internal,
+                        format!("cannot read restricted project script stdout: {error}"),
+                    )
+                })?;
+        }
         let memory_stats_denied = stderr_reader
             .join()
             .map_err(|_| {
@@ -1240,11 +1469,32 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
                     format!("cannot read restricted project script stderr: {e}"),
                 )
             })?;
+        let (stdout, stderr, output_limit_exceeded) = if let Some(captured) = captured {
+            let mut captured = captured.lock().map_err(|_| {
+                ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
+                    "output capture lock was poisoned",
+                )
+            })?;
+            (
+                std::mem::take(&mut captured.stdout),
+                std::mem::take(&mut captured.stderr),
+                captured.exceeded,
+            )
+        } else {
+            (Vec::new(), Vec::new(), false)
+        };
         if let Some(report) = private_report {
             parse_private_report(report)?;
         }
         self.termination = Some(if timed_out {
             Termination::TimedOut
+        } else if output_hit_during_wait || output_limit_exceeded {
+            Termination::OutputLimitExceeded
+        } else if memory_limit_exceeded {
+            Termination::MemoryLimitExceeded
+        } else if process_limit_exceeded {
+            Termination::ProcessLimitExceeded
         } else if let Some(code) = status.code() {
             Termination::Exited(code)
         } else {
@@ -1257,7 +1507,7 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             ""
         };
         let mechanism = if requested.process_tree_membership() {
-            "Landlock and seccomp before target exec; target is PID 1 in a private namespace; timeout kills the util-linux supervisor and the kernel kills namespace descendants"
+            "Landlock and seccomp are installed before target exec; when process-count or memory limits are requested, the private launcher joins PID 1 to a dedicated cgroup with read-back limits before exec; timeout/output termination kills the supervisor, cgroup.kill cleans the execution group, and the kernel tears down namespace descendants"
         } else {
             &format!(
                 "Landlock and seccomp restrictions installed before target exec{process_memory_stats_evidence}"
@@ -1272,8 +1522,8 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
         Ok(Box::new(
             ExecutionOutcome::checked(
                 self.termination.clone().unwrap(),
-                Vec::new(),
-                Vec::new(),
+                stdout,
+                stderr,
                 receipt,
                 completion,
             )?
@@ -1284,7 +1534,11 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
     }
 
     fn cleanup(&mut self) -> CompletionEvidence {
-        completion_for(self.preflight).expect("Restricted completion evidence is valid")
+        if let Some(mut supervisor) = self.supervisor.take() {
+            terminate_supervisor(&mut supervisor)
+                .expect("cannot confirm ManagedTree supervisor termination during cleanup");
+        }
+        completion_for(self.preflight).expect("Linux completion evidence is valid")
     }
 }
 
@@ -1346,6 +1600,54 @@ mod tests {
             .policy(policy)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn managed_tree_process_limit_is_reported_only_with_delegated_cgroup_support() {
+        let root = root();
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::ManagedTree,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(None, None, Some(2), None).unwrap(),
+        )
+        .unwrap();
+        let req = request(&root, "exit 0", policy);
+
+        let support = containment_support(&req);
+
+        assert!(
+            support.is_supported()
+                || matches!(
+                    support.unsupported_reason(),
+                    Some(
+                        "Landlock ABI 3 or newer is unavailable"
+                            | "kernel cannot install the required seccomp filter"
+                    )
+                ),
+            "delegated cgroup support should pass preflight before unrelated kernel checks; got {:?}",
+            support.unsupported_reason()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unified_cgroup_path_parser_accepts_one_clean_v2_entry() {
+        assert_eq!(
+            cgroup::parse_unified_path("2:cpu:/slice\n0::/tapid/manager\n"),
+            Some(std::path::PathBuf::from("/tapid/manager"))
+        );
+        assert_eq!(
+            cgroup::parse_unified_path("0::/\n"),
+            Some(std::path::PathBuf::from("/"))
+        );
+        assert_eq!(cgroup::parse_unified_path("2:cpu:/slice\n"), None);
+        assert_eq!(cgroup::parse_unified_path("0::/tapid\n0::/other\n"), None);
+        assert_eq!(cgroup::parse_unified_path("0::/../outside\n"), None);
+        assert_eq!(cgroup::parse_unified_path("0::relative\n"), None);
     }
 
     fn restricted(_root: &std::path::Path, write: Vec<String>, network: bool) -> SandboxPolicy {
@@ -1483,6 +1785,19 @@ mod tests {
         assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
         assert!(libc::WIFEXITED(status), "child status: {status}");
         assert_eq!(libc::WEXITSTATUS(status), 0, "child status: {status}");
+    }
+
+    #[test]
+    fn bounded_output_capture_enforces_one_combined_stdout_stderr_ceiling() {
+        let mut captured = CapturedOutput::default();
+
+        captured.push(true, b"123", 4);
+        captured.push(false, b"abc", 4);
+
+        assert_eq!(captured.stdout, b"123");
+        assert_eq!(captured.stderr, b"a");
+        assert_eq!(captured.total_bytes, 4);
+        assert!(captured.exceeded);
     }
 
     #[test]
@@ -1713,9 +2028,9 @@ mod tests {
     }
 
     #[test]
-    fn managed_tree_rejects_unavailable_memory_limits_before_target_execution() {
+    fn managed_tree_enforces_combined_stdout_stderr_limit_and_stops_child() {
         let root = root();
-        let marker = root.join("must-not-run");
+        let marker = root.join("after-output-limit");
         let policy = SandboxPolicy::new_with_assurance(
             SandboxMode::Required,
             AssuranceLevel::ManagedTree,
@@ -1723,16 +2038,133 @@ mod tests {
             false,
             vec![],
             true,
-            ExecutionLimits::new(None, None, None, Some(64 * 1024 * 1024)).unwrap(),
+            ExecutionLimits::new(None, Some(4), None, None).unwrap(),
         )
         .unwrap();
-        let req = request(&root, &format!("touch '{}'", marker.display()), policy);
-        let error = execute(&req).unwrap_err();
-        assert_eq!(
-            error.category(),
-            ExecutionErrorCategory::UnsupportedContainment
+        let command = format!(
+            "printf 12345; printf 67890 >&2; sleep 1; touch '{}'",
+            marker.display()
         );
-        assert!(!marker.exists());
+        let req = request(&root, &command, policy);
+        if fails_closed_for_unavailable_kernel_enforcement(&req) {
+            assert!(!marker.exists());
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+
+        let outcome = execute(&req).unwrap();
+
+        assert_eq!(outcome.termination(), &Termination::OutputLimitExceeded);
+        assert_eq!(
+            outcome.stdout().len() + outcome.stderr().len(),
+            4,
+            "stdout and stderr share one output budget"
+        );
+        assert!(
+            !marker.exists(),
+            "output overflow must stop the target tree"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_tree_enforces_process_limit_before_more_children_can_start() {
+        let root = root();
+        let baseline = request(&root, "exit 0", managed_tree(&root, vec![]));
+        if fails_closed_for_unavailable_kernel_enforcement(&baseline) {
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::ManagedTree,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(Some(6), None, Some(2), None).unwrap(),
+        )
+        .unwrap();
+        let req = request(&root, "/bin/sleep 2 & /bin/sleep 2 & wait", policy);
+
+        let outcome = execute(&req).unwrap();
+
+        assert_eq!(outcome.termination(), &Termination::ProcessLimitExceeded);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn memory_limit_event_stops_the_supervisor_before_follow_on_commands() {
+        let root = root();
+        let marker = root.join("command-after-memory-limit");
+        let cgroup = cgroup::ExecutionCgroup::create(None, Some(32 * 1024 * 1024)).unwrap();
+        let cgroup_procs_fd = cgroup.processes_fd();
+        let command_line = format!(
+            "python3 -c 'import time; data=bytearray(128*1024*1024); data[::4096]=b\"x\"*(len(data)//4096)'; sleep 2; touch '{}'",
+            marker.display()
+        );
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", &command_line])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || cgroup::write_current_pid_to_cgroup(cgroup_procs_fd));
+        }
+        let mut child = command.spawn().unwrap();
+
+        let (status, timed_out, output_exceeded, _, memory_limit_hit) =
+            wait_for_supervisor(&mut child, Some(5), None, Some(&cgroup)).unwrap();
+
+        assert!(!timed_out);
+        assert!(!output_exceeded);
+        assert!(memory_limit_hit);
+        assert!(
+            !status.success(),
+            "a cgroup memory-limit breach must terminate the supervisor"
+        );
+        assert!(
+            !marker.exists(),
+            "the command after a memory-limit breach must not run"
+        );
+        assert!(cgroup.memory_limit_exceeded().unwrap());
+        cgroup.cleanup().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_tree_enforces_memory_limit_and_stops_the_remaining_tree() {
+        let root = root();
+        let marker = root.join("must-not-run-after-memory-limit");
+        let baseline = request(&root, "exit 0", managed_tree(&root, vec![".".into()]));
+        if fails_closed_for_unavailable_kernel_enforcement(&baseline) {
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::ManagedTree,
+            FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(None, None, None, Some(32 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap();
+        let command = format!(
+            "python3 -c 'import time; data=bytearray(128*1024*1024); data[::4096]=b\"x\"*(len(data)//4096)'; sleep 2; touch '{}'",
+            marker.display()
+        );
+        let req = request(&root, &command, policy);
+
+        let outcome = execute(&req).unwrap();
+
+        assert_eq!(outcome.termination(), &Termination::MemoryLimitExceeded);
+        assert!(
+            !marker.exists(),
+            "the managed process tree must stop after exceeding memory.max"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1754,8 +2186,10 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = command.spawn().unwrap();
-        let (status, timed_out) = wait_for_supervisor(&mut child, Some(1)).unwrap();
+        let (status, timed_out, output_exceeded, _, _) =
+            wait_for_supervisor(&mut child, Some(1), None, None).unwrap();
         assert!(timed_out);
+        assert!(!output_exceeded);
         assert!(!status.success());
         std::thread::sleep(Duration::from_millis(1200));
         assert!(
