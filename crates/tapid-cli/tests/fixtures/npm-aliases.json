@@ -1,0 +1,47 @@
+{
+  "packages": [
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "h3",
+      "version": "1.0.0",
+      "dependencies": {},
+      "integrity": "sha512-SP3u8B5tYPrOW7kCfDRmZoQY3yTbvjwDgFzW0WVF1BCnjLdQxdsaAA0oOtdILLuhK+j+koC8cegztMLHxAMoxg==",
+      "artifact": "base64:H4sIAAAAAAAC/+3TsW7CMBSFYc99CstzFWxADK14GItcqEvjRHFASFHeHSfQDu3QpSCh/t9y7ePBg30av9n7ncyayyzeUx3VH7PZarmcZvZ9WufmX+spd241t0pbdQeH1Pk2X6/+p95EX4l50eZtYZ61OUqbQh3HwBW2sGNW+TAFIZZyyj9kzEppJG/jJkjKZ/0wKDyga+9nn297izt+679d/Oj/OOj/HVR1efiQQk5N3XZJr7XZhjZ15vWJbgAAAAAAAAAAAAAAADyCM/R/haoAKAAA"
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "h3",
+      "version": "2.0.0",
+      "dependencies": {},
+      "integrity": "sha512-ErtRtIjmIMF/d9NTFIX8xs8kwHmNcpVKyGvaF7EytgR4S2WxZNws4iKqgjOXVkGcK+q/5sOAtps/mNy45wf3aA==",
+      "artifact": "base64:H4sIAAAAAAAC/+3UzY6CMBSG4a69iqZrgwWMi5nMxTRwoozSEqoTE+O9W/Bn4cbNaGJ8n82Bj8VZtB+dq9ZuKbPuPLPfGLz6ZzZZzOfjTO6nzfPi9jzmeb4orNJWvcAubl2f1qvPdDDetWK+tFmVZqrNn/SxCX4Iisxmdsha14xB42vZpxsyZLV0kl591UhM3w7Ho8IbuvR+dj3bZ+x41H9blvf9Tz8F+v8Kbah3G8lk34V+G/WPNlGq4GvzPaEcAAAAAAAAAAAAAAAAb+AEon+KwwAoAAA="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "h3",
+      "version": "2.0.1-rc.20",
+      "dependencies": {},
+      "integrity": "sha512-EYsuTrhXVue0/pqHzBoKtP/XZsZJz2MiVSkHCJ9WVU/6moq6gQajXSBh6QdB4/3E3XcS/iVv1DDTpRQtPVR5ZQ==",
+      "artifact": "base64:H4sIAAAAAAAC/+3TsU7DMBDGcc88heUZXDstrVTUh7GSEwSaxLJbVKnqu9cJIKQuLFCB+P+Ws++GG+wvhvolPMosvlX7nIdefTNXLBeLqRaX1fnq8zz1vV/6ldJOXcE+70Iq69X/dDR96MSstXmam1ttXiXldujHRmWd9XeptpUbJ11op3bbN3Io/2TsNRKlXPu6lVxmx9NJ4U95z/3s41V/YsdX+Xfz1WX+nbsn/9fQDc1+K1YOcUi7rDfaxCRJthKymIcbAgIAAAAAAAAAAAAAAPDLnQHzNrP6ACgAAA=="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "@actual/scoped",
+      "version": "1.2.0",
+      "dependencies": {},
+      "integrity": "sha512-Gv9yjbv0xUrS/SNrOxAs1eFdNAodWRbLI/yIoE2gxdxUc6Za6X0Vx+DRJI33a0Ev84ZoXQC+J2+97hLdKElRvg==",
+      "artifact": "base64:H4sIAAAAAAAC/+3VQU+DMBgG4J73K2q9aOJo2QATjYl/pcKXBYWWUFiWEP67LUMPXLwoLtn7XApfKT3A+7XR+Yc+kGzOY/TurGG/THlZkkyjtxxV/Bh/X0/1OM52KeOKraB3nW799uw6DcLomsQTF68673pdSZfbhgrxwMWRWldaEybjaBepUKt1ORVKU9DJ/y2hVlBD/tbkJTk/N4y+9jY9Nojz27adtVVYFsawahwZXII59/Lre/7FHj/lX+33y/z7poD8r6G2RV9RRKfGtp3jL3xOrHjeIBxXlP+5MbN/yX+aLfKvsjRB/tdweyN710p/XEsyR25sQZvcGmd9U6js4U7oqtRuG47ze7QEAAAAAAAAAAAAAAAAAIDL9QmcixfLACgAAA=="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "alias-parent",
+      "version": "1.0.0",
+      "dependencies": {
+        "h3-v2": "npm:h3@2.0.1-rc.20",
+        "@local/direct": "npm:@actual/scoped@^1"
+      },
+      "integrity": "sha512-2su9jaQRbNW2rpRwDYIgKf+A/s89r0iKkepk0pdxGJH+8B0rBXxaJrh+eBKWMuzCo7ATZQKJ5x1ctHhkjazPwQ==",
+      "artifact": "base64:H4sIAAAAAAAC/+3TsW6DMBAGYOY+heWFRi1gA8pAVYknqWSZU0MDxrUhihTl3WtoE6lZujTp0P8bOLiz8QC/VXqrXimznzV984OJfpkI1mW51OCyirwozvdLX8p1XkZMRDcw+VG5cHz0Px24UT3xinHVtconVjkyI39kfEfOt4OZRzIVqZh7vWqXRmsa2od/Ze41ZCk8Gt2SD7MD3xTJLp9XGdtXm6LOw26ZOJ3myzvqbtCqy5rWkR5Py2qlxyl0vR4sNfWL5MdjBNf3lfvs9EWvccZP+ZeivMz/XJD/G+iHZuoopb0d3OjZM3P0PoVo3sdLjOMVe2BxFYfrefAtwPHq6Q4pAgAAAAAAAAAAAAAAAAAAAPg7H4+J8PoAKAAA"
+    }
+  ]
+}

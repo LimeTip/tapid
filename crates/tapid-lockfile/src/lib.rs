@@ -16,7 +16,8 @@ pub use model::{
 
 /// Returns the current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Current lockfile schema with exact direct roots and registry-integrity provenance.
-pub const LOCKFILE_VERSION: u32 = 6;
+/// Current lockfile schema with exact local bindings, alias targets, and integrity provenance.
+pub const LOCKFILE_VERSION: u32 = 7;
+const ROOTS_LEGACY_LOCKFILE_VERSION: u32 = 6;
 const LEGACY_LOCKFILE_VERSION: u32 = 4;
 const PROVENANCE_LEGACY_LOCKFILE_VERSION: u32 = 5;

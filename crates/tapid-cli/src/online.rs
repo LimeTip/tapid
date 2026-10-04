@@ -10,7 +10,8 @@ use std::{
 use tapid_archive::{ArchiveFormat, ArchiveLimits, canonical_tree_digest, extract_to};
 use tapid_core::{ArtifactDigest, PackageIntegrity, PackageName, PackageVersion, RegistryOrigin};
 use tapid_linker::{
-    DependencyEdge, InstanceKey, LayoutInput, PackageInstance, VerifiedTreeReference,
+    InstanceKey, NamedDependency, NamedDependencyEdge, NamedLayoutInput, PackageInstance,
+    VerifiedTreeReference,
 };
 use tapid_lockfile::{LockedPackage, Lockfile, LockfilePackageKey, RegistryIntegrityProvenance};
 use tapid_manifest::PackageManifest;
@@ -479,6 +480,19 @@ fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String>
             Ok((parsed_name, parsed_requirement))
         })
         .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
+    if package.registry.as_str() == JSR
+        && metadata
+            .dependencies
+            .values()
+            .chain(metadata.peer_dependencies.values())
+            .chain(optional_dependencies.values())
+            .any(Requirement::is_alias)
+    {
+        return Err(
+            "npm aliases in JSR package metadata are not supported; refusing JSR registry fallback"
+                .into(),
+        );
+    }
     Ok(NormalizedRecord {
         metadata,
         optional_dependencies,
@@ -511,12 +525,11 @@ where
     for mut package in packages {
         if package.registry.to_string() == NPM {
             for (name, requirement) in overrides {
-                let name = name.to_string();
-                if let Some(dependency) = package.dependencies.get_mut(&name) {
-                    *dependency = requirement.raw.clone();
+                if let Some(dependency) = package.dependencies.get_mut(name.as_str()) {
+                    *dependency = overridden_requirement(name, dependency, requirement);
                 }
-                if let Some(dependency) = package.optional_dependencies.get_mut(&name) {
-                    *dependency = requirement.raw.clone();
+                if let Some(dependency) = package.optional_dependencies.get_mut(name.as_str()) {
+                    *dependency = overridden_requirement(name, dependency, requirement);
                 }
             }
         }
@@ -570,8 +583,9 @@ where
         let package = records.get(key).expect("record inserted before metadata");
         let mut package_metadata = record.metadata.clone();
         for (name, requirement) in &record.optional_dependencies {
-            let target_registry = registry_for_dependency(&package.registry, name)?;
-            if candidate_matches(&target_registry, name, requirement) {
+            let actual_name = requirement.package_name(name);
+            let target_registry = registry_for_dependency(&package.registry, actual_name)?;
+            if candidate_matches(&target_registry, actual_name, requirement) {
                 package_metadata
                     .dependencies
                     .insert(name.clone(), requirement.clone());
@@ -621,11 +635,12 @@ where
                 continue;
             };
             for (name, requirement) in &parent_record.optional_dependencies {
-                let target_registry = registry_for_dependency(&parent_registry, name)?;
+                let actual_name = requirement.package_name(name);
+                let target_registry = registry_for_dependency(&parent_registry, actual_name)?;
                 if inserted_names
                     .get(&target_registry.to_string())
-                    .is_some_and(|names| names.contains(name))
-                    && candidate_matches(&target_registry, name, requirement)
+                    .is_some_and(|names| names.contains(actual_name))
+                    && candidate_matches(&target_registry, actual_name, requirement)
                 {
                     parent
                         .dependencies
@@ -635,6 +650,17 @@ where
         }
     }
     Ok(())
+}
+
+fn overridden_requirement(name: &PackageName, previous: &str, replacement: &Requirement) -> String {
+    if previous.trim().starts_with("npm:") {
+        return match previous.parse::<Requirement>() {
+            Ok(alias) => format!("npm:{}@{}", alias.package_name(name), replacement.raw),
+            // Keep malformed aliases invalid rather than changing their source.
+            Err(_) => previous.to_owned(),
+        };
+    }
+    replacement.raw.clone()
 }
 
 fn discarded_version_diagnostics(
@@ -746,10 +772,16 @@ where
                         parent.version.to_string(),
                     );
                     if let Some(record) = records.get(&key) {
-                        for raw_name in record.optional_dependencies.keys() {
+                        for (raw_name, raw_requirement) in &record.optional_dependencies {
                             let name: PackageName = raw_name
                                 .parse()
                                 .map_err(|error: tapid_core::DomainError| error.to_string())?;
+                            let requirement = parse_registry_requirement(
+                                &name.to_string(),
+                                "optional dependency",
+                                raw_requirement,
+                            )?;
+                            let name = requirement.package_name(&name).clone();
                             let registry = registry_for_dependency(&parent.registry, &name)?;
                             if !fetched.contains(&(registry.to_string(), name.to_string())) {
                                 optional_frontier.insert((registry, name));
@@ -875,6 +907,11 @@ pub(crate) fn manifest_overrides(
         let requirement = range
             .parse::<Requirement>()
             .map_err(|error| format!("invalid override '{name}' range '{range}': {error}"))?;
+        if requirement.is_alias() {
+            return Err(format!(
+                "unsupported alias override '{name}': override values must be version ranges"
+            ));
+        }
         match overrides.insert(package.clone(), requirement.clone()) {
             Some(previous) if previous != requirement => {
                 return Err(format!("conflicting override declarations for '{package}'"));
@@ -903,6 +940,11 @@ pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependenc
             let requirement = range.parse::<Requirement>().map_err(|error| {
                 format!("invalid {kind} dependency '{name}' range '{range}': {error}")
             })?;
+            if registry.as_str() == JSR && requirement.is_alias() {
+                return Err(format!(
+                    "npm alias '{name}@{range}' cannot use a JSR dependency name"
+                ));
+            }
             roots.push(Dependency::new(registry, package, requirement));
         }
     }
@@ -933,7 +975,7 @@ pub fn resolve_and_fetch(
 ) -> Result<
     (
         Lockfile,
-        LayoutInput,
+        NamedLayoutInput,
         BTreeMap<String, PathBuf>,
         StoreTransaction,
     ),
@@ -994,7 +1036,8 @@ pub fn resolve_and_fetch(
             if dependency.registry.to_string() == JSR {
                 Ok(dependency)
             } else {
-                let origin = registry_config.origin_for_name(&dependency.name)?;
+                let origin = registry_config
+                    .origin_for_name(dependency.requirement.package_name(&dependency.name))?;
                 Ok(Dependency::new(
                     origin,
                     dependency.name,
@@ -1220,7 +1263,7 @@ pub fn resolve_and_fetch(
                 )
                 .to_string();
                 locked
-                    .add_dependency(&edge.dependency.to_string(), &target_key)
+                    .add_alias_dependency(&edge.dependency.to_string(), &target_key)
                     .map_err(|e| e.to_string())?;
             }
             Ok(locked)
@@ -1242,6 +1285,29 @@ pub fn resolve_and_fetch(
         .to_string()
     }))
     .map_err(|e| e.to_string())?;
+    lock.set_root_bindings(
+        resolution
+            .root_bindings
+            .iter()
+            .map(|((_, name), id)| {
+                let platform = platform_contexts
+                    .get(id)
+                    .expect("selected root platform context");
+                (
+                    name.to_string(),
+                    LockfilePackageKey::new(
+                        id.registry.clone(),
+                        id.name.clone(),
+                        id.version.clone(),
+                        resolution.peer_contexts.get(id).unwrap_or(&empty_peer),
+                        platform,
+                    )
+                    .to_string(),
+                )
+            })
+            .collect(),
+    )
+    .map_err(|error| error.to_string())?;
     let instance_keys = instances
         .iter()
         .map(|instance| {
@@ -1283,12 +1349,15 @@ pub fn resolve_and_fetch(
                     .unwrap_or_default(),
             ))
             .ok_or_else(|| format!("missing child instance for {}", edge.child))?;
-        edge_list.push(DependencyEdge {
+        edge_list.push(NamedDependencyEdge {
             parent: parent.clone(),
-            child: child.clone(),
+            dependency: NamedDependency {
+                name: edge.dependency.clone(),
+                child: child.clone(),
+            },
         });
     }
-    for id in &resolution.roots {
+    for ((_, name), id) in &resolution.root_bindings {
         let instance = instance_keys
             .get(&(
                 id.registry.clone(),
@@ -1301,11 +1370,14 @@ pub fn resolve_and_fetch(
                     .unwrap_or_default(),
             ))
             .ok_or_else(|| format!("missing root instance for {id}"))?;
-        root_deps.push(instance.clone());
+        root_deps.push(NamedDependency {
+            name: name.clone(),
+            child: instance.clone(),
+        });
     }
     Ok((
         lock,
-        LayoutInput {
+        NamedLayoutInput {
             instances,
             root_dependencies: root_deps,
             dependency_edges: edge_list,
@@ -1318,6 +1390,72 @@ pub fn resolve_and_fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_alias_fetches_the_actual_package_and_retains_the_local_edge() {
+        let mut parent = named_record("parent", "1.0.0", &[]);
+        parent
+            .optional_dependencies
+            .insert("h3-v2".into(), "npm:h3@2.0.1-rc.20".into());
+        let roots = vec![Dependency::new(
+            NPM.parse().unwrap(),
+            "parent".parse().unwrap(),
+            "1".parse().unwrap(),
+        )];
+        let mut fetched = Vec::new();
+        let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+            fetched.push(name.to_string());
+            match name.as_str() {
+                "parent" => Ok(vec![parent.clone()]),
+                "h3" => Ok(vec![named_record("h3", "2.0.1-rc.20", &[])]),
+                _ => panic!("must fetch actual alias identity: {name}"),
+            }
+        })
+        .unwrap();
+        assert_eq!(fetched, ["parent", "h3"]);
+        assert_eq!(resolution.dependencies[0].dependency.as_str(), "h3-v2");
+        assert_eq!(resolution.dependencies[0].child.name.as_str(), "h3");
+    }
+
+    #[test]
+    fn jsr_alias_metadata_never_falls_back_to_a_jsr_package_of_the_same_name() {
+        let mut package = named_record("@scope/parent", "1.0.0", &[("local", "npm:@actual/pkg@1")]);
+        package.registry = JSR.parse().unwrap();
+        let error = normalize_record(&package)
+            .err()
+            .expect("npm source cannot be interpreted as JSR");
+        assert!(error.contains("refusing JSR registry fallback"));
+    }
+
+    #[test]
+    fn overriding_an_alias_range_preserves_its_actual_identity() {
+        let roots = vec![Dependency::new(
+            NPM.parse().unwrap(),
+            "parent".parse().unwrap(),
+            "1".parse().unwrap(),
+        )];
+        let overrides = BTreeMap::from([("local".parse().unwrap(), "2".parse().unwrap())]);
+        let (resolution, _) =
+            resolve_with_overrides(&roots, &overrides, |_, name| match name.as_str() {
+                "parent" => Ok(vec![named_record(
+                    "parent",
+                    "1.0.0",
+                    &[("local", "npm:actual@1")],
+                )]),
+                "actual" => Ok(vec![
+                    named_record("actual", "1.0.0", &[]),
+                    named_record("actual", "2.0.0", &[]),
+                ]),
+                _ => panic!("unexpected alias target {name}"),
+            })
+            .unwrap();
+        assert_eq!(resolution.dependencies[0].dependency.as_str(), "local");
+        assert_eq!(resolution.dependencies[0].child.name.as_str(), "actual");
+        assert_eq!(
+            resolution.dependencies[0].child.version.to_string(),
+            "2.0.0"
+        );
+    }
     #[test]
     fn custom_private_origins_use_the_npm_metadata_protocol() {
         let registry: RegistryOrigin = "https://127.0.0.1:9".parse().unwrap();

@@ -3,7 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use tapid_core::{PackageInstanceId, PeerContext, PlatformContext};
+use tapid_core::{PackageInstanceId, PackageName, PeerContext, PlatformContext};
 
 use crate::Platform;
 
@@ -95,6 +95,53 @@ pub struct LayoutInput {
     pub instances: Vec<PackageInstance>,
     pub root_dependencies: Vec<InstanceKey>,
     pub dependency_edges: Vec<DependencyEdge>,
+}
+
+/// An import name bound to an actual verified package instance.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct NamedDependency {
+    pub name: PackageName,
+    pub child: InstanceKey,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedDependencyEdge {
+    pub parent: InstanceKey,
+    pub dependency: NamedDependency,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedLayoutInput {
+    pub instances: Vec<PackageInstance>,
+    pub root_dependencies: Vec<NamedDependency>,
+    pub dependency_edges: Vec<NamedDependencyEdge>,
+}
+
+impl From<LayoutInput> for NamedLayoutInput {
+    fn from(input: LayoutInput) -> Self {
+        Self {
+            instances: input.instances,
+            root_dependencies: input
+                .root_dependencies
+                .into_iter()
+                .map(|child| NamedDependency {
+                    name: child.id.name.clone(),
+                    child,
+                })
+                .collect(),
+            dependency_edges: input
+                .dependency_edges
+                .into_iter()
+                .map(|edge| NamedDependencyEdge {
+                    parent: edge.parent,
+                    dependency: NamedDependency {
+                        name: edge.child.id.name.clone(),
+                        child: edge.child,
+                    },
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -213,6 +260,14 @@ pub fn plan_layout(
     input: LayoutInput,
     platform: Platform,
 ) -> Result<MaterializationPlan, PlanError> {
+    plan_named_layout(root, input.into(), platform)
+}
+
+pub fn plan_named_layout(
+    root: ManagedRoot,
+    input: NamedLayoutInput,
+    platform: Platform,
+) -> Result<MaterializationPlan, PlanError> {
     let kind = match platform {
         Platform::Unix => LinkKind::Symlink,
         Platform::Windows => LinkKind::Junction,
@@ -253,20 +308,21 @@ pub fn plan_layout(
             target: path,
         });
     }
-    let mut children: std::collections::BTreeMap<InstanceKey, Vec<InstanceKey>> =
+    let mut children: std::collections::BTreeMap<InstanceKey, Vec<NamedDependency>> =
         std::collections::BTreeMap::new();
     let mut edges = input.dependency_edges;
-    edges.sort_by(|a, b| {
-        (a.parent.clone(), a.child.clone()).cmp(&(b.parent.clone(), b.child.clone()))
-    });
+    edges.sort_by(|a, b| (&a.parent, &a.dependency).cmp(&(&b.parent, &b.dependency)));
     for edge in edges {
         if !by_key.contains_key(&edge.parent) {
             return Err(PlanError::UnknownInstance(edge.parent.id));
         }
-        if !by_key.contains_key(&edge.child) {
-            return Err(PlanError::UnknownInstance(edge.child.id));
+        if !by_key.contains_key(&edge.dependency.child) {
+            return Err(PlanError::UnknownInstance(edge.dependency.child.id));
         }
-        children.entry(edge.parent).or_default().push(edge.child);
+        children
+            .entry(edge.parent)
+            .or_default()
+            .push(edge.dependency);
     }
     for selected in children.values_mut() {
         selected.sort();
@@ -281,11 +337,12 @@ pub fn plan_layout(
     let mut activation = Vec::new();
     let mut placements = std::collections::BTreeMap::new();
     let mut reachable = std::collections::BTreeSet::new();
-    for child in roots {
+    for dependency in roots {
+        let child = dependency.child;
         if !by_key.contains_key(&child) {
             return Err(PlanError::UnknownInstance(child.id));
         }
-        let target = root_base.join(package_name_path(child.id.name.as_str()));
+        let target = root_base.join(package_name_path(dependency.name.as_str()));
         if let Some(existing) = placements.insert(target.clone(), child.clone()) {
             if existing != child {
                 return Err(PlanError::ConflictingTarget(target));
@@ -311,12 +368,13 @@ pub fn plan_layout(
         }
     }
 
-    while let Some((child, bases, lineage)) = pending.pop_front() {
+    while let Some((dependency, bases, lineage)) = pending.pop_front() {
+        let child = dependency.child;
         let closes_cycle = lineage.contains(&child);
         let mut already_resolves = false;
         let mut shadowed_at = None;
         for (index, base) in bases.iter().enumerate().rev() {
-            let target = base.join(package_name_path(child.id.name.as_str()));
+            let target = base.join(package_name_path(dependency.name.as_str()));
             if !root.contains(&target) {
                 return Err(PlanError::PathOutsideManagedRoot(target));
             }
@@ -335,7 +393,7 @@ pub fn plan_layout(
         let first_candidate = shadowed_at.map_or(0, |index| index + 1);
         let mut selected = None;
         for (index, base) in bases.iter().enumerate().skip(first_candidate) {
-            let target = base.join(package_name_path(child.id.name.as_str()));
+            let target = base.join(package_name_path(dependency.name.as_str()));
             if !placements.contains_key(&target) {
                 selected = Some((index, target));
                 break;
@@ -346,7 +404,7 @@ pub fn plan_layout(
                 bases
                     .last()
                     .expect("dependency search always has a direct parent base")
-                    .join(package_name_path(child.id.name.as_str())),
+                    .join(package_name_path(dependency.name.as_str())),
             ));
         };
         placements.insert(target.clone(), child.clone());
@@ -520,6 +578,61 @@ mod tests {
                 test_tree_root(),
             )
             .unwrap(),
+        }
+    }
+
+    #[test]
+    fn alias_names_control_shadowing_and_reused_actual_instances() {
+        let app = instance("app", "1.0.0", PeerContext::default());
+        let outer = instance("actual", "1.0.0", PeerContext::default());
+        let inner = instance("actual", "2.0.0", PeerContext::default());
+        let binding = |name: &str, instance: &PackageInstance| NamedDependency {
+            name: name.parse().unwrap(),
+            child: InstanceKey::from(instance),
+        };
+        let input = NamedLayoutInput {
+            instances: vec![app.clone(), outer.clone(), inner.clone()],
+            root_dependencies: vec![
+                binding("app", &app),
+                binding("local", &outer),
+                binding("other", &outer),
+            ],
+            dependency_edges: vec![NamedDependencyEdge {
+                parent: InstanceKey::from(&app),
+                dependency: binding("local", &inner),
+            }],
+        };
+        for platform in [Platform::Unix, Platform::Windows] {
+            let plan = plan_named_layout(test_managed_root(), input.clone(), platform).unwrap();
+            assert_eq!(plan.entries.len(), 3);
+            assert_eq!(plan.activation.steps.len(), 4);
+            let base = test_project_root().join("node_modules");
+            assert!(plan.activation.steps.iter().any(|step| {
+                step.target == base.join("app/node_modules/local")
+                    && step
+                        .source
+                        .starts_with(test_project_root().join(".tapid/instances/actual/2.0.0"))
+            }));
+            let local = plan
+                .activation
+                .steps
+                .iter()
+                .find(|step| step.target == base.join("local"))
+                .unwrap();
+            let other = plan
+                .activation
+                .steps
+                .iter()
+                .find(|step| step.target == base.join("other"))
+                .unwrap();
+            assert_eq!(local.source, other.source);
+            assert!(
+                !plan
+                    .activation
+                    .steps
+                    .iter()
+                    .any(|step| step.target == base.join("actual"))
+            );
         }
     }
     #[test]

@@ -24,11 +24,12 @@ fn requirement_base_parse_count() -> usize {
     REQUIREMENT_BASE_PARSE_COUNT.with(std::cell::Cell::get)
 }
 
-/// A validated dependency requirement in Tapid's supported npm range subset.
+/// A validated npm version range, optionally bound to an alias target.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Requirement {
     /// Canonical trimmed source requirement used for deterministic diagnostics.
     pub raw: String,
+    alias: Option<PackageName>,
     clauses: Vec<RequirementClause>,
 }
 
@@ -80,9 +81,28 @@ impl FromStr for Requirement {
     type Err = ResolveError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let raw = s.trim();
+        if let Some(spec) = raw.strip_prefix("npm:") {
+            let (name, range) = match spec.rfind('@').filter(|index| *index > 0) {
+                Some(index) => (&spec[..index], &spec[index + 1..]),
+                None => (spec, "*"),
+            };
+            let name = name
+                .parse::<PackageName>()
+                .map_err(|_| ResolveError::UnsupportedRange(raw.into()))?;
+            if range.is_empty() || range.starts_with("npm:") {
+                return Err(ResolveError::UnsupportedRange(raw.into()));
+            }
+            let mut requirement = range
+                .parse::<Requirement>()
+                .map_err(|_| ResolveError::UnsupportedRange(raw.into()))?;
+            requirement.raw = raw.into();
+            requirement.alias = Some(name);
+            return Ok(requirement);
+        }
         if raw.is_empty() {
             return Ok(Self {
                 raw: raw.into(),
+                alias: None,
                 clauses: vec![RequirementClause::AnyStable],
             });
         }
@@ -169,12 +189,21 @@ impl FromStr for Requirement {
         }
         Ok(Self {
             raw: raw.into(),
+            alias: None,
             clauses,
         })
     }
 }
 
 impl Requirement {
+    /// Actual registry name for an npm alias, or the declared dependency name.
+    pub fn package_name<'a>(&'a self, declared: &'a PackageName) -> &'a PackageName {
+        self.alias.as_ref().unwrap_or(declared)
+    }
+
+    pub fn is_alias(&self) -> bool {
+        self.alias.is_some()
+    }
     /// Returns whether an exact version satisfies this validated requirement.
     pub fn matches(&self, version: &PackageVersion) -> bool {
         matches_requirement(version, self)
@@ -417,6 +446,8 @@ pub struct Resolution {
     pub selected: Vec<RegistryPackageId>,
     /// Exact identities selected for direct manifest dependencies.
     pub roots: Vec<RegistryPackageId>,
+    /// Local root names bound to exact actual package identities.
+    pub root_bindings: BTreeMap<(RegistryOrigin, PackageName), RegistryPackageId>,
     /// Exact dependency edges used by lockfile and linker construction.
     pub dependencies: Vec<ResolvedDependency>,
     /// Peer providers bound to each selected package identity.
@@ -524,11 +555,20 @@ where
         ));
     }
     let candidate_index = candidate_index(metadata);
-    let mut root_constraints: BTreeMap<(RegistryOrigin, PackageName), BTreeSet<Requirement>> =
-        BTreeMap::new();
+    let mut root_constraints: BTreeMap<
+        (RegistryOrigin, PackageName, PackageName),
+        BTreeSet<Requirement>,
+    > = BTreeMap::new();
     for dependency in ds {
         root_constraints
-            .entry((dependency.registry.clone(), dependency.name.clone()))
+            .entry((
+                dependency.registry.clone(),
+                dependency.name.clone(),
+                dependency
+                    .requirement
+                    .package_name(&dependency.name)
+                    .clone(),
+            ))
             .or_default()
             .insert(dependency.requirement.clone());
     }
@@ -536,9 +576,10 @@ where
     let mut selected = BTreeSet::new();
     let mut selected_packages = BTreeMap::new();
     let mut roots = Vec::new();
+    let mut root_bindings = BTreeMap::new();
     let mut queue = Vec::new();
     let mut missing_metadata = BTreeSet::new();
-    for ((registry, name), requirements) in root_constraints {
+    for ((registry, local_name, name), requirements) in root_constraints {
         let package = match select_package(&registry, &name, &requirements, &candidate_index) {
             Ok(package) => package,
             Err(ResolveError::MissingCandidate { .. })
@@ -549,10 +590,17 @@ where
             }
             Err(error) => return Err(error),
         };
-        let id = RegistryPackageId::new(registry, name, package.version.clone());
+        let id = RegistryPackageId::new(registry.clone(), name, package.version.clone());
         selected.insert(id.clone());
         selected_packages.insert(id.clone(), package);
         roots.push(id.clone());
+        if let Some(previous) = root_bindings.insert((registry, local_name.clone()), id.clone())
+            && previous != id
+        {
+            return Err(ResolveError::RegistryRouting(format!(
+                "conflicting root binding for {local_name}"
+            )));
+        }
         queue.push(id);
     }
 
@@ -568,23 +616,24 @@ where
             .dependencies
             .clone();
         for (dependency, requirement) in package_dependencies {
-            let registry = registry_for_dependency(&parent.registry, &dependency)
+            let actual_name = requirement.package_name(&dependency).clone();
+            let registry = registry_for_dependency(&parent.registry, &actual_name)
                 .map_err(ResolveError::RegistryRouting)?;
             let requirements = BTreeSet::from([requirement]);
             let child_package =
-                match select_package(&registry, &dependency, &requirements, &candidate_index) {
+                match select_package(&registry, &actual_name, &requirements, &candidate_index) {
                     Ok(package) => package,
                     Err(ResolveError::MissingCandidate { .. })
                         if !candidate_index
-                            .contains_key(&(registry.clone(), dependency.clone())) =>
+                            .contains_key(&(registry.clone(), actual_name.clone())) =>
                     {
-                        missing_metadata.insert((registry.to_string(), dependency.to_string()));
+                        missing_metadata.insert((registry.to_string(), actual_name.to_string()));
                         continue;
                     }
                     Err(error) => return Err(error),
                 };
             let child =
-                RegistryPackageId::new(registry, dependency.clone(), child_package.version.clone());
+                RegistryPackageId::new(registry, actual_name, child_package.version.clone());
             dependencies.insert(ResolvedDependency {
                 parent: parent.clone(),
                 dependency: dependency.clone(),
@@ -603,37 +652,41 @@ where
         });
     }
 
-    let root_providers = roots
+    roots.sort();
+    roots.dedup();
+    let root_providers = root_bindings
         .iter()
-        .map(|root| {
-            (
-                (root.registry.clone(), root.name.clone()),
-                root.version.clone(),
-            )
-        })
+        .map(|((registry, local_name), root)| ((registry.clone(), local_name.clone()), root))
         .collect::<BTreeMap<_, _>>();
     let mut peer_contexts = BTreeMap::new();
     for (id, package) in &selected_packages {
         let mut context = PeerContext::default();
         for (peer, requirement) in &package.peer_dependencies {
-            let peer_registry = registry_for_dependency(&id.registry, peer)
-                .map_err(ResolveError::RegistryRouting)?;
+            let peer_registry =
+                registry_for_dependency(&id.registry, requirement.package_name(peer))
+                    .map_err(ResolveError::RegistryRouting)?;
             let provider = root_providers.get(&(peer_registry, peer.clone()));
             if provider.is_none() && package.optional_peer_dependencies.contains(peer) {
                 continue;
             }
 
-            if !provider.is_some_and(|version| requirement.matches(version)) {
+            if !provider.is_some_and(|provider| {
+                requirement.matches(&provider.version)
+                    && (!requirement.is_alias() || requirement.package_name(peer) == &provider.name)
+            }) {
                 return Err(ResolveError::PeerDependency {
                     package: id.to_string(),
                     peer: peer.to_string(),
                     requirement: requirement.raw.clone(),
-                    provider: provider.map(ToString::to_string),
+                    provider: provider.map(|provider| provider.version.to_string()),
                 });
             }
             context = context.with(
                 peer.clone(),
-                provider.expect("validated root peer provider").clone(),
+                provider
+                    .expect("validated root peer provider")
+                    .version
+                    .clone(),
             );
         }
         peer_contexts.insert(id.clone(), context);
@@ -642,6 +695,7 @@ where
     Ok(Resolution {
         selected: selected.into_iter().collect(),
         roots,
+        root_bindings,
         dependencies: dependencies.into_iter().collect(),
         peer_contexts,
     })
@@ -869,6 +923,81 @@ mod tests {
     use proptest::prelude::*;
     fn req(s: &str) -> Requirement {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn npm_aliases_validate_actual_names_and_ranges() {
+        let local: PackageName = "local".parse().unwrap();
+        for (spec, target) in [
+            ("npm:h3@2.0.1-rc.20", "h3"),
+            ("npm:@scope/pkg@^1", "@scope/pkg"),
+            ("npm:@scope/pkg", "@scope/pkg"),
+        ] {
+            let requirement = req(spec);
+            assert_eq!(requirement.raw, spec);
+            assert_eq!(requirement.package_name(&local).as_str(), target);
+            assert!(requirement.is_alias());
+        }
+        assert!(req("npm:h3@2.0.1-rc.20").matches(&"2.0.1-rc.20".parse().unwrap()));
+        assert!(!req("npm:h3@2.0.1-rc.20").matches(&"2.0.1".parse().unwrap()));
+        for spec in [
+            "npm:",
+            "npm:pkg@",
+            "npm:pkg@latest",
+            "npm:../pkg@1",
+            "npm:@scope@1",
+            "npm:pkg@npm:other@1",
+            "npm:https://example.test/pkg@1",
+            "npm:pkg@workspace:*",
+        ] {
+            assert!(spec.parse::<Requirement>().is_err(), "{spec}");
+        }
+    }
+
+    #[test]
+    fn aliases_select_distinct_root_versions_and_route_transitives_by_actual_name() {
+        let public = "https://registry.npmjs.org";
+        let private = "https://packages.example";
+        let metadata = vec![
+            registry(
+                public,
+                vec![
+                    package("h3", "1.0.0", &[]),
+                    package("h3", "2.0.0", &[]),
+                    package("parent", "1.0.0", &[("local", "npm:@actual/pkg@^1")]),
+                ],
+            ),
+            registry(private, vec![package("@actual/pkg", "1.2.0", &[])]),
+        ];
+        let resolution = resolve_graph_with_routing(
+            &[
+                dep(public, "first", "npm:h3@1"),
+                dep(public, "second", "npm:h3@2"),
+                dep(public, "parent", "1"),
+            ],
+            &metadata,
+            Default::default(),
+            |parent, name| {
+                Ok(if name.as_str() == "@actual/pkg" {
+                    private.parse().unwrap()
+                } else {
+                    parent.clone()
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(resolution.selected.len(), 4);
+        let bindings = resolution
+            .root_bindings
+            .iter()
+            .map(|((_, name), id)| (name.as_str(), id.version.to_string()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(bindings["first"], "1.0.0");
+        assert_eq!(bindings["second"], "2.0.0");
+        let edge = &resolution.dependencies[0];
+        assert_eq!(edge.dependency.as_str(), "local");
+        assert_eq!(edge.child.name.as_str(), "@actual/pkg");
+        assert_eq!(edge.child.registry.as_str(), private);
     }
 
     #[test]
