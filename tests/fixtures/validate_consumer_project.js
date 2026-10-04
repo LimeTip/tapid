@@ -16,16 +16,13 @@ const binary = args.length ? path.resolve(args[1]) :
 // Expected capabilities, not verified-release evidence. Like the documentation
 // contracts, published tags require review; never infer capability from an error.
 // Source validation (no tag) always requires the current native contract.
-const releaseContracts = new Map([
-  ['v0.0.9', 'legacy-uncontained'],
-  ['v0.0.10', 'native-restricted'],
-  ['v0.0.11', 'native-restricted-linux'],
-]);
+const { loadConsumerContracts } = require('./consumer_contract.js');
+const { current, releases } = loadConsumerContracts();
 const releaseTag = args[3];
-assert.ok(!releaseTag || releaseContracts.has(releaseTag), 'unreviewed root-script release');
-const legacy = releaseTag && releaseContracts.get(releaseTag) === 'legacy-uncontained';
-const nativeRestricted = !legacy && (process.platform === 'darwin' ||
-  (process.platform === 'linux' && (!releaseTag || releaseContracts.get(releaseTag) === 'native-restricted-linux')));
+assert.ok(!releaseTag || releases.has(releaseTag), 'unreviewed root-script release');
+const contract = releaseTag ? releases.get(releaseTag) : current;
+const legacy = contract.legacy;
+const nativeRestricted = contract.nativePlatforms.includes(process.platform);
 const lifecycleMarker = path.join(project, 'LIFECYCLE_SHOULD_NOT_RUN');
 const startMarker = 'TAPID_FIXTURE_STARTED=';
 assert.ok(['darwin', 'linux', 'win32'].includes(process.platform), 'unsupported validation host');

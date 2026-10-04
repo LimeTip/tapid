@@ -274,7 +274,9 @@ Read the job steps and logs. Do not infer real installation from workflow succes
 
 The supplemental root-script fixture uses `tests/fixtures/validate_consumer_project.js`
 against the installed binary, not a source build. Before tagging, review its
-`releaseContracts` capability table alongside `docs/examples/contracts.json`.
+`tests/fixtures/consumer_contracts.json` capability data alongside
+`docs/examples/contracts.json`. The current contract uses the product version
+from `crates/tapid-cli/Cargo.toml`; historical contracts list exact reviewed tags.
 Unknown published tags fail until reviewed; never infer support from an arbitrary
 command failure. The v0.0.11 native Restricted contract requires macOS and Linux child execution,
 exact arguments, environment/exit-code checks and receipts. Windows must return
