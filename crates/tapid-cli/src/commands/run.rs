@@ -100,7 +100,13 @@ pub(crate) fn run(args: Args) -> ExitCode {
         (manifest, project_dir.clone())
     };
     let Some(script) = manifest.scripts().get(&args.script).cloned() else {
-        eprintln!("error: root package script is missing: {}", args.script);
+        match args.workspace.as_deref() {
+            Some(workspace_name) => eprintln!(
+                "error: workspace member '{workspace_name}' package script is missing: {}",
+                args.script
+            ),
+            None => eprintln!("error: root package script is missing: {}", args.script),
+        }
         return ExitCode::from(1);
     };
     let config_path = project_dir.join("tapid.toml");

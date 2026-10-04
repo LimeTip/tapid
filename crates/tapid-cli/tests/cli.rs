@@ -3851,11 +3851,15 @@ fn run_executes_root_or_explicitly_selected_workspace_member_script() {
     )
     .unwrap();
     let root_output = run(&dir, &["run", "probe"]);
-    assert!(
-        root_output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&root_output.stderr)
-    );
+    let root_stderr = String::from_utf8_lossy(&root_output.stderr);
+    if !root_output.status.success()
+        && root_stderr.contains("sandbox execution failed (unsupported-containment)")
+    {
+        eprintln!("skipping: requested Restricted backend is unavailable: {root_stderr}");
+        cleanup(dir);
+        return;
+    }
+    assert!(root_output.status.success(), "{}", root_stderr);
     let root_stdout = String::from_utf8_lossy(&root_output.stdout);
     assert!(root_stdout.contains("ROOT_SCRIPT"), "{root_stdout}");
     assert!(!root_stdout.contains("MEMBER_SCRIPT"), "{root_stdout}");
@@ -4322,9 +4326,16 @@ fn run_rejects_a_missing_node_runtime_stably() {
 #[test]
 fn run_rejects_missing_script_stably_before_policy_loading() {
     let dir = temp_dir("run-missing-script");
+    let member_dir = dir.join("packages/news");
+    fs::create_dir_all(&member_dir).unwrap();
     fs::write(
         dir.join("package.json"),
-        r#"{"name":"demo","version":"1.0.0","scripts":{}}"#,
+        r#"{"name":"demo","version":"1.0.0","workspaces":["packages/news"],"scripts":{}}"#,
+    )
+    .unwrap();
+    fs::write(
+        member_dir.join("package.json"),
+        r#"{"name":"news","version":"1.0.0","scripts":{}}"#,
     )
     .unwrap();
     let missing = run(
@@ -4340,6 +4351,23 @@ fn run_rejects_missing_script_stably_before_policy_loading() {
     assert_eq!(
         String::from_utf8_lossy(&missing.stderr),
         "error: root package script is missing: missing\n"
+    );
+
+    let missing_member = run(
+        &dir,
+        &[
+            "run",
+            "missing",
+            "--workspace",
+            "news",
+            "--node-runtime",
+            env!("CARGO_BIN_EXE_tapid"),
+        ],
+    );
+    assert_eq!(missing_member.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&missing_member.stderr),
+        "error: workspace member 'news' package script is missing: missing\n"
     );
     cleanup(dir);
 }
