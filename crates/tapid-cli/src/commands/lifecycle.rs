@@ -168,7 +168,7 @@ pub(crate) fn prune(args: ReadOnlyArgs) -> ExitCode {
         &args.common.project_dir,
         args.common.workspace.as_deref(),
     ) {
-        Ok((project_dir, _)) => project_dir,
+        Ok(selection) => selection.root_dir,
         Err(error) => {
             eprintln!("error: {error}");
             return ExitCode::from(1);
@@ -200,36 +200,14 @@ fn mutate_and_install(
         &tapid_manifest::PackageManifest,
     ) -> Result<crate::application::lifecycle::LifecyclePlan, String>,
 ) -> Result<crate::application::install::InstallReport, String> {
-    let (project_dir, manifest) = crate::application::lifecycle::resolve_workspace(
+    let selection = crate::application::lifecycle::resolve_workspace(
         &common.project_dir,
         common.workspace.as_deref(),
     )?;
-    let plan = planner(&manifest)?;
-    if common.workspace.is_some() {
-        let workspace = tapid_manifest::Workspace::discover(&common.project_dir)?;
-        let workspace_names = workspace
-            .members()
-            .iter()
-            .map(|member| member.name())
-            .collect::<std::collections::BTreeSet<_>>();
-        for dependency_map in [
-            plan.manifest.dependencies(),
-            plan.manifest.dev_dependencies(),
-            plan.manifest.optional_dependencies(),
-            plan.manifest.peer_dependencies(),
-        ] {
-            if let Some(name) = dependency_map
-                .keys()
-                .find(|name| workspace_names.contains(name.as_str()))
-            {
-                return Err(format!(
-                    "selected workspace member dependency '{name}' cannot yet be linked from member lifecycle operations; refusing registry fallback"
-                ));
-            }
-        }
-    }
-    crate::application::install::run_with_manifest(
-        &project_dir,
+    let plan = planner(&selection.manifest)?;
+    crate::application::install::run_with_manifest_target(
+        &selection.root_dir,
+        &selection.manifest_path,
         Some(&plan.manifest),
         None,
         common.store_dir.as_deref(),

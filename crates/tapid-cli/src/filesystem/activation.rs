@@ -19,11 +19,24 @@ fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
     activate_node_modules_with_lock(project, stage, &activation_lock, false)
 }
 
+#[cfg(all(test, unix))]
 pub(crate) fn activate_node_modules_with_lock(
     project: &Path,
     stage: &Path,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
+) -> Result<(), String> {
+    activate_node_modules_with_preflight(project, stage, activation_lock, preserve_previous, || {
+        Ok(())
+    })
+}
+
+pub(crate) fn activate_node_modules_with_preflight(
+    project: &Path,
+    stage: &Path,
+    activation_lock: &ActivationLock,
+    preserve_previous: bool,
+    preflight: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let staged = stage.join("node_modules");
     if !staged.is_dir() {
@@ -117,6 +130,18 @@ pub(crate) fn activate_node_modules_with_lock(
             error.push_str(&format!("; {restore}"));
         }
         return Err(error);
+    }
+    if let Err(error) = preflight() {
+        let backup_restore = restore_node_modules_backup(&destination, &backup);
+        let marker_restore = restore_marker(&marker, &marker_backup, marker_exists);
+        let mut message = error;
+        if let Err(restore) = backup_restore {
+            message.push_str(&format!("; {restore}"));
+        }
+        if let Err(restore) = marker_restore {
+            message.push_str(&format!("; {restore}"));
+        }
+        return Err(message);
     }
     if let Err(error) = fs::rename(&staged, &destination) {
         if backup.exists() {
@@ -962,6 +987,38 @@ mod activation_tests {
                 .file_type()
                 .is_symlink()
         );
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn failed_activation_preflight_restores_previous_layout_and_marker() {
+        use super::activate_node_modules_with_preflight;
+
+        let project = temp_project("activation-preflight-rollback");
+        let stage = project.join("stage");
+        fs::create_dir_all(project.join("node_modules")).unwrap();
+        fs::write(project.join("node_modules/retained"), b"old layout").unwrap();
+        fs::write(project.join(".tapid-managed"), MANAGED_MARKER).unwrap();
+        fs::create_dir_all(stage.join("node_modules")).unwrap();
+        fs::write(stage.join("node_modules/new"), b"new layout").unwrap();
+        let lock = ActivationLock::acquire(&project).unwrap();
+
+        let error = activate_node_modules_with_preflight(&project, &stage, &lock, false, || {
+            Err("workspace validation failed".to_owned())
+        })
+        .unwrap_err();
+
+        assert!(error.contains("workspace validation failed"));
+        assert_eq!(
+            fs::read(project.join("node_modules/retained")).unwrap(),
+            b"old layout"
+        );
+        assert!(!project.join("node_modules/new").exists());
+        assert_eq!(
+            fs::read(project.join(".tapid-managed")).unwrap(),
+            MANAGED_MARKER
+        );
+        drop(lock);
         let _ = fs::remove_dir_all(project);
     }
 

@@ -91,6 +91,27 @@ pub fn prepare_execution_request(
     arguments: &[OsString],
     host: HostExecutionEnvironment<'_>,
 ) -> Result<PreparedExecution, RunPreparationError> {
+    prepare_execution_request_with_working_directory(
+        project_dir,
+        project_dir,
+        script_name,
+        config,
+        script,
+        arguments,
+        host,
+    )
+}
+
+/// Constructs a request using workspace-root policy and a separately contained package cwd.
+pub fn prepare_execution_request_with_working_directory(
+    project_dir: &Path,
+    working_directory: &Path,
+    script_name: &str,
+    config: &RunConfig,
+    script: &str,
+    arguments: &[OsString],
+    host: HostExecutionEnvironment<'_>,
+) -> Result<PreparedExecution, RunPreparationError> {
     let project_dir =
         fs::canonicalize(project_dir).map_err(|_| RunPreparationError::InvalidProjectDirectory)?;
     if !project_dir.is_dir() {
@@ -173,6 +194,7 @@ pub fn prepare_execution_request(
         .trusted_node_runtime(&node_runtime)
         .allow_process_memory_stats(host.allow_process_memory_stats)
         .project_root(project_dir)
+        .working_directory(working_directory)
         .policy(policy)
         .envs(environment)
         .build()

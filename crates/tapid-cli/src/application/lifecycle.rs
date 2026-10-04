@@ -1,7 +1,10 @@
 use serde::Deserialize;
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
-use tapid_lockfile::{Lockfile, LockfilePackageSource};
+use tapid_lockfile::{Lockfile, LockfilePackageKey, LockfilePackageSource};
 use tapid_manifest::{DependencyKind, PackageManifest, Workspace};
 use tapid_registry_client::{HttpsTransport, JsrRegistry, NpmRegistry};
 use tapid_resolver::Requirement;
@@ -41,12 +44,6 @@ pub(crate) fn plan_add(
             .requirement
             .as_deref()
             .ok_or_else(|| format!("add requires a requirement for '{}'", mutation.name))?;
-        if requirement.starts_with("workspace:") {
-            return Err(format!(
-                "unsupported workspace dependency reference: {}@{}",
-                mutation.name, requirement
-            ));
-        }
         next = next
             .with_dependency_kind(mutation.kind, &mutation.name, requirement)
             .map_err(|error| format!("cannot add dependency '{}': {error}", mutation.name))?;
@@ -137,10 +134,16 @@ pub(crate) fn plan_update(
     })
 }
 
+pub(crate) struct WorkspaceSelection {
+    pub(crate) root_dir: PathBuf,
+    pub(crate) manifest_path: PathBuf,
+    pub(crate) manifest: PackageManifest,
+}
+
 pub(crate) fn resolve_workspace(
     project_dir: &Path,
     selector: Option<&str>,
-) -> Result<(std::path::PathBuf, PackageManifest), String> {
+) -> Result<WorkspaceSelection, String> {
     if selector.is_some_and(|value| value.starts_with("workspace:")) {
         return Err(
             "workspace protocol references are not implemented; refusing registry fallback"
@@ -149,51 +152,17 @@ pub(crate) fn resolve_workspace(
     }
     let workspace = Workspace::discover(project_dir)?;
     let manifest = workspace.select(selector)?.clone();
-    if selector.is_some() {
-        let member_names = workspace
-            .members()
-            .iter()
-            .map(|member| member.name())
-            .collect::<std::collections::BTreeSet<_>>();
-        for dependencies in [
-            manifest.dependencies(),
-            manifest.dev_dependencies(),
-            manifest.optional_dependencies(),
-            manifest.peer_dependencies(),
-        ] {
-            if let Some((name, requirement)) = dependencies
-                .iter()
-                .find(|(name, _)| member_names.contains(name.as_str()))
-            {
-                return Err(format!(
-                    "selected workspace member dependency {name}@{requirement} is not yet integrated with workspace linking; refusing registry fallback"
-                ));
-            }
-        }
-    }
-    for dependencies in [
-        manifest.dependencies(),
-        manifest.dev_dependencies(),
-        manifest.optional_dependencies(),
-        manifest.peer_dependencies(),
-    ] {
-        if let Some((name, requirement)) = dependencies
-            .iter()
-            .find(|(_, requirement)| requirement.starts_with("workspace:"))
-        {
-            return Err(format!(
-                "unsupported workspace dependency reference: {name}@{requirement}; workspace linking is not implemented"
-            ));
-        }
-    }
     let manifest_path = workspace.select_path(selector)?.to_path_buf();
-    Ok((
-        manifest_path
-            .parent()
-            .ok_or("workspace manifest has no parent directory")?
-            .to_path_buf(),
+    let root_dir = workspace
+        .root_path()
+        .parent()
+        .ok_or("workspace root manifest has no parent directory")?
+        .to_path_buf();
+    Ok(WorkspaceSelection {
+        root_dir,
+        manifest_path,
         manifest,
-    ))
+    })
 }
 
 pub(crate) fn format_outdated_entry(entry: &OutdatedEntry) -> String {
@@ -317,8 +286,9 @@ pub(crate) fn outdated_report(
     workspace_selector: Option<&str>,
     registry_fixture: Option<&Path>,
 ) -> Result<Vec<OutdatedEntry>, String> {
-    let (project_dir, mut manifest) = resolve_workspace(project_dir, workspace_selector)?;
-    let project_dir = project_dir.as_path();
+    let selection = resolve_workspace(project_dir, workspace_selector)?;
+    let project_dir = selection.root_dir.as_path();
+    let mut manifest = selection.manifest;
     let recovery_lock = if crate::filesystem::lifecycle_journal::has_pending(project_dir)? {
         Some(crate::filesystem::activation::ActivationLock::acquire(
             project_dir,
@@ -327,7 +297,7 @@ pub(crate) fn outdated_report(
         None
     };
     if recovery_lock.is_some() {
-        let recovered_manifest = fs::read_to_string(project_dir.join("package.json"))
+        let recovered_manifest = fs::read_to_string(&selection.manifest_path)
             .map_err(|error| format!("cannot read recovered package manifest: {error}"))?;
         manifest = PackageManifest::parse(&recovered_manifest)
             .map_err(|error| format!("invalid recovered package manifest: {error}"))?;
@@ -341,6 +311,16 @@ pub(crate) fn outdated_report(
         .packages_typed()
         .map_err(|error| format!("invalid lockfile package identity: {error}"))?;
     let direct_dependencies = direct_dependencies(&manifest);
+    let local_workspace_versions = Workspace::discover(project_dir)?
+        .members()
+        .iter()
+        .map(|member| {
+            (
+                member.name().to_owned(),
+                member.manifest().version().clone(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     drop(recovery_lock);
     let transport = if registry_fixture.is_none() {
         Some(
@@ -352,6 +332,40 @@ pub(crate) fn outdated_report(
     };
     let mut entries = Vec::new();
     for (identity, declared, kind) in direct_dependencies {
+        if let Some(local_version) = local_workspace_versions.get(&identity) {
+            let requirement = crate::online::workspace_requirement(&declared, local_version)?;
+            let compatible = requirement.matches(local_version);
+            let locked_version = lock
+                .workspace_packages()
+                .keys()
+                .filter_map(|key| key.parse::<LockfilePackageKey>().ok())
+                .filter(|key| {
+                    key.source
+                        .workspace()
+                        .is_some_and(|source| source.name() == identity)
+                })
+                .map(|key| key.version)
+                .max();
+            entries.push(OutdatedEntry {
+                identity,
+                kind: kind_name(kind).to_owned(),
+                declared: declared.clone(),
+                locked: locked_version.map(|version| version.to_string()),
+                newest_compatible: compatible.then(|| local_version.to_string()),
+                newest_available: Some(local_version.to_string()),
+                diagnostic: (!compatible).then(|| {
+                    format!(
+                        "local workspace version {local_version} does not satisfy declared range {declared}"
+                    )
+                }),
+            });
+            continue;
+        }
+        if declared.starts_with("workspace:") {
+            return Err(format!(
+                "workspace dependency '{identity}@{declared}' has no matching local workspace member; refusing registry fallback"
+            ));
+        }
         let (origin, package_name) = crate::online::dep_parts(&identity)?;
         let locked_version = locked
             .iter()
@@ -462,14 +476,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_workspace_protocol_as_a_registry_requirement() {
+    fn add_planner_preserves_workspace_protocol_for_workspace_preflight() {
         let mutation = DependencyMutation {
             name: "local-pkg".into(),
             requirement: Some("workspace:*".into()),
             kind: DependencyKind::Dependencies,
         };
-        let error = plan_add(&manifest(), &[mutation]).unwrap_err();
-        assert!(error.contains("workspace dependency reference"));
+        let plan = plan_add(&manifest(), &[mutation]).unwrap();
+        assert_eq!(plan.manifest.dependencies()["local-pkg"], "workspace:*");
     }
 
     #[test]

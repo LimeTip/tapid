@@ -18,7 +18,10 @@ pub use layout::{
     StagedActivationPlan, VerifiedTreeReference, plan_layout, plan_materialization,
 };
 pub use platform::{Capability, Platform, PlatformCapabilities};
-pub use shims::{ShimEntry, ShimPackage, ShimPlan, ShimStrategy, plan_shims};
+pub use shims::{
+    ShimEntry, ShimPackage, ShimPlan, ShimStrategy, WorkspaceShimPackage, plan_shims,
+    plan_shims_with_workspace_packages,
+};
 pub use workspace::{WorkspaceLink, WorkspaceLinkPlan, WorkspacePackage, plan_workspace_links};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

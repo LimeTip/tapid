@@ -1090,10 +1090,18 @@ pub(crate) fn validate_manifest_roots(
     workspace_root_resolution(manifest, &workspace).map(|_| ())
 }
 
+pub(crate) fn resolved_workspace_registry_dependencies(
+    manifest: &PackageManifest,
+    workspace: &WorkspaceMaterialization,
+) -> Result<Vec<WorkspaceRegistryDependency>, String> {
+    Ok(workspace_root_resolution(manifest, workspace)?.registry_dependencies)
+}
+
 struct WorkspaceRootResolution {
     roots: Vec<Dependency>,
     direct_root_identities: BTreeSet<(RegistryOrigin, PackageName)>,
     workspace_root_keys: Vec<String>,
+    registry_dependencies: Vec<WorkspaceRegistryDependency>,
     overrides: BTreeMap<PackageName, Requirement>,
 }
 
@@ -1104,6 +1112,7 @@ fn workspace_root_resolution(
     let overrides = manifest_overrides(manifest)?;
     let mut roots = Vec::new();
     let mut direct_root_identities = BTreeSet::new();
+    let mut registry_dependencies = Vec::with_capacity(workspace.registry_dependencies.len());
     let mut workspace_root_keys = workspace
         .locked
         .iter()
@@ -1120,6 +1129,16 @@ fn workspace_root_resolution(
                 if !requirement.matches(version) {
                     return Err(format!(
                         "workspace dependency '{name}@{range}' does not match local member version {version}"
+                    ));
+                }
+                let (registry, package) = dep_parts(name)?;
+                if registry.to_string() == NPM
+                    && overrides.get(&package).is_some_and(|override_requirement| {
+                        override_requirement.raw != requirement.raw
+                    })
+                {
+                    return Err(format!(
+                        "unsupported direct dependency override for '{package}': npm requires the override range to match the declared dependency range"
                     ));
                 }
                 workspace_root_keys.push(LockfilePackageKey::workspace(source.clone()).to_string());
@@ -1148,28 +1167,28 @@ fn workspace_root_resolution(
         }
     }
     for dependency in &workspace.registry_dependencies {
-        if dependency.registry.to_string() == NPM
-            && overrides
+        let requirement = if dependency.registry.to_string() == NPM {
+            overrides
                 .get(&dependency.package)
-                .is_some_and(|override_requirement| {
-                    override_requirement.raw != dependency.requirement.raw
-                })
-        {
-            return Err(format!(
-                "unsupported direct dependency override for '{}': npm requires the override range to match the declared dependency range",
-                dependency.package
-            ));
-        }
+                .cloned()
+                .unwrap_or_else(|| dependency.requirement.clone())
+        } else {
+            dependency.requirement.clone()
+        };
         roots.push(Dependency::new(
             dependency.registry.clone(),
             dependency.package.clone(),
-            dependency.requirement.clone(),
+            requirement.clone(),
         ));
+        let mut resolved_dependency = dependency.clone();
+        resolved_dependency.requirement = requirement;
+        registry_dependencies.push(resolved_dependency);
     }
     Ok(WorkspaceRootResolution {
         roots,
         direct_root_identities,
         workspace_root_keys,
+        registry_dependencies,
         overrides,
     })
 }
@@ -1186,13 +1205,14 @@ pub fn resolve_and_fetch(
         roots,
         direct_root_identities: root_registry_identities,
         workspace_root_keys,
+        registry_dependencies: workspace_registry_dependencies,
         overrides,
     } = workspace_root_resolution(manifest, &workspace)?;
     let WorkspaceMaterialization {
         links: workspace_links,
         locked: mut workspace_locked,
         members: _,
-        registry_dependencies: workspace_registry_dependencies,
+        registry_dependencies: _,
         peer_dependencies: workspace_peer_dependencies,
     } = workspace;
     let fixture = fixture_path.map(fixture).transpose()?;

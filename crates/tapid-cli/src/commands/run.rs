@@ -15,6 +15,9 @@ pub(crate) struct Args {
     /// Project directory containing package.json.
     #[arg(long, default_value = ".")]
     pub(crate) project_dir: PathBuf,
+    /// Select a workspace member by package name while retaining root policy and containment.
+    #[arg(long)]
+    pub(crate) workspace: Option<String>,
     /// Exact Node executable; otherwise the first valid Node on the host PATH is used.
     #[arg(long)]
     pub(crate) node_runtime: Option<PathBuf>,
@@ -59,12 +62,42 @@ pub(crate) fn run(args: Args) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let manifest = match super::manifest::read_manifest(&project_dir.join("package.json")) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("error: {error}");
+    let (manifest, working_directory) = if let Some(workspace_name) = args.workspace.as_deref() {
+        let workspace = match tapid_manifest::Workspace::discover(&project_dir) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let manifest = match workspace.select(Some(workspace_name)) {
+            Ok(manifest) => manifest.clone(),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let member_manifest = match workspace.select_path(Some(workspace_name)) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let Some(working_directory) = member_manifest.parent() else {
+            eprintln!("error: workspace member manifest has no parent");
             return ExitCode::from(1);
-        }
+        };
+        (manifest, working_directory.to_owned())
+    } else {
+        let manifest = match super::manifest::read_manifest(&project_dir.join("package.json")) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        (manifest, project_dir.clone())
     };
     let Some(script) = manifest.scripts().get(&args.script).cloned() else {
         eprintln!("error: root package script is missing: {}", args.script);
@@ -120,19 +153,37 @@ pub(crate) fn run(args: Args) -> ExitCode {
         .is_none()
         .then(|| env::var_os("PATH"))
         .flatten();
-    let prepared = match crate::run::prepare_execution_request(
-        &project_dir,
-        &args.script,
-        &config,
-        &script,
-        &args.arguments,
-        crate::run::HostExecutionEnvironment {
-            node_runtime: args.node_runtime.as_deref(),
-            path: host_path.as_deref(),
-            allowlisted: &ambient_environment,
-            allow_process_memory_stats: args.allow_process_memory_stats,
-        },
-    ) {
+    let prepared_result = if args.workspace.is_some() {
+        crate::run::prepare_execution_request_with_working_directory(
+            &project_dir,
+            &working_directory,
+            &args.script,
+            &config,
+            &script,
+            &args.arguments,
+            crate::run::HostExecutionEnvironment {
+                node_runtime: args.node_runtime.as_deref(),
+                path: host_path.as_deref(),
+                allowlisted: &ambient_environment,
+                allow_process_memory_stats: args.allow_process_memory_stats,
+            },
+        )
+    } else {
+        crate::run::prepare_execution_request(
+            &project_dir,
+            &args.script,
+            &config,
+            &script,
+            &args.arguments,
+            crate::run::HostExecutionEnvironment {
+                node_runtime: args.node_runtime.as_deref(),
+                path: host_path.as_deref(),
+                allowlisted: &ambient_environment,
+                allow_process_memory_stats: args.allow_process_memory_stats,
+            },
+        )
+    };
+    let prepared = match prepared_result {
         Ok(prepared) => prepared,
         Err(error) => {
             eprintln!("error: {error}");

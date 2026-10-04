@@ -11,6 +11,7 @@ fn local_workspace_source_has_a_canonical_identity_and_rejects_escape_paths() {
         "workspace:packages/web:@tapid/web@1.2.3".parse().unwrap()
     );
     assert!(LocalWorkspaceSource::new("../outside", "@tapid/web", "1.2.3").is_err());
+    assert!(LocalWorkspaceSource::new("packages/with|separator", "@tapid/web", "1.2.3").is_err());
 }
 
 #[test]

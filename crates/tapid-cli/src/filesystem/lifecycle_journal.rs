@@ -12,6 +12,8 @@ const MAX_JOURNAL_BYTES: u64 = 96 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 struct Record {
     version: u32,
+    #[serde(default = "default_manifest_path")]
+    manifest_path: String,
     owner: String,
     state: State,
     manifest_existed: bool,
@@ -21,6 +23,10 @@ struct Record {
     marker_existed: bool,
     node_modules_existed: bool,
     store_root: Option<String>,
+}
+
+fn default_manifest_path() -> String {
+    "package.json".to_owned()
 }
 
 #[derive(Serialize, Deserialize, PartialEq)]
@@ -34,9 +40,41 @@ pub(crate) struct LifecycleJournal {
     record: Record,
 }
 
+fn relative_manifest_path(project: &Path, manifest_path: &Path) -> Result<String, String> {
+    let project = fs::canonicalize(project)
+        .map_err(|error| format!("cannot resolve lifecycle project root: {error}"))?;
+    let candidate = if manifest_path.is_absolute() {
+        manifest_path.to_path_buf()
+    } else {
+        project.join(manifest_path)
+    };
+    let metadata = fs::symlink_metadata(&candidate)
+        .map_err(|error| format!("cannot inspect lifecycle manifest target: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err("lifecycle manifest target must be a regular, non-symlink file".into());
+    }
+    let canonical = fs::canonicalize(&candidate)
+        .map_err(|error| format!("cannot resolve lifecycle manifest target: {error}"))?;
+    let relative = canonical
+        .strip_prefix(&project)
+        .map_err(|_| "lifecycle manifest target escapes the project root")?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("lifecycle manifest target has an unsafe relative path".into());
+    }
+    relative
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "lifecycle manifest target path is not valid UTF-8".to_owned())
+}
+
 impl LifecycleJournal {
     pub(crate) fn begin(
         project: &Path,
+        manifest_path: &Path,
         owner: &str,
         manifest: &[u8],
         lock: Option<&[u8]>,
@@ -58,7 +96,8 @@ impl LifecycleJournal {
         let marker_existed = exists(project.join(".tapid-managed"))?;
         let node_modules_existed = exists(project.join("node_modules"))?;
         let record = Record {
-            version: 1,
+            version: 2,
+            manifest_path: relative_manifest_path(project, manifest_path)?,
             owner: owner.to_owned(),
             state: State::Prepared,
             manifest_existed: true,
@@ -210,12 +249,14 @@ pub(crate) fn recover(
         fs::read(&path).map_err(|error| format!("cannot read lifecycle journal: {error}"))?;
     let record: Record = serde_json::from_slice(&bytes)
         .map_err(|error| format!("refusing to recover a malformed lifecycle journal: {error}"))?;
-    if record.version != 1
+    if !matches!(record.version, 1 | 2)
+        || (record.version == 1 && record.manifest_path != "package.json")
         || !valid_owner(&record.owner)
         || stale_owner.is_some_and(|owner| record.owner != owner)
     {
         return Err("refusing to recover a lifecycle journal with invalid ownership".into());
     }
+    recovery_manifest_path(project, &record.manifest_path)?;
     if record.manifest.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES
         || record.lock.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES
     {
@@ -270,7 +311,8 @@ fn recover_record(project: &Path, record: &Record) -> Result<(), String> {
     let manifest = STANDARD
         .decode(&record.manifest)
         .map_err(|error| format!("invalid manifest bytes in lifecycle journal: {error}"))?;
-    atomic_replace(&project.join("package.json"), &manifest)?;
+    let manifest_path = recovery_manifest_path(project, &record.manifest_path)?;
+    atomic_replace(&manifest_path, &manifest)?;
     let lock_path = project.join("tapid.lock");
     if record.lock_existed {
         let lock = STANDARD
@@ -285,6 +327,42 @@ fn recover_record(project: &Path, record: &Record) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn recovery_manifest_path(project: &Path, relative: &str) -> Result<std::path::PathBuf, String> {
+    let relative = Path::new(relative);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("refusing to recover lifecycle manifest through an unsafe path".into());
+    }
+    let root = fs::canonicalize(project)
+        .map_err(|error| format!("cannot resolve lifecycle project root: {error}"))?;
+    let target = root.join(relative);
+    let parent = target
+        .parent()
+        .ok_or("lifecycle manifest path has no parent")?;
+    let canonical_parent = fs::canonicalize(parent)
+        .map_err(|error| format!("cannot resolve lifecycle manifest parent: {error}"))?;
+    if !canonical_parent.starts_with(&root) {
+        return Err("refusing to recover lifecycle manifest outside project root".into());
+    }
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err("refusing to recover lifecycle manifest over a non-regular file".into());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect lifecycle manifest during recovery: {error}"
+            ));
+        }
+    }
+    Ok(target)
 }
 
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -450,7 +528,14 @@ mod tests {
         let lock = vec![b'x'; 25 * 1024 * 1024];
         fs::write(project.join("package.json"), b"current manifest").unwrap();
 
-        let journal = LifecycleJournal::begin(&project, owner, manifest, Some(&lock)).unwrap();
+        let journal = LifecycleJournal::begin(
+            &project,
+            &project.join("package.json"),
+            owner,
+            manifest,
+            Some(&lock),
+        )
+        .unwrap();
         std::mem::forget(journal);
         assert!(has_pending(&project).unwrap());
         let decision = recover(&project, Some(owner)).unwrap().unwrap();
@@ -458,6 +543,44 @@ mod tests {
         assert!(!decision.committed);
         assert_eq!(fs::read(project.join("package.json")).unwrap(), manifest);
         assert_eq!(fs::read(project.join("tapid.lock")).unwrap(), lock);
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn interrupted_selected_member_transaction_restores_only_that_manifest() {
+        let project = std::env::temp_dir().join(format!(
+            "tapid-journal-member-recovery-{}-{}",
+            std::process::id(),
+            crate::filesystem::atomic::unique_nonce()
+        ));
+        let member_dir = project.join("packages/news");
+        fs::create_dir_all(&member_dir).unwrap();
+        let root_manifest = br#"{"name":"root","version":"1.0.0"}"#;
+        let original_member = br#"{"name":"news","version":"1.0.0"}"#;
+        let interrupted_member =
+            br#"{"name":"news","version":"1.0.0","dependencies":{"local":"1.0.0"}}"#;
+        let root_manifest_path = project.join("package.json");
+        let member_manifest_path = member_dir.join("package.json");
+        fs::write(&root_manifest_path, root_manifest).unwrap();
+        fs::write(&member_manifest_path, original_member).unwrap();
+        let owner = "123-deadbeef\n";
+
+        let journal = LifecycleJournal::begin(
+            &project,
+            &member_manifest_path,
+            owner,
+            original_member,
+            None,
+        )
+        .unwrap();
+        fs::write(&member_manifest_path, interrupted_member).unwrap();
+        std::mem::forget(journal);
+
+        let decision = recover(&project, Some(owner)).unwrap().unwrap();
+        assert!(!decision.committed);
+        assert_eq!(fs::read(&root_manifest_path).unwrap(), root_manifest);
+        assert_eq!(fs::read(&member_manifest_path).unwrap(), original_member);
+        finish_recovery(&project).unwrap();
         let _ = fs::remove_dir_all(project);
     }
 
@@ -475,6 +598,7 @@ mod tests {
         let backup = project.join(JOURNAL).with_extension("lifecycle.bak");
         let record = Record {
             version: 1,
+            manifest_path: "package.json".to_owned(),
             owner: owner.to_owned(),
             state: State::Prepared,
             manifest_existed: true,
@@ -513,6 +637,7 @@ mod tests {
         fs::write(project.join("package.json"), b"committed manifest").unwrap();
         let prepared = Record {
             version: 1,
+            manifest_path: "package.json".to_owned(),
             owner: owner.to_owned(),
             state: State::Prepared,
             manifest_existed: true,
@@ -525,6 +650,7 @@ mod tests {
         };
         let committed = Record {
             version: prepared.version,
+            manifest_path: prepared.manifest_path.clone(),
             owner: prepared.owner.clone(),
             state: State::Committed,
             manifest_existed: prepared.manifest_existed,
@@ -566,6 +692,7 @@ mod tests {
         fs::write(project.join("package.json"), committed_manifest).unwrap();
         let prepared = Record {
             version: 1,
+            manifest_path: "package.json".to_owned(),
             owner: owner.to_owned(),
             state: State::Prepared,
             manifest_existed: true,
@@ -578,6 +705,7 @@ mod tests {
         };
         let mut committed = Record {
             version: prepared.version,
+            manifest_path: prepared.manifest_path.clone(),
             owner: prepared.owner.clone(),
             state: State::Committed,
             manifest_existed: prepared.manifest_existed,

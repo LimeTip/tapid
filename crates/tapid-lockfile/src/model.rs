@@ -239,7 +239,11 @@ impl std::str::FromStr for LocalWorkspaceSource {
 }
 
 fn canonical_workspace_path(value: &str) -> Result<String, LockfileError> {
-    if value.is_empty() || value.contains('\\') || value.chars().any(char::is_control) {
+    if value.is_empty()
+        || value.contains('\\')
+        || value.contains('|')
+        || value.chars().any(char::is_control)
+    {
         return Err(LockfileError::InvalidWorkspaceSource(value.to_owned()));
     }
     let path = std::path::Path::new(value);

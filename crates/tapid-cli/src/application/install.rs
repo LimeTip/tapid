@@ -150,6 +150,31 @@ pub(crate) fn run_with_manifest(
     allow_unverified_registry_artifacts: bool,
     report_replay_progress: impl FnMut(usize, usize),
 ) -> Result<InstallReport, String> {
+    run_with_manifest_target(
+        project_dir,
+        &project_dir.join("package.json"),
+        manifest_override,
+        package,
+        store_root,
+        mode,
+        registry_fixture,
+        allow_unverified_registry_artifacts,
+        report_replay_progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_manifest_target(
+    project_dir: &Path,
+    target_manifest_path: &Path,
+    manifest_override: Option<&PackageManifest>,
+    package: Option<&str>,
+    store_root: Option<&Path>,
+    mode: InstallMode,
+    registry_fixture: Option<&Path>,
+    allow_unverified_registry_artifacts: bool,
+    report_replay_progress: impl FnMut(usize, usize),
+) -> Result<InstallReport, String> {
     let offline = matches!(mode, InstallMode::Offline);
     let frozen = matches!(mode, InstallMode::Frozen);
     if package.is_some() && (offline || frozen) {
@@ -176,6 +201,21 @@ pub(crate) fn run_with_manifest(
             ));
         }
     };
+    let target_candidate = if target_manifest_path.is_absolute() {
+        target_manifest_path.to_path_buf()
+    } else {
+        project_dir.join(target_manifest_path)
+    };
+    let target_metadata = fs::symlink_metadata(&target_candidate)
+        .map_err(|error| format!("cannot inspect target package.json: {error}"))?;
+    if !target_metadata.file_type().is_file() {
+        return Err("target package.json must be a regular, non-symlink file".to_owned());
+    }
+    let manifest_path = fs::canonicalize(&target_candidate)
+        .map_err(|error| format!("cannot resolve target package.json: {error}"))?;
+    if !manifest_path.starts_with(&project_dir) {
+        return Err("target package.json must be contained beneath workspace root".to_owned());
+    }
     let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
     online::validate_manifest_roots(&project_dir, &preflight_manifest)?;
     if let Some(updated) = manifest_override {
@@ -199,11 +239,10 @@ pub(crate) fn run_with_manifest(
             replayed: false,
         });
     }
-    let current_manifest = read_manifest(&project_dir.join("package.json"))?;
-    let manifest_path = project_dir.join("package.json");
+    let current_manifest = read_manifest(&manifest_path)?;
     let lock_path = project_dir.join("tapid.lock");
     let original_manifest = fs::read(&manifest_path)
-        .map_err(|error| format!("cannot preserve package.json for recovery: {error}"))?;
+        .map_err(|error| format!("cannot preserve target package.json for recovery: {error}"))?;
     let original_lock = match fs::read(&lock_path) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -215,6 +254,7 @@ pub(crate) fn run_with_manifest(
         Some(
             crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
                 &project_dir,
+                &manifest_path,
                 activation_lock.owner_line(),
                 &original_manifest,
                 original_lock.as_deref(),
@@ -224,7 +264,7 @@ pub(crate) fn run_with_manifest(
         None
     };
     let mut manifest_transaction = None;
-    let manifest = if let Some(updated) = manifest_override {
+    if let Some(updated) = manifest_override {
         if package.is_some() {
             return Err("cannot combine a manifest override with a package argument".to_owned());
         }
@@ -234,7 +274,6 @@ pub(crate) fn run_with_manifest(
             .write(&updated.to_json())
             .map_err(|error| format!("cannot update package.json: {error}"))?;
         manifest_transaction = Some(transaction);
-        updated.clone()
     } else if let Some(spec) = package {
         let (name, requirement) = package_spec::parse(spec);
         let updated = current_manifest
@@ -246,10 +285,8 @@ pub(crate) fn run_with_manifest(
             .write(&updated.to_json())
             .map_err(|error| format!("cannot update package.json: {error}"))?;
         manifest_transaction = Some(transaction);
-        updated
-    } else {
-        current_manifest
-    };
+    }
+    let manifest = read_manifest(&project_dir.join("package.json"))?;
     if !offline && !frozen {
         let store = Store::new(match store_root {
             Some(path) => path.to_owned(),
@@ -267,6 +304,7 @@ pub(crate) fn run_with_manifest(
             lifecycle_journal = Some(
                 crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
                     &project_dir,
+                    &manifest_path,
                     activation_lock.owner_line(),
                     &original_manifest,
                     original_lock.as_deref(),
@@ -398,7 +436,9 @@ pub(crate) fn run_with_manifest(
     if current_workspace != locked_workspace {
         return Err("workspace membership or member manifest changed; regenerate tapid.lock with an online install".to_owned());
     }
-    validate_workspace_dependency_edges(&workspace, &lock)?;
+    let workspace_registry_dependencies =
+        online::resolved_workspace_registry_dependencies(&manifest, &workspace)?;
+    validate_workspace_dependency_edges(&workspace, &workspace_registry_dependencies, &lock)?;
     let store = Store::new(match store_root {
         Some(path) => path.to_owned(),
         None => default_store_root()?,
@@ -415,7 +455,7 @@ pub(crate) fn run_with_manifest(
         &project_dir,
         input,
         trees,
-        online::workspace_materialization(&project_dir)?.links,
+        workspace.links,
         true,
         &activation_lock,
         lifecycle_journal.is_some(),
@@ -435,6 +475,7 @@ pub(crate) fn run_with_manifest(
 
 fn validate_workspace_dependency_edges(
     workspace: &online::WorkspaceMaterialization,
+    registry_dependencies: &[online::WorkspaceRegistryDependency],
     lock: &Lockfile,
 ) -> Result<(), String> {
     for current in &workspace.locked {
@@ -462,8 +503,7 @@ fn validate_workspace_dependency_edges(
                 ));
             }
         }
-        for dependency in workspace
-            .registry_dependencies
+        for dependency in registry_dependencies
             .iter()
             .filter(|dependency| dependency.member_key == key)
         {
@@ -598,11 +638,18 @@ fn materialize_with_lock(
         &workspace_links,
     )
     .and_then(|_| {
-        crate::filesystem::activation::activate_node_modules_with_lock(
+        crate::filesystem::activation::activate_node_modules_with_preflight(
             project_dir,
             &stage,
             activation_lock,
             preserve_previous,
+            || {
+                crate::filesystem::tree::validate_workspace_links(
+                    project_dir,
+                    &stage,
+                    &workspace_links,
+                )
+            },
         )
     });
     if replayed {

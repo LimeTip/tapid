@@ -88,6 +88,24 @@ impl Workspace {
                     path.display()
                 ));
             }
+            let member_root = canonical
+                .parent()
+                .ok_or_else(|| "workspace member manifest has no parent".to_owned())?;
+            let relative_member_root = member_root.strip_prefix(&project_dir).map_err(|_| {
+                format!(
+                    "workspace member escapes workspace root: {}",
+                    path.display()
+                )
+            })?;
+            if relative_member_root
+                .components()
+                .any(|component| component.as_os_str() == "node_modules")
+            {
+                return Err(format!(
+                    "workspace member may not be inside root node_modules: {}",
+                    member_root.display()
+                ));
+            }
             let text = read_file(&canonical)?;
             let manifest = PackageManifest::parse(&text).map_err(|error| {
                 format!("invalid workspace member {}: {error}", canonical.display())
