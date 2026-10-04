@@ -71,7 +71,8 @@ const PRIVATE_REPORT_SETUP_ERROR: u32 = 2;
 const PRIVATE_REPORT_EXEC_ERROR: u32 = 3;
 const LIMITATIONS: &[&str] = &[
     "Landlock grants use path bindings checked against held filesystem identities before setup",
-    "configured process-count and memory limits require an explicitly delegated cgroup v2 subtree named by TAPID_CGROUP_ROOT; the backend reads back pids.max and memory.max, requires local pids.events.local and memory.events.local counters for accurate per-execution attribution, and uses cgroup.kill plus PID-namespace teardown for cleanup",
+    "process-count and memory limits require a delegated cgroup v2 subtree named by TAPID_CGROUP_ROOT; the backend reads back pids.max and memory.max to verify each limit",
+    "per-execution limit attribution requires pids.events.local and memory.events.local; cleanup uses cgroup.kill and PID-namespace teardown",
     "mount namespace setup leaves existing root propagation unchanged and is supported only when the root mount has no shared propagation group",
     "network-disabled policy denies Internet socket creation, connection, binding, listening, accepts, sendto, and recvfrom; AF_UNIX socketpairs with sendmsg/recvmsg and shutdown remain available for local runtime IPC; enabled networking is unrestricted",
     "Restricted does not own or guarantee cleanup of detached descendants; ManagedTree cleanup relies on the kernel PID namespace boundary",

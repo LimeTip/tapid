@@ -78,6 +78,18 @@ fn fails_closed_for_unavailable_kernel_enforcement(request: &ExecutionRequest) -
 }
 
 #[test]
+fn linux_evidence_limitations_fit_backend_metadata_bound() {
+    for limitation in LIMITATIONS {
+        assert!(
+            limitation.len() <= super::super::MAX_BACKEND_IDENTITY_BYTES,
+            "Linux evidence limitation is {} bytes; maximum is {}: {limitation}",
+            limitation.len(),
+            super::super::MAX_BACKEND_IDENTITY_BYTES,
+        );
+    }
+}
+
+#[test]
 fn network_denial_preserves_unix_ipc_but_blocks_inet_socket_creation() {
     let root = root();
     let request = request(&root, "exit 0", restricted(&root, vec![], true));
