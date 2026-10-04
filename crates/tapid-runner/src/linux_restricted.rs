@@ -891,6 +891,18 @@ fn duplicate_fd_above_private_range(fd: libc::c_int) -> Result<OwnedFd, Executio
     Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
 }
 
+fn set_supervisor_parent_death_signal(expected_parent_pid: libc::pid_t) -> io::Result<()> {
+    // SAFETY: prctl receives only scalar arguments and is async-signal-safe in Command::pre_exec.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: getppid is async-signal-safe and has no pointer arguments.
+    if unsafe { libc::getppid() } != expected_parent_pid {
+        return Err(io::Error::from_raw_os_error(libc::EINTR));
+    }
+    Ok(())
+}
+
 fn private_memory_stats_command(
     request: &ExecutionRequest,
     ruleset: &OwnedFd,
@@ -951,9 +963,12 @@ fn private_memory_stats_command(
     let ruleset_source = ruleset_copy.as_raw_fd();
     let report_source = report_copy.as_raw_fd();
     let cgroup_source = cgroup_copy.as_ref().map_or(-1, |fd| fd.as_raw_fd());
+    // SAFETY: getpid has no pointer arguments or memory-safety preconditions.
+    let supervisor_parent_pid = unsafe { libc::getpid() };
     unsafe {
         command.pre_exec(move || {
             let _keep_open = (&ruleset_copy, &report_copy, &cgroup_copy);
+            set_supervisor_parent_death_signal(supervisor_parent_pid)?;
             if libc::dup2(ruleset_source, LANDLOCK_RULESET_FD) < 0
                 || libc::dup2(report_source, PRIVATE_REPORT_FD) < 0
                 || (cgroup_source >= 0 && libc::dup2(cgroup_source, CGROUP_PROCS_FD) < 0)
@@ -2229,6 +2244,83 @@ mod tests {
         assert!(
             !marker.exists(),
             "timed-out descendant survived the kernel cleanup boundary"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn supervisor_parent_death_signal_owner_helper() {
+        let (Ok(marker), Ok(ready)) = (
+            std::env::var("TAPID_PARENT_DEATH_TEST_MARKER"),
+            std::env::var("TAPID_PARENT_DEATH_TEST_READY"),
+        ) else {
+            return;
+        };
+        let Ok(unshare) = locate_unshare() else {
+            std::process::exit(77);
+        };
+        // SAFETY: getpid has no pointer arguments or memory-safety preconditions.
+        let parent_pid = unsafe { libc::getpid() };
+        let mut command = Command::new(unshare);
+        command
+            .args(unshare_namespace_arguments(
+                !has_effective_sys_admin(),
+                false,
+            ))
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg("printf ready > \"$1\"; sleep 2; printf survived > \"$2\"")
+            .arg("tapid-parent-death")
+            .arg(&ready)
+            .arg(&marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || set_supervisor_parent_death_signal(parent_pid));
+        }
+        let mut child = command.spawn().unwrap();
+        let ready_deadline = Instant::now() + Duration::from_secs(2);
+        while !Path::new(&ready).exists() && Instant::now() < ready_deadline {
+            if child.try_wait().unwrap().is_some() {
+                std::process::exit(77);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !Path::new(&ready).exists() {
+            std::process::exit(77);
+        }
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn supervisor_parent_death_signal_kills_namespace_tree_after_owner_exits() {
+        let root = root();
+        let marker = root.join("survived-parent-death");
+        let ready = root.join("namespace-ready");
+        let mut owner = Command::new(std::env::current_exe().unwrap())
+            .arg("supervisor_parent_death_signal_owner_helper")
+            .env("TAPID_PARENT_DEATH_TEST_MARKER", &marker)
+            .env("TAPID_PARENT_DEATH_TEST_READY", &ready)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = owner.wait().unwrap();
+        if status.code() == Some(77) && std::env::var_os("TAPID_REQUIRE_NAMESPACE_TESTS").is_none()
+        {
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        assert!(
+            status.success(),
+            "namespace setup failed in the required test lane"
+        );
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(
+            !marker.exists(),
+            "the namespace workload survived its Tapid supervisor"
         );
         fs::remove_dir_all(root).unwrap();
     }

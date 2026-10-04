@@ -42,6 +42,7 @@ printf '+memory +pids\n' > "$delegation_root/cgroup.subtree_control"
 printf '+memory +pids\n' > "$delegation_root/workloads/cgroup.subtree_control"
 export TAPID_CGROUP_ROOT="$delegation_root/workloads"
 export TAPID_REQUIRE_CGROUP_TESTS=1
+export TAPID_REQUIRE_NAMESPACE_TESTS=1
 
 mkdir -p /tmp/tapid-cargo /tmp/tapid-rustup /tmp/tapid-target
 
