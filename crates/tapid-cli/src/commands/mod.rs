@@ -30,7 +30,7 @@ pub(crate) enum Command {
     Run(run::Args),
 
     /// Install dependencies, optionally adding one package first.
-    #[command(alias = "i")]
+    #[command(visible_alias = "i")]
     Install(install::Args),
     /// Add direct dependencies and resolve the resulting graph.
     Add(lifecycle::AddArgs),
