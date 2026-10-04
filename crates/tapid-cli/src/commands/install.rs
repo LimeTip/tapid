@@ -43,11 +43,6 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
 
 /// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
 pub(crate) fn run(args: Args) -> ExitCode {
-    if args.allow_unverified_registry_artifacts && !args.offline && !args.frozen {
-        eprintln!(
-            "warning: npm artifacts without registry integrity are not authenticated against a registry-declared digest"
-        );
-    }
     let mode = if args.offline {
         crate::application::install::InstallMode::Offline
     } else if args.frozen {
@@ -66,6 +61,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
     );
     match result {
         Ok(report) => {
+            crate::output::report_warnings(&report.outcome.warnings);
             if report.replayed {
                 println!("Replayed lockfile: {} package(s)", report.package_count);
             } else {
@@ -74,7 +70,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("error: {error}");
+            crate::output::report_failure(&error);
             ExitCode::from(1)
         }
     }

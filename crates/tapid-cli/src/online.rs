@@ -1,3 +1,4 @@
+use crate::application::outcome::{ErrorKind, OperationalError};
 mod resolution;
 use resolution::resolve_with_fetch_routed_and_overrides;
 #[cfg(test)]
@@ -146,13 +147,16 @@ fn remote_records(
     registry: &RegistryOrigin,
     name: &PackageName,
     allow_missing_integrity: bool,
-) -> Result<Vec<PackageRecord>, String> {
+) -> Result<Vec<PackageRecord>, OperationalError> {
     if registry.to_string() != JSR {
         let route = registry_config.route(name.as_str())?;
         if route.origin != *registry {
-            return Err(format!(
-                "registry identity mismatch for package {name}: selected {}, requested {registry}",
-                route.origin
+            return Err(OperationalError::new(
+                ErrorKind::RegistryConfiguration,
+                format!(
+                    "registry identity mismatch for package {name}: selected {}, requested {registry}",
+                    route.origin
+                ),
             ));
         }
     }
@@ -162,7 +166,9 @@ fn remote_records(
         NpmRegistry::new(transport, registry.clone())
             .fetch_with_options(&name.to_string(), allow_missing_integrity)
     }
-    .map_err(|e| format!("cannot fetch metadata for {registry}:{name}: {e}"))?;
+    .map_err(|e| {
+        OperationalError::from(e).context(format!("cannot fetch metadata for {registry}:{name}"))
+    })?;
     Ok(artifacts
         .into_iter()
         .map(|a| PackageRecord {
@@ -252,9 +258,12 @@ pub fn resolve_and_fetch(
         BTreeMap<String, PathBuf>,
         StoreTransaction,
     ),
-    String,
+    OperationalError,
 > {
-    let fixture = fixture_path.map(fixture).transpose()?;
+    let fixture = fixture_path
+        .map(fixture)
+        .transpose()
+        .map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))?;
     let mut fixture_records = BTreeMap::<(String, String, String), PackageRecord>::new();
     if let Some(f) = &fixture {
         for p in &f.packages {
@@ -279,9 +288,12 @@ pub fn resolve_and_fetch(
                 })
                 .transpose()?;
             if registry.to_string() == NPM && integrity.is_none() && !allow_missing_integrity {
-                return Err(format!(
-                    "fixture npm metadata for {}@{} is missing dist.integrity; pass --allow-unverified-registry-artifacts for an explicit compatibility exception",
-                    name, version
+                return Err(OperationalError::new(
+                    ErrorKind::RegistryMetadata,
+                    format!(
+                        "fixture npm metadata for {}@{} is missing dist.integrity; pass --allow-unverified-registry-artifacts for an explicit compatibility exception",
+                        name, version
+                    ),
                 ));
             }
             fixture_records.insert(
@@ -302,8 +314,10 @@ pub fn resolve_and_fetch(
             );
         }
     }
-    let overrides = manifest_overrides(manifest)?;
-    let roots = manifest_roots(manifest)?
+    let overrides = manifest_overrides(manifest)
+        .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+    let roots = manifest_roots(manifest)
+        .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?
         .into_iter()
         .map(|dependency| {
             if dependency.registry.to_string() == JSR {
@@ -351,12 +365,14 @@ pub fn resolve_and_fetch(
         },
     )?;
 
-    store
-        .recover_transactions()
-        .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
-    fs::create_dir_all(store.root()).map_err(|e| format!("cannot create store: {e}"))?;
+    store.recover_transactions().map_err(|error| {
+        OperationalError::from(error).context("cannot prepare shared store for recovery")
+    })?;
+    fs::create_dir_all(store.root()).map_err(|e| {
+        OperationalError::from_source(ErrorKind::Store, e).context("cannot create store")
+    })?;
     let mut store_transaction = store.transaction();
-    let mut lock = Lockfile::new(&root_digest(project)?).map_err(|e| e.to_string())?;
+    let mut lock = Lockfile::new(&root_digest(project)?).map_err(OperationalError::from)?;
     let empty_peer = tapid_core::PeerContext::default();
     let mut platform_contexts = BTreeMap::new();
     let mut packages = BTreeMap::new();
@@ -430,9 +446,15 @@ pub fn resolve_and_fetch(
                 NpmRegistry::new(transport, record.registry.clone())
                     .download_artifact(&record.artifact)
             }
-            .map_err(|e| format!("cannot download {}: {e}", id))?;
+            .map_err(|e| {
+                OperationalError::from_source(ErrorKind::RegistryTransport, e)
+                    .context(format!("cannot download {id}"))
+            })?;
             if response.status != 200 {
-                return Err(format!("cannot download {}: HTTP {}", id, response.status));
+                return Err(OperationalError::new(
+                    ErrorKind::RegistryTransport,
+                    format!("cannot download {}: HTTP {}", id, response.status),
+                ));
             }
             response.body
         };
@@ -442,7 +464,10 @@ pub fn resolve_and_fetch(
             .as_ref()
             .is_some_and(|expected| !integrity_matches(expected, &actual))
         {
-            return Err(format!("integrity mismatch for {}", id));
+            return Err(OperationalError::new(
+                ErrorKind::Integrity,
+                format!("integrity mismatch for {id}"),
+            ));
         }
         let temp_id = NEXT_TEMP_TREE_ID.fetch_add(1, Ordering::Relaxed);
         let temp = store.root().join(format!(
@@ -457,14 +482,17 @@ pub fn resolve_and_fetch(
             &temp,
             ArchiveLimits::default(),
         )
-        .map_err(|e| format!("cannot extract {id}: {e}"))?;
+        .map_err(|e| {
+            OperationalError::from_source(ErrorKind::Archive, e)
+                .context(format!("cannot extract {id}"))
+        })?;
         let tree_digest: ArtifactDigest = canonical_tree_digest(&temp)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| OperationalError::from_source(ErrorKind::Archive, e))?
             .parse()
             .map_err(|e: tapid_core::DomainError| e.to_string())?;
         let tree = store_transaction
             .stage_verified_tree(&tree_digest, &temp)
-            .map_err(|e| e.to_string())?;
+            .map_err(OperationalError::from)?;
         let key = LockfilePackageKey::new(
             id.registry.clone(),
             id.name.clone(),
@@ -542,8 +570,10 @@ pub fn resolve_and_fetch(
             Ok(locked)
         })
         .collect();
-    lock.insert_packages(locked_packages?)
-        .map_err(|e| e.to_string())?;
+    lock.insert_packages(
+        locked_packages.map_err(|e| OperationalError::new(ErrorKind::Lockfile, e))?,
+    )
+    .map_err(|e| e.to_string())?;
     lock.set_roots(resolution.roots.iter().map(|id| {
         let platform = platform_contexts
             .get(id)

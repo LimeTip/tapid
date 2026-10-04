@@ -1,3 +1,4 @@
+use crate::application::outcome::{ErrorKind, OperationalError};
 use serde::Deserialize;
 use std::{collections::BTreeMap, env};
 use tapid_core::{PackageName, RegistryOrigin};
@@ -173,7 +174,7 @@ impl RegistryConfig {
         Ok((origin, package))
     }
 
-    pub(crate) fn route(&self, package: &str) -> Result<RegistryRoute, String> {
+    pub(crate) fn route(&self, package: &str) -> Result<RegistryRoute, OperationalError> {
         self.route_with_env(package, |name| env::var(name).ok())
     }
 
@@ -181,17 +182,21 @@ impl RegistryConfig {
         &self,
         package: &str,
         mut read_env: impl FnMut(&str) -> Option<String>,
-    ) -> Result<RegistryRoute, String> {
-        let entry = self.selected_entry(package)?;
-        let origin = self.origin_for(package)?;
-        let policy = self.policy_for(package)?;
+    ) -> Result<RegistryRoute, OperationalError> {
+        let entry = self
+            .selected_entry(package)
+            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+        let origin = self
+            .origin_for(package)
+            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+        let policy = self
+            .policy_for(package)
+            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let token = if let Some(variable) = entry.and_then(|entry| entry.token_env.as_deref()) {
             let value = read_env(variable)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| {
-                    format!(
-                        "required registry credential environment variable {variable} is missing or empty"
-                    )
+                    OperationalError::new(ErrorKind::RegistryCredentialMissing, format!("required registry credential environment variable {variable} is missing or empty"))
                 })?;
             Some(value)
         } else {
@@ -219,7 +224,9 @@ impl RegistryConfig {
     ) -> Result<Vec<(String, String)>, String> {
         let mut credentials = BTreeMap::new();
         for package in packages {
-            let route = self.route_with_env(package, &mut read_env)?;
+            let route = self
+                .route_with_env(package, &mut read_env)
+                .map_err(|error| error.to_string())?;
             if let Some(token) = route.token {
                 insert_credential(&mut credentials, route.origin.to_string(), token)?;
             }
@@ -417,13 +424,15 @@ environment=['ACME_TOKEN']
             .route_with_env("@acme/widget", |_| None)
             .err()
             .unwrap();
-        assert!(missing.contains("TAPID_ACME_TOKEN"));
-        assert!(!missing.contains("secret"));
+        assert_eq!(missing.kind, ErrorKind::RegistryCredentialMissing);
+        assert!(missing.to_string().contains("TAPID_ACME_TOKEN"));
+        assert!(!missing.to_string().contains("secret"));
         let empty = config
             .route_with_env("@acme/widget", |_| Some(String::new()))
             .err()
             .unwrap();
-        assert!(empty.contains("empty"));
+        assert_eq!(empty.kind, ErrorKind::RegistryCredentialMissing);
+        assert!(empty.to_string().contains("empty"));
     }
 
     #[test]

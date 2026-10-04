@@ -1,4 +1,5 @@
 //! Metadata normalization, overrides, and incremental dependency graph resolution.
+use crate::application::outcome::{ErrorKind, OperationalError};
 
 use super::*;
 
@@ -312,7 +313,7 @@ fn report_metadata_progress(fetches: usize) {
 #[cfg(test)]
 pub(super) fn resolve_with_fetch<F>(
     roots: &[Dependency],
-    fetch: F,
+    mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
@@ -321,33 +322,55 @@ where
         roots,
         |parent, _| Ok(parent.clone()),
         &BTreeMap::new(),
-        fetch,
+        |registry, name| {
+            fetch(registry, name)
+                .map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))
+        },
     )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 pub(super) fn resolve_with_overrides<F>(
     roots: &[Dependency],
     overrides: &BTreeMap<PackageName, Requirement>,
-    fetch: F,
+    mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
-    resolve_with_fetch_routed_and_overrides(roots, |parent, _| Ok(parent.clone()), overrides, fetch)
+    resolve_with_fetch_routed_and_overrides(
+        roots,
+        |parent, _| Ok(parent.clone()),
+        overrides,
+        |registry, name| {
+            fetch(registry, name)
+                .map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 pub(super) fn resolve_with_fetch_routed<R, F>(
     roots: &[Dependency],
     registry_for_dependency: R,
-    fetch: F,
+    mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
     R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
-    resolve_with_fetch_routed_and_overrides(roots, registry_for_dependency, &BTreeMap::new(), fetch)
+    resolve_with_fetch_routed_and_overrides(
+        roots,
+        registry_for_dependency,
+        &BTreeMap::new(),
+        |registry, name| {
+            fetch(registry, name)
+                .map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub(super) fn resolve_with_fetch_routed_and_overrides<R, F>(
@@ -355,10 +378,10 @@ pub(super) fn resolve_with_fetch_routed_and_overrides<R, F>(
     mut registry_for_dependency: R,
     overrides: &BTreeMap<PackageName, Requirement>,
     mut fetch: F,
-) -> Result<ResolvedRecords, String>
+) -> Result<ResolvedRecords, OperationalError>
 where
     R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
-    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
 {
     let mut fetched = BTreeSet::<(String, String)>::new();
     let mut records = BTreeMap::<PackageRecordKey, PackageRecord>::new();
@@ -428,9 +451,12 @@ where
                             "resolution failed: metadata for {registry}:{name} remains unavailable"
                         );
                         return if discarded.is_empty() {
-                            Err(error)
+                            Err(OperationalError::new(ErrorKind::Resolution, error))
                         } else {
-                            Err(format!("{error}; {discarded}"))
+                            Err(OperationalError::new(
+                                ErrorKind::Resolution,
+                                format!("{error}; {discarded}"),
+                            ))
                         };
                     }
                     report_metadata_progress(fetched.len());
@@ -463,9 +489,10 @@ where
                 if !fetched.insert(key) {
                     let discarded = discarded_version_diagnostics(&normalized, &registry, &name);
                     return if discarded.is_empty() {
-                        Err(format!("resolution failed: {error}"))
+                        Err(OperationalError::from(error).context("resolution failed"))
                     } else {
-                        Err(format!("resolution failed: {error}; {discarded}"))
+                        Err(OperationalError::from(error)
+                            .context(format!("resolution failed; {discarded}")))
                     };
                 }
                 report_metadata_progress(fetched.len());
@@ -484,7 +511,7 @@ where
                     &mut registry_for_dependency,
                 )?;
             }
-            Err(error) => return Err(format!("resolution failed: {error}")),
+            Err(error) => return Err(OperationalError::from(error).context("resolution failed")),
         }
     }
 }
