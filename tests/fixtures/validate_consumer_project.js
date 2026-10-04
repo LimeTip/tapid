@@ -19,11 +19,13 @@ const binary = args.length ? path.resolve(args[1]) :
 const releaseContracts = new Map([
   ['v0.0.9', 'legacy-uncontained'],
   ['v0.0.10', 'native-restricted'],
+  ['v0.0.11', 'native-restricted-linux'],
 ]);
 const releaseTag = args[3];
 assert.ok(!releaseTag || releaseContracts.has(releaseTag), 'unreviewed root-script release');
 const legacy = releaseTag && releaseContracts.get(releaseTag) === 'legacy-uncontained';
-const nativeRestricted = !legacy && (process.platform === 'darwin' || (!releaseTag && process.platform === 'linux'));
+const nativeRestricted = !legacy && (process.platform === 'darwin' ||
+  (process.platform === 'linux' && (!releaseTag || releaseContracts.get(releaseTag) === 'native-restricted-linux')));
 const lifecycleMarker = path.join(project, 'LIFECYCLE_SHOULD_NOT_RUN');
 const startMarker = 'TAPID_FIXTURE_STARTED=';
 assert.ok(['darwin', 'linux', 'win32'].includes(process.platform), 'unsupported validation host');

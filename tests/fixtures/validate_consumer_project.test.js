@@ -19,7 +19,7 @@ function validate(platform, failure, releaseTag = 'v0.0.10') {
     ? ['--binary', binary, '--release-tag', releaseTag]
     : ['--binary', binary];
   const nativeRestricted = releaseTag !== 'v0.0.9' &&
-    (platform === 'darwin' || (platform === 'linux' && !releaseTag));
+    (platform === 'darwin' || (platform === 'linux' && (!releaseTag || releaseTag === 'v0.0.11')));
   const context = {
     require(name) {
       if (name === 'node:fs') return {
@@ -91,3 +91,27 @@ test('unknown published releases require an explicit reviewed contract', () => {
 test('linux source validation exercises native Restricted execution', () => {
   assert.equal(validate('linux', undefined, null).length, 7);
 });
+
+for (const platform of ['linux', 'darwin', 'win32']) {
+  test(`${platform}: validates the reviewed v0.0.11 containment contract`, () => {
+    assert.equal(validate(platform, undefined, 'v0.0.11').length, 7);
+  });
+}
+for (const platform of ['linux', 'darwin']) {
+  for (const failure of ['argv', 'exit']) {
+    test(`${platform}: v0.0.11 rejects incorrect ${failure}`, () => {
+      assert.throws(() => validate(platform, failure, 'v0.0.11'), error => {
+        assert.doesNotMatch(error.message, /unreviewed root-script release/);
+        return true;
+      });
+    });
+  }
+}
+for (const failure of ['success', 'unrelated', 'child', 'receipt']) {
+  test(`win32: v0.0.11 rejects ${failure} instead of fail-closed containment`, () => {
+    assert.throws(() => validate('win32', failure, 'v0.0.11'), error => {
+      assert.doesNotMatch(error.message, /unreviewed root-script release/);
+      return true;
+    });
+  });
+}
