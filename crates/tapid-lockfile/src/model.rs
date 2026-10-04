@@ -151,9 +151,9 @@ fn validate_platform_context(value: &str, original: &str) -> Result<(), Lockfile
 
 /// Identifies a package provided by a workspace member.
 ///
-/// The path is a normalized, workspace-root-relative POSIX path. This type is
-/// representation-only: installation and registry fallback deliberately do not
-/// consume it yet.
+/// The path is a normalized, workspace-root-relative POSIX path. The source
+/// records local package identity in the lockfile; installation resolves it to
+/// the separately validated workspace member and never treats it as a registry artifact.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct LocalWorkspaceSource {
     path: String,

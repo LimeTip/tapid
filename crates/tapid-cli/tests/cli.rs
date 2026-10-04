@@ -1268,6 +1268,47 @@ fn root_workspace_activation_failure_restores_manifest_lock_and_managed_tree() {
 }
 
 #[test]
+fn root_workspace_rejects_member_inside_node_modules_without_mutation() {
+    let dir = temp_dir("workspace-member-in-node-modules");
+    let manifest = r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["node_modules/local"],"dependencies":{"local":"workspace:*"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let member_dir = dir.join("node_modules/local");
+    fs::create_dir_all(&member_dir).unwrap();
+    let member_manifest = r#"{"name":"local","version":"1.0.0"}"#;
+    fs::write(member_dir.join("package.json"), member_manifest).unwrap();
+    fs::write(dir.join("tapid.lock"), b"previous lock bytes\n").unwrap();
+    fs::write(dir.join("node_modules/KEEP"), b"previous active tree").unwrap();
+    fs::write(dir.join(".tapid-managed"), b"tapid-managed-v1\n").unwrap();
+    let store = dir.join("store");
+
+    let output = run(&dir, &["install", "--store-dir", store.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("tapid.lock")).unwrap(),
+        b"previous lock bytes\n"
+    );
+    assert_eq!(
+        fs::read(member_dir.join("package.json")).unwrap(),
+        member_manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/KEEP")).unwrap(),
+        b"previous active tree"
+    );
+    assert_eq!(
+        fs::read(dir.join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1\n"
+    );
+    assert!(!store.exists());
+    cleanup(dir);
+}
+
+#[test]
 fn root_workspace_lifecycle_add_update_remove_prune_stays_local() {
     let dir = temp_dir("workspace-root-lifecycle");
     fs::write(
