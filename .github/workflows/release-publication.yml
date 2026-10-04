@@ -164,6 +164,11 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
         run: node --experimental-strip-types tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"
+      - name: Generate runtime-free installers with authenticated bootstrap pins
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: node --experimental-strip-types tools/release/bootstrap.ts release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"
       - name: Sign release metadata
         env:
           TAPID_RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_ED25519_PRIVATE_KEY }}
@@ -225,7 +230,7 @@ jobs:
           case "$release_id" in
             ''|*[!0-9]*) echo "invalid release ID" >&2; exit 1 ;;
           esac
-          for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig; do
+          for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig release/install.sh release/install.ps1; do
             name="${asset##*/}"
             curl --fail --silent --show-error \
               --request POST \
