@@ -15,10 +15,17 @@ fi
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev python3 util-linux >/dev/null
 
-mkdir -p /tmp/tapid-cargo /tmp/tapid-rustup /tmp/tapid-target /tmp/tapid-home
-chown -R 12345:12345 /tmp/tapid-cargo /tmp/tapid-rustup /tmp/tapid-target /tmp/tapid-home
+workspace_uid="$(stat -c %u /work)"
+workspace_gid="$(stat -c %g /work)"
+if [[ "$workspace_uid" -eq 0 ]]; then
+  workspace_uid=12345
+  workspace_gid=12345
+fi
 
-setpriv --reuid=12345 --regid=12345 --clear-groups \
+mkdir -p /tmp/tapid-cargo /tmp/tapid-rustup /tmp/tapid-target /tmp/tapid-home
+chown -R "$workspace_uid:$workspace_gid" /tmp/tapid-cargo /tmp/tapid-rustup /tmp/tapid-target /tmp/tapid-home
+
+setpriv --reuid="$workspace_uid" --regid="$workspace_gid" --clear-groups \
   --inh-caps=+sys_admin --ambient-caps=+sys_admin -- \
   env HOME=/tmp/tapid-home \
     CARGO_HOME=/tmp/tapid-cargo \
