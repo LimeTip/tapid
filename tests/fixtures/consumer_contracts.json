@@ -1,0 +1,16 @@
+{
+  "current": {
+    "legacy": false,
+    "nativePlatforms": ["darwin", "linux"]
+  },
+  "historical": {
+    "v0.0.9": {
+      "legacy": true,
+      "nativePlatforms": []
+    },
+    "v0.0.10": {
+      "legacy": false,
+      "nativePlatforms": ["darwin"]
+    }
+  }
+}

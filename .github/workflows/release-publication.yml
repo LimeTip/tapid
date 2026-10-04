@@ -132,6 +132,7 @@ jobs:
           if-no-files-found: error
 
   draft-release:
+    environment: stable-release
     needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
@@ -165,9 +166,11 @@ jobs:
         run: node --experimental-strip-types tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"
       - name: Sign release metadata
         env:
-          TAPID_RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_SIGNING_KEY }}
+          TAPID_RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_ED25519_PRIVATE_KEY }}
           TAPID_RELEASE_SIGNING_KEY_ID: ${{ vars.TAPID_RELEASE_SIGNING_KEY_ID }}
         run: node --experimental-strip-types tools/release/sign.ts sign release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig
+      - name: Verify release metadata signature
+        run: node --experimental-strip-types tools/release/sign.ts verify release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig crates/tapid-signatures/data/release-keyring.json
       - name: Create draft GitHub release
         id: release
         env:
