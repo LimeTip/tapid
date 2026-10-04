@@ -31,6 +31,10 @@ jobs:
       sha: ${{ steps.release.outputs.sha }}
       runner_sha: ${{ steps.release.outputs.runner_sha }}
       latest_tag: ${{ steps.release.outputs.latest_tag }}
+      selected_installer_sh: ${{ steps.release.outputs.selected_installer_sh }}
+      selected_installer_ps1: ${{ steps.release.outputs.selected_installer_ps1 }}
+      latest_installer_sh: ${{ steps.release.outputs.latest_installer_sh }}
+      latest_installer_ps1: ${{ steps.release.outputs.latest_installer_ps1 }}
       previous_tag: ${{ steps.release.outputs.previous_tag }}
       record_aware: ${{ steps.release.outputs.record_aware }}
       unix_matrix: ${{ steps.release.outputs.unix_matrix }}
@@ -46,12 +50,19 @@ jobs:
           latest_tag="$(gh api repos/LimeTip/tapid/releases/latest --jq .tag_name)"
           [[ "$latest_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           tag="${REQUESTED_TAG:-$latest_tag}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          stable="$(gh api "repos/LimeTip/tapid/releases/tags/$tag" --jq '(.draft == false) and (.prerelease == false)')"
+          test "$stable" = true
+          sha="$(gh api "repos/LimeTip/tapid/commits/$tag" --jq .sha)"
+          latest_sha="$(gh api "repos/LimeTip/tapid/commits/$latest_tag" --jq .sha)"
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$latest_sha" =~ ^[a-f0-9]{40}$ ]]
           runner_sha="$(gh api repos/LimeTip/tapid/commits/main --jq .sha)"
           [[ "$runner_sha" =~ ^[a-f0-9]{40}$ ]]
           printf 'latest_tag=%s\nrunner_sha=%s\n' "$latest_tag" "$runner_sha" >> "$GITHUB_OUTPUT"
           # Bound discovery to the latest 100 releases. Never select 0.0.9, which has no upgrader.
           gh release list --repo LimeTip/tapid --limit 100 --json tagName,isDraft,isPrerelease > "$RUNNER_TEMP/releases.json"
-          LATEST_TAG="$latest_tag" python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
+          SELECTED_TAG="$tag" SELECTED_SHA="$sha" LATEST_TAG="$latest_tag" LATEST_SHA="$latest_sha" python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
           import json, os, re
           def version(tag):
               return tuple(map(int, tag[1:].split('.')))
@@ -62,12 +73,15 @@ jobs:
                         and (0, 0, 10) <= version(r['tagName']) < latest]
           print('previous_tag=' + (max(candidates, key=version) if candidates else ''))
           print('record_aware=' + str(latest > (0, 0, 10)).lower())
+          def installer_url(tag, sha, extension):
+              if version(tag) <= (0, 0, 10):
+                  return f'https://raw.githubusercontent.com/LimeTip/tapid/{sha}/scripts/install.{extension}'
+              return f'https://github.com/LimeTip/tapid/releases/download/{tag}/install.{extension}'
+          for kind in ('selected', 'latest'):
+              tag, sha = os.environ[kind.upper() + '_TAG'], os.environ[kind.upper() + '_SHA']
+              for extension in ('sh', 'ps1'):
+                  print(f'{kind}_installer_{extension}=' + installer_url(tag, sha, extension))
           PYTHON
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          stable="$(gh api "repos/LimeTip/tapid/releases/tags/$tag" --jq '(.draft == false) and (.prerelease == false)')"
-          test "$stable" = true
-          sha="$(gh api "repos/LimeTip/tapid/commits/$tag" --jq .sha)"
-          [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
           printf 'tag=%s\nsha=%s\n' "$tag" "$sha" >> "$GITHUB_OUTPUT"
           if [ "$EVENT_NAME" = schedule ]; then
             printf 'unix_matrix=["ubuntu-latest"]\n' >> "$GITHUB_OUTPUT"
@@ -111,12 +125,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+          INSTALLER_URL: ${{ needs.resolve.outputs.selected_installer_sh }}
         run: |
           set -euo pipefail
           install_dir="$RUNNER_TEMP/tapid"
           mkdir -p "$RUNNER_TEMP/tapid-home"
-          # Exercise the tagged URL rendered by the website, not its compatibility copy.
-          installer_url="https://github.com/LimeTip/tapid/releases/download/$RELEASE_TAG/install.sh"
+          # Use the selected release's published installer contract.
+          installer_url="$INSTALLER_URL"
           curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL "$installer_url" -o "$RUNNER_TEMP/install.sh"
           shasum -a 256 "$RUNNER_TEMP/install.sh" > "$RUNNER_TEMP/installer-sha256.txt"
           installer_digest="$(cut -d ' ' -f 1 "$RUNNER_TEMP/installer-sha256.txt")"
@@ -173,12 +188,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           LATEST_TAG: ${{ needs.resolve.outputs.latest_tag }}
+          LATEST_INSTALLER_URL: ${{ needs.resolve.outputs.latest_installer_sh }}
         run: |
           set -euo pipefail
           curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL https://tapid.dev/install.sh -o "$RUNNER_TEMP/public-install.sh"
           shasum -a 256 "$RUNNER_TEMP/public-install.sh" > "$RUNNER_TEMP/public-installer-sha256.txt"
           # The public script must match latest, even when explicitly testing an older release.
-          latest_installer_url="https://github.com/LimeTip/tapid/releases/download/$LATEST_TAG/install.sh"
+          latest_installer_url="$LATEST_INSTALLER_URL"
           curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL "$latest_installer_url" -o "$RUNNER_TEMP/latest-tag-install.sh"
           shasum -a 256 "$RUNNER_TEMP/latest-tag-install.sh" >> "$RUNNER_TEMP/public-installer-sha256.txt"
           cmp "$RUNNER_TEMP/public-install.sh" "$RUNNER_TEMP/latest-tag-install.sh"
@@ -309,11 +325,12 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+          INSTALLER_URL: ${{ needs.resolve.outputs.selected_installer_ps1 }}
         run: |
           $installer = Join-Path $env:RUNNER_TEMP 'install.ps1'
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid'
           # curl.exe bounds the download on Windows PowerShell 5.1 as well as pwsh.
-          $installerUrl = "https://github.com/LimeTip/tapid/releases/download/$env:RELEASE_TAG/install.ps1"
+          $installerUrl = $env:INSTALLER_URL
           curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL $installerUrl --output $installer
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $installerDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
@@ -375,6 +392,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           LATEST_TAG: ${{ needs.resolve.outputs.latest_tag }}
+          LATEST_INSTALLER_URL: ${{ needs.resolve.outputs.latest_installer_ps1 }}
         run: |
           $installer = Join-Path $env:RUNNER_TEMP 'public-install.ps1'
           curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL https://tapid.dev/install.ps1 --output $installer
@@ -383,7 +401,7 @@ jobs:
           "$installerDigest  public-install.ps1" | Set-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'public-installer-sha256.txt')
           # Compare against latest, not the selected historical release.
           $latestInstaller = Join-Path $env:RUNNER_TEMP 'latest-tag-install.ps1'
-          $latestInstallerUrl = "https://github.com/LimeTip/tapid/releases/download/$env:LATEST_TAG/install.ps1"
+          $latestInstallerUrl = $env:LATEST_INSTALLER_URL
           curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL $latestInstallerUrl --output $latestInstaller
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $latestInstallerDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $latestInstaller).Hash.ToLowerInvariant()

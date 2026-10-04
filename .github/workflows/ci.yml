@@ -412,7 +412,7 @@ jobs:
         with:
           node-version: 22
       - name: Test release helpers and workflows
-        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts tools/release/installers_test.ts tools/release/sign_test.ts tools/release/bootstrap_test.ts
+        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts tools/release/installers_test.ts tools/release/sign_test.ts tools/release/bootstrap_test.ts tools/release/smoke_installer_test.ts
       - name: Test consumer capability contracts
         run: node --test tests/fixtures/consumer_contract.test.js tests/fixtures/validate_consumer_project.test.js
       - name: Check source architecture
@@ -597,6 +597,9 @@ jobs:
             Remove-Item Env:TAPID_FIXTURE_ROOT -ErrorAction SilentlyContinue
             [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')
           }
+          # The expected native signature failure sets LASTEXITCODE to 1.
+          # Reaching this point means all rejection and preservation assertions passed.
+          $global:LASTEXITCODE = 0
 
   package:
     name: Package workspace

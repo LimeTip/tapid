@@ -179,7 +179,7 @@ The expected asset set is exactly:
 - `install.sh`
 - `install.ps1`
 
-This is eleven assets for the new release flow. Historical releases through 0.0.10 have seven assets and no release record. Recovery must use the asset contract of the original tagged workflow; never add metadata to a published historical release.
+This is eleven assets for the new release flow. Historical releases through 0.0.10 have seven assets and no release record. Public smoke uses those releases' original installer scripts pinned to their resolved commit SHA. New releases use the generated installer assets; the same distinction applies when comparing the public website installer with latest. Recovery must use the asset contract of the original tagged workflow; never add metadata to a published historical release.
 
 Before publication:
 

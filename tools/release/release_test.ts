@@ -384,8 +384,8 @@ test("public smoke tests use the published installer and released version", asyn
   const workflow = await text(".github/workflows/release-public-smoke.yml");
   assert(workflow.includes("types: [published]"));
   // Keep the tagged installer evidence while checking the live website copies too.
-  assert(workflow.includes('installer_url="https://github.com/LimeTip/tapid/releases/download/$RELEASE_TAG/install.sh"'));
-  assert(workflow.includes('$installerUrl = "https://github.com/LimeTip/tapid/releases/download/$env:RELEASE_TAG/install.ps1"'));
+  assert(workflow.includes('installer_url="$INSTALLER_URL"'));
+  assert(workflow.includes('$installerUrl = $env:INSTALLER_URL'));
   assert(workflow.includes("https://tapid.dev/install.sh"));
   assert(workflow.includes("https://tapid.dev/install.ps1"));
   assert(workflow.includes('"$installer_url" -o "$RUNNER_TEMP/install.sh"'));
@@ -444,10 +444,10 @@ test("public installers exercise explicit and latest discovery plus supported up
     assert(job.includes("public-repeat-upgrade.txt"));
     assert(job.includes("Skip truthful repeat assertion: releases through 0.0.10"));
   }
-  assert(unix.includes('latest_installer_url="https://github.com/LimeTip/tapid/releases/download/$LATEST_TAG/install.sh"'));
+  assert(unix.includes('latest_installer_url="$LATEST_INSTALLER_URL"'));
   const parity = unix.indexOf('cmp "$RUNNER_TEMP/public-install.sh" "$RUNNER_TEMP/latest-tag-install.sh"');
   assert(parity >= 0 && parity < unix.indexOf('sh "$RUNNER_TEMP/public-install.sh" --version'));
-  assert(windows.includes('$latestInstallerUrl = "https://github.com/LimeTip/tapid/releases/download/$env:LATEST_TAG/install.ps1"'));
+  assert(windows.includes('$latestInstallerUrl = $env:LATEST_INSTALLER_URL'));
   const nativePublic = windows.slice(windows.indexOf("- name: Check the public website installer with an explicit version"));
   const nativeParity = nativePublic.indexOf("if ($installerDigest -cne $latestInstallerDigest)");
   assert(nativeParity >= 0 && nativeParity < nativePublic.indexOf("& $installer -Version"));
