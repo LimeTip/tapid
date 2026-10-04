@@ -11,7 +11,7 @@ Deterministic lockfile models and canonical JSON serialization for Tapid.
 
 The current contract provides:
 
-- Schema version `6`, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
+- Schema version `7`, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
 - Exact package name and version keys, registry origin, canonical padded SHA-512 SRI, required schema 6 registry-integrity provenance, SHA-256 unpacked digest, and explicit `treeDigest` replay identity.
 - Deterministic package ordering through `BTreeMap` serialization.
 - HTTPS registry and artifact URL validation.
@@ -36,3 +36,5 @@ Package keys encode empty contexts as `peer=-|platform=-`. Non-empty peer contex
 Consumer replay uses `STORE/trees/<digest>/` and a regular `.tapid-tree` marker containing the exact digest. Before reading store trees, the CLI rejects schema 5 locks that lack the schema 6 provenance contract and packages marked as lacking registry-declared integrity, validates every explicit schema 6 root against direct manifest identity and version requirements, and requires exactly one root per direct identity. It then validates every referenced tree and stages the managed layout before atomically replacing `node_modules`; dependency lifecycle scripts never run. `tapid install --store-dir PATH` supplies a dynamic store root.
 
 This is a lockfile model and replay contract, not a complete npm lockfile implementation or dependency resolver. Rich peer, optional, platform, lifecycle, provenance, audit, and complete dependency-edge semantics remain limited to the tested subset.
+
+Schema 7 preserves alias names separately from actual package identities. `rootBindings` maps local direct names to exact package keys. `dependencyAliases` records each renamed transitive dependency and its actual target name; it must agree with the exact dependency key. Alias metadata in older schemas, unsafe names, inconsistent targets, and dangling bindings are rejected. Schema 6 locks without alias metadata retain their existing replay support. Older clients reject schema 7.

@@ -31,7 +31,7 @@ Use strict red, green, refactor cycles for production behavior:
 4. Run the focused test and confirm it passes.
 5. Refactor only while tests remain green.
 6. Add failure and attack-path tests at each affected trust seam.
-7. Run related crate and workspace checks before completion.
+7. Run the affected crate checks before completion. Use the full local lane for cross-cutting changes, as defined in [testing.md](testing.md).
 
 A vertical slice crosses only the capabilities needed to deliver behavior. Do not build broad horizontal layers, unused ports, or speculative commands. Keep manifest semantics in `tapid-manifest`, registry transport in `tapid-registry-client`, resolution in `tapid-resolver`, storage in `tapid-store`, and materialization in `tapid-linker`.
 
@@ -53,16 +53,8 @@ The checker scans Git-tracked production Rust files and excludes tests plus top-
 
 ## Completion checks
 
-Run the narrow test during each TDD cycle, then the relevant checks:
+Follow [testing.md](testing.md) for the focused, affected-crate, and full local lanes. Do not repeat the full lane after every test or refactor step. CI owns the additional platform, coverage, security, compatibility, and packaging gates.
 
-```text
-node --experimental-strip-types --test tools/check_architecture_test.ts
-node --experimental-strip-types tools/check_architecture.ts
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
-cargo test --manifest-path tests/integration/Cargo.toml --locked
-cargo package --workspace --locked
-```
+Update documentation when a change affects a documented behavior, interface, security claim, or development command. A private refactor with unchanged contracts does not require crate README or architecture edits. Write or supersede an ADR only when the decision meets the consequential-decision rule above.
 
-Use ADRs and durable documentation to keep code, tests, security claims, and architecture consistent. Do not add registry publication, sandbox claims, or authentication shortcuts as part of adoption work.
+Do not add registry publication, sandbox claims, or authentication shortcuts as part of adoption work.

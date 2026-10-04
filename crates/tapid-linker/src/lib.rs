@@ -13,8 +13,9 @@ mod shims;
 
 pub use layout::{
     ActivationStep, DependencyEdge, InstanceKey, LayoutInput, LinkKind, ManagedRoot,
-    MaterializationEntry, MaterializationInput, MaterializationPlan, PackageInstance, PlanError,
-    StagedActivationPlan, VerifiedTreeReference, plan_layout, plan_materialization,
+    MaterializationEntry, MaterializationInput, MaterializationPlan, NamedDependency,
+    NamedDependencyEdge, NamedLayoutInput, PackageInstance, PlanError, StagedActivationPlan,
+    VerifiedTreeReference, plan_layout, plan_materialization, plan_named_layout,
 };
 pub use platform::{Capability, Platform, PlatformCapabilities};
 pub use shims::{ShimEntry, ShimPackage, ShimPlan, ShimStrategy, plan_shims};

@@ -19,7 +19,7 @@ A `tapid.lock` records the root manifest digest, exact selected package identiti
 
 ```json
 {
-  "lockfile_version": 6,
+  "lockfile_version": 7,
   "root_manifest_digest": "sha256-…",
   "resolver_version": "0",
   "linker_version": "0",
@@ -78,16 +78,26 @@ The consumer workflow exercises deterministic dependency resolution, npm metadat
 
 ### Synthetic news-site compatibility fixture
 
-`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/React/TypeScript application for evaluating package-manager compatibility on a representative news-site workload. The route at `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Its npm-generated `package-lock.json` (lockfile v3) is the reference install. After installing that reference tree with `npm ci`, Tapid—not npm or a direct Node command—runs the fixture's `build`, `test`, and `start` scripts. Lockfile generation used Node.js v26.10.0 / npm 11.19.1; CI uses Ubuntu 24.04 / Node.js 22 and records its toolchain versions. The fixture contains no private code, customer information, credentials, or proprietary assets. From the repository root:
+`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/React/TypeScript application for evaluating package-manager compatibility on a representative news-site workload. The route at `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Its npm-generated `package-lock.json` (lockfile v3) is the reference install. Install that reference in a separate directory with `npm ci`, then run a clean Tapid install and frozen/offline replay in the fixture. `scripts/compare-news-site-package-graphs.py` compares reachable names/versions and dependency/peer edges, source origins, integrity, and platform-optional selections; it also reports physical-only packages even when unreachable. Tapid—not npm or a direct Node command—runs the fixture's `build`, `test`, and `start` scripts. Lockfile generation used Node.js v26.10.0 / npm 11.19.1; CI uses Ubuntu 24.04 / Node.js 22 and records its toolchain versions. The fixture contains no private code, customer information, credentials, or proprietary assets. From the repository root:
 
 ```bash
 cargo build --locked --bin tapid
 cd examples/news-site-consumer
-npm ci
-mkdir -p .tmp
+npm_reference="$(mktemp -d)"
+cp package.json package-lock.json "$npm_reference/"
+npm ci --prefix "$npm_reference"
+mkdir -p .next .tmp
+tapid() { ../../target/debug/tapid "$@"; }
+tapid install
+tapid install --frozen
+tapid install --offline --frozen
+python3 ../../scripts/compare-news-site-package-graphs.py \
+  --npm-root "$npm_reference" \
+  --tapid-root "$PWD" \
+  --json .tmp/package-graph.json \
+  --text .tmp/package-graph.txt
 export NEXT_TELEMETRY_DISABLED=1
 export TMPDIR="$PWD/.tmp"
-tapid() { ../../target/debug/tapid "$@"; }
 tapid run build
 tapid run test
 tapid run start
@@ -95,7 +105,7 @@ tapid run start
 curl --fail http://127.0.0.1:3000/acceptance
 ```
 
-The expected response is `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Next.js production output is stored in the ignored `.next/` directory; `.tmp/` and `node_modules/` are also generated and ignored. The checked-in `tapid.toml` requests Restricted execution, with build output and temporary files limited to fixture-local paths. This verifies Tapid script execution against the npm reference install; Tapid-managed dependency installation/replay and package-graph parity remain separate acceptance requirements.
+The expected response is `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Next.js production output is stored in the ignored `.next/` directory; `.tmp/` and `node_modules/` are also generated and ignored. The checked-in `tapid.toml` requests Restricted execution, with build output and temporary files limited to fixture-local paths and networking disabled by default. CI installs the npm baseline in a separate directory, performs Tapid online/frozen/offline-frozen install, fails on reachable graph, dependency/peer-edge, source, integrity, or platform-optional drift, and retains the deterministic graph report. Physical-only packages are reported even when unreachable. The app scripts are executed through Tapid after its managed install.
 
 The package-management toolchain also includes:
 
@@ -177,7 +187,8 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 ## Supported subset and limitations
 
 - npm package metadata with semver versions, package dependencies, and HTTPS tarball URLs is supported.
-- Range satisfaction is differentially tested against pinned `node-semver` 7.8.5 for exact and partial versions, `x`/`*` wildcards, comparators and intersections, caret/tilde (including zero-major bounds), hyphen ranges, `||` alternatives, prerelease eligibility, and ignored build metadata. This is not a claim of complete npm CLI or package-specifier compatibility; tags, aliases, git/file/workspace specs, and other npm behaviors remain incomplete.
+- npm aliases such as `"h3-v2": "npm:h3@2.0.1-rc.20"` preserve the local import name and the actual registry identity through install and frozen/offline replay. Alias targets accept supported semver ranges; dist-tags remain unsupported. See [alias behavior](docs/compatibility.md#npm-aliases).
+- Range satisfaction is differentially tested against pinned `node-semver` 7.8.5 for exact and partial versions, `x`/`*` wildcards, comparators and intersections, caret/tilde (including zero-major bounds), hyphen ranges, `||` alternatives, prerelease eligibility, and ignored build metadata. This is not a claim of complete npm CLI or package-specifier compatibility; tags, git/file/workspace specs, and other npm behaviors remain incomplete.
 - `add`, `remove`, and range-preserving `update` are available for the current package, with `--dev`, `--optional`, `--peer`, and explicit `--latest` mutation modes. `add --peer` records only a declaration; registry package peer requirements are validated against compatible direct project roots and recorded in peer contexts in lockfile/materialization identities. Missing or incompatible providers fail closed transactionally. Nested/ancestor peer-provider lookup and multiple contexts for one exact package instance remain unsupported. `outdated` is read-only during normal operation and reports lockfile versions and registry metadata; if it finds a durable interrupted-transaction journal, it recovers project state before reporting. `prune` replays the validated lockfile atomically to remove unreachable managed output. Lifecycle commands operate on the manifest in `--project-dir` by default, or a named member selected with `--workspace <name>`. Workspace linking and `workspace:` protocol installation remain unsupported and fail closed with a precise diagnostic before mutation.
 - Lifecycle mutations are all-or-nothing across the manifest, lockfile, verified store, and managed `node_modules` activation. Resolution, integrity, archive, peer, workspace, and materialization failures preserve the prior state; verified trees are not committed to the shared store until project activation succeeds. Durable recovery journals let the next lifecycle command, including `outdated`, restore the prior state after a crash before commit or finish cleanup after a committed operation.
 - The live npm path requires registry-declared SHA-512 integrity by default and verifies downloaded bytes against that digest. This integrity check matches bytes to registry metadata; it does not authenticate the publisher, prove the user intended that package, or establish the archive's package identity independently of the metadata. The explicit `--allow-unverified-registry-artifacts` compatibility exception permits missing integrity and is online-only.
@@ -185,7 +196,7 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - Lifecycle scripts from dependencies never run during install. There is no approval workflow yet.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
-- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock and seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. ManagedTree, configured resource-limit profiles, Windows native containment, and the broader Linux Restricted probe matrix remain unsupported or pending. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
+- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted and ManagedTree execution use Landlock/seccomp and private PID/mount namespaces, with optional delegated cgroup-v2 limits for process-count and memory enforcement. ManagedTree availability is kernel- and delegation-dependent; exact-current-revision positive acceptance remains pending. macOS ManagedTree, Windows native containment, and the broader Linux Restricted probe matrix remain unsupported or pending. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
 
 ## Development
 

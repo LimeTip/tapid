@@ -10,7 +10,7 @@ use std::{
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
-    /// Root package script name.
+    /// Script name from package.json. Requires a matching [run.scripts.<name>] profile in tapid.toml.
     pub(crate) script: String,
     /// Project directory containing package.json.
     #[arg(long, default_value = ".")]
@@ -21,7 +21,7 @@ pub(crate) struct Args {
     /// Emit the versioned receipt as one JSON line on stderr after child output.
     #[arg(long)]
     pub(crate) receipt_json: bool,
-    /// Linux Restricted only: create a private PID/mount namespace with read-only procfs for process-memory statistics.
+    /// Allow process-memory statistics in Linux Restricted mode by creating a private PID/mount namespace with read-only procfs.
     #[arg(long, visible_aliases = ["allow-procfs", "allow-memory-read"])]
     pub(crate) allow_process_memory_stats: bool,
     /// Arguments forwarded after `--` to the script.
@@ -103,11 +103,30 @@ pub(crate) fn run(args: Args) -> ExitCode {
         );
         return ExitCode::from(1);
     }
-    let ambient_environment = match crate::run::read_allowlisted_environment(
+    let registry_config = match crate::registry::RegistryConfig::parse_toml_bytes(&config_bytes) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let registry_credential_names = registry_config.credential_environment_names();
+    if registry_config.allowlist_contains_registry_credentials(
         config
             .exact_profile(&args.script)
             .expect("exact profile was checked")
             .environment(),
+        cfg!(windows),
+    ) {
+        eprintln!("error: registry credential environment variables cannot be passed to scripts");
+        return ExitCode::from(1);
+    }
+    let ambient_environment = match crate::run::read_allowlisted_environment_with_denied(
+        config
+            .exact_profile(&args.script)
+            .expect("exact profile was checked")
+            .environment(),
+        &registry_credential_names,
     ) {
         Ok(environment) => environment,
         Err(error) => {
@@ -157,17 +176,28 @@ pub(crate) fn run(args: Args) -> ExitCode {
     }
 }
 
-enum ConfigReadError {
+pub(crate) enum ConfigReadError {
     CapacityExceeded,
     Io(io::Error),
 }
 
 fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigReadError> {
+    read_bounded_config_file(path, tapid_runner::MAX_CONFIG_BYTES)
+}
+
+pub(crate) fn read_bounded_config_file(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ConfigReadError> {
+    let max_bytes = u64::try_from(max_bytes).map_err(|_| ConfigReadError::CapacityExceeded)?;
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or(ConfigReadError::CapacityExceeded)?;
     let metadata = fs::symlink_metadata(path).map_err(ConfigReadError::Io)?;
     if !metadata.file_type().is_file() {
         return Err(ConfigReadError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "run configuration is not a regular file",
+            "configuration is not a regular file",
         )));
     }
     let mut options = fs::OpenOptions::new();
@@ -184,17 +214,17 @@ fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigReadError> {
     if !metadata.is_file() {
         return Err(ConfigReadError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "run configuration is not a regular file",
+            "configuration is not a regular file",
         )));
     }
-    if metadata.len() > tapid_runner::MAX_CONFIG_BYTES as u64 {
+    if metadata.len() > max_bytes {
         return Err(ConfigReadError::CapacityExceeded);
     }
     let mut bytes = Vec::new();
-    file.take(tapid_runner::MAX_CONFIG_BYTES as u64 + 1)
+    file.take(read_limit)
         .read_to_end(&mut bytes)
         .map_err(ConfigReadError::Io)?;
-    if bytes.len() > tapid_runner::MAX_CONFIG_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(ConfigReadError::CapacityExceeded);
     }
     Ok(bytes)

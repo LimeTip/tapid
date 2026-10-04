@@ -105,7 +105,7 @@ No platform or assurance level is described as supported until positive and nega
 - Process execution remains behind the focused `tapid-runner` capability. The CLI owns parsing, file discovery, interaction, and rendering.
 - Dependency lifecycle scripts remain disabled by default and are not made eligible by a root-script profile. Root scripts run only through explicit selection.
 - Perfect containment is not claimed. Each backend and receipt reports only the dimensions and scopes it actually enforces.
-- At the current exact HEAD, experimental native macOS 26 Restricted execution and a Linux Landlock/seccomp Restricted backend exist. Linux has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation; the broader common probe matrix is still pending. ManagedTree, configured resource limits, Windows native containment, and `--no-sandbox` remain unsupported or unimplemented.
+- At the current exact HEAD, experimental native macOS 26 Restricted execution, Linux Landlock/seccomp Restricted execution, and runtime-gated Linux ManagedTree execution exist. Linux ManagedTree uses private PID/mount namespaces and optionally delegated cgroup-v2 controllers for process-count and memory limits. Exact integrated-revision positive acceptance remains pending; the broader common probe matrix, macOS ManagedTree, Windows native containment, and `--no-sandbox` remain unsupported or unimplemented.
 
 ## Rejected alternatives
 

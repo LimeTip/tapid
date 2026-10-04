@@ -124,8 +124,20 @@ pub(crate) fn plan_update(
         .cloned()
         .unwrap();
         mutations.push(DependencyMutation {
+            requirement: Some(if latest {
+                let parsed = requirement
+                    .parse::<Requirement>()
+                    .map_err(|error| format!("invalid dependency '{name}': {error}"))?;
+                if parsed.is_alias() {
+                    let (_, declared) = crate::online::dep_parts(&name)?;
+                    format!("npm:{}@*", parsed.package_name(&declared))
+                } else {
+                    "*".to_owned()
+                }
+            } else {
+                requirement
+            }),
             name,
-            requirement: Some(if latest { "*".to_owned() } else { requirement }),
             kind,
         });
     }
@@ -277,12 +289,10 @@ fn versions_from_registry(
         JsrRegistry::new(transport, origin.clone())
             .fetch(&name.to_string())
             .map_err(|error| error.to_string())?
-    } else if origin.to_string() == "https://registry.npmjs.org" {
+    } else {
         NpmRegistry::new(transport, origin.clone())
             .fetch(&name.to_string())
             .map_err(|error| error.to_string())?
-    } else {
-        return Err(format!("unsupported registry origin {origin}"));
     };
     Ok(artifacts
         .into_iter()
@@ -297,6 +307,7 @@ pub(crate) fn outdated_report(
 ) -> Result<Vec<OutdatedEntry>, String> {
     let (project_dir, mut manifest) = resolve_workspace(project_dir, workspace_selector)?;
     let project_dir = project_dir.as_path();
+    let registry_config = crate::registry::RegistryConfig::load(project_dir)?;
     let recovery_lock = if crate::filesystem::lifecycle_journal::has_pending(project_dir)? {
         Some(crate::filesystem::activation::ActivationLock::acquire(
             project_dir,
@@ -320,31 +331,48 @@ pub(crate) fn outdated_report(
         .map_err(|error| format!("invalid lockfile package identity: {error}"))?;
     let direct_dependencies = direct_dependencies(&manifest);
     drop(recovery_lock);
-    let transport = if registry_fixture.is_none() {
-        Some(
-            HttpsTransport::standard()
-                .map_err(|error| format!("cannot initialize registry transport: {error}"))?,
-        )
-    } else {
-        None
-    };
+    let mut transports = std::collections::BTreeMap::new();
+    let allowed_origins = registry_config.configured_origins();
     let mut entries = Vec::new();
     for (identity, declared, kind) in direct_dependencies {
-        let (origin, package_name) = crate::online::dep_parts(&identity)?;
+        let (manifest_origin, local_name) = crate::online::dep_parts(&identity)?;
+        let requirement = declared.parse::<Requirement>().ok();
+        let package_name = requirement
+            .as_ref()
+            .map(|requirement| requirement.package_name(&local_name))
+            .unwrap_or(&local_name)
+            .clone();
+        let origin = if manifest_origin.to_string() == "https://jsr.io" {
+            manifest_origin
+        } else {
+            registry_config.origin_for_name(&package_name)?
+        };
+        let bound_root = lock.root_bindings().get(local_name.as_str());
         let locked_version = locked
             .iter()
-            .filter(|(key, _)| key.registry == origin && key.name == package_name)
+            .filter(|(key, _)| {
+                key.registry == origin
+                    && key.name == package_name
+                    && bound_root.is_none_or(|target| key.to_string() == *target)
+            })
             .map(|(key, _)| key.version.clone())
             .max();
         let versions = match registry_fixture {
             Some(path) => versions_from_fixture(path, &origin, &package_name),
-            None => versions_from_registry(
-                transport.as_ref().expect("transport"),
-                &origin,
-                &package_name,
-            ),
+            None => {
+                let transport = crate::online::metadata_transport_for_package(
+                    &mut transports,
+                    &registry_config,
+                    &origin,
+                    &package_name,
+                    &allowed_origins,
+                );
+                match transport {
+                    Ok(transport) => versions_from_registry(transport, &origin, &package_name),
+                    Err(error) => Err(error),
+                }
+            }
         };
-        let requirement = declared.parse::<Requirement>().ok();
         let (newest_compatible, newest_available, diagnostic) = match versions {
             Ok(mut versions) => {
                 versions.sort();

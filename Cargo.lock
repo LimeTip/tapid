@@ -1489,7 +1489,9 @@ dependencies = [
  "tapid-runner",
  "tapid-signatures",
  "tapid-store",
+ "tapid-test-support",
  "time",
+ "toml",
  "windows-sys 0.52.0",
 ]
 
@@ -1526,6 +1528,7 @@ dependencies = [
 name = "tapid-linker"
 version = "0.0.5"
 dependencies = [
+ "sha2",
  "tapid-core",
  "tapid-manifest",
 ]
@@ -1577,10 +1580,11 @@ dependencies = [
 
 [[package]]
 name = "tapid-registry-client"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "httpdate",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tapid-core",
@@ -1601,7 +1605,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-resolver"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "proptest",
  "semver",
@@ -1612,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-runner"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "libc",
  "serde",

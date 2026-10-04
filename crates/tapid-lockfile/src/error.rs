@@ -10,6 +10,7 @@ pub enum LockfileError {
     InvalidSha512(String),
     InvalidWorkspaceSource(String),
     UnsupportedVersion(u32),
+    AliasMetadataInLegacySchema(u32),
     RegenerationRequired(u32),
     DuplicatePackage(String),
     PackageKeyMismatch(String),
@@ -52,6 +53,10 @@ impl fmt::Display for LockfileError {
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported lockfile version: {version}")
             }
+            Self::AliasMetadataInLegacySchema(version) => write!(
+                f,
+                "lockfile version {version} cannot contain npm alias bindings; alias metadata requires schema 7"
+            ),
             Self::RegenerationRequired(version) => write!(
                 f,
                 "lockfile version {version} lacks required integrity provenance; regenerate it online"

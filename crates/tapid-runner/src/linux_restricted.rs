@@ -1059,6 +1059,7 @@ impl ExecutionBackend for PlatformBackend {
                 filter,
                 termination: None,
                 supervisor: None,
+                process_started: false,
             }),
         ))
     }
@@ -1159,6 +1160,7 @@ struct LinuxLifecycle<'a> {
     filter: Vec<libc::sock_filter>,
     termination: Option<Termination>,
     supervisor: Option<Child>,
+    process_started: bool,
 }
 
 fn terminate_supervisor(child: &mut Child) -> io::Result<ExitStatus> {
@@ -1345,6 +1347,7 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
                 format!("cannot launch restricted project script: {e}"),
             )
         })?);
+        self.process_started = true;
         drop(command);
         let stdout_reader = self
             .supervisor
@@ -1548,12 +1551,19 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
         ))
     }
 
-    fn cleanup(&mut self) -> CompletionEvidence {
-        if let Some(mut supervisor) = self.supervisor.take() {
-            terminate_supervisor(&mut supervisor)
-                .expect("cannot confirm ManagedTree supervisor termination during cleanup");
+    fn cleanup(&mut self) -> Result<Option<CompletionEvidence>, ExecutionError> {
+        if !self.process_started {
+            return Ok(None);
         }
-        completion_for(self.preflight).expect("Linux completion evidence is valid")
+        if let Some(mut supervisor) = self.supervisor.take() {
+            terminate_supervisor(&mut supervisor).map_err(|error| {
+                ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
+                    format!("cannot confirm ManagedTree supervisor termination during cleanup: {error}"),
+                )
+            })?;
+        }
+        completion_for(self.preflight).map(Some)
     }
 }
 
@@ -1581,7 +1591,7 @@ fn completion_for(preflight: &ValidatedPreflight) -> Result<CompletionEvidence, 
 }
 
 #[cfg(test)]
-mod tests {
+mod legacy_tests {
     use super::*;
     use crate::{
         AssuranceLevel, CleanupConfidence, ExecutionErrorCategory, ExecutionLimits,
@@ -2359,3 +2369,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "linux_restricted/tests.rs"]
+mod tests;
