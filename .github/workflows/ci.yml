@@ -20,10 +20,17 @@ jobs:
   news-site-consumer:
     name: News-site Tapid scripts (Ubuntu 24.04)
     runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:24.04
+      options: --cap-add SYS_ADMIN --security-opt seccomp=unconfined
     env:
       NEXT_TELEMETRY_DISABLED: '1'
       TMPDIR: ${{ github.workspace }}/examples/news-site-consumer/.tmp
     steps:
+      - name: Install container dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git libssl-dev pkg-config python3 tar xz-utils
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -47,8 +54,8 @@ jobs:
         run: mkdir -p examples/news-site-consumer/.next examples/news-site-consumer/.tmp
       - name: Build and test via Tapid
         run: |
-          sudo -n -- env PATH="$PATH" TMPDIR="$TMPDIR" NEXT_TELEMETRY_DISABLED=1 \
-            target/debug/tapid run build --allow-process-memory-stats --project-dir examples/news-site-consumer
+          env PATH="$PATH" TMPDIR="$TMPDIR" NEXT_TELEMETRY_DISABLED=1 \
+            target/debug/tapid run build --project-dir examples/news-site-consumer
           target/debug/tapid run test --project-dir examples/news-site-consumer
       - name: Start via Tapid and assert acceptance marker
         shell: bash

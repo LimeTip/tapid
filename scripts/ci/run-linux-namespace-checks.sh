@@ -20,9 +20,9 @@ fi
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev python3 util-linux >/dev/null
 
-mkdir -p /tmp/tapid-cargo /tmp/tapid-rustup /tmp/tapid-target /tmp/tapid-home
+mkdir -p /tmp/tapid-cargo /tmp/tapid-rustup /tmp/tapid-target
 
-env HOME=/tmp/tapid-home \
+env HOME=/root \
   CARGO_HOME=/tmp/tapid-cargo \
   RUSTUP_HOME=/tmp/tapid-rustup \
   CARGO_TARGET_DIR=/tmp/tapid-target \

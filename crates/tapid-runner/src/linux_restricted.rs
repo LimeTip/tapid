@@ -463,7 +463,7 @@ fn namespace_identity(name: &str) -> io::Result<(u64, u64)> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
-fn establish_private_read_only_procfs(
+fn verify_private_namespaces(
     parent_pid_namespace: (u64, u64),
     parent_mount_namespace: (u64, u64),
 ) -> io::Result<()> {
@@ -476,6 +476,14 @@ fn establish_private_read_only_procfs(
             "private PID or mount namespace was not established",
         ));
     }
+    Ok(())
+}
+
+fn establish_private_read_only_procfs(
+    parent_pid_namespace: (u64, u64),
+    parent_mount_namespace: (u64, u64),
+) -> io::Result<()> {
+    verify_private_namespaces(parent_pid_namespace, parent_mount_namespace)?;
     if unsafe {
         libc::mount(
             std::ptr::null(),
@@ -650,9 +658,11 @@ fn private_launcher_setup(
             "private launcher report descriptor is not a socket",
         ));
     }
-    establish_private_read_only_procfs(parent_pid_namespace, parent_mount_namespace)?;
     if allow_proc_read {
+        establish_private_read_only_procfs(parent_pid_namespace, parent_mount_namespace)?;
         add_private_procfs_read_rule(ruleset)?;
+    } else {
+        verify_private_namespaces(parent_pid_namespace, parent_mount_namespace)?;
     }
     let filter = seccomp_filter(network, subprocess)
         .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error.to_string()))?;
@@ -674,7 +684,7 @@ fn private_launcher_entry(arguments: Vec<OsString>, report_fd: Option<libc::c_in
                 unsafe { libc::_exit(125) }
             }
             if let Err(error) = write_private_report(report_fd, PRIVATE_REPORT_READY, 0) {
-                eprintln!("tapid: cannot confirm private procfs setup: {error}");
+                eprintln!("tapid: cannot confirm private namespace setup: {error}");
                 unsafe { libc::_exit(125) }
             }
             let error = Command::new(program).args(program_arguments).exec();
@@ -694,7 +704,7 @@ fn private_launcher_entry(arguments: Vec<OsString>, report_fd: Option<libc::c_in
                     error.raw_os_error().unwrap_or(libc::EIO),
                 );
             }
-            eprintln!("tapid: cannot establish private read-only procfs: {error}");
+            eprintln!("tapid: cannot establish private execution namespaces: {error}");
             unsafe { libc::_exit(125) }
         }
     }
@@ -718,7 +728,9 @@ fn parse_private_report(mut report: UnixStream) -> Result<(), ExecutionError> {
         .take((2 * PRIVATE_REPORT_FRAME_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|error| {
-            unsupported(&format!("cannot read private procfs setup report: {error}"))
+            unsupported(&format!(
+                "cannot read private namespace setup report: {error}"
+            ))
         })?;
     if bytes.is_empty()
         || bytes.len() > 2 * PRIVATE_REPORT_FRAME_BYTES
@@ -731,11 +743,11 @@ fn parse_private_report(mut report: UnixStream) -> Result<(), ExecutionError> {
     let mut ready = false;
     let (frames, remainder) = bytes.as_chunks::<PRIVATE_REPORT_FRAME_BYTES>();
     if !remainder.is_empty() {
-        return Err(unsupported("private procfs setup report was invalid"));
+        return Err(unsupported("private namespace setup report was invalid"));
     }
     for frame in frames {
         if &frame[..4] != PRIVATE_REPORT_MAGIC {
-            return Err(unsupported("private procfs setup report was invalid"));
+            return Err(unsupported("private namespace setup report was invalid"));
         }
         let kind = u32::from_le_bytes(frame[4..8].try_into().expect("fixed report field"));
         let value = i32::from_le_bytes(frame[8..12].try_into().expect("fixed report field"));
@@ -752,7 +764,7 @@ fn parse_private_report(mut report: UnixStream) -> Result<(), ExecutionError> {
                     format!("cannot exec restricted project script (errno {value})"),
                 ));
             }
-            _ => return Err(unsupported("private procfs setup report was invalid")),
+            _ => return Err(unsupported("private namespace setup report was invalid")),
         }
     }
     if ready {
@@ -802,21 +814,19 @@ fn has_effective_sys_admin() -> bool {
     data[word].effective & mask != 0
 }
 
-fn unshare_namespace_arguments(needs_user_namespace: bool) -> Vec<&'static str> {
+fn unshare_namespace_arguments(
+    needs_user_namespace: bool,
+    private_proc: bool,
+) -> Vec<&'static str> {
     let mut arguments = Vec::with_capacity(8);
     if needs_user_namespace {
         arguments.extend(["--user", "--map-root-user"]);
     }
-    arguments.extend([
-        "--mount",
-        "--pid",
-        "--fork",
-        "--kill-child",
-        "--mount-proc",
-        "--propagation",
-        "unchanged",
-        "--",
-    ]);
+    arguments.extend(["--mount", "--pid", "--fork", "--kill-child"]);
+    if private_proc {
+        arguments.push("--mount-proc");
+    }
+    arguments.extend(["--propagation", "unchanged", "--"]);
     arguments
 }
 
@@ -882,7 +892,10 @@ fn private_memory_stats_command(
     let report_copy = duplicate_fd_above_private_range(report_writer.as_raw_fd())?;
     let mut command = Command::new(unshare);
     command
-        .args(unshare_namespace_arguments(!has_effective_sys_admin()))
+        .args(unshare_namespace_arguments(
+            !has_effective_sys_admin(),
+            request.allow_process_memory_stats(),
+        ))
         .arg(launcher)
         .arg(PRIVATE_LAUNCHER_MARKER)
         .arg(if request.policy().network() { "1" } else { "0" })
@@ -1475,20 +1488,20 @@ mod tests {
     #[test]
     fn namespace_arguments_use_user_namespace_only_when_requested() {
         assert_eq!(
-            unshare_namespace_arguments(false),
+            unshare_namespace_arguments(false, false),
             [
                 "--mount",
                 "--pid",
                 "--fork",
                 "--kill-child",
-                "--mount-proc",
                 "--propagation",
                 "unchanged",
                 "--",
             ]
         );
+        assert!(unshare_namespace_arguments(false, true).contains(&"--mount-proc"));
         assert_eq!(
-            &unshare_namespace_arguments(true)[..2],
+            &unshare_namespace_arguments(true, false)[..2],
             &["--user", "--map-root-user"]
         );
     }
@@ -1519,7 +1532,7 @@ mod tests {
         }
         assert!(has_effective_sys_admin());
         assert_eq!(
-            unshare_namespace_arguments(!has_effective_sys_admin()).first(),
+            unshare_namespace_arguments(!has_effective_sys_admin(), false).first(),
             Some(&"--mount"),
             "an effective CAP_SYS_ADMIN holder should use its existing user namespace"
         );
@@ -1730,7 +1743,10 @@ mod tests {
         let unshare = locate_unshare().unwrap();
         let mut command = Command::new(unshare);
         command
-            .args(unshare_namespace_arguments(!has_effective_sys_admin()))
+            .args(unshare_namespace_arguments(
+                !has_effective_sys_admin(),
+                false,
+            ))
             .arg("/bin/sh")
             .arg("-c")
             .arg(format!("sleep 2; touch '{}'", marker.display()))
