@@ -54,6 +54,147 @@ fn cleanup(path: PathBuf) {
 }
 
 #[test]
+fn aliased_root_cycle_keeps_locked_dependencies_during_install_and_replay() {
+    let project = tapid_test_support::TempProject::new("aliased-root-cycle").unwrap();
+    let dir = project.path().to_path_buf();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"app":"npm:a@1.0.0","b":"2.0.0"}}"#).unwrap();
+    let fixture = project
+        .write(
+            "registry.json",
+            include_bytes!("fixtures/aliased-root-cycle.json"),
+        )
+        .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "i",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock_bytes = fs::read(dir.join("tapid.lock")).unwrap();
+    for replay in [false, true] {
+        if replay {
+            fs::remove_dir_all(dir.join("node_modules")).unwrap();
+            let output = run(
+                &dir,
+                &[
+                    "i",
+                    "--offline",
+                    "--frozen",
+                    "--store-dir",
+                    store.to_str().unwrap(),
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        for path in ["app/node_modules/b/index.js", "a/node_modules/b/index.js"] {
+            assert_eq!(
+                fs::read_to_string(dir.join("node_modules").join(path)).unwrap(),
+                "module.exports = \"b1\";\n"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/b/index.js")).unwrap(),
+            "module.exports = \"b2\";\n"
+        );
+        if let Ok(node) = Command::new("node")
+            .args([
+                "-e",
+                "console.log(require('app'), require('a'), require('b'))",
+            ])
+            .current_dir(&dir)
+            .output()
+        {
+            assert!(
+                node.status.success(),
+                "{}",
+                String::from_utf8_lossy(&node.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&node.stdout).trim(), "b1 b1 b2");
+        }
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_bytes);
+    }
+}
+
+#[test]
+fn cross_registry_aliases_install_distinct_artifacts_and_replay_offline() {
+    let project = tapid_test_support::TempProject::new("cross-registry-alias").unwrap();
+    let dir = project.path().to_path_buf();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"local":"npm:@s/foo@1.0.0","jsr:@s/foo":"1.0.0"}}"#).unwrap();
+    let fixture = project
+        .write(
+            "registry.json",
+            include_bytes!("fixtures/cross-registry-alias.json"),
+        )
+        .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "i",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock_bytes = fs::read(dir.join("tapid.lock")).unwrap();
+    let lock = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
+    assert_eq!(lock.packages().len(), 2);
+    for replay in [false, true] {
+        if replay {
+            fs::remove_dir_all(dir.join("node_modules")).unwrap();
+            let output = run(
+                &dir,
+                &[
+                    "i",
+                    "--offline",
+                    "--frozen",
+                    "--store-dir",
+                    store.to_str().unwrap(),
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/local/index.js")).unwrap(),
+            "module.exports = \"npm\";\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/@s/foo/index.js")).unwrap(),
+            "module.exports = \"jsr\";\n"
+        );
+        assert_ne!(
+            fs::canonicalize(dir.join("node_modules/local")).unwrap(),
+            fs::canonicalize(dir.join("node_modules/@s/foo")).unwrap()
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_bytes);
+    }
+}
+
+#[test]
 fn npm_aliases_preserve_local_names_actual_identities_and_offline_replay() {
     let dir = temp_dir("npm-aliases");
     fs::write(dir.join("package.json"), r#"{"name":"demo","version":"1.0.0","dependencies":{"first":"npm:h3@1","second":"npm:h3@2.0.0","third":"npm:h3@1","alias-parent":"1.0.0","@local/direct":"npm:@actual/scoped@^1"}}"#).unwrap();

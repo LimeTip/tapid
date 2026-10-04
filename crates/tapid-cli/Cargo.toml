@@ -41,3 +41,4 @@ windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage
 [dev-dependencies]
 proptest = "1"
 ed25519-dalek = "2"
+tapid-test-support = { path = "../tapid-test-support" }

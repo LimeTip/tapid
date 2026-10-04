@@ -89,6 +89,7 @@ impl FromStr for Requirement {
             let name = name
                 .parse::<PackageName>()
                 .map_err(|_| ResolveError::UnsupportedRange(raw.into()))?;
+            let range = range.trim();
             if range.is_empty() || range.starts_with("npm:") {
                 return Err(ResolveError::UnsupportedRange(raw.into()));
             }

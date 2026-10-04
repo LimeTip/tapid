@@ -1221,6 +1221,7 @@ dependencies = [
 name = "tapid-linker"
 version = "0.0.5"
 dependencies = [
+ "sha2",
  "tapid-core",
  "tapid-manifest",
 ]

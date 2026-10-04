@@ -516,7 +516,23 @@ impl Lockfile {
         Ok(())
     }
 
+    fn validate_alias_schema(&self) -> Result<(), LockfileError> {
+        if self.lockfile_version < LOCKFILE_VERSION
+            && (!self.root_bindings.is_empty()
+                || self
+                    .packages
+                    .values()
+                    .any(|package| !package.dependency_aliases.is_empty()))
+        {
+            return Err(LockfileError::AliasMetadataInLegacySchema(
+                self.lockfile_version,
+            ));
+        }
+        Ok(())
+    }
+
     pub fn to_json(&self) -> Result<String, LockfileError> {
+        self.validate_alias_schema()?;
         if self.lockfile_version >= ROOTS_LEGACY_LOCKFILE_VERSION
             && !self.packages.is_empty()
             && self.roots.is_empty()
@@ -577,17 +593,7 @@ impl Lockfile {
                 return Err(LockfileError::DanglingRoot(root.clone()));
             }
         }
-        if lockfile.lockfile_version < LOCKFILE_VERSION
-            && (!lockfile.root_bindings.is_empty()
-                || lockfile
-                    .packages
-                    .values()
-                    .any(|package| !package.dependency_aliases.is_empty()))
-        {
-            return Err(LockfileError::AliasMetadataInLegacySchema(
-                lockfile.lockfile_version,
-            ));
-        }
+        lockfile.validate_alias_schema()?;
         if !lockfile.root_bindings.is_empty() {
             lockfile.set_root_bindings(lockfile.root_bindings.clone())?;
         }

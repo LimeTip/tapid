@@ -574,6 +574,50 @@ fn alias_bindings_round_trip_and_reject_mismatched_or_legacy_metadata() {
 }
 
 #[test]
+fn legacy_schema_serialization_rejects_alias_metadata_added_through_public_apis() {
+    let child = package_fixture();
+    let child_key = child.key();
+    let mut base = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    base.insert_package(child).unwrap();
+    base.set_roots([&child_key]).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&base.to_json().unwrap()).unwrap();
+    for version in [4, 5, 6] {
+        value["lockfileVersion"] = version.into();
+        let legacy = Lockfile::from_json(&value.to_string()).unwrap();
+        assert_eq!(
+            Lockfile::from_json(&legacy.to_json().unwrap()).unwrap(),
+            legacy
+        );
+
+        let mut roots = legacy.clone();
+        roots
+            .set_root_bindings(std::collections::BTreeMap::from([(
+                "local".into(),
+                child_key.clone(),
+            )]))
+            .unwrap();
+        assert!(
+            matches!(roots.to_json(), Err(super::LockfileError::AliasMetadataInLegacySchema(v)) if v == version)
+        );
+
+        let mut edges = legacy;
+        let mut parent = declared_package(
+            "https://registry.example.test",
+            "parent",
+            "1.0.0",
+            &format!("sha512-{}", "A".repeat(86)),
+            &format!("sha256-{}", "b".repeat(64)),
+        )
+        .unwrap();
+        parent.add_alias_dependency("local", &child_key).unwrap();
+        edges.insert_packages([parent]).unwrap();
+        assert!(
+            matches!(edges.to_json(), Err(super::LockfileError::AliasMetadataInLegacySchema(v)) if v == version)
+        );
+    }
+}
+
+#[test]
 fn schema_6_without_aliases_remains_replayable() {
     let package = package_fixture();
     let key = package.key();

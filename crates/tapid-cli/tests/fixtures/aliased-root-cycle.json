@@ -1,0 +1,32 @@
+{
+  "packages": [
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "a",
+      "version": "1.0.0",
+      "dependencies": {
+        "b": "1.0.0"
+      },
+      "integrity": "sha512-Sk4j021SvdYUnamuz0aBeMRA689JaHJzviJlyL03u6bUgRmbVC1GE+XCKfYVH+ap/cVD33GDpW8KHwm4sW4d4Q==",
+      "artifact": "base64:H4sIAAAAAAAC/+3T30rDMBTH8Vz7FCFXCtKlc1Zw7GHiepCoTbtkHYWyd19W/8FuvNGh+P3cnCQnIRfJr3PrZ/cos+61Fk+pDeqb2axaLKaanVZbzquP8bReltX8VmmrzqBPWxfz9ep/Gk1wjZh7bZy51mYnMfk2HOdlYQt7XKulk1BLWHtJuTGah8/2Pvcb56cDPm8a8gcy+wuFP+It97P3x/uJO77Kv725O82/teT/LJq27l+kkKFr4zbplY6y6X2Uy5zyqyVBBgAAAAAAAAAAAAAA+O0O6xm6GgAoAAA="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "b",
+      "version": "1.0.0",
+      "dependencies": {
+        "a": "1.0.0"
+      },
+      "integrity": "sha512-iZeD20ZGErST/K1al/sJV0qFWfIZ2BahxojiGUV70BcYgsoArmEaIGd8CqIrt0YMotP4XU8cwpqWcamd0glPag==",
+      "artifact": "base64:H4sIAAAAAAAC/+3UwYrCMBDG8Zz3KUrOS01KraD4MLEdluo2LY2KIH13Y3d1wYsXFWT/v8ukmYQ5tF87V27cl0y6n5quQ+vVg5moyPOxRrfV2Ky4rsd9a4tsqhKjXmAXtq6P49X/dNTeNaLniV7pz0TvpQ9168/PNjWpOe9V0omvxJe1hNg4avfXHmK/cfV4oY6HDvED0sOHwpv4zf3k8vKeMeNe/k02u82/MTn5f4WmrXbfksqha/ttSJbxP2D1ggADAAAAAAAAAAAAAAC8ixMbci6WACgAAA=="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "b",
+      "version": "2.0.0",
+      "dependencies": {},
+      "integrity": "sha512-EMhQCgExzXrMM0J8kxOh0WkuCCCjowNJ2aOGCVQdUp6wPKOzHDe3uSi6SiP8LUfvPA0zATsuzR8pD3zsQtXksA==",
+      "artifact": "base64:H4sIAAAAAAAC/+3UzYrCMBSG4ay9ipK11NNQHJjBi4n2IB2naWlUBPHejfVn4caNI4jvsznJSSCL5EvnFyu/1El3rvlvbIN5MkmmZTnU5L5KUbjbeOgXxdSJycS8wCaufZ+ON59pb4Nv1H5ndm7Hmd1qH+s2nOYul1xOvUo7DZWGRa0xLewPqdf4ethUp4VdejT2MDJ4Q5fcT64X+R9nPMq/uK/7/IuU5P8Vmrba/Gmuu67t1zGbpX/A2R/CDAAAAAAAAAAAAAAA8C6OwZtW8QAoAAA="
+    }
+  ]
+}
