@@ -10,6 +10,12 @@ pub(crate) struct Args {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Check the format and internal consistency of tapid.lock in the current directory.
+    #[command(
+        long_about = "Read tapid.lock from the current directory and validate its schema and internal consistency. Does not verify package files in the store or compare the lockfile with package.json.",
+        after_help = "Example:
+  tapid lock verify"
+    )]
     Verify,
 }
 

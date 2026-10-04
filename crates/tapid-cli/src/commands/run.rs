@@ -10,7 +10,7 @@ use std::{
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
-    /// Root package script name.
+    /// Script name from package.json. Requires a matching [run.scripts.<name>] profile in tapid.toml.
     pub(crate) script: String,
     /// Project directory containing package.json.
     #[arg(long, default_value = ".")]
@@ -21,7 +21,7 @@ pub(crate) struct Args {
     /// Emit the versioned receipt as one JSON line on stderr after child output.
     #[arg(long)]
     pub(crate) receipt_json: bool,
-    /// Linux Restricted only: create a private PID/mount namespace with read-only procfs for process-memory statistics.
+    /// Allow process-memory statistics in Linux Restricted mode by creating a private PID/mount namespace with read-only procfs.
     #[arg(long, visible_aliases = ["allow-procfs", "allow-memory-read"])]
     pub(crate) allow_process_memory_stats: bool,
     /// Arguments forwarded after `--` to the script.
