@@ -478,14 +478,30 @@ fn windows_runtime_directory_ace_allows_launching_read_execute_binaries() {
 }
 
 #[test]
-fn windows_write_enabled_policy_fails_closed_before_spawn() {
-    let root = temporary_project("write-policy-unsupported");
-    let marker = root.join("must-not-spawn.txt");
-    let command = format!("echo should-not-run>\"{}\"", marker.display());
+fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
+    let root = temporary_project("write-existing-file");
+    let writable = root.join("writable");
+    fs::create_dir(&writable).unwrap();
+    let authorized = writable.join("authorized.txt");
+    fs::write(&authorized, "preexisting content").unwrap();
+    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
+    let icacls = fs::canonicalize(PathBuf::from(system_root).join("System32/icacls.exe")).unwrap();
+    let label = Command::new(&icacls)
+        .arg(&writable)
+        .args(["/setintegritylevel", "(OI)(CI)L", "/c"])
+        .output()
+        .unwrap();
+    assert!(
+        label.status.success(),
+        "icacls failed to set the test low-integrity label: {}{}",
+        String::from_utf8_lossy(&label.stdout),
+        String::from_utf8_lossy(&label.stderr)
+    );
+    let command = format!("echo TAPID_WRITE_GRANTED>\"{}\"", authorized.display());
     let policy = SandboxPolicy::new_with_assurance(
         SandboxMode::Required,
         AssuranceLevel::ManagedTree,
-        FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+        FilesystemPolicy::new(vec![".".into()], vec!["writable".into()]).unwrap(),
         false,
         vec!["TAPID_TEST_MARKER".into()],
         false,
@@ -494,12 +510,18 @@ fn windows_write_enabled_policy_fails_closed_before_spawn() {
     .unwrap();
     let request = command_request_with_policy(&root, &command, policy);
 
-    let error = execute(&request).expect_err("Windows write-enabled policy must fail closed");
+    let outcome = execute(&request).expect("a declared write grant should execute");
     assert_eq!(
-        error.category(),
-        ExecutionErrorCategory::UnsupportedContainment
+        outcome.termination(),
+        &Termination::Exited(0),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(outcome.stdout()),
+        String::from_utf8_lossy(outcome.stderr())
     );
-    assert!(!marker.exists(), "unsupported write policy spawned a child");
+    assert_eq!(
+        fs::read_to_string(&authorized).unwrap().trim(),
+        "TAPID_WRITE_GRANTED"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

@@ -374,22 +374,30 @@ impl WindowsPathAcl {
                 ptstrName: sid.cast(),
             },
         };
-        let entries = if access == FilesystemAccess::Write && is_directory && subtree {
-            [
-                make_entry(root_permissions, 0),
-                make_entry(
-                    FILE_GENERIC_WRITE,
-                    inheritance | windows_sys::Win32::Security::INHERIT_ONLY_ACE,
-                ),
-            ]
+        let mut entries = Vec::with_capacity(4);
+        if access == FilesystemAccess::Write && is_directory && subtree {
+            entries.push(make_entry(root_permissions, 0));
+            entries.push(make_entry(
+                FILE_GENERIC_WRITE,
+                inheritance | windows_sys::Win32::Security::INHERIT_ONLY_ACE,
+            ));
         } else {
-            [make_entry(root_permissions, inheritance), make_entry(0, 0)]
-        };
-        let entry_count = if access == FilesystemAccess::Write && is_directory && subtree {
-            2
-        } else {
-            1
-        };
+            entries.push(make_entry(root_permissions, inheritance));
+        }
+        if is_directory && !directory_traversal_only && !allow_execute {
+            // AppContainer tokens may not have SeChangeNotifyPrivilege. Grant traversal on the
+            // granted directory itself and descendant directories, without granting execute on
+            // descendant files.
+            entries.push(make_entry(FILE_EXECUTE, 0));
+            if subtree {
+                entries.push(make_entry(
+                    FILE_EXECUTE,
+                    windows_sys::Win32::Security::CONTAINER_INHERIT_ACE
+                        | windows_sys::Win32::Security::INHERIT_ONLY_ACE,
+                ));
+            }
+        }
+        let entry_count = entries.len() as u32;
         let mut new_dacl: *mut ACL = null_mut();
         // SAFETY: entries reference the live AppContainer SID; original_dacl remains owned by the
         // security descriptor until the merged ACL has been attached to the object.
@@ -691,6 +699,46 @@ mod tests {
     use super::lock_acl_mutations;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn directory_write_grant_propagates_to_existing_files() {
+        let root = std::env::temp_dir().join(format!(
+            "tapid-existing-child-acl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let writable = root.join("writable");
+        std::fs::create_dir_all(&writable).unwrap();
+        let file = writable.join("existing.txt");
+        std::fs::write(&file, b"before").unwrap();
+        let mut container = crate::execution::windows_job::WindowsAppContainer::create().unwrap();
+        let mut grant = super::WindowsPathAcl::grant(
+            &writable,
+            container.sid(),
+            crate::execution::FilesystemAccess::Write,
+            crate::execution::FilesystemGrantKind::DirectorySubtree,
+        )
+        .unwrap();
+        let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
+        let icacls = std::fs::canonicalize(
+            std::path::PathBuf::from(system_root).join("System32/icacls.exe"),
+        )
+        .unwrap();
+        let output = Command::new(icacls).arg(&file).output().unwrap();
+        let listing = String::from_utf8_lossy(&output.stdout).into_owned();
+        let restore = grant.restore();
+        container.cleanup().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        restore.unwrap();
+        assert!(output.status.success(), "icacls failed: {listing}");
+        assert!(
+            listing.contains("(I)(W"),
+            "existing child did not inherit the write ACE: {listing}"
+        );
+    }
 
     #[test]
     fn acl_mutation_lock_serializes_separate_processes() {

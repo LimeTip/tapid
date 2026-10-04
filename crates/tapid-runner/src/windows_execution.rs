@@ -80,16 +80,6 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
         None,
     )
     .expect("static backend identity must satisfy the checked contract");
-    if !request.policy().filesystem().write().is_empty() {
-        return ContainmentSupport::unsupported(
-            backend,
-            "windows",
-            "project write policies are unsupported until writable filesystem behavior is implemented and natively verified",
-            requested,
-            EnforcementDimensions::none(),
-            EnforcementDimensions::none(),
-        );
-    }
     if request.policy().network() {
         return ContainmentSupport::unsupported(
             backend,
