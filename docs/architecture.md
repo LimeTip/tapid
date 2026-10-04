@@ -66,7 +66,7 @@ Full npm/pnpm compatibility and automatic peer placement are not claimed.
 
 `tapid-core` must not depend on the CLI, filesystem, network, operating system, registry implementation, process execution, clock, environment, or global mutable state. It must not become a general utility crate or a place to hide ambiguity between focused capabilities.
 
-The detailed inclusion and exclusion rules are in the Tapid project skill reference `references/crate-boundaries.md`.
+A shared type belongs in `tapid-core` only when it is a stable domain value with deterministic validation. Wire contracts belong in `tapid-protocol`, test fixtures in `tapid-test-support`, and capability-specific types in their owning crate. See the task map in [AGENTS.md](../AGENTS.md).
 
 ## Focused responsibilities
 
@@ -135,4 +135,4 @@ Consequential, cross-cutting, or difficult-to-reverse decisions require an ADR i
 
 Node.js 22.6.0 or later is required. `node --experimental-strip-types tools/check_architecture.ts` scans tracked production Rust files. Tests and top-level generated or build output trees are excluded, while ordinary production modules named `build` or `generated` remain in scope. Eight hundred physical lines is an advisory review trigger, not a pass/fail rule. When a file exceeds it, review cohesion, interface depth, change locality, and navigability before deciding whether splitting improves the module. A cohesive file may remain larger without an exception. The checker separately enforces a 100 physical line entrypoint threshold for `crates/tapid-cli/src/main.rs`; a temporary exception must document any existing migration debt.
 
-When a capability or crate interface changes, update its implementation, focused tests, crate README, relevant ADR, and this architecture document. Do not expand scaffold crates or `tapid-core` horizontally without an exercised user or protocol behavior.
+When a capability or crate interface changes, update its implementation and focused tests, then update the documentation that describes the changed contract. Update this document when capability ownership or dependency direction changes. Write or supersede an ADR for a consequential decision, not for every interface edit. Private refactors with unchanged contracts do not require documentation churn. Do not expand scaffold crates or `tapid-core` horizontally without an exercised user or protocol behavior.

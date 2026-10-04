@@ -133,8 +133,7 @@ jobs:
         run: cargo test -p tapid --lib --locked native_windows_shim_materialization_rejects_collisions_before_writes
       - name: Run tests
         run: cargo test --workspace --all-features --locked
-      - name: Install documentation runner Python
-        if: runner.os != 'Windows'
+      - name: Install Python for development and documentation tests
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
@@ -148,6 +147,8 @@ jobs:
       - name: Test executable documentation runner (Unix)
         if: runner.os != 'Windows'
         run: python3 -m unittest discover -s tests -p test_doc_examples.py -v
+      - name: Test development build cache selection
+        run: python -m unittest discover -s tests -p test_dev.py -v
       - name: Verify source documentation artifact (Unix, offline)
         if: runner.os != 'Windows'
         run: python3 scripts/check-doc-examples.py --lane source --example init --example upgrade-help --report doc-contract-source.json
