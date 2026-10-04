@@ -86,14 +86,16 @@ jobs:
           if-no-files-found: warn
       - name: Build and test via Tapid
         run: |
+          # Node/libuv reads the current process's resident memory from /proc/self/statm.
+          # Opt in explicitly; the runner exposes only its private read-only procfs view.
           env PATH="$PATH" TMPDIR="$TMPDIR" NEXT_TELEMETRY_DISABLED=1 \
-            target/debug/tapid run build --project-dir examples/news-site-consumer
-          target/debug/tapid run test --project-dir examples/news-site-consumer
+            target/debug/tapid run build --allow-process-memory-stats --project-dir examples/news-site-consumer
+          target/debug/tapid run test --allow-process-memory-stats --project-dir examples/news-site-consumer
       - name: Start via Tapid and assert acceptance marker
         shell: bash
         run: |
           set -euo pipefail
-          target/debug/tapid run start --project-dir examples/news-site-consumer > "$RUNNER_TEMP/news-site-consumer.log" 2>&1 &
+          target/debug/tapid run start --allow-process-memory-stats --project-dir examples/news-site-consumer > "$RUNNER_TEMP/news-site-consumer.log" 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
           for _ in {1..30}; do
