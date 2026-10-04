@@ -40,6 +40,10 @@ This amendment authorizes a development-release self-update path within the exis
 
 ### Amendment for the next release, expected 0.0.11
 
+The unsigned-record and eight-asset decisions below are superseded by
+[ADR 0006](0006-immutable-release-signatures.md). The final flow signs immutable
+records, publishes eleven assets, and generates installers that use a checksum-pinned native verifier.
+
 Tapid owns its public discovery address while GitHub remains the initial release host. The installers and default `tapid upgrade` read a small [release record](../release-record-v1.md) through `tapid.dev/releases/v1/latest.tsv`. Versioned records use `tapid.dev/releases/v1/vVERSION.tsv`. These routes redirect to provider-hosted assets; future provider changes do not require another client discovery protocol.
 
 The existing release workflow generates the record from the six archives and uploads it beside `SHA256SUMS` in the same draft. Publishing that draft exposes all eight assets together. No website edit or signing operation is needed for an ordinary release. The record uses TSV so the POSIX installer needs no JSON interpreter.

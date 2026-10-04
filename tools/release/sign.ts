@@ -3,7 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 const SPKI_ED25519_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-const SIGNATURE_SCHEMA = "tapid-release-v1-signature";
+const SIGNATURE_SCHEMA = "tapid-release-v1-immutable-signature";
 const SUBJECT = "tapid-release-v1";
 
 function sortJson(value: unknown): unknown {
@@ -53,10 +53,10 @@ function createHashHex(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function signingPayload(record: Buffer, keyId: string, createdAt: string, expiresAt: string) {
+function signingPayload(record: Buffer, keyId: string, createdAt: string) {
   return {
     artifact_digest: `sha256-${createHashHex(record)}`,
-    claims: { created_at: createdAt, expires_at: expiresAt, schema: SIGNATURE_SCHEMA },
+    claims: { created_at: createdAt, schema: SIGNATURE_SCHEMA },
     subject: SUBJECT,
     version: "tapid-trust-envelope-v1",
     signature_context: { algorithm: "ed25519", key_id: keyId },
@@ -87,8 +87,7 @@ async function signRecord(recordPath: string, sidecarPath: string, keyringPath: 
   const { key, keyId } = await trustedSigningKey(keyringPath);
   const record = await readFile(recordPath);
   const createdAt = new Date().toISOString().replace(".000Z", "Z");
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().replace(".000Z", "Z");
-  const payload = signingPayload(record, keyId, createdAt, expiresAt);
+  const payload = signingPayload(record, keyId, createdAt);
   const signature = sign(null, canonicalJson(payload), key);
   await writeFile(sidecarPath, JSON.stringify({
     artifact_digest: payload.artifact_digest,
@@ -108,6 +107,12 @@ async function signRecord(recordPath: string, sidecarPath: string, keyringPath: 
 async function verifyRecord(recordPath: string, sidecarPath: string, keyringPath: string): Promise<void> {
   const record = await readFile(recordPath);
   const envelope = JSON.parse(await readFile(sidecarPath, "utf8"));
+  const claims = envelope.claims;
+  if (!claims || Object.keys(claims).length !== 2 || claims.schema !== SIGNATURE_SCHEMA ||
+      typeof claims.created_at !== "string" || !Number.isFinite(Date.parse(claims.created_at)) ||
+      Date.parse(claims.created_at) > Date.now()) {
+    throw new Error("invalid immutable release signature claims");
+  }
   const keyring = JSON.parse(await readFile(keyringPath, "utf8"));
   const key = keyring.keys.find((candidate: { key_id: string }) => candidate.key_id === envelope.signature?.key_id);
   if (!key) throw new Error("sidecar key is not in the trusted keyring");

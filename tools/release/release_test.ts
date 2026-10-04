@@ -199,11 +199,11 @@ test("binary release follows the small draft release flow", async () => {
   const metadata = workflow.indexOf('tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"');
   assert(metadata > workflow.indexOf("tools/release/release.ts checksums release"));
   assert(metadata < createRelease, "the complete metadata asset must exist before draft creation");
-  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig; do"));
+  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig release/install.sh release/install.ps1; do"));
   assert(workflow.includes("find release -maxdepth 1 -type f -exec basename {}"), "draft readback must include the metadata asset");
 });
 
-test("release runbook documents the workflow's nine-asset contract", async () => {
+test("release runbook documents the workflow's eleven-asset contract", async () => {
   const workflow = await text(".github/workflows/release-publication.yml");
   const runbook = await text("docs/release-distribution.md");
   const assets = [
@@ -216,16 +216,18 @@ test("release runbook documents the workflow's nine-asset contract", async () =>
     "SHA256SUMS",
     "tapid-release-v1.tsv",
     "tapid-release-v1.tsv.sig",
+    "install.sh",
+    "install.ps1",
   ];
   for (const asset of assets) assert(runbook.includes(`\`${asset}\``), `runbook omits ${asset}`);
-  assert(runbook.includes("upload and read back the exact nine-asset set"));
-  assert(runbook.includes("This is nine assets for the new release flow."));
-  assert(runbook.includes("Require exactly nine assets and no unexpected names for a new release."));
-  assert(runbook.includes("the exact nine assets remain present for the new release"));
-  assert(runbook.includes("Use nine assets for the new flow or seven for a historical tagged workflow."));
+  assert(runbook.includes("upload and read back the exact eleven-asset set"));
+  assert(runbook.includes("This is eleven assets for the new release flow."));
+  assert(runbook.includes("Require exactly eleven assets and no unexpected names for a new release."));
+  assert(runbook.includes("the exact eleven assets remain present for the new release"));
+  assert(runbook.includes("Use eleven assets for the new flow or seven for a historical tagged workflow."));
   assert(!runbook.includes("exact seven-asset set"));
   assert(!runbook.includes("Require exactly seven assets and no unexpected names"));
-  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig; do"));
+  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig release/install.sh release/install.ps1; do"));
 });
 
 test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM runner", async () => {
@@ -382,8 +384,8 @@ test("public smoke tests use the published installer and released version", asyn
   const workflow = await text(".github/workflows/release-public-smoke.yml");
   assert(workflow.includes("types: [published]"));
   // Keep the tagged installer evidence while checking the live website copies too.
-  assert(workflow.includes('installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$RELEASE_TAG/scripts/install.sh"'));
-  assert(workflow.includes('$installerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:RELEASE_TAG/scripts/install.ps1"'));
+  assert(workflow.includes('installer_url="https://github.com/LimeTip/tapid/releases/download/$RELEASE_TAG/install.sh"'));
+  assert(workflow.includes('$installerUrl = "https://github.com/LimeTip/tapid/releases/download/$env:RELEASE_TAG/install.ps1"'));
   assert(workflow.includes("https://tapid.dev/install.sh"));
   assert(workflow.includes("https://tapid.dev/install.ps1"));
   assert(workflow.includes('"$installer_url" -o "$RUNNER_TEMP/install.sh"'));
@@ -442,10 +444,10 @@ test("public installers exercise explicit and latest discovery plus supported up
     assert(job.includes("public-repeat-upgrade.txt"));
     assert(job.includes("Skip truthful repeat assertion: releases through 0.0.10"));
   }
-  assert(unix.includes('latest_installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$LATEST_TAG/scripts/install.sh"'));
+  assert(unix.includes('latest_installer_url="https://github.com/LimeTip/tapid/releases/download/$LATEST_TAG/install.sh"'));
   const parity = unix.indexOf('cmp "$RUNNER_TEMP/public-install.sh" "$RUNNER_TEMP/latest-tag-install.sh"');
   assert(parity >= 0 && parity < unix.indexOf('sh "$RUNNER_TEMP/public-install.sh" --version'));
-  assert(windows.includes('$latestInstallerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:LATEST_TAG/scripts/install.ps1"'));
+  assert(windows.includes('$latestInstallerUrl = "https://github.com/LimeTip/tapid/releases/download/$env:LATEST_TAG/install.ps1"'));
   const nativePublic = windows.slice(windows.indexOf("- name: Check the public website installer with an explicit version"));
   const nativeParity = nativePublic.indexOf("if ($installerDigest -cne $latestInstallerDigest)");
   assert(nativeParity >= 0 && nativeParity < nativePublic.indexOf("& $installer -Version"));
@@ -544,9 +546,9 @@ test("installers verify signed release records before parsing", async () => {
     assert(installer.includes("release.tsv.sig"));
     assert(installer.includes("release record signature verification failed"));
   }
-  const verifier = await text("scripts/verify-release-record.py");
-  assert(verifier.includes("tapid-release-v1-signature"));
-  assert(verifier.includes("release record signature verification failed"));
+  const verifier = await text("crates/tapid-cli/src/application/release_verification.rs");
+  assert(verifier.includes("verify_signature"));
+  assert(verifier.includes("KeyRing::production()"));
   const shell = await text("scripts/install.sh");
   assert(shell.includes("release archive must contain exactly one member named tapid"));
   assert(shell.includes("MAX_ARCHIVE_BYTES="));

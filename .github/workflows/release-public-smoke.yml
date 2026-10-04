@@ -116,7 +116,7 @@ jobs:
           install_dir="$RUNNER_TEMP/tapid"
           mkdir -p "$RUNNER_TEMP/tapid-home"
           # Exercise the tagged URL rendered by the website, not its compatibility copy.
-          installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$RELEASE_TAG/scripts/install.sh"
+          installer_url="https://github.com/LimeTip/tapid/releases/download/$RELEASE_TAG/install.sh"
           curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL "$installer_url" -o "$RUNNER_TEMP/install.sh"
           shasum -a 256 "$RUNNER_TEMP/install.sh" > "$RUNNER_TEMP/installer-sha256.txt"
           installer_digest="$(cut -d ' ' -f 1 "$RUNNER_TEMP/installer-sha256.txt")"
@@ -178,7 +178,7 @@ jobs:
           curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL https://tapid.dev/install.sh -o "$RUNNER_TEMP/public-install.sh"
           shasum -a 256 "$RUNNER_TEMP/public-install.sh" > "$RUNNER_TEMP/public-installer-sha256.txt"
           # The public script must match latest, even when explicitly testing an older release.
-          latest_installer_url="https://raw.githubusercontent.com/LimeTip/tapid/$LATEST_TAG/scripts/install.sh"
+          latest_installer_url="https://github.com/LimeTip/tapid/releases/download/$LATEST_TAG/install.sh"
           curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL "$latest_installer_url" -o "$RUNNER_TEMP/latest-tag-install.sh"
           shasum -a 256 "$RUNNER_TEMP/latest-tag-install.sh" >> "$RUNNER_TEMP/public-installer-sha256.txt"
           cmp "$RUNNER_TEMP/public-install.sh" "$RUNNER_TEMP/latest-tag-install.sh"
@@ -313,7 +313,7 @@ jobs:
           $installer = Join-Path $env:RUNNER_TEMP 'install.ps1'
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid'
           # curl.exe bounds the download on Windows PowerShell 5.1 as well as pwsh.
-          $installerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:RELEASE_TAG/scripts/install.ps1"
+          $installerUrl = "https://github.com/LimeTip/tapid/releases/download/$env:RELEASE_TAG/install.ps1"
           curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL $installerUrl --output $installer
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $installerDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
@@ -383,7 +383,7 @@ jobs:
           "$installerDigest  public-install.ps1" | Set-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'public-installer-sha256.txt')
           # Compare against latest, not the selected historical release.
           $latestInstaller = Join-Path $env:RUNNER_TEMP 'latest-tag-install.ps1'
-          $latestInstallerUrl = "https://raw.githubusercontent.com/LimeTip/tapid/$env:LATEST_TAG/scripts/install.ps1"
+          $latestInstallerUrl = "https://github.com/LimeTip/tapid/releases/download/$env:LATEST_TAG/install.ps1"
           curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL $latestInstallerUrl --output $latestInstaller
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $latestInstallerDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $latestInstaller).Hash.ToLowerInvariant()

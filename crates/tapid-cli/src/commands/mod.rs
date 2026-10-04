@@ -6,6 +6,7 @@ pub(crate) mod install;
 pub(crate) mod lifecycle;
 pub(crate) mod lock;
 pub(crate) mod manifest;
+mod release_verification;
 pub(crate) mod run;
 pub(crate) mod upgrade;
 
@@ -25,6 +26,8 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    #[command(name = "__verify-release-record", hide = true)]
+    VerifyReleaseRecord(release_verification::Args),
     /// Create a private package.json manifest.
     #[command(
         long_about = "Create a private package.json in an existing directory. Uses the directory name as the package name and sets version 0.1.0. Refuses to overwrite an existing package.json.",
@@ -112,6 +115,7 @@ pub(crate) enum Command {
 /// Routes a parsed command to its handler, or prints usage guidance when no command is given.
 pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
     match command {
+        Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
         None => {
             println!("Run 'tapid --help' for usage");
             ExitCode::SUCCESS

@@ -412,7 +412,7 @@ jobs:
         with:
           node-version: 22
       - name: Test release helpers and workflows
-        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts tools/release/installers_test.ts tools/release/sign_test.ts
+        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts tools/release/installers_test.ts tools/release/sign_test.ts tools/release/bootstrap_test.ts
       - name: Test consumer capability contracts
         run: node --test tests/fixtures/consumer_contract.test.js tests/fixtures/validate_consumer_project.test.js
       - name: Check source architecture
@@ -466,6 +466,12 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Build native verifier
+        run: cargo build --locked --bin tapid
       - name: Install and reject archive fixtures
         shell: pwsh
         run: |
@@ -515,22 +521,26 @@ jobs:
             '^function Save-BoundedHttpsFile\([^\r\n]+\) \{.*?^\}',
             ([Text.RegularExpressions.RegexOptions]::Multiline -bor [Text.RegularExpressions.RegexOptions]::Singleline)
           )
-          $fixtureVerifier = Join-Path $fixture 'verify-release-record.py'
-          $fixtureVerifierText = Get-Content -Raw (Join-Path $PWD 'scripts/verify-release-record.py')
-          $fixturePublicKey = ((Get-Content -Raw (Join-Path $fixture 'keyring.json') | ConvertFrom-Json).keys[0].public_key)
-          $fixtureVerifierText = $fixtureVerifierText.Replace(
-            'eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc=',
-            $fixturePublicKey)
-          Set-Content -Encoding utf8 -NoNewline -Path $fixtureVerifier -Value $fixtureVerifierText
-          $fixtureVerifierHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixtureVerifier).Hash.ToLowerInvariant()
+          # Authenticate the real native verifier independently of the target fixture archive.
+          $bootstrapDir = Join-Path $fixture 'bootstrap-assets'
+          $bootstrapPayload = Join-Path $fixture 'bootstrap-payload'
+          New-Item -ItemType Directory -Force -Path $bootstrapDir, $bootstrapPayload | Out-Null
+          Copy-Item -LiteralPath (Join-Path $PWD 'target/debug/tapid.exe') -Destination (Join-Path $bootstrapPayload 'tapid.exe')
+          foreach ($bootstrapTarget in @('aarch64-apple-darwin', 'x86_64-apple-darwin', 'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-gnu', 'aarch64-pc-windows-msvc', 'x86_64-pc-windows-msvc')) {
+            $name = "tapid-1.0.0-$bootstrapTarget.tar.gz"
+            & tar.exe -czf (Join-Path $bootstrapDir $name) -C $bootstrapPayload tapid.exe
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Copy-Item -LiteralPath (Join-Path $bootstrapDir $name) -Destination (Join-Path $fixture $name)
+          }
+          node --experimental-strip-types tools/release/bootstrap.ts $bootstrapDir 1.0.0 'https://fixture.example/bootstrap/v1.0.0'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installerText = Get-Content -Raw (Join-Path $bootstrapDir 'install.ps1')
           $fixtureInstallerText = $downloaderPattern.Replace($installerText, $fixtureDownloader, 1)
           if ($fixtureInstallerText -eq $installerText) { throw 'failed to create isolated installer fixture' }
+          # Only this fixture selects an explicit ephemeral keyring.
           $fixtureInstallerText = $fixtureInstallerText.Replace(
-            'https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py',
-            'https://fixture.example/verify-release-record.py')
-          $fixtureInstallerText = $fixtureInstallerText.Replace(
-            '4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d',
-            $fixtureVerifierHash)
+            '& $bootstrap __verify-release-record $recordPath $signaturePath',
+            ('& $bootstrap __verify-release-record $recordPath $signaturePath --keyring ''{0}''' -f (Join-Path $fixture 'keyring.json')))
           Set-Content -NoNewline -Path $installerUnderTest -Value $fixtureInstallerText
           $env:TAPID_FIXTURE_ROOT = $fixture
           Set-Content -NoNewline -Path (Join-Path $fixture 'requests.txt') -Value ''
@@ -555,14 +565,34 @@ jobs:
           $expectedRequests = @(
             'https://tapid.dev/releases/v1/v1.2.3.tsv'
             'https://tapid.dev/releases/v1/v1.2.3.tsv.sig'
-            'https://fixture.example/verify-release-record.py'
+            "https://fixture.example/bootstrap/v1.0.0/tapid-1.0.0-$target.tar.gz"
             "https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName"
             'https://tapid.dev/releases/v1/v1.2.3.tsv'
             'https://tapid.dev/releases/v1/v1.2.3.tsv.sig'
-            'https://fixture.example/verify-release-record.py'
+            "https://fixture.example/bootstrap/v1.0.0/tapid-1.0.0-$target.tar.gz"
             "https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName"
           )
           if (($requests -join "`n") -cne ($expectedRequests -join "`n")) { throw 'fixture did not use release record discovery and artifact URLs' }
+          $signaturePath = Join-Path $fixture 'v1.2.3.tsv.sig'
+          $validSignature = [IO.File]::ReadAllBytes($signaturePath)
+          [IO.File]::WriteAllBytes($signaturePath, [Text.Encoding]::ASCII.GetBytes('{}'))
+          try {
+            & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
+            throw 'invalid signature was accepted'
+          } catch {
+            if ($_.Exception.Message -notlike '*release record signature verification failed*') { throw }
+          }
+          if ((Get-FileHash -Algorithm SHA256 $installed).Hash -ne $before) { throw 'invalid signature changed installation' }
+          [IO.File]::WriteAllBytes($signaturePath, $validSignature)
+          [IO.File]::WriteAllBytes((Join-Path $fixture "tapid-1.0.0-$target.tar.gz"), [byte[]](1, 2, 3))
+          try {
+            & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
+            throw 'tampered bootstrap was accepted'
+          } catch {
+            if ($_.Exception.Message -notlike '*bootstrap archive checksum mismatch*') { throw }
+          }
+          if ((Get-FileHash -Algorithm SHA256 $installed).Hash -ne $before) { throw 'tampered bootstrap changed installation' }
+
           } finally {
             Remove-Item Env:TAPID_FIXTURE_ROOT -ErrorAction SilentlyContinue
             [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')

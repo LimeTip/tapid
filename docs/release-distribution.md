@@ -20,7 +20,7 @@ The [`v0.0.8` operations record](releases/0.0.8-operations.md) preserves the fir
 
 Tapid relies on the reviewed repository, an annotated version tag, GitHub Actions, the owned domain and its route configuration, the release provider, HTTPS, and repository release immutability. New release archives are accompanied by `SHA256SUMS` and the [release record](release-record-v1.md). GitHub remains the initial provider.
 
-The checksum detects corruption, truncation, and accidental asset substitution. Because the checksum and archive come from the same GitHub release, it is not an independent authenticity proof. Tapid does not currently claim a separate signed release trust root.
+The checksum detects corruption, truncation, and accidental asset substitution. Because the checksum and archive come from the same GitHub release, it is not an independent authenticity proof. The detached Ed25519 sidecar separately authenticates the release record against the embedded production keyring. Immutable record sidecars do not expire; the legacy signed-manifest protocol keeps its expiry checks.
 
 The new installers accept only stable `vX.Y.Z` versions and HTTPS release endpoints. They consume the record through `tapid.dev/releases/v1/latest.tsv`, or the corresponding `vVERSION.tsv` route for an explicit new version. They validate metadata and archive size, verify SHA-256, require exactly one expected regular executable in the archive, extract into a temporary directory, and stage the destination before replacement. Explicit versions through 0.0.10 retain the historical GitHub archive and `SHA256SUMS` path unless `TAPID_RELEASE_RECORD_URL` is supplied.
 
@@ -30,13 +30,13 @@ Released Tapid 0.0.10 first attempts signed discovery, then uses the canonical G
 
 This is a one-time cutover, expected for 0.0.11. Subsequent releases generate the record in the ordinary draft workflow and need no website edit.
 
-1. Review the client, installers, publisher, website routes, and tests together. Prepare the website change, but do not deploy the new default installer copies while the latest public release lacks `tapid-release-v1.tsv`.
-2. Build and review the first nine-asset draft. Verify the record and signature against all six downloaded archives, including version, immutable URLs, sizes, and hashes. Keep existing public installation working during draft review.
-3. Publish the reviewed draft after approval. Deploy the prepared website routes and installer copies at the controlled cutover, then verify the latest and explicit-version public record routes and public installation. The route returns 404 before a record-bearing release is public, so source tests alone cannot prove this step.
-4. Require the public smoke evidence described below. If the automatic publication run raced the website cutover, rerun the original release-event workflow run after the routes and installer copies are deployed, and retain both attempts. A new manual dispatch does not satisfy the crates.io gate, which requires a successful `release` event run with the exact release title and tag commit.
+1. Review the client, installers, publisher, website routes, and tests together. Prepare the website change, but do not deploy the new default installer redirects while the latest public release lacks `tapid-release-v1.tsv`.
+2. Build and review the first eleven-asset draft. Verify the record and signature against all six downloaded archives, including version, immutable URLs, sizes, and hashes. Keep existing public installation working during draft review.
+3. Publish the reviewed draft after approval. Deploy the prepared record/signature routes and generated installer redirects at the controlled cutover, then verify the latest and explicit-version public record routes and public installation. The route returns 404 before a record-bearing release is public, so source tests alone cannot prove this step.
+4. Require the public smoke evidence described below. If the automatic publication run raced the website cutover, rerun the original release-event workflow run after the routes and installer redirects are deployed, and retain both attempts. A new manual dispatch does not satisfy the crates.io gate, which requires a successful `release` event run with the exact release title and tag commit.
 5. Verify an installed 0.0.10 upgrades through its existing GitHub fallback to the new binary, then repeats through the new record path with an already-up-to-date result. Keep historical `/stable.json` behavior unchanged; placing unsigned metadata there breaks released signed-discovery clients.
 
-The website routes are static provider mappings: `latest.tsv` redirects to GitHub's latest release asset, and `vVERSION.tsv` redirects to that version's asset. Provider migration changes those mappings and the published artifact URLs. It does not require per-release website deployment or signing-key operations.
+The website routes are static provider mappings: `latest.tsv` redirects to GitHub's latest release asset, and `vVERSION.tsv` redirects to that version's asset. Matching `.sig` routes select the sidecars. The public installer endpoints redirect to the latest release's generated `install.sh` and `install.ps1` assets. Each installer embeds that release's archive checksums and uses its authenticated native binary to verify the release record. Provider migration changes those mappings and the published artifact URLs. It does not require per-release website deployment or signing-key operations.
 
 ## Versioning policy
 
@@ -157,7 +157,7 @@ The tag-triggered workflow must:
 - require exactly one matching release whose ID equals the create response;
 - generate `tapid-release-v1.tsv` from the immutable archive bytes;
 - generate its `tapid-release-v1.tsv.sig` sidecar with the protected release key;
-- upload and read back the exact nine-asset set.
+- upload and read back the exact eleven-asset set.
 
 Warnings and notices are evidence, not harmless decoration. Inspect the workflow annotations even when every job is green. Upgrade deprecated action runtimes and validate announced runner-image migrations in an ordinary pull request before their deadlines.
 
@@ -176,17 +176,19 @@ The expected asset set is exactly:
 - `SHA256SUMS`
 - `tapid-release-v1.tsv`
 - `tapid-release-v1.tsv.sig`
+- `install.sh`
+- `install.ps1`
 
-This is nine assets for the new release flow. Historical releases through 0.0.10 have seven assets and no release record. Recovery must use the asset contract of the original tagged workflow; never add metadata to a published historical release.
+This is eleven assets for the new release flow. Historical releases through 0.0.10 have seven assets and no release record. Recovery must use the asset contract of the original tagged workflow; never add metadata to a published historical release.
 
 Before publication:
 
 1. Require `draft=true`, `prerelease=false`, the exact tag, and the expected release ID.
-2. Require exactly nine assets and no unexpected names for a new release.
+2. Require exactly eleven assets and no unexpected names for a new release.
 3. Record every asset ID, name, and provider-reported size.
 4. Download every asset from GitHub by numeric asset ID into a fresh directory.
 5. Compare each downloaded size with the provider-reported size.
-6. Verify all six archives against the downloaded `SHA256SUMS`.
+6. Verify all six archives against the downloaded `SHA256SUMS`. Regenerate both installers with `tools/release/bootstrap.ts` from these downloaded archives and the exact release download base URL, then compare their bytes with the draft's installer assets.
 7. Require each archive to contain exactly one regular file named `tapid` or `tapid.exe`, as appropriate.
 8. Execute the locally compatible downloaded binary and require `tapid <version>`.
 9. Correlate the other binaries with successful native build jobs that executed the version check.
@@ -247,7 +249,7 @@ Immediately verify through an unauthenticated API request that:
 - the public release ID is the reviewed draft ID;
 - `tag_name` equals the intended tag;
 - `draft=false` and `prerelease=false`;
-- the exact nine assets remain present for the new release;
+- the exact eleven assets remain present for the new release;
 - the release is immutable when repository release immutability is enabled;
 - the remote annotated tag object and peeled commit are unchanged.
 
@@ -440,7 +442,7 @@ Do not dispatch the create-only workflow again and do not create a duplicate rel
 4. Require all six expected archives and reject extra files.
 5. Generate and verify `SHA256SUMS` from those exact bytes. For the new release flow, also generate the release record using that version's immutable public download directory.
 6. Inspect archive layout and correlate native version checks with the build logs.
-7. List assets already attached to the draft by numeric release ID. Require their names to be a unique subset of the expected asset set and reject unexpected or duplicate names. Use nine assets for the new flow or seven for a historical tagged workflow.
+7. List assets already attached to the draft by numeric release ID. Require their names to be a unique subset of the expected asset set and reject unexpected or duplicate names. Use eleven assets for the new flow or seven for a historical tagged workflow.
 8. Download every existing asset by numeric asset ID. Require its size and SHA-256 to match the corresponding locally recovered file exactly. Stop on any mismatch; never overwrite or delete an ambiguous asset.
 9. Upload only expected names that are not already present, using the existing numeric release ID.
 10. Download every resulting asset back by numeric asset ID.
@@ -520,7 +522,7 @@ Never:
 
 ## Residual risks
 
-- Domain, route configuration, release provider, repository, or workflow compromise can substitute both an archive and its release record. SHA-256 is not independent release authorization.
+- A compromised discovery route or release provider can replay a previously signed record but cannot change its bytes without the release key. A non-expiring signature does not prove latest-release freshness. Client rollback state limits normal downgrades; a fresh installer has no prior release floor. Repository, workflow, or signing-key compromise can still authorize malicious releases.
 - The installers do not enforce rollback protection beyond selecting a requested immutable release version.
 - Public smoke tests run after publication and can detect but cannot prevent a broken release from briefly being available.
 - macOS and Windows platform code signing are not part of this flow.

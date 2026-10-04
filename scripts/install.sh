@@ -20,8 +20,41 @@ MAX_RECORD_BYTES=262144
 MAX_CHECKSUM_BYTES=1048576
 MAX_ARCHIVE_BYTES=536870912
 MAX_BINARY_BYTES=536870912
-VERIFIER_URL="https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py"
-VERIFIER_SHA256="4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d"
+# Release CI fills these values from the exact built archives before publication.
+BOOTSTRAP_VERSION="@TAPID_BOOTSTRAP_VERSION@"
+BOOTSTRAP_BASE_URL="@TAPID_BOOTSTRAP_BASE_URL@"
+bootstrap_sha256() {
+  case "$1" in
+# @TAPID_BOOTSTRAP_PINS@
+    *) return 1 ;;
+  esac
+}
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    fail "shasum or sha256sum is required"
+  fi
+}
+
+extract_binary() {
+  archive_path="$1"
+  extract_path="$2"
+  mkdir "$extract_path"
+  members="$(tar -tzf "$archive_path")" || fail "cannot inspect release archive"
+  printf '%s\n' "$members" | awk 'NF { count++; if ($0 != "tapid") invalid=1 } END { exit !(count == 1 && !invalid) }' || fail "release archive must contain exactly one member named tapid"
+  entry_info="$(tar -tvzf "$archive_path")" || fail "cannot inspect release archive entry type"
+  printf '%s\n' "$entry_info" | awk 'NF { count++; if (substr($0, 1, 1) != "-" || $NF != "tapid") invalid=1 } END { exit !(count == 1 && !invalid) }' || fail "release archive tapid member must be a regular file"
+  probe_bytes="$(tar -xOzf "$archive_path" tapid | dd bs=1048576 count=513 2>/dev/null | wc -c | tr -d '[:space:]')"
+  [ "$probe_bytes" -le "$MAX_BINARY_BYTES" ] || fail "release binary exceeds the size limit"
+  (ulimit -f 1048576; tar -xzf "$archive_path" -C "$extract_path" tapid) || fail "cannot extract tapid"
+  [ -f "$extract_path/tapid" ] && [ ! -L "$extract_path/tapid" ] || fail "release archive tapid member must be a regular file"
+  [ "$(wc -c < "$extract_path/tapid" | tr -d '[:space:]')" -le "$MAX_BINARY_BYTES" ] || fail "release binary exceeds the size limit"
+}
+
 
 usage() {
   cat <<'USAGE'
@@ -208,7 +241,7 @@ else
   if [ -z "${TAPID_RELEASE_RECORD_URL-}" ] && [ "$VERSION" != latest ]; then
     record_url="https://tapid.dev/releases/v1/v$VERSION.tsv"
   fi
-  # Keep the shell installer dependency-free. Validate before using any record fields.
+  # Validate the discovery address before downloading metadata.
   printf '%s\n' "$record_url" | LC_ALL=C awk '
     NR != 1 || $0 !~ /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(\/.*)?$/ || /[^!-~]/ || /[@?#\\]/ { bad=1 }
     END { exit bad }
@@ -217,17 +250,15 @@ else
   curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize "$MAX_RECORD_BYTES" "$record_url.sig" -o "$tmp_dir/release.tsv.sig" 2>/dev/null || fail "could not download release record signature"
   [ "$(wc -c < "$tmp_dir/release.tsv" | tr -d '[:space:]')" -le "$MAX_RECORD_BYTES" ] || fail "release record exceeds the size limit"
   [ -s "$tmp_dir/release.tsv.sig" ] || fail "release record signature is empty"
-  command -v python3 >/dev/null 2>&1 || fail "python3 is required to verify the release record signature"
-  curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize 262144 "$VERIFIER_URL" -o "$tmp_dir/verify-release-record.py" 2>/dev/null || fail "could not download release record verifier"
-  if command -v shasum >/dev/null 2>&1; then
-    verifier_hash="$(shasum -a 256 "$tmp_dir/verify-release-record.py" | awk '{print $1}')"
-  elif command -v sha256sum >/dev/null 2>&1; then
-    verifier_hash="$(sha256sum "$tmp_dir/verify-release-record.py" | awk '{print $1}')"
-  else
-    fail "shasum or sha256sum is required"
-  fi
-  [ "$verifier_hash" = "$VERIFIER_SHA256" ] || fail "release record verifier checksum mismatch"
-  python3 "$tmp_dir/verify-release-record.py" "$tmp_dir/release.tsv" "$tmp_dir/release.tsv.sig" || fail "release record signature verification failed"
+  bootstrap_hash="$(bootstrap_sha256 "$target")" || fail "installer bootstrap pins are missing; use a published release installer"
+  bootstrap_archive="tapid-$BOOTSTRAP_VERSION-$target.tar.gz"
+  bootstrap_path="$tmp_dir/bootstrap.tar.gz"
+  curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=https' --max-filesize "$MAX_ARCHIVE_BYTES" "$BOOTSTRAP_BASE_URL/$bootstrap_archive" -o "$bootstrap_path" 2>/dev/null || fail "could not download installer bootstrap"
+  [ "$(wc -c < "$bootstrap_path" | tr -d '[:space:]')" -le "$MAX_ARCHIVE_BYTES" ] || fail "bootstrap archive exceeds the size limit"
+  [ "$(sha256_file "$bootstrap_path")" = "$bootstrap_hash" ] || fail "bootstrap archive checksum mismatch"
+  extract_binary "$bootstrap_path" "$tmp_dir/bootstrap"
+  chmod 0755 "$tmp_dir/bootstrap/tapid"
+  "$tmp_dir/bootstrap/tapid" __verify-release-record "$tmp_dir/release.tsv" "$tmp_dir/release.tsv.sig" || fail "release record signature verification failed"
   [ "$(tail -c 1 "$tmp_dir/release.tsv" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || fail "release record must end with a newline"
   # Some awk implementations truncate strings at NUL. Check raw bytes first.
   [ "$(LC_ALL=C tr -d '\011\012\040-\176' < "$tmp_dir/release.tsv" | wc -c | tr -d '[:space:]')" = 0 ] || fail "release record must contain ASCII fields and LF lines"
@@ -261,25 +292,9 @@ curl -fsSL --connect-timeout 10 --max-time 60 --proto '=https' --proto-redir '=h
 actual_size="$(wc -c < "$tmp_dir/$archive" | tr -d '[:space:]')"
 [ "$actual_size" -le "$MAX_ARCHIVE_BYTES" ] || fail "release archive exceeds the size limit"
 [ -z "$expected_size" ] || [ "$actual_size" = "$expected_size" ] || fail "release archive size does not match release record"
-if command -v shasum >/dev/null 2>&1; then
-  actual="$(shasum -a 256 "$tmp_dir/$archive" | awk '{print $1}')"
-elif command -v sha256sum >/dev/null 2>&1; then
-  actual="$(sha256sum "$tmp_dir/$archive" | awk '{print $1}')"
-else
-  fail "shasum or sha256sum is required"
-fi
+actual="$(sha256_file "$tmp_dir/$archive")"
 [ "$actual" = "$expected" ] || fail "checksum verification failed for $archive"
-
-mkdir "$tmp_dir/extracted"
-members="$(tar -tzf "$tmp_dir/$archive")" || fail "cannot inspect release archive"
-printf '%s\n' "$members" | awk 'NF { count++; if ($0 != "tapid") invalid=1 } END { exit !(count == 1 && !invalid) }' || fail "release archive must contain exactly one member named tapid"
-entry_info="$(tar -tvzf "$tmp_dir/$archive")" || fail "cannot inspect release archive entry type"
-printf '%s\n' "$entry_info" | awk 'NF { count++; if (substr($0, 1, 1) != "-" || $NF != "tapid") invalid=1 } END { exit !(count == 1 && !invalid) }' || fail "release archive tapid member must be a regular file"
-probe_bytes="$(tar -xOzf "$tmp_dir/$archive" tapid | dd bs=1048576 count=513 2>/dev/null | wc -c | tr -d '[:space:]')"
-[ "$probe_bytes" -le "$MAX_BINARY_BYTES" ] || fail "release binary exceeds the size limit"
-(ulimit -f 1048576; tar -xzf "$tmp_dir/$archive" -C "$tmp_dir/extracted" tapid) || fail "cannot extract tapid"
-[ -f "$tmp_dir/extracted/tapid" ] && [ ! -L "$tmp_dir/extracted/tapid" ] || fail "release archive tapid member must be a regular file"
-[ "$(wc -c < "$tmp_dir/extracted/tapid" | tr -d '[:space:]')" -le "$MAX_BINARY_BYTES" ] || fail "release binary exceeds the size limit"
+extract_binary "$tmp_dir/$archive" "$tmp_dir/extracted"
 
 STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
 STAGED_MARKER="$(mktemp "$INSTALL_DIR/.tapid-marker.tmp.XXXXXX")"
