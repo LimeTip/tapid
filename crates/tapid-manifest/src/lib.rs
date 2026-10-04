@@ -92,6 +92,33 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn discovers_single_string_workspace_pattern() {
+        let root = unique_temp_dir("workspace-string");
+        std::fs::create_dir_all(root.join("packages/web")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":"packages/*"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/web/package.json"),
+            r#"{"name":"web","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let workspace = Workspace::discover(&root).unwrap();
+        assert_eq!(
+            workspace
+                .members()
+                .iter()
+                .map(WorkspaceMember::name)
+                .collect::<Vec<_>>(),
+            ["web"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_workspace_glob_symlinks_instead_of_silently_omitting_members() {
@@ -167,6 +194,33 @@ mod tests {
             std::fs::canonicalize(root.join("apps/web/package.json")).unwrap()
         );
         assert!(workspace.select(Some("missing")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_object_workspace_packages_from_single_string() {
+        let root = unique_temp_dir("workspace-object-string");
+        std::fs::create_dir_all(root.join("apps/web")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":{"packages":"apps/*"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("apps/web/package.json"),
+            r#"{"name":"web","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let workspace = Workspace::discover(&root).unwrap();
+        assert_eq!(
+            workspace
+                .members()
+                .iter()
+                .map(WorkspaceMember::name)
+                .collect::<Vec<_>>(),
+            ["web"]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -178,12 +178,18 @@ fn read_file(path: &Path) -> Result<String, String> {
 fn workspace_patterns(document: &Value) -> Result<Vec<String>, String> {
     let value = match document.get("workspaces") {
         None => return Ok(Vec::new()),
+        Some(Value::String(pattern)) => return Ok(vec![pattern.to_owned()]),
         Some(Value::Array(values)) => values,
-        Some(Value::Object(object)) => object
-            .get("packages")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "package.json workspaces.packages must be an array".to_owned())?,
-        Some(_) => return Err("package.json workspaces must be an array or object".to_owned()),
+        Some(Value::Object(object)) => match object.get("packages") {
+            Some(Value::String(pattern)) => return Ok(vec![pattern.to_owned()]),
+            Some(Value::Array(values)) => values,
+            _ => {
+                return Err("package.json workspaces.packages must be a string or array".to_owned());
+            }
+        },
+        Some(_) => {
+            return Err("package.json workspaces must be a string, array, or object".to_owned());
+        }
     };
     value
         .iter()
