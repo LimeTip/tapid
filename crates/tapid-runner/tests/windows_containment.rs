@@ -40,7 +40,7 @@ fn managed_policy_with_flags(
     SandboxPolicy::new_with_assurance(
         SandboxMode::Required,
         AssuranceLevel::ManagedTree,
-        FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+        FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
         network,
         vec!["TAPID_TEST_MARKER".into()],
         allow_subprocess,
@@ -69,6 +69,18 @@ fn command_request_with_flags(
     allow_subprocess: bool,
     network: bool,
 ) -> ExecutionRequest {
+    command_request_with_policy(
+        root,
+        command,
+        managed_policy_with_flags(limits, allow_subprocess, network),
+    )
+}
+
+fn command_request_with_policy(
+    root: &PathBuf,
+    command: &str,
+    policy: SandboxPolicy,
+) -> ExecutionRequest {
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
     let system32 = fs::canonicalize(PathBuf::from(system_root).join("System32")).unwrap();
     let mut arguments: Vec<OsString> = vec!["/D".into(), "/S".into(), "/C".into()];
@@ -77,7 +89,7 @@ fn command_request_with_flags(
         .args(arguments)
         .executable_search_path(&system32)
         .project_root(root)
-        .policy(managed_policy_with_flags(limits, allow_subprocess, network))
+        .policy(policy)
         .windows_verbatim_arguments(true)
         .build()
         .unwrap()
@@ -94,7 +106,7 @@ fn windows_managed_tree_executes_with_checked_appcontainer_and_job_evidence() {
             OsString::from("/D"),
             OsString::from("/S"),
             OsString::from("/C"),
-            OsString::from("echo stdout-marker & echo stderr-marker 1>&2 & echo TAPID_WINDOWS_MANAGED_TREE>allowed.txt"),
+            OsString::from("echo stdout-marker & echo stderr-marker 1>&2"),
         ])
         .executable_search_path(&system32)
         .project_root(&root)
@@ -115,10 +127,6 @@ fn windows_managed_tree_executes_with_checked_appcontainer_and_job_evidence() {
     assert!(String::from_utf8_lossy(outcome.stdout()).contains("stdout-marker"));
     assert!(String::from_utf8_lossy(outcome.stderr()).contains("stderr-marker"));
     assert_eq!(
-        fs::read_to_string(root.join("allowed.txt")).unwrap().trim(),
-        "TAPID_WINDOWS_MANAGED_TREE"
-    );
-    assert_eq!(
         outcome.enforcement().assurance(),
         AssuranceLevel::ManagedTree
     );
@@ -128,7 +136,6 @@ fn windows_managed_tree_executes_with_checked_appcontainer_and_job_evidence() {
     );
     for dimension in [
         tapid_runner::EnforcementDimension::FilesystemRead,
-        tapid_runner::EnforcementDimension::FilesystemWrite,
         tapid_runner::EnforcementDimension::Network,
         tapid_runner::EnforcementDimension::EnvironmentSanitization,
         tapid_runner::EnforcementDimension::DescriptorHygiene,
@@ -232,8 +239,7 @@ fn windows_appcontainer_timeout_terminates_the_managed_job() {
 #[test]
 fn windows_disabled_subprocess_policy_prevents_child_process_creation() {
     let root = temporary_project("process-limit");
-    let marker = "child-process-created.txt";
-    let command = format!(r#"start "" /B cmd.exe /D /S /C "echo CHILD>{marker}""#);
+    let command = r#"start "" /B cmd.exe /D /S /C "echo CHILD_PROCESS_MARKER""#;
     let request = command_request(
         &root,
         &command,
@@ -244,10 +250,7 @@ fn windows_disabled_subprocess_policy_prevents_child_process_creation() {
         outcome.termination(),
         Termination::Exited(_) | Termination::TimedOut
     ));
-    assert!(
-        !root.join(marker).exists(),
-        "a child process escaped the active-process limit"
-    );
+    assert!(!String::from_utf8_lossy(outcome.stdout()).contains("CHILD_PROCESS_MARKER"));
     assert_eq!(
         outcome.completion().cleanup_confidence(),
         CleanupConfidence::KernelOwnedComplete
@@ -471,6 +474,32 @@ fn windows_runtime_directory_ace_allows_launching_read_execute_binaries() {
     );
     assert!(String::from_utf8_lossy(outcome.stdout()).contains("RUNTIME_EXECUTABLE_MARKER"));
     fs::remove_file(probe).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn windows_write_enabled_policy_fails_closed_before_spawn() {
+    let root = temporary_project("write-policy-unsupported");
+    let marker = root.join("must-not-spawn.txt");
+    let command = format!("echo should-not-run>\"{}\"", marker.display());
+    let policy = SandboxPolicy::new_with_assurance(
+        SandboxMode::Required,
+        AssuranceLevel::ManagedTree,
+        FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+        false,
+        vec!["TAPID_TEST_MARKER".into()],
+        false,
+        ExecutionLimits::new(Some(10), Some(4096), Some(4), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let request = command_request_with_policy(&root, &command, policy);
+
+    let error = execute(&request).expect_err("Windows write-enabled policy must fail closed");
+    assert_eq!(
+        error.category(),
+        ExecutionErrorCategory::UnsupportedContainment
+    );
+    assert!(!marker.exists(), "unsupported write policy spawned a child");
     fs::remove_dir_all(root).unwrap();
 }
 
