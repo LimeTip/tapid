@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderInstallers } from './bootstrap.ts';
 
-import { strictEqual, match } from 'node:assert/strict';
+import { deepStrictEqual, strictEqual, match } from 'node:assert/strict';
 
 import { test } from 'node:test';
 
@@ -49,4 +49,20 @@ test('publication and draft verification automate bootstrap pin generation and r
   match(draft, /cmp "\$generated\/install.ps1"/);
   match(draft, /exactly eleven draft assets/);
   match(draft, /__verify-release-record/);
+});
+
+test('draft verification grants repository write access only to the draft-reading job', async () => {
+  const draft = await readFile(new URL('../../.github/workflows/release-draft-verify.yml', import.meta.url), 'utf8');
+  match(draft, /^permissions:\n  contents: read\n/m);
+  const jobs = [...draft.slice(draft.indexOf('\njobs:\n')).matchAll(/^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm)];
+  strictEqual(jobs.some((job) => job[1] === 'install'), true);
+  for (const [_, name, body] of jobs) {
+    const permissions = body.match(/^    permissions:[^\n]*(?:\n {6}[^\n]*)*/m)?.[0];
+    if (permissions !== undefined) {
+      strictEqual(permissions, `    permissions:\n      contents: ${name === 'resolve-and-verify' ? 'write' : 'read'}`);
+    }
+  }
+  const writeJobs = jobs.filter((job) => /^    permissions:\n      contents: write\n/m.test(job[2]));
+  deepStrictEqual(writeJobs.map((job) => job[1]), ['resolve-and-verify']);
+  strictEqual(draft.match(/^\s*contents: write\s*$/gm)?.length, 1);
 });
