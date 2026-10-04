@@ -351,19 +351,20 @@ fn validate_workspace_peer_providers(
     resolution: &Resolution,
 ) -> Result<(), String> {
     for peer in peers {
-        if let WorkspacePeerProvider::Registry { registry, package } = &peer.provider {
-            if !direct_root_dependencies.contains(&(registry.clone(), package.clone()))
-                || !resolution.roots.iter().any(|root| {
-                    root.registry == *registry
-                        && root.name == *package
-                        && peer.requirement.matches(&root.version)
-                })
-            {
-                return Err(format!(
-                    "workspace member peer dependency '{}' has no direct root provider satisfying {:?}",
-                    peer.manifest_name, peer.requirement
-                ));
-            }
+        let WorkspacePeerProvider::Registry { registry, package } = &peer.provider else {
+            continue;
+        };
+        if !direct_root_dependencies.contains(&(registry.clone(), package.clone()))
+            || !resolution.roots.iter().any(|root| {
+                root.registry == *registry
+                    && root.name == *package
+                    && peer.requirement.matches(&root.version)
+            })
+        {
+            return Err(format!(
+                "workspace member peer dependency '{}' has no direct root provider satisfying {:?}",
+                peer.manifest_name, peer.requirement
+            ));
         }
     }
     Ok(())

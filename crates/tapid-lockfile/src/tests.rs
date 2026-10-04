@@ -70,7 +70,7 @@ fn workspace_package_lock_identity_roundtrips_roots_and_dependency_edges() {
     let json = lockfile.to_json().unwrap();
     assert!(json.contains("workspacePackages"));
     let replayed = Lockfile::from_json(&json).unwrap();
-    assert_eq!(replayed.roots(), &[workspace_key.clone()]);
+    assert_eq!(replayed.roots(), std::slice::from_ref(&workspace_key));
     assert_eq!(
         replayed.packages()[&consumer_key].dependencies()["@tapid/web"],
         workspace_key
