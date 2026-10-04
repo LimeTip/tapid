@@ -267,24 +267,32 @@ pub fn resolve_and_fetch(
     let mut fixture_records = BTreeMap::<(String, String, String), PackageRecord>::new();
     if let Some(f) = &fixture {
         for p in &f.packages {
-            let registry: RegistryOrigin = p
-                .registry
-                .parse()
-                .map_err(|_| format!("invalid fixture registry {}", p.registry))?;
-            let name: PackageName = p
-                .name
-                .parse()
-                .map_err(|_| format!("invalid fixture package {}", p.name))?;
-            let version: PackageVersion = p
-                .version
-                .parse()
-                .map_err(|_| format!("invalid fixture version {}", p.version))?;
+            let registry: RegistryOrigin =
+                p.registry
+                    .parse()
+                    .map_err(|error: tapid_core::DomainError| {
+                        OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+                            .context(format!("invalid fixture registry {}", p.registry))
+                    })?;
+            let name: PackageName = p.name.parse().map_err(|error: tapid_core::DomainError| {
+                OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+                    .context(format!("invalid fixture package {}", p.name))
+            })?;
+            let version: PackageVersion =
+                p.version
+                    .parse()
+                    .map_err(|error: tapid_core::DomainError| {
+                        OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+                            .context(format!("invalid fixture version {}", p.version))
+                    })?;
             let integrity = p
                 .integrity
                 .clone()
                 .map(|v| {
-                    v.parse()
-                        .map_err(|_| format!("invalid fixture integrity {v}"))
+                    v.parse().map_err(|error: tapid_core::DomainError| {
+                        OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+                            .context(format!("invalid fixture integrity {v}"))
+                    })
                 })
                 .transpose()?;
             if registry.to_string() == NPM && integrity.is_none() && !allow_missing_integrity {

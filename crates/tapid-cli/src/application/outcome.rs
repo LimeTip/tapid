@@ -300,9 +300,19 @@ pub(crate) struct OperationFailure {
 impl OperationFailure {
     pub(crate) fn new(
         error: OperationalError,
-        outcome: OperationOutcome,
+        mut outcome: OperationOutcome,
         recovery_error: Option<OperationalError>,
     ) -> Self {
+        if outcome.state == ChangeState::RecoveryRequired {
+            // An older transaction may fail before this attempt records mutations.
+            // Recovery must inspect all durable project outputs, not report zero.
+            for name in ["package.json", "tapid.lock", "node_modules"] {
+                let path = outcome.project_dir.join(name);
+                if !outcome.changed_files.contains(&path) {
+                    outcome.changed_files.push(path);
+                }
+            }
+        }
         let retry = match outcome.state {
             ChangeState::Committed | ChangeState::CommittedCleanupPending => {
                 RetryAdvice::DoNotRepeat

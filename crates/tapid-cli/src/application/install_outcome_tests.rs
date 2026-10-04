@@ -518,3 +518,89 @@ fn successful_install_and_replay_report_effective_project_changes_and_warnings()
     );
     assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
 }
+
+#[test]
+fn failed_previous_recovery_reports_project_outputs_for_install_and_outdated() {
+    for command in ["install", "outdated"] {
+        let project = TempProject::new(command).unwrap();
+        let original = br#"{"name":"app","version":"1.0.0"}"#;
+        project.write("package.json", original).unwrap();
+        project
+            .write(".tapid-lifecycle-journal.json", b"{}")
+            .unwrap();
+        let failure = if command == "install" {
+            run(
+                project.path(),
+                None,
+                Some(&project.path().join("store")),
+                InstallMode::Online,
+                None,
+                false,
+                |_, _| {},
+            )
+            .unwrap_err()
+        } else {
+            crate::application::lifecycle::outdated_report(project.path(), None, None).unwrap_err()
+        };
+        assert_eq!(failure.error.kind, ErrorKind::Recovery);
+        assert_eq!(failure.outcome.state, ChangeState::RecoveryRequired);
+        assert_eq!(failure.retry, RetryAdvice::RecoverFirst);
+        let root = project.path().canonicalize().unwrap();
+        assert_eq!(
+            failure.outcome.changed_files,
+            [
+                root.join("package.json"),
+                root.join("tapid.lock"),
+                root.join("node_modules")
+            ]
+        );
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read(project.path().join(".tapid-lifecycle-journal.json")).unwrap(),
+            b"{}"
+        );
+    }
+}
+
+#[test]
+fn invalid_fixture_package_fields_preserve_the_registry_metadata_category() {
+    use std::error::Error;
+    for (field, invalid) in [
+        ("registry", "not-an-origin"),
+        ("name", "invalid name"),
+        ("version", "not-a-version"),
+        ("integrity", "not-a-digest"),
+    ] {
+        let (project, fixture) = project_with_fixture(field, INTEGRITY);
+        let original = fs::read(project.path().join("package.json")).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+        metadata["packages"][0][field] = invalid.into();
+        fs::write(&fixture, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let failure = run(
+            project.path(),
+            Some("plugin@1.0.0"),
+            Some(&project.path().join("store")),
+            InstallMode::Online,
+            Some(&fixture),
+            false,
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.error.kind,
+            ErrorKind::RegistryMetadata,
+            "field: {field}"
+        );
+        assert!(failure.error.source().is_some(), "field: {field}");
+        assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            original
+        );
+        assert!(!project.path().join("node_modules").exists());
+    }
+}
