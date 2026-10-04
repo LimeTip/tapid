@@ -11,9 +11,10 @@ use request::{
 };
 
 mod supervision;
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+use supervision::ExecutionLifecycle;
 use supervision::{
-    ExecutionBackend, ExecutionLifecycle, OwnedExecutionAttempt, PreparationError,
-    execute_with_backend,
+    ExecutionBackend, OwnedExecutionAttempt, PreparationError, execute_with_backend,
 };
 
 use crate::config::{
