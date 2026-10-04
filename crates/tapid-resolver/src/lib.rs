@@ -333,7 +333,7 @@ fn parse_requirement_base(op: RequirementOperator, value: &str) -> Option<Requir
                 || !component.bytes().all(|byte| byte.is_ascii_digit())
                 || (component.len() > 1 && component.starts_with('0'))
         })
-        || (!matches!(
+        || !(matches!(
             op,
             RequirementOperator::Exact
                 | RequirementOperator::Tilde
@@ -341,7 +341,7 @@ fn parse_requirement_base(op: RequirementOperator, value: &str) -> Option<Requir
                 | RequirementOperator::GreaterEqual
                 | RequirementOperator::Less
                 | RequirementOperator::LessEqual
-        ) && !(op == RequirementOperator::Caret && matches!(components.len(), 1 | 2)))
+        ) || op == RequirementOperator::Caret && matches!(components.len(), 1 | 2))
     {
         return None;
     }

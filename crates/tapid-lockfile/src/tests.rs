@@ -1,4 +1,4 @@
-use super::{LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfile, VERSION};
+use super::{LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfile};
 use proptest::prelude::*;
 
 #[test]
@@ -205,11 +205,6 @@ fn declared_package(
 }
 use std::str::FromStr;
 use tapid_core::{ArtifactDigest, PackageName, PackageVersion};
-
-#[test]
-fn version_is_present() {
-    assert!(!VERSION.is_empty());
-}
 
 #[test]
 fn serializes_packages_in_canonical_order() {
