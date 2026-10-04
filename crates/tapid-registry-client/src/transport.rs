@@ -496,7 +496,7 @@ mod tests {
     };
 
     fn local_tls_server_config() -> Arc<rustls::ServerConfig> {
-        // Public, self-signed test fixture only; never use this key outside tests.
+        // Public certificate/key fixture for local TLS tests only.
         let certificate = rustls::pki_types::CertificateDer::from(
             include_bytes!("../tests/fixtures/local-test-cert.der").to_vec(),
         );
@@ -597,14 +597,15 @@ mod tests {
             HttpsTransport::new_authenticated(origins, credentials, timeout, 4096).unwrap();
         let allowed_origins = transport.allowed_origins.clone();
         let policy = exact_origin_redirect_policy(allowed_origins);
-        // The fixture uses a self-signed certificate. This test-only client skips
-        // certificate validation so assertions focus on auth and redirect policy;
-        // production transports retain normal certificate validation.
+        // Trust this test CA explicitly; normal certificate validation stays enabled.
+        let certificate =
+            reqwest::Certificate::from_der(include_bytes!("../tests/fixtures/local-test-ca.der"))
+                .unwrap();
         transport.client = reqwest::blocking::Client::builder()
             .user_agent("tapid/0.0.2")
             .timeout(timeout)
             .redirect(policy)
-            .danger_accept_invalid_certs(true)
+            .add_root_certificate(certificate)
             .build()
             .unwrap();
         transport
