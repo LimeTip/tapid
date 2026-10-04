@@ -63,6 +63,8 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
       - name: Check tag version using trusted release tooling
         id: version
         shell: bash
@@ -147,6 +149,8 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
       - name: Rebuild exact tagged source and compare reviewed plan
         id: recheck
         shell: bash

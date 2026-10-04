@@ -111,6 +111,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.99.0
           targets: ${{ matrix.target }}
       - name: Build and archive
         shell: bash
