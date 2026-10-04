@@ -158,6 +158,7 @@ fn materialize_workspace_links(
             .parent()
             .ok_or("workspace link target has no parent")?;
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
         let final_parent = project_root
             .join("node_modules")
             .join(link.name.as_str().split('/').collect::<PathBuf>())
