@@ -440,6 +440,7 @@ pub enum ResolveError {
     InvalidRequirement(String),
     UnsupportedRange(String),
     UnsupportedMode(&'static str),
+    RegistryRouting(String),
     DuplicateMetadata {
         package: String,
     },
@@ -498,6 +499,20 @@ pub fn resolve_graph(
     metadata: &[RegistryMetadata],
     options: ResolutionOptions,
 ) -> Result<Resolution, ResolveError> {
+    resolve_graph_with_routing(ds, metadata, options, |parent, _| Ok(parent.clone()))
+}
+
+/// Resolves a graph while selecting each transitive package's registry from its
+/// parent registry and dependency name. Root identities remain caller-selected.
+pub fn resolve_graph_with_routing<F>(
+    ds: &[Dependency],
+    metadata: &[RegistryMetadata],
+    options: ResolutionOptions,
+    mut registry_for_dependency: F,
+) -> Result<Resolution, ResolveError>
+where
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+{
     if options.frozen {
         return Err(ResolveError::UnsupportedMode(
             "frozen resolution requires a lockfile replay input",
@@ -553,28 +568,23 @@ pub fn resolve_graph(
             .dependencies
             .clone();
         for (dependency, requirement) in package_dependencies {
+            let registry = registry_for_dependency(&parent.registry, &dependency)
+                .map_err(ResolveError::RegistryRouting)?;
             let requirements = BTreeSet::from([requirement]);
-            let child_package = match select_package(
-                &parent.registry,
-                &dependency,
-                &requirements,
-                &candidate_index,
-            ) {
-                Ok(package) => package,
-                Err(ResolveError::MissingCandidate { .. })
-                    if !candidate_index
-                        .contains_key(&(parent.registry.clone(), dependency.clone())) =>
-                {
-                    missing_metadata.insert((parent.registry.to_string(), dependency.to_string()));
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let child = RegistryPackageId::new(
-                parent.registry.clone(),
-                dependency.clone(),
-                child_package.version.clone(),
-            );
+            let child_package =
+                match select_package(&registry, &dependency, &requirements, &candidate_index) {
+                    Ok(package) => package,
+                    Err(ResolveError::MissingCandidate { .. })
+                        if !candidate_index
+                            .contains_key(&(registry.clone(), dependency.clone())) =>
+                    {
+                        missing_metadata.insert((registry.to_string(), dependency.to_string()));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+            let child =
+                RegistryPackageId::new(registry, dependency.clone(), child_package.version.clone());
             dependencies.insert(ResolvedDependency {
                 parent: parent.clone(),
                 dependency: dependency.clone(),
@@ -606,10 +616,13 @@ pub fn resolve_graph(
     for (id, package) in &selected_packages {
         let mut context = PeerContext::default();
         for (peer, requirement) in &package.peer_dependencies {
-            let provider = root_providers.get(&(id.registry.clone(), peer.clone()));
+            let peer_registry = registry_for_dependency(&id.registry, peer)
+                .map_err(ResolveError::RegistryRouting)?;
+            let provider = root_providers.get(&(peer_registry, peer.clone()));
             if provider.is_none() && package.optional_peer_dependencies.contains(peer) {
                 continue;
             }
+
             if !provider.is_some_and(|version| requirement.matches(version)) {
                 return Err(ResolveError::PeerDependency {
                     package: id.to_string(),

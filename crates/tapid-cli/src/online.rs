@@ -19,7 +19,7 @@ use tapid_registry_client::{
 };
 use tapid_resolver::{
     Dependency, PackageVersionMetadata, RegistryMetadata, Requirement, Resolution,
-    ResolutionOptions, ResolveError, resolve_graph,
+    ResolutionOptions, ResolveError, resolve_graph_with_routing,
 };
 use tapid_store::{Store, StoreTransaction};
 
@@ -117,19 +117,97 @@ fn fixture(path: &Path) -> Result<Fixture, String> {
     Ok(f)
 }
 
+fn package_registry_route(
+    registry_config: &crate::registry::RegistryConfig,
+    registry: &RegistryOrigin,
+    name: &PackageName,
+) -> Result<crate::registry::RegistryRoute, String> {
+    if registry.to_string() == JSR {
+        return Ok(crate::registry::RegistryRoute {
+            origin: registry.clone(),
+            token: None,
+            policy: "jsr".to_owned(),
+        });
+    }
+    let route = registry_config.route(name.as_str())?;
+    if route.origin != *registry {
+        return Err(format!(
+            "registry identity mismatch for package {name}: selected {}, requested {registry}",
+            route.origin
+        ));
+    }
+    Ok(route)
+}
+
+fn transport_for_route<'a>(
+    cache: &'a mut BTreeMap<(String, String), HttpsTransport>,
+    route: crate::registry::RegistryRoute,
+    allowed_origins: &[String],
+    artifact: bool,
+) -> Result<&'a HttpsTransport, String> {
+    let origin = route.origin.to_string();
+    let key = (origin.clone(), route.policy);
+    if !cache.contains_key(&key) {
+        let credentials = route
+            .token
+            .map(|token| vec![(origin.clone(), token)])
+            .unwrap_or_default();
+        let transport = if artifact {
+            HttpsTransport::authenticated_artifact(allowed_origins.to_vec(), credentials)
+        } else {
+            HttpsTransport::authenticated_metadata(allowed_origins.to_vec(), credentials)
+        }
+        .map_err(|error| format!("cannot create registry transport: {error}"))?;
+        cache.insert(key.clone(), transport);
+    }
+    Ok(cache
+        .get(&key)
+        .expect("transport cache entry was just found or inserted"))
+}
+
+pub(crate) fn metadata_transport_for_package<'a>(
+    cache: &'a mut BTreeMap<(String, String), HttpsTransport>,
+    registry_config: &crate::registry::RegistryConfig,
+    registry: &RegistryOrigin,
+    name: &PackageName,
+    allowed_origins: &[String],
+) -> Result<&'a HttpsTransport, String> {
+    let route = package_registry_route(registry_config, registry, name)?;
+    transport_for_route(cache, route, allowed_origins, false)
+}
+
+fn artifact_transport_for_package<'a>(
+    cache: &'a mut BTreeMap<(String, String), HttpsTransport>,
+    registry_config: &crate::registry::RegistryConfig,
+    registry: &RegistryOrigin,
+    name: &PackageName,
+    allowed_origins: &[String],
+) -> Result<&'a HttpsTransport, String> {
+    let route = package_registry_route(registry_config, registry, name)?;
+    transport_for_route(cache, route, allowed_origins, true)
+}
+
 fn remote_records(
     transport: &HttpsTransport,
+    registry_config: &crate::registry::RegistryConfig,
     registry: &RegistryOrigin,
     name: &PackageName,
     allow_missing_integrity: bool,
 ) -> Result<Vec<PackageRecord>, String> {
+    if registry.to_string() != JSR {
+        let route = registry_config.route(name.as_str())?;
+        if route.origin != *registry {
+            return Err(format!(
+                "registry identity mismatch for package {name}: selected {}, requested {registry}",
+                route.origin
+            ));
+        }
+    }
     let artifacts: Vec<RegistryArtifact> = if registry.to_string() == JSR {
         JsrRegistry::new(transport, registry.clone()).fetch(&name.to_string())
-    } else if registry.to_string() == NPM {
+    } else {
         NpmRegistry::new(transport, registry.clone())
             .fetch_with_options(&name.to_string(), allow_missing_integrity)
-    } else {
-        return Err(format!("unsupported registry origin: {registry}"));
     }
     .map_err(|e| format!("cannot fetch metadata for {registry}:{name}: {e}"))?;
     Ok(artifacts
@@ -417,13 +495,17 @@ thread_local! {
     static RESOLVER_METADATA_PARENT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn insert_records(
+fn insert_records<F>(
     records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &mut NormalizedRecords,
     metadata: &mut Vec<RegistryMetadata>,
     overrides: &BTreeMap<PackageName, Requirement>,
     packages: Vec<PackageRecord>,
-) -> Result<(), String> {
+    registry_for_dependency: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+{
     let mut inserted_keys = BTreeSet::new();
     let mut inserted_names = BTreeMap::<String, BTreeSet<PackageName>>::new();
     for mut package in packages {
@@ -460,22 +542,23 @@ fn insert_records(
             .or_default()
             .push(key);
     }
-    let candidate_matches = |registry: &str, name: &PackageName, requirement: &Requirement| {
-        candidates
-            .get(&(registry.to_owned(), name.to_string()))
-            .into_iter()
-            .flatten()
-            .any(|key| {
-                normalized
-                    .get(*key)
-                    .and_then(|record| record.as_ref().ok())
-                    .is_some()
-                    && records.get(*key).is_some_and(|candidate| {
-                        current_platform_matches(&candidate.platform)
-                            && requirement.matches(&candidate.version)
-                    })
-            })
-    };
+    let candidate_matches =
+        |registry: &RegistryOrigin, name: &PackageName, requirement: &Requirement| {
+            candidates
+                .get(&(registry.to_string(), name.to_string()))
+                .into_iter()
+                .flatten()
+                .any(|key| {
+                    normalized
+                        .get(*key)
+                        .and_then(|record| record.as_ref().ok())
+                        .is_some()
+                        && records.get(*key).is_some_and(|candidate| {
+                            current_platform_matches(&candidate.platform)
+                                && requirement.matches(&candidate.version)
+                        })
+                })
+        };
 
     let mut additions = BTreeMap::<RegistryOrigin, Vec<PackageVersionMetadata>>::new();
     for key in &inserted_keys {
@@ -487,7 +570,8 @@ fn insert_records(
         let package = records.get(key).expect("record inserted before metadata");
         let mut package_metadata = record.metadata.clone();
         for (name, requirement) in &record.optional_dependencies {
-            if candidate_matches(&key.0, name, requirement) {
+            let target_registry = registry_for_dependency(&package.registry, name)?;
+            if candidate_matches(&target_registry, name, requirement) {
                 package_metadata
                     .dependencies
                     .insert(name.clone(), requirement.clone());
@@ -521,15 +605,12 @@ fn insert_records(
     }
 
     for registry_metadata in metadata {
-        let registry = registry_metadata.registry.to_string();
-        let Some(names) = inserted_names.get(&registry) else {
-            continue;
-        };
+        let parent_registry = registry_metadata.registry.clone();
         for parent in &mut registry_metadata.packages {
             #[cfg(test)]
             RESOLVER_METADATA_PARENT_VISITS.set(RESOLVER_METADATA_PARENT_VISITS.get() + 1);
             let parent_key = (
-                registry.clone(),
+                parent_registry.to_string(),
                 parent.name.to_string(),
                 parent.version.to_string(),
             );
@@ -539,9 +620,12 @@ fn insert_records(
             else {
                 continue;
             };
-            for name in names {
-                if let Some(requirement) = parent_record.optional_dependencies.get(name)
-                    && candidate_matches(&registry, name, requirement)
+            for (name, requirement) in &parent_record.optional_dependencies {
+                let target_registry = registry_for_dependency(&parent_registry, name)?;
+                if inserted_names
+                    .get(&target_registry.to_string())
+                    .is_some_and(|names| names.contains(name))
+                    && candidate_matches(&target_registry, name, requirement)
                 {
                     parent
                         .dependencies
@@ -595,15 +679,47 @@ fn resolve_with_fetch<F>(roots: &[Dependency], fetch: F) -> Result<ResolvedRecor
 where
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
-    resolve_with_overrides(roots, &BTreeMap::new(), fetch)
+    resolve_with_fetch_routed_and_overrides(
+        roots,
+        |parent, _| Ok(parent.clone()),
+        &BTreeMap::new(),
+        fetch,
+    )
 }
 
+#[cfg(test)]
 fn resolve_with_overrides<F>(
     roots: &[Dependency],
+    overrides: &BTreeMap<PackageName, Requirement>,
+    fetch: F,
+) -> Result<ResolvedRecords, String>
+where
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
+{
+    resolve_with_fetch_routed_and_overrides(roots, |parent, _| Ok(parent.clone()), overrides, fetch)
+}
+
+#[cfg(test)]
+fn resolve_with_fetch_routed<R, F>(
+    roots: &[Dependency],
+    registry_for_dependency: R,
+    fetch: F,
+) -> Result<ResolvedRecords, String>
+where
+    R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
+{
+    resolve_with_fetch_routed_and_overrides(roots, registry_for_dependency, &BTreeMap::new(), fetch)
+}
+
+fn resolve_with_fetch_routed_and_overrides<R, F>(
+    roots: &[Dependency],
+    mut registry_for_dependency: R,
     overrides: &BTreeMap<PackageName, Requirement>,
     mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
+    R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
     let mut fetched = BTreeSet::<(String, String)>::new();
@@ -615,33 +731,34 @@ where
         #[cfg(test)]
         RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
 
-        match resolve_graph(roots, &metadata, ResolutionOptions::default()) {
+        match resolve_graph_with_routing(
+            roots,
+            &metadata,
+            ResolutionOptions::default(),
+            |parent, dependency| registry_for_dependency(parent, dependency),
+        ) {
             Ok(resolution) => {
-                let optional_frontier = resolution
-                    .selected
-                    .iter()
-                    .filter_map(|parent| {
-                        records
-                            .get(&(
-                                parent.registry.to_string(),
-                                parent.name.to_string(),
-                                parent.version.to_string(),
-                            ))
-                            .map(|record| (parent, record))
-                    })
-                    .flat_map(|(parent, record)| {
-                        record.optional_dependencies.keys().filter_map(|name| {
-                            let key = (parent.registry.to_string(), name.clone());
-                            (!fetched.contains(&key))
-                                .then_some((parent.registry.clone(), name.clone()))
-                        })
-                    })
-                    .collect::<BTreeSet<_>>();
+                let mut optional_frontier = BTreeSet::<(RegistryOrigin, PackageName)>::new();
+                for parent in &resolution.selected {
+                    let key = (
+                        parent.registry.to_string(),
+                        parent.name.to_string(),
+                        parent.version.to_string(),
+                    );
+                    if let Some(record) = records.get(&key) {
+                        for raw_name in record.optional_dependencies.keys() {
+                            let name: PackageName = raw_name
+                                .parse()
+                                .map_err(|error: tapid_core::DomainError| error.to_string())?;
+                            let registry = registry_for_dependency(&parent.registry, &name)?;
+                            if !fetched.contains(&(registry.to_string(), name.to_string())) {
+                                optional_frontier.insert((registry, name));
+                            }
+                        }
+                    }
+                }
                 if !optional_frontier.is_empty() {
                     for (registry, name) in optional_frontier {
-                        let name: PackageName = name
-                            .parse()
-                            .map_err(|error: tapid_core::DomainError| error.to_string())?;
                         fetched.insert((registry.to_string(), name.to_string()));
                         report_metadata_progress(fetched.len());
                         insert_records(
@@ -650,6 +767,7 @@ where
                             &mut metadata,
                             overrides,
                             fetch(&registry, &name)?,
+                            &mut registry_for_dependency,
                         )?;
                     }
                     continue;
@@ -684,6 +802,7 @@ where
                         &mut metadata,
                         overrides,
                         fetch(&registry, &name)?,
+                        &mut registry_for_dependency,
                     )?;
                 }
             }
@@ -718,6 +837,7 @@ where
                     &mut metadata,
                     overrides,
                     fetch(&registry, &name)?,
+                    &mut registry_for_dependency,
                 )?;
             }
             Err(error) => return Err(format!("resolution failed: {error}")),
@@ -809,6 +929,7 @@ pub fn resolve_and_fetch(
     store: &Store,
     fixture_path: Option<&Path>,
     allow_missing_integrity: bool,
+    registry_config: &crate::registry::RegistryConfig,
 ) -> Result<
     (
         Lockfile,
@@ -867,17 +988,28 @@ pub fn resolve_and_fetch(
         }
     }
     let overrides = manifest_overrides(manifest)?;
-    let roots = manifest_roots(manifest)?;
-    let metadata_transport = if fixture.is_none() {
-        Some(
-            HttpsTransport::standard()
-                .map_err(|error| format!("cannot create registry transport: {error}"))?,
-        )
-    } else {
-        None
-    };
-    let (resolution, mut records) =
-        resolve_with_overrides(&roots, &overrides, |registry, name| {
+    let roots = manifest_roots(manifest)?
+        .into_iter()
+        .map(|dependency| {
+            if dependency.registry.to_string() == JSR {
+                Ok(dependency)
+            } else {
+                let origin = registry_config.origin_for_name(&dependency.name)?;
+                Ok(Dependency::new(
+                    origin,
+                    dependency.name,
+                    dependency.requirement,
+                ))
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let configured_origins = registry_config.configured_origins();
+    let mut metadata_transports = BTreeMap::<(String, String), HttpsTransport>::new();
+    let (resolution, mut records) = resolve_with_fetch_routed_and_overrides(
+        &roots,
+        |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
+        &overrides,
+        |registry, name| {
             if fixture.is_some() {
                 Ok(fixture_records
                     .values()
@@ -885,16 +1017,24 @@ pub fn resolve_and_fetch(
                     .cloned()
                     .collect())
             } else {
+                let transport = metadata_transport_for_package(
+                    &mut metadata_transports,
+                    registry_config,
+                    registry,
+                    name,
+                    &configured_origins,
+                )?;
                 remote_records(
-                    metadata_transport
-                        .as_ref()
-                        .expect("remote metadata transport"),
+                    transport,
+                    registry_config,
                     registry,
                     name,
                     allow_missing_integrity,
                 )
             }
-        })?;
+        },
+    )?;
+
     store
         .recover_transactions()
         .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
@@ -906,14 +1046,7 @@ pub fn resolve_and_fetch(
     let mut packages = BTreeMap::new();
     let mut trees = BTreeMap::new();
     let mut instances = Vec::new();
-    let artifact_transport = if fixture.is_none() {
-        Some(
-            HttpsTransport::standard_artifact()
-                .map_err(|error| format!("cannot create registry transport: {error}"))?,
-        )
-    } else {
-        None
-    };
+    let mut artifact_transports = BTreeMap::<(String, String), HttpsTransport>::new();
     let artifact_total = resolution.selected.len();
     for (index, id) in resolution.selected.iter().enumerate() {
         let peer_context = resolution
@@ -929,10 +1062,16 @@ pub fn resolve_and_fetch(
         let record = if let Some(p) = records.get(&key3) {
             p.clone()
         } else {
+            let transport = metadata_transport_for_package(
+                &mut metadata_transports,
+                registry_config,
+                &id.registry,
+                &id.name,
+                &configured_origins,
+            )?;
             let fetched = remote_records(
-                metadata_transport
-                    .as_ref()
-                    .expect("remote metadata transport"),
+                transport,
+                registry_config,
                 &id.registry,
                 &id.name,
                 allow_missing_integrity,
@@ -961,9 +1100,13 @@ pub fn resolve_and_fetch(
                     .map_err(|e| format!("cannot read artifact {}: {e}", record.artifact))?
             }
         } else {
-            let transport = artifact_transport
-                .as_ref()
-                .expect("remote artifact transport");
+            let transport = artifact_transport_for_package(
+                &mut artifact_transports,
+                registry_config,
+                &id.registry,
+                &id.name,
+                &configured_origins,
+            )?;
             let response = if record.registry.to_string() == JSR {
                 JsrRegistry::new(transport, record.registry.clone())
                     .download_artifact(&record.artifact)
@@ -1175,6 +1318,235 @@ pub fn resolve_and_fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn custom_private_origins_use_the_npm_metadata_protocol() {
+        let registry: RegistryOrigin = "https://127.0.0.1:9".parse().unwrap();
+        let transport =
+            HttpsTransport::authenticated_metadata([registry.to_string()], std::iter::empty())
+                .unwrap();
+        let config = crate::registry::RegistryConfig::from_toml(
+            "[registries.default]\nurl='https://127.0.0.1:9'\n",
+        )
+        .unwrap();
+        let error = remote_records(
+            &transport,
+            &config,
+            &registry,
+            &"private-package".parse().unwrap(),
+            false,
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("cannot fetch metadata"), "{error}");
+        assert!(!error.contains("unsupported registry origin"), "{error}");
+    }
+
+    #[test]
+    fn private_package_resolves_unscoped_transitive_dependency_from_public_npm() {
+        let config = crate::registry::RegistryConfig::from_toml(
+            r#"[registries.'@acme']
+url='https://packages.acme.example'
+"#,
+        )
+        .unwrap();
+        let (private_origin, package_name) = config.identity_for_spec("@acme/widget").unwrap();
+        let root = Dependency::new(private_origin.clone(), package_name, "*".parse().unwrap());
+        let mut private_package = named_record("@acme/widget", "1.0.0", &[("left-pad", "^1")]);
+        private_package.registry = private_origin.clone();
+        let public_origin: RegistryOrigin = NPM.parse().unwrap();
+        let mut requests = Vec::new();
+
+        let result = resolve_with_fetch_routed(
+            &[root],
+            |parent, dependency| config.registry_for_dependency(parent, dependency),
+            |registry, name| {
+                requests.push((registry.to_string(), name.to_string()));
+                match name.to_string().as_str() {
+                    "@acme/widget" => Ok(vec![private_package.clone()]),
+                    "left-pad" => Ok(vec![named_record("left-pad", "1.3.0", &[])]),
+                    other => panic!("unexpected metadata request for {other}"),
+                }
+            },
+        );
+
+        let (resolution, _) = match result {
+            Ok(resolution) => resolution,
+            Err(error) => panic!("mixed-origin resolution failed: {error}"),
+        };
+        let child = resolution
+            .selected
+            .iter()
+            .find(|package| package.name.to_string() == "left-pad")
+            .expect("public transitive dependency must be selected");
+        assert_eq!(child.registry, public_origin);
+        assert!(requests.contains(&(NPM.to_owned(), "left-pad".to_owned())));
+    }
+
+    #[test]
+    fn public_package_resolves_scoped_transitive_dependency_from_private_registry() {
+        let config = crate::registry::RegistryConfig::from_toml(
+            r#"[registries.'@acme']
+url='https://packages.acme.example'
+"#,
+        )
+        .unwrap();
+        let private_origin = config.origin_for("@acme/helper").unwrap();
+        let root = Dependency::new(
+            NPM.parse().unwrap(),
+            "public-app".parse().unwrap(),
+            "*".parse().unwrap(),
+        );
+        let public_package = named_record("public-app", "1.0.0", &[("@acme/helper", "^1")]);
+        let mut private_package = named_record("@acme/helper", "1.2.0", &[]);
+        private_package.registry = private_origin.clone();
+        let mut requests = Vec::new();
+
+        let result = resolve_with_fetch_routed(
+            &[root],
+            |parent, dependency| config.registry_for_dependency(parent, dependency),
+            |registry, name| {
+                requests.push((registry.to_string(), name.to_string()));
+                match name.to_string().as_str() {
+                    "public-app" => Ok(vec![public_package.clone()]),
+                    "@acme/helper" => Ok(vec![private_package.clone()]),
+                    other => panic!("unexpected metadata request for {other}"),
+                }
+            },
+        );
+
+        let (resolution, _) = match result {
+            Ok(resolution) => resolution,
+            Err(error) => panic!("mixed-origin resolution failed: {error}"),
+        };
+        let child = resolution
+            .selected
+            .iter()
+            .find(|package| package.name.to_string() == "@acme/helper")
+            .expect("private scoped dependency must be selected");
+        assert_eq!(child.registry, private_origin);
+        assert!(requests.contains(&(private_origin.to_string(), "@acme/helper".to_owned())));
+    }
+
+    #[test]
+    fn optional_dependency_uses_its_configured_registry_route() {
+        let config = crate::registry::RegistryConfig::from_toml(
+            r#"[registries.'@acme']
+url='https://packages.acme.example'
+"#,
+        )
+        .unwrap();
+        let private_origin = config.origin_for("@acme/feature").unwrap();
+        let root = Dependency::new(
+            NPM.parse().unwrap(),
+            "public-app".parse().unwrap(),
+            "*".parse().unwrap(),
+        );
+        let mut public_package = named_record("public-app", "1.0.0", &[]);
+        public_package
+            .optional_dependencies
+            .insert("@acme/feature".into(), "^1".into());
+        let mut private_feature = named_record("@acme/feature", "1.1.0", &[]);
+        private_feature.registry = private_origin.clone();
+
+        let result = resolve_with_fetch_routed(
+            &[root],
+            |parent, dependency| config.registry_for_dependency(parent, dependency),
+            |_, name| match name.to_string().as_str() {
+                "public-app" => Ok(vec![public_package.clone()]),
+                "@acme/feature" => Ok(vec![private_feature.clone()]),
+                other => panic!("unexpected metadata request for {other}"),
+            },
+        );
+        let (resolution, _) = match result {
+            Ok(resolution) => resolution,
+            Err(error) => panic!("optional dependency resolution failed: {error}"),
+        };
+
+        assert!(resolution.selected.iter().any(|package| {
+            package.name.to_string() == "@acme/feature" && package.registry == private_origin
+        }));
+    }
+
+    #[test]
+    fn peer_provider_uses_the_configured_registry_route() {
+        let config = crate::registry::RegistryConfig::from_toml(
+            r#"[registries.'@acme']
+url='https://packages.acme.example'
+"#,
+        )
+        .unwrap();
+        let private_origin = config.origin_for("@acme/host").unwrap();
+        let roots = vec![
+            Dependency::new(
+                NPM.parse().unwrap(),
+                "plugin".parse().unwrap(),
+                "*".parse().unwrap(),
+            ),
+            Dependency::new(
+                private_origin.clone(),
+                "@acme/host".parse().unwrap(),
+                "*".parse().unwrap(),
+            ),
+        ];
+        let mut plugin = named_record("plugin", "1.0.0", &[]);
+        plugin
+            .peer_dependencies
+            .insert("@acme/host".into(), "^1".into());
+        let mut host = named_record("@acme/host", "1.2.0", &[]);
+        host.registry = private_origin.clone();
+
+        let result = resolve_with_fetch_routed(
+            &roots,
+            |parent, dependency| config.registry_for_dependency(parent, dependency),
+            |_, name| match name.to_string().as_str() {
+                "plugin" => Ok(vec![plugin.clone()]),
+                "@acme/host" => Ok(vec![host.clone()]),
+                other => panic!("unexpected metadata request for {other}"),
+            },
+        );
+
+        let (resolution, _) = match result {
+            Ok(resolution) => resolution,
+            Err(error) => panic!("cross-origin peer resolution failed: {error}"),
+        };
+        assert!(resolution.selected.iter().any(|package| {
+            package.name.to_string() == "@acme/host" && package.registry == private_origin
+        }));
+    }
+
+    #[test]
+    fn same_origin_authenticated_and_public_routes_use_separate_transports() {
+        let config = crate::registry::RegistryConfig::from_toml(
+            "[registries.'@acme']\nurl='https://registry.npmjs.org'\ntoken-env='ACME_TOKEN'\n",
+        )
+        .unwrap();
+        let authenticated = config
+            .route_with_env("@acme/private", |_| Some("fixture-only-token".into()))
+            .unwrap();
+        let public = config.route("left-pad").unwrap();
+        assert_eq!(authenticated.origin, public.origin);
+        assert!(authenticated.token.is_some());
+        assert!(public.token.is_none());
+        assert_ne!(authenticated.policy, public.policy);
+
+        for artifact in [false, true] {
+            let mut cache = BTreeMap::new();
+            let authenticated_transport = transport_for_route(
+                &mut cache,
+                authenticated.clone(),
+                &[NPM.to_owned()],
+                artifact,
+            )
+            .unwrap() as *const HttpsTransport;
+            let public_transport =
+                transport_for_route(&mut cache, public.clone(), &[NPM.to_owned()], artifact)
+                    .unwrap() as *const HttpsTransport;
+
+            assert_ne!(authenticated_transport, public_transport);
+            assert_eq!(cache.len(), 2);
+        }
+    }
+
     #[test]
     fn artifact_progress_is_emitted_at_bounded_completion_checkpoints() {
         let checkpoints = (1..=625)
