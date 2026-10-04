@@ -53,6 +53,8 @@ const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
 const PR_SET_SECCOMP: libc::c_int = 22;
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+const CAP_SYS_ADMIN: u32 = 21;
 const PRIVATE_LAUNCHER_MARKER: &str = "--tapid-private-linux-procfs-v1";
 const LANDLOCK_RULESET_FD: libc::c_int = 198;
 const PRIVATE_REPORT_FD: libc::c_int = 199;
@@ -78,6 +80,18 @@ struct PathBeneathAttr {
     allowed_access: u64,
     parent_fd: libc::c_int,
     reserved: u32,
+}
+#[repr(C)]
+struct CapUserHeader {
+    version: u32,
+    pid: libc::pid_t,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CapUserData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
 }
 
 struct LandlockRuleset(OwnedFd);
@@ -766,9 +780,30 @@ fn locate_unshare() -> Result<std::path::PathBuf, ExecutionError> {
     ))
 }
 
-fn unshare_namespace_arguments(is_root: bool) -> Vec<&'static str> {
+fn has_effective_sys_admin() -> bool {
+    let mut header = CapUserHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let mut data = [CapUserData::default(); 2];
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_capget,
+            &mut header as *mut CapUserHeader,
+            data.as_mut_ptr(),
+        )
+    };
+    if result != 0 {
+        return false;
+    }
+    let word = (CAP_SYS_ADMIN / u32::BITS) as usize;
+    let mask = 1u32 << (CAP_SYS_ADMIN % u32::BITS);
+    data[word].effective & mask != 0
+}
+
+fn unshare_namespace_arguments(needs_user_namespace: bool) -> Vec<&'static str> {
     let mut arguments = Vec::with_capacity(8);
-    if !is_root {
+    if needs_user_namespace {
         arguments.extend(["--user", "--map-root-user"]);
     }
     arguments.extend([
@@ -817,7 +852,7 @@ fn private_memory_stats_command(
     let report_copy = duplicate_fd_above_private_range(report_writer.as_raw_fd())?;
     let mut command = Command::new(unshare);
     command
-        .args(unshare_namespace_arguments(unsafe { libc::geteuid() == 0 }))
+        .args(unshare_namespace_arguments(!has_effective_sys_admin()))
         .arg(launcher)
         .arg(PRIVATE_LAUNCHER_MARKER)
         .arg(if request.policy().network() { "1" } else { "0" })
@@ -1400,9 +1435,9 @@ mod tests {
     }
 
     #[test]
-    fn root_namespace_launch_does_not_create_an_unprivileged_user_namespace() {
+    fn namespace_arguments_use_user_namespace_only_when_requested() {
         assert_eq!(
-            unshare_namespace_arguments(true),
+            unshare_namespace_arguments(false),
             [
                 "--mount",
                 "--pid",
@@ -1415,8 +1450,30 @@ mod tests {
             ]
         );
         assert_eq!(
-            &unshare_namespace_arguments(false)[..2],
+            &unshare_namespace_arguments(true)[..2],
             &["--user", "--map-root-user"]
+        );
+    }
+
+    #[test]
+    fn sysadmin_holder_without_root_does_not_need_user_namespace() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let status = fs::read_to_string("/proc/self/status").unwrap();
+        let effective_caps = status
+            .lines()
+            .find_map(|line| line.strip_prefix("CapEff:\t"))
+            .and_then(|value| u64::from_str_radix(value, 16).ok())
+            .expect("Linux proc status must include effective capabilities");
+        if effective_caps & (1 << 21) == 0 {
+            return;
+        }
+        assert!(has_effective_sys_admin());
+        assert_eq!(
+            unshare_namespace_arguments(!has_effective_sys_admin()).first(),
+            Some(&"--mount"),
+            "an effective CAP_SYS_ADMIN holder should use its existing user namespace"
         );
     }
 
@@ -1625,7 +1682,7 @@ mod tests {
         let unshare = locate_unshare().unwrap();
         let mut command = Command::new(unshare);
         command
-            .args(unshare_namespace_arguments(unsafe { libc::geteuid() == 0 }))
+            .args(unshare_namespace_arguments(!has_effective_sys_admin()))
             .arg("/bin/sh")
             .arg("-c")
             .arg(format!("sleep 2; touch '{}'", marker.display()))
