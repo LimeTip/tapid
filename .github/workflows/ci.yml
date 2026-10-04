@@ -25,7 +25,8 @@ jobs:
       options: --cap-add SYS_ADMIN --security-opt seccomp=unconfined
     env:
       NEXT_TELEMETRY_DISABLED: '1'
-      TMPDIR: ${{ github.workspace }}/examples/news-site-consumer/.tmp
+      # Keep bootstrap actions working before checkout creates project-local paths.
+      TMPDIR: /tmp
     steps:
       - name: Install container dependencies
         run: |
