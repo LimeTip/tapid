@@ -23,6 +23,7 @@ pub(crate) struct Args {
     pub(crate) registry_fixture: Option<PathBuf>,
 }
 
+/// Rejects bare command words before project access while preserving explicit package specs.
 fn parse_package_argument(value: &str) -> Result<String, String> {
     match value.trim() {
         "help" => Err(
@@ -37,6 +38,7 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
     }
 }
 
+/// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
 pub(crate) fn run(args: Args) -> ExitCode {
     if args.allow_unverified_registry_artifacts && !args.offline && !args.frozen {
         eprintln!(

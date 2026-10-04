@@ -46,6 +46,7 @@ pub(crate) enum Command {
     Upgrade(upgrade::Args),
 }
 
+/// Routes a parsed command to its handler, or prints usage guidance when no command is given.
 pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
     match command {
         None => {

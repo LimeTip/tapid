@@ -2595,6 +2595,7 @@ fn legacy_registry_replay_rejects_without_mutation() {
     }
 }
 
+/// Checks that both install spellings reject bare command words without changing the project.
 #[test]
 fn install_rejects_ambiguous_package_arguments_before_accessing_project() {
     for command in ["install", "i"] {
@@ -2632,6 +2633,7 @@ fn install_rejects_ambiguous_package_arguments_before_accessing_project() {
     }
 }
 
+/// Checks that explicit specs for command-like package names pass argument validation.
 #[test]
 fn install_accepts_explicit_specs_for_ambiguous_package_names() {
     let dir = temp_dir("explicit-install");
@@ -2647,6 +2649,7 @@ fn install_accepts_explicit_specs_for_ambiguous_package_names() {
     cleanup(dir);
 }
 
+/// Checks frozen replay through `i`, installation help forms, and alias visibility in help.
 #[test]
 fn install_alias_replays_project_and_provides_help() {
     let dir = temp_dir("install-alias");
