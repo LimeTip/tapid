@@ -118,7 +118,7 @@ jobs:
             bash -lc '
               set -euo pipefail
               apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev util-linux >/dev/null
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev python3 util-linux >/dev/null
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
               source /root/.cargo/env
               export CARGO_TARGET_DIR=/tmp/tapid-target
@@ -221,7 +221,7 @@ jobs:
             bash -lc '
               set -euo pipefail
               apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev util-linux >/dev/null
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev python3 util-linux >/dev/null
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
               source /root/.cargo/env
               export CARGO_TARGET_DIR=/tmp/tapid-nextest-target
@@ -265,7 +265,7 @@ jobs:
             bash -lc '
               set -euo pipefail
               apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev util-linux >/dev/null
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev python3 util-linux >/dev/null
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
               source /root/.cargo/env
               rustup component add llvm-tools-preview

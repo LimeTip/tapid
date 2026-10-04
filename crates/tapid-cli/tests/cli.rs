@@ -1682,19 +1682,37 @@ fn run_prints_libuv_process_memory_opt_in_hint_once() {
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(19), "{stderr}");
-    assert_eq!(stderr.matches("RUN_MARKER").count(), 1, "{stderr}");
-    assert_eq!(
-        stderr
-            .matches("retry with --allow-process-memory-stats")
-            .count(),
-        1,
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("aliases: --allow-memory-read, --allow-procfs"),
-        "{stderr}"
-    );
+    if stderr.contains("Landlock ABI 3 or newer is unavailable")
+        || stderr.contains("kernel cannot install the required seccomp filter")
+    {
+        // Some permitted container kernels lack Landlock or seccomp-filter support.
+        // In that case the runner must reject before starting the script rather than claim
+        // containment or emit a runtime-derived memory-stats hint.
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("unsupported-containment"), "{stderr}");
+        assert_eq!(stderr.matches("RUN_MARKER").count(), 0, "{stderr}");
+        assert_eq!(
+            stderr
+                .matches("retry with --allow-process-memory-stats")
+                .count(),
+            0,
+            "{stderr}"
+        );
+    } else {
+        assert_eq!(output.status.code(), Some(19), "{stderr}");
+        assert_eq!(stderr.matches("RUN_MARKER").count(), 1, "{stderr}");
+        assert_eq!(
+            stderr
+                .matches("retry with --allow-process-memory-stats")
+                .count(),
+            1,
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("aliases: --allow-memory-read, --allow-procfs"),
+            "{stderr}"
+        );
+    }
     cleanup(dir);
 }
 

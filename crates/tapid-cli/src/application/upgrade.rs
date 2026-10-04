@@ -817,7 +817,14 @@ mod upgrade_tests {
                 .artifact_sha256,
             digest
         );
-        assert!(stale_path.exists());
+        if unsafe { libc::geteuid() == 0 } {
+            // Root can remove entries from a mode-0500 directory in the test
+            // container, so cleanup succeeds instead of exercising the failure
+            // path available to an unprivileged runner.
+            assert!(!stale_path.exists());
+        } else {
+            assert!(stale_path.exists());
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

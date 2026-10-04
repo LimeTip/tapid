@@ -332,6 +332,35 @@ fn seccomp_filter(
     }
 }
 
+// PR_SET_NO_NEW_PRIVS is irreversible, so probe filter installation in a child
+// that immediately exits instead of mutating the support-query caller.
+fn probe_seccomp_filter(filter: &[libc::sock_filter]) -> bool {
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return false;
+    }
+    if pid == 0 {
+        unsafe {
+            if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                libc::_exit(1);
+            }
+            let mut program = libc::sock_fprog {
+                len: filter.len() as u16,
+                filter: filter.as_ptr() as *mut libc::sock_filter,
+            };
+            if libc::prctl(PR_SET_SECCOMP, 2, &mut program as *mut libc::sock_fprog) != 0 {
+                libc::_exit(2);
+            }
+            libc::_exit(0);
+        }
+    }
+    let mut status = 0;
+    if unsafe { libc::waitpid(pid, &mut status, 0) } != pid {
+        return false;
+    }
+    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+}
+
 fn install_restrictions(
     ruleset: libc::c_int,
     filter: &[libc::sock_filter],
@@ -369,7 +398,7 @@ fn install_restrictions(
         len: filter.len() as u16,
         filter: filter.as_ptr() as *mut libc::sock_filter,
     };
-    if unsafe { libc::prctl(PR_SET_SECCOMP, 2, &mut program) } != 0 {
+    if unsafe { libc::prctl(PR_SET_SECCOMP, 2, &mut program as *mut libc::sock_fprog) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -964,8 +993,12 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
     {
         return unsupported("Linux Restricted does not enforce configured resource limits");
     }
-    if seccomp_filter(request.policy().network(), request.policy().subprocess()).is_err() {
-        return unsupported("required seccomp architecture or filter is unavailable");
+    let filter = match seccomp_filter(request.policy().network(), request.policy().subprocess()) {
+        Ok(filter) => filter,
+        Err(_) => return unsupported("required seccomp architecture or filter is unavailable"),
+    };
+    if !probe_seccomp_filter(&filter) {
+        return unsupported("kernel cannot install the required seccomp filter");
     }
     let evidence = evidence_for_dimensions(
         &requested,
@@ -1255,22 +1288,64 @@ mod tests {
         .unwrap()
     }
 
+    fn fails_closed_for_unavailable_kernel_enforcement(request: &ExecutionRequest) -> bool {
+        let support = containment_support(request);
+        if support.is_supported() {
+            return false;
+        }
+        assert!(
+            matches!(
+                support.unsupported_reason(),
+                Some(
+                    "Landlock ABI 3 or newer is unavailable"
+                        | "kernel cannot install the required seccomp filter"
+                )
+            ),
+            "unexpected unsupported reason: {:?}",
+            support.unsupported_reason()
+        );
+        let error =
+            execute(request).expect_err("unsupported kernel enforcement must fail before spawn");
+        assert_eq!(
+            error.category(),
+            ExecutionErrorCategory::UnsupportedContainment
+        );
+        true
+    }
+
     #[test]
     fn network_denial_preserves_unix_ipc_but_blocks_inet_socket_creation() {
         let filter = seccomp_filter(false, true).unwrap();
+        let allow_filter = [libc::sock_filter {
+            code: (libc::BPF_RET | libc::BPF_K) as u16,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        }];
+        if !probe_seccomp_filter(&allow_filter) {
+            eprintln!("skipping: kernel cannot install seccomp filters in this container");
+            return;
+        }
+        assert!(
+            probe_seccomp_filter(&filter),
+            "kernel rejected the generated network-denial filter"
+        );
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork failed: {}", io::Error::last_os_error());
         if pid == 0 {
             unsafe {
-                if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                    || libc::prctl(
-                        PR_SET_SECCOMP,
-                        libc::SECCOMP_MODE_FILTER,
-                        &libc::sock_fprog {
-                            len: filter.len() as u16,
-                            filter: filter.as_ptr() as *mut libc::sock_filter,
-                        },
-                    ) != 0
+                if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    libc::_exit(10);
+                }
+                let mut program = libc::sock_fprog {
+                    len: filter.len() as u16,
+                    filter: filter.as_ptr() as *mut libc::sock_filter,
+                };
+                if libc::prctl(
+                    PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER,
+                    &mut program as *mut libc::sock_fprog,
+                ) != 0
                 {
                     libc::_exit(1);
                 }
@@ -1355,6 +1430,10 @@ mod tests {
             .policy(restricted(&root, vec![], false))
             .build()
             .unwrap();
+        if fails_closed_for_unavailable_kernel_enforcement(&req) {
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
         let outcome = execute(&req).unwrap();
         assert_eq!(outcome.termination(), &Termination::Exited(1));
         assert!(!outcome.process_memory_stats_hint());
@@ -1433,6 +1512,10 @@ mod tests {
             "printf '%s\\n' '[Error: EACCES: permission denied, uv_resident_set_memory]' >&2; exit 9",
             restricted(&root, vec![], false),
         );
+        if fails_closed_for_unavailable_kernel_enforcement(&req) {
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
         let outcome = execute(&req).unwrap();
         assert_eq!(outcome.termination(), &Termination::Exited(9));
         assert!(outcome.process_memory_stats_hint());
@@ -1447,6 +1530,11 @@ mod tests {
             "printf allowed > marker",
             restricted(&root, vec![".".into()], false),
         );
+        if fails_closed_for_unavailable_kernel_enforcement(&req) {
+            assert!(!root.join("marker").exists());
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
         let outcome = execute(&req).unwrap();
         assert_eq!(outcome.termination(), &Termination::Exited(0));
         assert_eq!(fs::read(root.join("marker")).unwrap(), b"allowed");
@@ -1483,6 +1571,11 @@ mod tests {
         let outside = root.with_extension("outside");
         let command = format!("printf denied > '{}'", outside.display());
         let req = request(&root, &command, restricted(&root, vec![], false));
+        if fails_closed_for_unavailable_kernel_enforcement(&req) {
+            assert!(!outside.exists());
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
         let outcome = execute(&req).unwrap();
         assert_ne!(outcome.termination(), &Termination::Exited(0));
         assert!(!outside.exists());
@@ -1570,6 +1663,11 @@ mod tests {
             &format!("sleep 2; touch '{}'", marker.display()),
             policy,
         );
+        if fails_closed_for_unavailable_kernel_enforcement(&req) {
+            assert!(!marker.exists());
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
         let outcome = execute(&req).unwrap();
         assert_eq!(outcome.termination(), &Termination::TimedOut);
         std::thread::sleep(std::time::Duration::from_millis(1200));
@@ -1591,6 +1689,11 @@ mod tests {
             ),
             managed_tree(&root, vec![".".into()]),
         );
+        if fails_closed_for_unavailable_kernel_enforcement(&req) {
+            assert!(!root.join("descendant-survived").exists());
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
         let outcome = execute(&req).expect("ManagedTree should be supported when namespaces work");
         assert_eq!(outcome.termination(), &Termination::Exited(0));
         assert_eq!(
