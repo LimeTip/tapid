@@ -121,7 +121,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_workspace_glob_symlinks_instead_of_silently_omitting_members() {
+    fn ignores_file_symlink_entries_during_workspace_glob_expansion() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("workspace-file-symlink");
+        std::fs::create_dir_all(root.join("packages/web")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/web/package.json"),
+            r#"{"name":"web","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("notes.txt"), "not a workspace directory").unwrap();
+        symlink(root.join("notes.txt"), root.join("packages/notes-link")).unwrap();
+
+        let workspace = Workspace::discover(&root).unwrap();
+        assert_eq!(
+            workspace
+                .members()
+                .iter()
+                .map(WorkspaceMember::name)
+                .collect::<Vec<_>>(),
+            ["web"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_workspace_glob_directory_symlinks() {
         use std::os::unix::fs::symlink;
 
         let root = unique_temp_dir("workspace-symlink");

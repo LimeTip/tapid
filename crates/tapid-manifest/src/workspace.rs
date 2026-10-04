@@ -229,14 +229,24 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
                     let file_type = entry
                         .file_type()
                         .map_err(|error| format!("cannot inspect workspace directory: {error}"))?;
+                    let entry_path = entry.path();
                     if file_type.is_symlink() {
-                        return Err(format!(
-                            "workspace glob encountered a symlink, which is unsupported: {}",
-                            entry.path().display()
-                        ));
+                        let target_metadata = fs::metadata(&entry_path).map_err(|error| {
+                            format!(
+                                "cannot inspect workspace symlink target {}: {error}",
+                                entry_path.display()
+                            )
+                        })?;
+                        if !target_metadata.is_file() {
+                            return Err(format!(
+                                "workspace glob encountered a symlink, which is unsupported: {}",
+                                entry_path.display()
+                            ));
+                        }
+                        continue;
                     }
                     if file_type.is_dir() {
-                        next.push(entry.path());
+                        next.push(entry_path);
                     }
                 }
             }
