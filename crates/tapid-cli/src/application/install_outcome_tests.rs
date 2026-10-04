@@ -604,3 +604,41 @@ fn invalid_fixture_package_fields_preserve_the_registry_metadata_category() {
         assert!(!project.path().join("node_modules").exists());
     }
 }
+
+#[test]
+fn invalid_fixture_artifact_preserves_metadata_and_transport_categories() {
+    use std::error::Error;
+    for (label, kind) in [
+        ("encoding", ErrorKind::RegistryMetadata),
+        ("missing", ErrorKind::RegistryTransport),
+    ] {
+        let (project, fixture) = project_with_fixture(label, INTEGRITY);
+        let artifact = if label == "encoding" {
+            "base64:invalid!".to_owned()
+        } else {
+            project
+                .path()
+                .join("missing.tgz")
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+        metadata["packages"][0]["artifact"] = artifact.into();
+        fs::write(&fixture, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let failure = run(
+            project.path(),
+            Some("plugin@1.0.0"),
+            Some(&project.path().join("store")),
+            InstallMode::Online,
+            Some(&fixture),
+            false,
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert_eq!(failure.error.kind, kind);
+        assert!(failure.error.source().is_some());
+        assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+    }
+}

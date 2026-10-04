@@ -332,7 +332,10 @@ pub fn resolve_and_fetch(
                 Ok(dependency)
             } else {
                 let origin = registry_config
-                    .origin_for_name(dependency.requirement.package_name(&dependency.name))?;
+                    .origin_for_name(dependency.requirement.package_name(&dependency.name))
+                    .map_err(|error| {
+                        OperationalError::new(ErrorKind::RegistryConfiguration, error)
+                    })?;
                 Ok(Dependency::new(
                     origin,
                     dependency.name,
@@ -340,7 +343,7 @@ pub fn resolve_and_fetch(
                 ))
             }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, OperationalError>>()?;
     let configured_origins = registry_config.configured_origins();
     let mut metadata_transports = BTreeMap::<(String, String), HttpsTransport>::new();
     let (resolution, mut records) = resolve_with_fetch_routed_and_overrides(
@@ -380,7 +383,10 @@ pub fn resolve_and_fetch(
         OperationalError::from_source(ErrorKind::Store, e).context("cannot create store")
     })?;
     let mut store_transaction = store.transaction();
-    let mut lock = Lockfile::new(&root_digest(project)?).map_err(OperationalError::from)?;
+    let mut lock = Lockfile::new(
+        &root_digest(project).map_err(|error| OperationalError::new(ErrorKind::Manifest, error))?,
+    )
+    .map_err(OperationalError::from)?;
     let empty_peer = tapid_core::PeerContext::default();
     let mut platform_contexts = BTreeMap::new();
     let mut packages = BTreeMap::new();
@@ -419,7 +425,12 @@ pub fn resolve_and_fetch(
             let p = fetched
                 .into_iter()
                 .find(|p| p.version == id.version)
-                .ok_or_else(|| format!("missing artifact metadata: {id}"))?;
+                .ok_or_else(|| {
+                    OperationalError::new(
+                        ErrorKind::RegistryMetadata,
+                        format!("missing artifact metadata: {id}"),
+                    )
+                })?;
             records.insert(key3.clone(), p.clone());
             p
         };
@@ -428,16 +439,20 @@ pub fn resolve_and_fetch(
             std::env::consts::ARCH,
             current_libc(),
             &record.platform,
-        )?;
+        )
+        .map_err(|error| OperationalError::new(ErrorKind::Resolution, error))?;
         platform_contexts.insert(id.clone(), platform_context.clone());
         let bytes = if record.fixture {
             if let Some(encoded) = record.artifact.strip_prefix("base64:") {
-                STANDARD
-                    .decode(encoded)
-                    .map_err(|e| format!("invalid artifact encoding: {e}"))?
+                STANDARD.decode(encoded).map_err(|e| {
+                    OperationalError::from_source(ErrorKind::RegistryMetadata, e)
+                        .context("invalid artifact encoding")
+                })?
             } else {
-                fs::read(&record.artifact)
-                    .map_err(|e| format!("cannot read artifact {}: {e}", record.artifact))?
+                fs::read(&record.artifact).map_err(|e| {
+                    OperationalError::from_source(ErrorKind::RegistryTransport, e)
+                        .context(format!("cannot read artifact {}", record.artifact))
+                })?
             }
         } else {
             let transport = artifact_transport_for_package(
@@ -497,7 +512,9 @@ pub fn resolve_and_fetch(
         let tree_digest: ArtifactDigest = canonical_tree_digest(&temp)
             .map_err(|e| OperationalError::from_source(ErrorKind::Archive, e))?
             .parse()
-            .map_err(|e: tapid_core::DomainError| e.to_string())?;
+            .map_err(|e: tapid_core::DomainError| {
+                OperationalError::from_source(ErrorKind::Archive, e)
+            })?;
         let tree = store_transaction
             .stage_verified_tree(&tree_digest, &temp)
             .map_err(OperationalError::from)?;
@@ -523,11 +540,11 @@ pub fn resolve_and_fetch(
             (&peer_context, &platform_context),
             integrity_provenance,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(OperationalError::from)?;
         if !record.fixture {
             locked
                 .set_artifact_url(&record.artifact)
-                .map_err(|e| e.to_string())?;
+                .map_err(OperationalError::from)?;
         }
         packages.insert(key.clone(), (locked, record, id.clone()));
         trees.insert(key, tree.clone());
@@ -539,8 +556,9 @@ pub fn resolve_and_fetch(
             ),
             peer_context,
             platform_context,
-            tree: VerifiedTreeReference::new(&tree_digest.to_string(), &tree)
-                .map_err(|e| e.to_string())?,
+            tree: VerifiedTreeReference::new(&tree_digest.to_string(), &tree).map_err(|error| {
+                OperationalError::from_source(ErrorKind::Materialization, error)
+            })?,
         });
         let completed = index + 1;
         if artifact_progress_checkpoint(completed, artifact_total) {
@@ -554,15 +572,18 @@ pub fn resolve_and_fetch(
             .or_insert_with(Vec::new)
             .push(edge);
     }
-    let locked_packages: Result<Vec<_>, String> = packages
+    let locked_packages: Result<Vec<_>, OperationalError> = packages
         .values()
         .map(|(locked, _, id)| {
             let mut locked = locked.clone();
             for edge in dependencies_by_parent.get(id).into_iter().flatten() {
                 let target = &edge.child;
-                let target_platform = platform_contexts
-                    .get(target)
-                    .ok_or_else(|| format!("missing platform context for {target}"))?;
+                let target_platform = platform_contexts.get(target).ok_or_else(|| {
+                    OperationalError::new(
+                        ErrorKind::Resolution,
+                        format!("missing platform context for {target}"),
+                    )
+                })?;
                 let target_key = LockfilePackageKey::new(
                     target.registry.clone(),
                     target.name.clone(),
@@ -573,15 +594,13 @@ pub fn resolve_and_fetch(
                 .to_string();
                 locked
                     .add_alias_dependency(&edge.dependency.to_string(), &target_key)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(OperationalError::from)?;
             }
             Ok(locked)
         })
         .collect();
-    lock.insert_packages(
-        locked_packages.map_err(|e| OperationalError::new(ErrorKind::Lockfile, e))?,
-    )
-    .map_err(|e| e.to_string())?;
+    lock.insert_packages(locked_packages?)
+        .map_err(OperationalError::from)?;
     lock.set_roots(resolution.roots.iter().map(|id| {
         let platform = platform_contexts
             .get(id)
@@ -595,7 +614,7 @@ pub fn resolve_and_fetch(
         )
         .to_string()
     }))
-    .map_err(|e| e.to_string())?;
+    .map_err(OperationalError::from)?;
     lock.set_root_bindings(
         resolution
             .root_bindings
@@ -618,7 +637,7 @@ pub fn resolve_and_fetch(
             })
             .collect(),
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(OperationalError::from)?;
     let instance_keys = instances
         .iter()
         .map(|instance| {
@@ -647,7 +666,12 @@ pub fn resolve_and_fetch(
                     .cloned()
                     .unwrap_or_default(),
             ))
-            .ok_or_else(|| format!("missing parent instance for {}", edge.parent))?;
+            .ok_or_else(|| {
+                OperationalError::new(
+                    ErrorKind::Resolution,
+                    format!("missing parent instance for {}", edge.parent),
+                )
+            })?;
         let child = instance_keys
             .get(&(
                 edge.child.registry.clone(),
@@ -659,7 +683,12 @@ pub fn resolve_and_fetch(
                     .cloned()
                     .unwrap_or_default(),
             ))
-            .ok_or_else(|| format!("missing child instance for {}", edge.child))?;
+            .ok_or_else(|| {
+                OperationalError::new(
+                    ErrorKind::Resolution,
+                    format!("missing child instance for {}", edge.child),
+                )
+            })?;
         edge_list.push(NamedDependencyEdge {
             parent: parent.clone(),
             dependency: NamedDependency {
