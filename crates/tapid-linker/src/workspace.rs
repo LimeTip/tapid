@@ -94,6 +94,12 @@ fn valid_relative_root(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    fn project_root() -> PathBuf {
+        std::env::current_dir()
+            .unwrap()
+            .join("tapid-linker-workspace-plan")
+    }
+
     fn package(root: &str, name: &str, version: &str) -> WorkspacePackage {
         WorkspacePackage {
             root: root.into(),
@@ -104,7 +110,7 @@ mod tests {
 
     #[test]
     fn plans_sorted_scoped_and_unscoped_package_links_with_identity() {
-        let root = PathBuf::from("/project");
+        let root = project_root();
         let plan = plan_workspace_links(
             &root,
             [
@@ -132,13 +138,13 @@ mod tests {
     #[test]
     fn rejects_absolute_and_traversing_package_roots() {
         for path in [
-            PathBuf::from("/outside"),
+            project_root().with_file_name("tapid-linker-workspace-outside"),
             PathBuf::from("../outside"),
             PathBuf::from("packages/../outside"),
         ] {
             assert!(matches!(
                 plan_workspace_links(
-                    "/project",
+                    project_root(),
                     [WorkspacePackage {
                         root: path,
                         name: "safe".parse().unwrap(),
@@ -154,7 +160,7 @@ mod tests {
     fn rejects_duplicate_link_targets() {
         assert!(matches!(
             plan_workspace_links(
-                "/project",
+                project_root(),
                 [
                     package("packages/a", "same", "1.0.0"),
                     package("packages/b", "same", "2.0.0")
