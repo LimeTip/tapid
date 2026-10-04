@@ -2,7 +2,8 @@ use crate::context;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 use tapid_core::{ArtifactDigest, PackageInstanceId};
 use tapid_linker::{
-    DependencyEdge, InstanceKey, LayoutInput, PackageInstance, Platform, VerifiedTreeReference,
+    InstanceKey, NamedDependency, NamedDependencyEdge, NamedLayoutInput, PackageInstance, Platform,
+    VerifiedTreeReference,
 };
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
@@ -52,10 +53,7 @@ pub(crate) fn replay_input(
     store: &Store,
     registry_config: &crate::registry::RegistryConfig,
     mut report_progress: impl FnMut(usize, usize),
-) -> Result<(LayoutInput, BTreeMap<String, PathBuf>), String> {
-    store
-        .cleanup_stale_replay_snapshots()
-        .map_err(|error| format!("cannot recover stale replay snapshots: {error}"))?;
+) -> Result<(NamedLayoutInput, BTreeMap<String, PathBuf>), String> {
     let mut instances = Vec::new();
     let mut keys = BTreeMap::new();
     let mut trees = BTreeMap::new();
@@ -75,6 +73,9 @@ pub(crate) fn replay_input(
             .map(|(key, _)| key),
     );
     let root_keys = replay_root_keys_with_config(lock, manifest, &typed_keys, registry_config)?;
+    store
+        .cleanup_stale_replay_snapshots()
+        .map_err(|error| format!("cannot recover stale replay snapshots: {error}"))?;
     let package_total = typed_packages.len();
     for (index, (key, package)) in typed_packages.iter().enumerate() {
         let completed = index + 1;
@@ -108,50 +109,82 @@ pub(crate) fn replay_input(
         trees.insert(encoded, tree);
         instances.push(instance);
     }
-    let mut roots = root_keys
+    let bindings = if lock.root_bindings().is_empty() {
+        root_keys
+            .iter()
+            .filter(|root| {
+                root.parse::<tapid_lockfile::LockfilePackageKey>()
+                    .is_ok_and(|key| key.source.registry().is_some())
+            })
+            .map(|root| {
+                let key: tapid_lockfile::LockfilePackageKey = root
+                    .parse()
+                    .map_err(|error: tapid_lockfile::LockfileError| error.to_string())?;
+                Ok((key.name.to_string(), root.clone()))
+            })
+            // Preserve duplicate local names so the linker rejects conflicting
+            // origins rather than silently dropping one legacy root.
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        lock.root_bindings()
+            .iter()
+            .map(|(name, key)| (name.clone(), key.clone()))
+            .collect()
+    };
+    let roots = bindings
         .iter()
-        .filter(|root| {
-            root.parse::<tapid_lockfile::LockfilePackageKey>()
-                .is_ok_and(|key| key.source.registry().is_some())
+        .map(|(name, root)| {
+            Ok(NamedDependency {
+                name: name
+                    .parse()
+                    .map_err(|error: tapid_core::DomainError| error.to_string())?,
+                child: keys
+                    .get(root)
+                    .cloned()
+                    .ok_or_else(|| format!("missing root package target {root}"))?,
+            })
         })
-        .map(|root| {
-            keys.get(root)
-                .cloned()
-                .ok_or_else(|| format!("missing root package target {root}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut roots = roots;
     for workspace_package in lock.workspace_packages().values() {
-        for target in workspace_package.dependencies().values() {
+        for (name, target) in workspace_package.dependencies() {
             let target_key = target
                 .parse::<tapid_lockfile::LockfilePackageKey>()
                 .map_err(|error| error.to_string())?;
             if target_key.source.registry().is_some() {
-                roots.push(
-                    keys.get(target)
+                roots.push(NamedDependency {
+                    name: name
+                        .parse()
+                        .map_err(|error: tapid_core::DomainError| error.to_string())?,
+                    child: keys
+                        .get(target)
                         .cloned()
                         .ok_or_else(|| format!("missing workspace dependency target {target}"))?,
-                );
+                });
             }
         }
     }
-    roots.sort();
-    roots.dedup();
     let mut edges = Vec::new();
     for (key, package) in &typed_packages {
         let encoded = key.to_string();
-        for dependency in package.dependencies().values() {
-            edges.push(DependencyEdge {
+        for (name, dependency) in package.dependencies() {
+            edges.push(NamedDependencyEdge {
                 parent: keys[&encoded].clone(),
-                child: keys
-                    .get(dependency)
-                    .cloned()
-                    .ok_or_else(|| format!("missing dependency target {dependency}"))?,
+                dependency: NamedDependency {
+                    name: name
+                        .parse()
+                        .map_err(|error: tapid_core::DomainError| error.to_string())?,
+                    child: keys
+                        .get(dependency)
+                        .cloned()
+                        .ok_or_else(|| format!("missing dependency target {dependency}"))?,
+                },
             });
         }
     }
     snapshots.keep = true;
     Ok((
-        LayoutInput {
+        NamedLayoutInput {
             instances,
             root_dependencies: roots,
             dependency_edges: edges,
@@ -180,6 +213,86 @@ fn replay_root_keys_with_config(
     typed_keys: &[tapid_lockfile::LockfilePackageKey],
     registry_config: &crate::registry::RegistryConfig,
 ) -> Result<Vec<String>, String> {
+    if !lock.root_bindings().is_empty() {
+        let required_names = manifest
+            .dependencies()
+            .keys()
+            .chain(manifest.dev_dependencies().keys())
+            .map(|name| crate::online::dep_parts(name).map(|(_, package)| package))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        let optional_names = manifest
+            .optional_dependencies()
+            .keys()
+            .map(|name| crate::online::dep_parts(name).map(|(_, package)| package))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        let mut declarations =
+            BTreeMap::<tapid_core::PackageName, Vec<tapid_resolver::Dependency>>::new();
+        for dependency in crate::online::manifest_roots(manifest)? {
+            let workspace_root = lock.roots().iter().any(|root| {
+                root.parse::<tapid_lockfile::LockfilePackageKey>()
+                    .ok()
+                    .is_some_and(|key| {
+                        key.source.workspace().is_some_and(|source| {
+                            source.name() == dependency.name.as_str()
+                                && dependency.requirement.matches(&key.version)
+                        })
+                    })
+            });
+            if workspace_root {
+                continue;
+            }
+            declarations
+                .entry(dependency.name.clone())
+                .or_default()
+                .push(dependency);
+        }
+        let typed_by_key = typed_keys
+            .iter()
+            .map(|key| (key.to_string(), key))
+            .collect::<BTreeMap<_, _>>();
+        for (name, target) in lock.root_bindings() {
+            let name = name
+                .parse::<tapid_core::PackageName>()
+                .map_err(|error| error.to_string())?;
+            let expected = declarations.get(&name).ok_or_else(|| {
+                format!("lockfile root binding {name} is not a direct manifest dependency")
+            })?;
+            let key = typed_by_key
+                .get(target)
+                .ok_or_else(|| format!("missing root package target {target}"))?;
+            for dependency in expected {
+                let actual = dependency.requirement.package_name(&dependency.name);
+                let registry = if dependency.registry.as_str() == "https://jsr.io" {
+                    dependency.registry.clone()
+                } else {
+                    registry_config.origin_for_name(actual)?
+                };
+                if key.source.registry() != Some(&registry)
+                    || &key.name != actual
+                    || !dependency.requirement.matches(&key.version)
+                {
+                    return Err(format!(
+                        "lockfile root binding {name} does not satisfy the manifest declaration"
+                    ));
+                }
+            }
+        }
+        for name in declarations.keys() {
+            let optional_only = optional_names.contains(name) && !required_names.contains(name);
+            if !optional_only && !lock.root_bindings().contains_key(name.as_str()) {
+                return Err(format!("lockfile is missing root binding for {name}"));
+            }
+        }
+        return Ok(lock.roots().to_vec());
+    }
+    if crate::online::manifest_roots(manifest)?
+        .iter()
+        .any(|dependency| dependency.requirement.is_alias())
+    {
+        return Err(
+            "npm aliases require lockfile root bindings; regenerate tapid.lock online".into(),
+        );
+    }
     let root_identities = replay_root_identities_with_config(manifest, registry_config)?;
     let optional_only = optional_only_root_identities_with_config(manifest, registry_config)?;
     if root_identities.is_empty() {

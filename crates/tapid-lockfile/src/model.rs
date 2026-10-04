@@ -8,7 +8,7 @@ use tapid_core::{
 
 use crate::{
     LEGACY_LOCKFILE_VERSION, LOCKFILE_VERSION, LockfileError, PROVENANCE_LEGACY_LOCKFILE_VERSION,
-    REGISTRY_ONLY_LOCKFILE_VERSION, validation,
+    REGISTRY_ONLY_LOCKFILE_VERSION, ROOTS_LEGACY_LOCKFILE_VERSION, validation,
 };
 
 fn encode(value: &str) -> String {
@@ -428,13 +428,14 @@ fn validate_dependency_target(
     package: &str,
     name: &str,
     dependency: &str,
+    aliases: &BTreeMap<String, String>,
     exists: impl Fn(&str) -> bool,
 ) -> Result<(), LockfileError> {
     let target = dependency.parse::<LockfilePackageKey>()?;
     if dependency == package {
         return Err(LockfileError::SelfDependency(package.to_owned()));
     }
-    if target.name.as_str() != name {
+    if target.name.as_str() != name && aliases.get(name) != Some(&target.name.to_string()) {
         return Err(LockfileError::DependencyNameMismatch {
             package: package.to_owned(),
             dependency: name.to_owned(),
@@ -459,6 +460,8 @@ pub struct LockedWorkspacePackage {
     manifest_digest: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     dependencies: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    dependency_aliases: BTreeMap<String, String>,
 }
 
 impl LockedWorkspacePackage {
@@ -471,6 +474,7 @@ impl LockedWorkspacePackage {
             source,
             manifest_digest,
             dependencies: BTreeMap::new(),
+            dependency_aliases: BTreeMap::new(),
         })
     }
 
@@ -484,6 +488,25 @@ impl LockedWorkspacePackage {
 
     pub fn dependencies(&self) -> &BTreeMap<String, String> {
         &self.dependencies
+    }
+
+    pub fn add_alias_dependency(&mut self, name: &str, key: &str) -> Result<(), LockfileError> {
+        let name = name
+            .parse::<PackageName>()
+            .map_err(LockfileError::Domain)?
+            .to_string();
+        let target = key.parse::<LockfilePackageKey>()?;
+        if key == self.key() {
+            return Err(LockfileError::SelfDependency(key.to_owned()));
+        }
+        if name != target.name.as_str() {
+            self.dependency_aliases
+                .insert(name.clone(), target.name.to_string());
+        } else {
+            self.dependency_aliases.remove(&name);
+        }
+        self.dependencies.insert(name, key.to_owned());
+        Ok(())
     }
 
     pub fn add_dependency(&mut self, name: &str, key: &str) -> Result<(), LockfileError> {
@@ -500,6 +523,7 @@ impl LockedWorkspacePackage {
             return Err(LockfileError::SelfDependency(key.to_owned()));
         }
         self.dependencies.insert(name.to_string(), key.to_owned());
+        self.dependency_aliases.remove(name.as_str());
         Ok(())
     }
 
@@ -523,7 +547,9 @@ impl LockedWorkspacePackage {
         }
         for (name, dependency) in &self.dependencies {
             let parsed = dependency.parse::<LockfilePackageKey>()?;
-            if parsed.name.as_str() != name {
+            if parsed.name.as_str() != name
+                && self.dependency_aliases.get(name) != Some(&parsed.name.to_string())
+            {
                 return Err(LockfileError::DependencyNameMismatch {
                     package: self.key(),
                     dependency: name.clone(),
@@ -532,6 +558,28 @@ impl LockedWorkspacePackage {
             }
             if dependency == &self.key() {
                 return Err(LockfileError::SelfDependency(self.key()));
+            }
+        }
+        for (name, actual) in &self.dependency_aliases {
+            name.parse::<PackageName>().map_err(LockfileError::Domain)?;
+            actual
+                .parse::<PackageName>()
+                .map_err(LockfileError::Domain)?;
+            let target = self
+                .dependencies
+                .get(name)
+                .ok_or_else(|| LockfileError::DependencyNameMismatch {
+                    package: self.key(),
+                    dependency: name.clone(),
+                    target: actual.clone(),
+                })?
+                .parse::<LockfilePackageKey>()?;
+            if actual != target.name.as_str() || name == actual {
+                return Err(LockfileError::DependencyNameMismatch {
+                    package: self.key(),
+                    dependency: name.clone(),
+                    target: target.name.to_string(),
+                });
             }
         }
         Ok(())
@@ -547,6 +595,8 @@ pub struct Lockfile {
     linker_version: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    root_bindings: BTreeMap<String, String>,
     packages: BTreeMap<String, LockedPackage>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workspace_packages: BTreeMap<String, LockedWorkspacePackage>,
@@ -561,6 +611,7 @@ impl Lockfile {
             resolver_version: "0".to_owned(),
             linker_version: "0".to_owned(),
             roots: Vec::new(),
+            root_bindings: BTreeMap::new(),
             packages: BTreeMap::new(),
             workspace_packages: BTreeMap::new(),
         })
@@ -624,12 +675,24 @@ impl Lockfile {
         };
         for (key, package) in &registry_batch {
             for (name, dependency) in &package.dependencies {
-                validate_dependency_target(key, name, dependency, exists)?;
+                validate_dependency_target(
+                    key,
+                    name,
+                    dependency,
+                    &package.dependency_aliases,
+                    exists,
+                )?;
             }
         }
         for (key, package) in &workspace_batch {
             for (name, dependency) in &package.dependencies {
-                validate_dependency_target(key, name, dependency, exists)?;
+                validate_dependency_target(
+                    key,
+                    name,
+                    dependency,
+                    &package.dependency_aliases,
+                    exists,
+                )?;
             }
         }
         self.packages.extend(
@@ -694,12 +757,47 @@ impl Lockfile {
             }
         }
         self.roots = roots;
+        self.root_bindings.clear();
         Ok(())
     }
 
     /// Returns exact canonical package keys selected as project roots.
     pub fn roots(&self) -> &[String] {
         &self.roots
+    }
+
+    /// Records each local root name and its immutable actual package key.
+    pub fn set_root_bindings(
+        &mut self,
+        bindings: BTreeMap<String, String>,
+    ) -> Result<(), LockfileError> {
+        for (name, target) in &bindings {
+            name.parse::<PackageName>().map_err(LockfileError::Domain)?;
+            target.parse::<LockfilePackageKey>()?;
+            if !self.roots.contains(target) {
+                return Err(LockfileError::DanglingRoot(target.clone()));
+            }
+        }
+        let bound_roots = bindings
+            .values()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        for root in &self.roots {
+            if !bound_roots.contains(root)
+                && root
+                    .parse::<LockfilePackageKey>()
+                    .ok()
+                    .is_none_or(|key| key.source.workspace().is_none())
+            {
+                return Err(LockfileError::NonCanonicalRoots);
+            }
+        }
+        self.root_bindings = bindings;
+        Ok(())
+    }
+
+    pub fn root_bindings(&self) -> &BTreeMap<String, String> {
+        &self.root_bindings
     }
 
     /// Returns package entries with their validated typed keys.
@@ -740,14 +838,30 @@ impl Lockfile {
         Ok(())
     }
 
+    fn validate_alias_schema(&self) -> Result<(), LockfileError> {
+        if self.lockfile_version < LOCKFILE_VERSION
+            && (!self.root_bindings.is_empty()
+                || self
+                    .packages
+                    .values()
+                    .any(|package| !package.dependency_aliases.is_empty()))
+        {
+            return Err(LockfileError::AliasMetadataInLegacySchema(
+                self.lockfile_version,
+            ));
+        }
+        Ok(())
+    }
+
     pub fn to_json(&self) -> Result<String, LockfileError> {
-        if self.lockfile_version == LOCKFILE_VERSION
+        self.validate_alias_schema()?;
+        if self.lockfile_version >= ROOTS_LEGACY_LOCKFILE_VERSION
             && (!self.packages.is_empty() || !self.workspace_packages.is_empty())
             && self.roots.is_empty()
         {
             return Err(LockfileError::MissingRoots);
         }
-        if self.lockfile_version == LOCKFILE_VERSION
+        if self.lockfile_version >= ROOTS_LEGACY_LOCKFILE_VERSION
             && let Some((key, _)) = self
                 .packages
                 .iter()
@@ -805,6 +919,10 @@ impl Lockfile {
                 return Err(LockfileError::DanglingRoot(root.clone()));
             }
         }
+        lockfile.validate_alias_schema()?;
+        if !lockfile.root_bindings.is_empty() {
+            lockfile.set_root_bindings(lockfile.root_bindings.clone())?;
+        }
         for (key, package) in &lockfile.packages {
             key.parse::<LockfilePackageKey>()?;
             package.validate()?;
@@ -822,12 +940,24 @@ impl Lockfile {
         let exists = |key: &str| lockfile.contains_package_key(key);
         for (key, package) in &lockfile.packages {
             for (name, dependency) in &package.dependencies {
-                validate_dependency_target(key, name, dependency, exists)?;
+                validate_dependency_target(
+                    key,
+                    name,
+                    dependency,
+                    &package.dependency_aliases,
+                    exists,
+                )?;
             }
         }
         for (key, package) in &lockfile.workspace_packages {
             for (name, dependency) in &package.dependencies {
-                validate_dependency_target(key, name, dependency, exists)?;
+                validate_dependency_target(
+                    key,
+                    name,
+                    dependency,
+                    &package.dependency_aliases,
+                    exists,
+                )?;
             }
         }
         Ok(lockfile)
@@ -853,6 +983,8 @@ pub struct LockedPackage {
     #[serde(skip_serializing_if = "String::is_empty", default)]
     platform_context: String,
     dependencies: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    dependency_aliases: BTreeMap<String, String>,
 }
 
 /// Identifies the source of a package artifact integrity value.
@@ -926,6 +1058,7 @@ impl LockedPackage {
             peer_context: canonical_peer_context(contexts.0),
             platform_context: canonical_platform_context(contexts.1),
             dependencies: BTreeMap::new(),
+            dependency_aliases: BTreeMap::new(),
         };
         package.validate()?;
         Ok(package)
@@ -989,6 +1122,31 @@ impl LockedPackage {
         if let Some(url) = &self.artifact_url {
             validation::validate_artifact_url(url)?;
         }
+        for (name, actual) in &self.dependency_aliases {
+            name.parse::<PackageName>().map_err(LockfileError::Domain)?;
+            actual
+                .parse::<PackageName>()
+                .map_err(LockfileError::Domain)?;
+            let target = self
+                .dependencies
+                .get(name)
+                .ok_or_else(|| LockfileError::DependencyNameMismatch {
+                    package: self.key(),
+                    dependency: name.clone(),
+                    target: actual.clone(),
+                })?
+                .parse::<LockfilePackageKey>()?;
+            if actual != target.name.as_str() || name == actual {
+                return Err(LockfileError::DependencyNameMismatch {
+                    package: self.key(),
+                    dependency: name.clone(),
+                    target: target.name.to_string(),
+                });
+            }
+        }
+        for name in self.dependencies.keys() {
+            name.parse::<PackageName>().map_err(LockfileError::Domain)?;
+        }
         Ok(())
     }
 
@@ -1011,6 +1169,27 @@ impl LockedPackage {
             return Err(LockfileError::SelfDependency(key.to_owned()));
         }
         self.dependencies.insert(name.to_string(), key.to_owned());
+        self.dependency_aliases.remove(name.as_str());
+        Ok(())
+    }
+
+    /// Binds a validated local alias to an exact actual registry package.
+    pub fn add_alias_dependency(&mut self, name: &str, key: &str) -> Result<(), LockfileError> {
+        let name = name
+            .parse::<PackageName>()
+            .map_err(LockfileError::Domain)?
+            .to_string();
+        let target = key.parse::<LockfilePackageKey>()?;
+        if key == self.key() {
+            return Err(LockfileError::SelfDependency(key.to_owned()));
+        }
+        if name != target.name.as_str() {
+            self.dependency_aliases
+                .insert(name.clone(), target.name.to_string());
+        } else {
+            self.dependency_aliases.remove(&name);
+        }
+        self.dependencies.insert(name, key.to_owned());
         Ok(())
     }
 }

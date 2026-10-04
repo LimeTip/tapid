@@ -7,7 +7,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tapid_linker::{LayoutInput, ManagedRoot, plan_layout};
+use tapid_linker::{ManagedRoot, NamedLayoutInput, plan_named_layout};
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 use tapid_store::Store;
@@ -516,7 +516,7 @@ fn validate_workspace_dependency_edges(
             .iter()
             .filter(|dependency| dependency.member_key == key)
         {
-            let name = dependency.package.to_string();
+            let name = dependency.manifest_name.clone();
             expected_names.insert(name.clone());
             let target = locked.dependencies().get(&name).ok_or_else(|| {
                 format!(
@@ -584,7 +584,7 @@ fn validate_workspace_dependency_edges(
 
 fn materialize_install(
     project_dir: &Path,
-    input: LayoutInput,
+    input: NamedLayoutInput,
     trees: BTreeMap<String, PathBuf>,
     workspace_links: tapid_linker::WorkspaceLinkPlan,
     activation_lock: &ActivationLock,
@@ -603,7 +603,7 @@ fn materialize_install(
 
 fn materialize_with_lock(
     project_dir: &Path,
-    input: LayoutInput,
+    input: NamedLayoutInput,
     trees: BTreeMap<String, PathBuf>,
     workspace_links: tapid_linker::WorkspaceLinkPlan,
     replayed: bool,
@@ -620,7 +620,7 @@ fn materialize_with_lock(
         }
     };
     let platform = crate::application::replay::current_platform();
-    let plan = match plan_layout(root, input.clone(), platform) {
+    let plan = match plan_named_layout(root, input.clone(), platform) {
         Ok(value) => value,
         Err(error) => {
             if replayed {
@@ -641,7 +641,7 @@ fn materialize_with_lock(
     let result = crate::filesystem::tree::materialize_stage_with_workspace_links(
         &stage,
         &plan,
-        &input,
+        &input.instances,
         &trees,
         replayed,
         &workspace_links,

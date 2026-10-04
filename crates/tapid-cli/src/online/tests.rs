@@ -1,4 +1,70 @@
 use super::*;
+
+#[test]
+fn optional_alias_fetches_the_actual_package_and_retains_the_local_edge() {
+    let mut parent = named_record("parent", "1.0.0", &[]);
+    parent
+        .optional_dependencies
+        .insert("h3-v2".into(), "npm:h3@2.0.1-rc.20".into());
+    let roots = vec![Dependency::new(
+        NPM.parse().unwrap(),
+        "parent".parse().unwrap(),
+        "1".parse().unwrap(),
+    )];
+    let mut fetched = Vec::new();
+    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+        fetched.push(name.to_string());
+        match name.as_str() {
+            "parent" => Ok(vec![parent.clone()]),
+            "h3" => Ok(vec![named_record("h3", "2.0.1-rc.20", &[])]),
+            _ => panic!("must fetch actual alias identity: {name}"),
+        }
+    })
+    .unwrap();
+    assert_eq!(fetched, ["parent", "h3"]);
+    assert_eq!(resolution.dependencies[0].dependency.as_str(), "h3-v2");
+    assert_eq!(resolution.dependencies[0].child.name.as_str(), "h3");
+}
+
+#[test]
+fn jsr_alias_metadata_never_falls_back_to_a_jsr_package_of_the_same_name() {
+    let mut package = named_record("@scope/parent", "1.0.0", &[("local", "npm:@actual/pkg@1")]);
+    package.registry = JSR.parse().unwrap();
+    let error = normalize_record(&package)
+        .err()
+        .expect("npm source cannot be interpreted as JSR");
+    assert!(error.contains("refusing JSR registry fallback"));
+}
+
+#[test]
+fn overriding_an_alias_range_preserves_its_actual_identity() {
+    let roots = vec![Dependency::new(
+        NPM.parse().unwrap(),
+        "parent".parse().unwrap(),
+        "1".parse().unwrap(),
+    )];
+    let overrides = BTreeMap::from([("local".parse().unwrap(), "2".parse().unwrap())]);
+    let (resolution, _) =
+        resolve_with_overrides(&roots, &overrides, |_, name| match name.as_str() {
+            "parent" => Ok(vec![named_record(
+                "parent",
+                "1.0.0",
+                &[("local", "npm:actual@1")],
+            )]),
+            "actual" => Ok(vec![
+                named_record("actual", "1.0.0", &[]),
+                named_record("actual", "2.0.0", &[]),
+            ]),
+            _ => panic!("unexpected alias target {name}"),
+        })
+        .unwrap();
+    assert_eq!(resolution.dependencies[0].dependency.as_str(), "local");
+    assert_eq!(resolution.dependencies[0].child.name.as_str(), "actual");
+    assert_eq!(
+        resolution.dependencies[0].child.version.to_string(),
+        "2.0.0"
+    );
+}
 #[test]
 fn custom_private_origins_use_the_npm_metadata_protocol() {
     let registry: RegistryOrigin = "https://127.0.0.1:9".parse().unwrap();

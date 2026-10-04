@@ -121,8 +121,20 @@ pub(crate) fn plan_update(
         .cloned()
         .unwrap();
         mutations.push(DependencyMutation {
+            requirement: Some(if latest {
+                let parsed = requirement
+                    .parse::<Requirement>()
+                    .map_err(|error| format!("invalid dependency '{name}': {error}"))?;
+                if parsed.is_alias() {
+                    let (_, declared) = crate::online::dep_parts(&name)?;
+                    format!("npm:{}@*", parsed.package_name(&declared))
+                } else {
+                    "*".to_owned()
+                }
+            } else {
+                requirement
+            }),
             name,
-            requirement: Some(if latest { "*".to_owned() } else { requirement }),
             kind,
         });
     }
@@ -359,19 +371,28 @@ pub(crate) fn outdated_report(
                 "workspace dependency '{identity}@{declared}' has no matching local workspace member; refusing registry fallback"
             ));
         }
-        let (origin, package_name) = crate::online::dep_parts(&identity)?;
-        let origin = if origin.to_string() == "https://jsr.io" {
-            origin
+        let (manifest_origin, local_name) = crate::online::dep_parts(&identity)?;
+        let requirement = declared.parse::<Requirement>().ok();
+        let package_name = requirement
+            .as_ref()
+            .map(|requirement| requirement.package_name(&local_name))
+            .unwrap_or(&local_name)
+            .clone();
+        let origin = if manifest_origin.to_string() == "https://jsr.io" {
+            manifest_origin
         } else {
             registry_config.origin_for_name(&package_name)?
         };
+        let bound_root = lock.root_bindings().get(local_name.as_str());
         let locked_version = locked
             .iter()
             .filter(|(key, _)| {
                 matches!(
                     &key.source,
                     LockfilePackageSource::Registry(registry)
-                        if registry == &origin && key.name == package_name
+                        if registry == &origin
+                            && key.name == package_name
+                            && bound_root.is_none_or(|target| key.to_string() == *target)
                 )
             })
             .map(|(key, _)| key.version.clone())
@@ -392,7 +413,6 @@ pub(crate) fn outdated_report(
                 }
             }
         };
-        let requirement = declared.parse::<Requirement>().ok();
         let (newest_compatible, newest_available, diagnostic) = match versions {
             Ok(mut versions) => {
                 versions.sort();

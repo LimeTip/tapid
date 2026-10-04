@@ -3,7 +3,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
 };
-use tapid_linker::{LayoutInput, ManagedRoot};
+use tapid_linker::{ManagedRoot, PackageInstance};
 
 #[cfg(test)]
 thread_local! {
@@ -38,14 +38,14 @@ fn report_materialization_completion(total: usize, report: impl FnOnce(usize, us
 pub(crate) fn materialize_stage(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
-    input: &LayoutInput,
+    instances: &[PackageInstance],
     trees: &BTreeMap<String, PathBuf>,
     sources_are_verified_snapshots: bool,
 ) -> Result<(), String> {
     materialize_stage_with_workspace_links(
         stage,
         plan,
-        input,
+        instances,
         trees,
         sources_are_verified_snapshots,
         &tapid_linker::WorkspaceLinkPlan::default(),
@@ -55,7 +55,7 @@ pub(crate) fn materialize_stage(
 pub(crate) fn materialize_stage_with_workspace_links(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
-    input: &LayoutInput,
+    instances: &[PackageInstance],
     trees: &BTreeMap<String, PathBuf>,
     sources_are_verified_snapshots: bool,
     workspace_links: &tapid_linker::WorkspaceLinkPlan,
@@ -68,8 +68,7 @@ pub(crate) fn materialize_stage_with_workspace_links(
             .values()
             .find(|path| **path == entry.source)
             .ok_or_else(|| "tree replay mapping lost".to_owned())?;
-        let expected = input
-            .instances
+        let expected = instances
             .iter()
             .find(|instance| instance.tree.root == *tree)
             .map(|instance| instance.tree.digest.as_str())
@@ -406,13 +405,24 @@ fn materialize_package_shims(
         let package_root = package_root_for_shims(&package_dir);
         let package_json = fs::read_to_string(package_root.join("package.json"))
             .map_err(|e| format!("cannot read installed package manifest: {e}"))?;
+        let parent = package_dir
+            .parent()
+            .ok_or_else(|| "installed package has no node_modules parent".to_owned())?;
+        let bin_dir = if parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('@'))
+        {
+            parent
+                .parent()
+                .ok_or_else(|| "scoped package has no node_modules parent".to_owned())?
+        } else {
+            parent
+        };
         packages.push(tapid_linker::ShimPackage {
             tree_root: package_root,
             package_json,
-            bin_dir: package_dir
-                .parent()
-                .ok_or_else(|| "installed package has no node_modules parent".to_owned())?
-                .to_path_buf(),
+            bin_dir: bin_dir.to_path_buf(),
         });
     }
     let project_root = stage
@@ -1142,7 +1152,7 @@ mod copy_tests {
         materialize_stage(
             &stage,
             &plan,
-            &input,
+            &input.instances,
             &BTreeMap::from([("example".to_owned(), source)]),
             false,
         )
@@ -1230,7 +1240,7 @@ mod copy_tests {
             let result = materialize_stage(
                 &stage,
                 &plan,
-                &input,
+                &input.instances,
                 &BTreeMap::from([("example".to_owned(), source)]),
                 false,
             );
@@ -1325,7 +1335,7 @@ mod copy_tests {
         materialize_stage(
             &stage,
             &plan,
-            &input,
+            &input.instances,
             &BTreeMap::from([("example".to_owned(), source)]),
             false,
         )
