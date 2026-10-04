@@ -27,6 +27,8 @@ Integration tests must use `tapid-test-support` temporary projects and homes. Do
 
 ## Local verification
 
+Every visible CLI command and nested subcommand needs a help description. Add a doc comment or `#[command(about = "...")]` to its Clap definition. The CLI documentation workflow discovers commands automatically and reports any missing or blank descriptions. Hidden commands are excluded. Run the same check locally with `python3 scripts/dev.py test -p tapid --lib --locked commands::documentation::`.
+
 Use [the testing workflow](docs/testing.md) as the single source for local verification commands. Start with the focused test for the changed behavior, run the affected crate checks before handoff, and use the full local lane for cross-cutting changes. CI retains its cross-platform, security, coverage, compatibility, and packaging gates.
 
 Run Cargo through `python3 scripts/dev.py` to reuse build artifacts across this repository's worktrees. Python 3, Git, Rust with rustfmt and Clippy, and Node.js 22.6.0 or later are the development prerequisites. Optional CI tools do not need to be installed for an ordinary local change.

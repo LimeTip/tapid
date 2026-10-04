@@ -12,7 +12,14 @@ pub(crate) struct Args {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    Validate { path: Option<PathBuf> },
+    /// Check a package.json manifest for valid JSON and supported field values.
+    #[command(
+        long_about = "Check a package.json manifest for valid JSON and supported field values.\n\nPrint the package name and version on success. Report an error and exit with code 1 if the file cannot be read or the manifest is invalid."
+    )]
+    Validate {
+        /// Manifest file to validate, defaults to package.json in the current directory.
+        path: Option<PathBuf>,
+    },
 }
 
 pub(crate) fn run(args: Args) -> ExitCode {

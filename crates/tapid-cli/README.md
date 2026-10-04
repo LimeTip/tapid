@@ -38,6 +38,8 @@ tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
 
+`tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
+
 ## Upgrade Tapid
 
 Starting with 0.0.10, `tapid upgrade` discovers and installs the latest stable release. `tapid upgrade --dry-run` inspects the selected release without replacing the binary. Older clients can be upgraded by rerunning the public installer.

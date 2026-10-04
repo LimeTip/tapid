@@ -2595,6 +2595,95 @@ fn legacy_registry_replay_rejects_without_mutation() {
     }
 }
 
+/// Checks that both install spellings reject bare command words without changing the project.
+#[test]
+fn install_rejects_ambiguous_package_arguments_before_accessing_project() {
+    for command in ["install", "i"] {
+        for package in ["help", "install", " help ", " install "] {
+            for with_manifest in [false, true] {
+                let dir = temp_dir("ambiguous-install");
+                let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+                if with_manifest {
+                    fs::write(dir.join("package.json"), manifest).unwrap();
+                }
+                let store = dir.join("store");
+                let output = run(
+                    &dir,
+                    &[command, package, "--store-dir", store.to_str().unwrap()],
+                );
+                assert_eq!(output.status.code(), Some(2));
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(stderr.contains("is ambiguous here"), "{stderr}");
+                assert!(stderr.contains("tapid install"), "{stderr}");
+                assert!(!stderr.contains("cannot read manifest"), "{stderr}");
+                assert!(output.stdout.is_empty());
+                assert_eq!(
+                    fs::read_dir(&dir).unwrap().count(),
+                    usize::from(with_manifest)
+                );
+                if with_manifest {
+                    assert_eq!(
+                        fs::read_to_string(dir.join("package.json")).unwrap(),
+                        manifest
+                    );
+                }
+                cleanup(dir);
+            }
+        }
+    }
+}
+
+/// Checks that explicit specs for command-like package names pass argument validation.
+#[test]
+fn install_accepts_explicit_specs_for_ambiguous_package_names() {
+    let dir = temp_dir("explicit-install");
+    for command in ["install", "i"] {
+        for package in ["help@1.0.0", "install@1.0.0", "npm:help", "npm:install"] {
+            let output = run(&dir, &[command, package]);
+            assert_eq!(output.status.code(), Some(1));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("cannot read manifest"), "{stderr}");
+        }
+    }
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    cleanup(dir);
+}
+
+/// Checks frozen replay through `i`, installation help forms, and alias visibility in help.
+#[test]
+fn install_alias_replays_project_and_provides_help() {
+    let dir = temp_dir("install-alias");
+    let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(
+        dir.join("tapid.lock"),
+        lock_for_manifest(manifest).to_json().unwrap(),
+    )
+    .unwrap();
+    let output = run(&dir, &["i", "--frozen"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.join("node_modules").is_dir());
+    for args in [
+        &["i", "--help"][..],
+        &["install", "--help"],
+        &["help", "install"],
+    ] {
+        let output = run(&dir, args);
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Install dependencies"));
+    }
+    for args in [&["--help"][..], &["help"]] {
+        let output = run(&dir, args);
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("[alias: i]"));
+    }
+    cleanup(dir);
+}
+
 #[test]
 fn install_requires_lockfile_in_offline_and_frozen_modes() {
     for mode in ["offline", "frozen"] {

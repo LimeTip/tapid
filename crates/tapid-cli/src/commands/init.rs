@@ -8,6 +8,7 @@ use tapid_manifest::PackageManifest;
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
+    /// Existing directory in which to create package.json. Defaults to the current directory.
     pub(crate) path: Option<PathBuf>,
 }
 
