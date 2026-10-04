@@ -89,6 +89,15 @@ Before merge, record the exact pull-request head and base. After merge, read bac
 
 ### 2. Create the immutable annotated tag
 
+Before tagging the first release-record release, run `release-signing-check.yml`
+from reviewed `main` and require its protected `stable-release` key check to pass.
+The draft job uses that environment's existing `TAPID_RELEASE_ED25519_PRIVATE_KEY`
+secret and key-ID variable. Verify that the environment permits the intended
+release-tag ref if using automatic tag-triggered signing. A `main`-only policy
+requires dispatching the release workflow from `main` after the tag exists;
+never bypass its independent approval. See
+[release key management](security/release-key-management.md).
+
 Set the intended values explicitly:
 
 ```sh
@@ -265,12 +274,14 @@ Read the job steps and logs. Do not infer real installation from workflow succes
 
 The supplemental root-script fixture uses `tests/fixtures/validate_consumer_project.js`
 against the installed binary, not a source build. Before tagging, review its
-`releaseContracts` capability table alongside `docs/examples/contracts.json`.
+`tests/fixtures/consumer_contracts.json` capability data alongside
+`docs/examples/contracts.json`. The current contract uses the product version
+from `crates/tapid-cli/Cargo.toml`; historical contracts list exact reviewed tags.
 Unknown published tags fail until reviewed; never infer support from an arbitrary
-command failure. The native Restricted contract requires macOS child execution,
-exact arguments, environment/exit-code checks and receipts. Linux and Windows
-must instead return the specific unsupported-containment rejection with no child
-marker or receipt. The historical uncontained contract retains forwarding checks
+command failure. The v0.0.11 native Restricted contract requires macOS and Linux child execution,
+exact arguments, environment/exit-code checks and receipts. Windows must return
+the specific unsupported-containment rejection with no child marker or receipt.
+The historical v0.0.10 contract requires that rejection on Linux as well. The historical uncontained contract retains forwarding checks
 without claiming containment. These expected contracts are not public execution
 evidence.
 

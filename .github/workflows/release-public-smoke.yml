@@ -152,7 +152,7 @@ jobs:
         run: |
           set -euo pipefail
           binary="$RUNNER_TEMP/tapid/tapid"
-          # Reviewed native contract: macOS executes; Linux fails closed.
+          # Reviewed native platform expectations come from consumer_contracts.json.
           # Historical uncontained releases retain forwarding checks, not containment claims.
           env -i HOME="$RUNNER_TEMP/tapid-home" PATH="$PATH" TAPID_FIXTURE_PROJECT="$TAPID_FIXTURE_PROJECT" \
             node tests/fixtures/validate_consumer_project.js --binary "$binary" --release-tag "$RELEASE_TAG"
