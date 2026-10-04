@@ -31,4 +31,12 @@ This scope covers explicit root project scripts only. It does not enable depende
 
 ## Current status
 
-Windows `tapid run` is **not supported yet**. The existing read-only prototype and compile checks do not satisfy this scope. The implementation must be ported to the current modular runner architecture, then pass the exact CLI and native ManagedTree acceptance above before documentation or release claims change.
+Windows `tapid run` is **not supported yet**. The existing read-only prototype and compile checks do not satisfy this scope.
+
+A baseline red run was recorded on Windows 11 Pro x64 build 26300 in Proxmox VM 126 with Node `v22.6.0`. The release `tapid.exe` was built from upstream commit `fc9fa6233e03c0fe9c183e516201d737e4b70280` (SHA-256 `397380dba2c7c7691171c16667c415b0e984ce851a9bfa0fb304f09b51df1cdb`). Running `tapid run test` against the checked-in #150 fixture files failed with exit code 1 before spawning Node:
+
+```text
+sandbox execution failed (unsupported-containment): sandbox containment is unavailable on windows: no platform execution backend is implemented; no process was started and no enforcement receipt was issued
+```
+
+This is only a baseline reproduction of the missing backend, not Windows support acceptance: it did not run the complete build/test/start workload or prove ManagedTree controls. The implementation must be ported to the current modular runner architecture, then pass the exact CLI and native ManagedTree acceptance above before documentation or release claims change.
