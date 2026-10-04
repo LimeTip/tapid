@@ -5,10 +5,66 @@ use std::sync::{Mutex, MutexGuard};
 // Windows exposes no compare-and-swap DACL update; serialize Tapid's ACL transactions within this process.
 static WINDOWS_ACL_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 
-fn lock_acl_mutations() -> Result<MutexGuard<'static, ()>, ExecutionError> {
-    WINDOWS_ACL_MUTATION_LOCK
+struct AclMutationGuard {
+    _process_guard: MutexGuard<'static, ()>,
+    named_mutex: HANDLE,
+}
+
+impl Drop for AclMutationGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::ReleaseMutex;
+
+        unsafe {
+            ReleaseMutex(self.named_mutex);
+            CloseHandle(self.named_mutex);
+        }
+    }
+}
+
+fn lock_acl_mutations() -> Result<AclMutationGuard, ExecutionError> {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+    let process_guard = WINDOWS_ACL_MUTATION_LOCK
         .lock()
-        .map_err(|_| unsupported_acl("serialize filesystem ACL updates", 6))
+        .map_err(|_| unsupported_acl("serialize filesystem ACL updates", 6))?;
+    let name: Vec<u16> = "Global\\TapidWindowsAclMutation-v1\0"
+        .encode_utf16()
+        .collect();
+    let named_mutex = unsafe { CreateMutexW(null_mut(), 0, name.as_ptr()) };
+    if named_mutex == 0 {
+        return Err(unsupported_acl(
+            "create cross-process filesystem ACL lock",
+            unsafe { GetLastError() },
+        ));
+    }
+    let wait = unsafe { WaitForSingleObject(named_mutex, 30_000) };
+    match wait {
+        WAIT_OBJECT_0 => Ok(AclMutationGuard {
+            _process_guard: process_guard,
+            named_mutex,
+        }),
+        WAIT_ABANDONED => {
+            unsafe {
+                windows_sys::Win32::System::Threading::ReleaseMutex(named_mutex);
+                CloseHandle(named_mutex);
+            }
+            Err(unsupported_acl("recover abandoned filesystem ACL lock", 6))
+        }
+        WAIT_TIMEOUT => {
+            unsafe { CloseHandle(named_mutex) };
+            Err(unsupported_acl("wait for filesystem ACL lock", 1460))
+        }
+        _ => {
+            let error = unsafe { GetLastError() };
+            unsafe { CloseHandle(named_mutex) };
+            Err(unsupported_acl("wait for filesystem ACL lock", error))
+        }
+    }
 }
 
 /// Temporarily grants an AppContainer SID access to a directory subtree and restores the
@@ -48,23 +104,67 @@ impl WindowsPathAcl {
         kind: FilesystemGrantKind,
         allow_execute: bool,
     ) -> Result<Self, ExecutionError> {
-        let _transaction = lock_acl_mutations()?;
         let mut parent_grants = Vec::new();
-        if matches!(
-            kind,
-            FilesystemGrantKind::ExactFile | FilesystemGrantKind::ExactDirectory
-        ) {
-            let parent = path.parent().ok_or_else(|| {
-                unsupported_acl("filesystem grant target has no parent directory", 87)
-            })?;
-            parent_grants.push(Self::grant_directory_listing_unlocked(parent, sid)?);
+        let _transaction = lock_acl_mutations()?;
+        let mut parent = path.parent().map(std::path::Path::to_path_buf);
+        while let Some(directory) = parent {
+            // The volume root is not user-writable. Windows path traversal normally
+            // relies on SeChangeNotifyPrivilege there; never try to rewrite its DACL.
+            if directory.parent().is_none() || !Self::parent_dacl_is_writable(&directory)? {
+                break;
+            }
+            parent_grants.push(Self::grant_parent_traversal_unlocked(&directory, sid)?);
+            parent = directory
+                .parent()
+                .filter(|ancestor| *ancestor != directory)
+                .map(std::path::Path::to_path_buf);
         }
         let mut grant = Self::grant_inner(path, sid, access, kind, false, allow_execute)?;
         grant.parent_grants = parent_grants;
         Ok(grant)
     }
 
-    fn grant_directory_listing_unlocked(
+    fn parent_dacl_is_writable(path: &std::path::Path) -> Result<bool, ExecutionError> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+        };
+
+        let wide = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // SAFETY: wide is NUL-terminated, and backup semantics permits opening a directory.
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                READ_CONTROL | WRITE_DAC,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                0,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(5) {
+                return Ok(false);
+            }
+            return Err(unsupported_acl(
+                "probe parent directory DACL writability",
+                error.raw_os_error().unwrap_or(1) as u32,
+            ));
+        }
+        // SAFETY: handle was returned successfully by CreateFileW.
+        unsafe { CloseHandle(handle) };
+        Ok(true)
+    }
+
+    fn grant_parent_traversal_unlocked(
         path: &std::path::Path,
         sid: windows_sys::Win32::Foundation::PSID,
     ) -> Result<Self, ExecutionError> {
@@ -83,7 +183,7 @@ impl WindowsPathAcl {
         sid: windows_sys::Win32::Foundation::PSID,
         access: FilesystemAccess,
         kind: FilesystemGrantKind,
-        directory_listing_only: bool,
+        directory_traversal_only: bool,
         allow_execute: bool,
     ) -> Result<Self, ExecutionError> {
         use std::os::windows::ffi::OsStrExt;
@@ -128,13 +228,15 @@ impl WindowsPathAcl {
             }
             FilesystemGrantKind::CharacterDevice => false,
         };
-        if !kind_matches || (directory_listing_only && kind != FilesystemGrantKind::ExactDirectory)
+        if !kind_matches
+            || (directory_traversal_only && kind != FilesystemGrantKind::ExactDirectory)
         {
             return Err(unsupported_acl(
                 "filesystem grant target kind is unsupported or changed",
                 87,
             ));
         }
+        let display_path = path.display().to_string();
         let path = path
             .as_os_str()
             .encode_wide()
@@ -155,7 +257,7 @@ impl WindowsPathAcl {
         };
         if handle == INVALID_HANDLE_VALUE {
             return Err(unsupported_acl(
-                "open filesystem grant for DACL update",
+                &format!("open filesystem grant for DACL update at {display_path}"),
                 std::io::Error::last_os_error().raw_os_error().unwrap_or(1) as u32,
             ));
         }
@@ -229,8 +331,8 @@ impl WindowsPathAcl {
             });
         }
 
-        let root_permissions = if directory_listing_only {
-            FILE_LIST_DIRECTORY
+        let root_permissions = if directory_traversal_only {
+            FILE_EXECUTE | FILE_READ_ATTRIBUTES
         } else {
             match access {
                 FilesystemAccess::ReadData => {
@@ -582,4 +684,76 @@ fn unsupported_acl(operation: &str, code: u32) -> ExecutionError {
             std::io::Error::from_raw_os_error(code as i32)
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lock_acl_mutations;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn acl_mutation_lock_serializes_separate_processes() {
+        let unique = format!(
+            "tapid-acl-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let directory = std::env::temp_dir().join(unique);
+        std::fs::create_dir(&directory).unwrap();
+        let ready = directory.join("ready");
+        let executable = std::env::current_exe().unwrap();
+        let held = lock_acl_mutations().expect("parent must acquire ACL lock");
+        let spawn_result = Command::new(executable)
+            .args([
+                "--exact",
+                "execution::windows_job::filesystem::tests::acl_mutation_lock_child",
+                "--nocapture",
+            ])
+            .env("TAPID_ACL_LOCK_CHILD", "1")
+            .env("TAPID_ACL_LOCK_READY", &ready)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let mut child = match spawn_result {
+            Ok(child) => child,
+            Err(error) => {
+                drop(held);
+                panic!("spawn ACL lock child: {error}");
+            }
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let child_started = ready.exists();
+        std::thread::sleep(Duration::from_millis(200));
+        let child_waiting_for_lock = child.try_wait().map(|status| status.is_none());
+        drop(held);
+        if !child_started {
+            let _ = child.kill();
+        }
+        let child_status = child.wait();
+        let _ = std::fs::remove_dir_all(directory);
+        assert!(child_started, "child did not reach the lock attempt");
+        assert!(
+            matches!(child_waiting_for_lock, Ok(true)),
+            "separate process bypassed the held ACL mutation lock"
+        );
+        assert!(child_status.unwrap().success());
+    }
+
+    #[test]
+    fn acl_mutation_lock_child() {
+        if std::env::var_os("TAPID_ACL_LOCK_CHILD").is_none() {
+            return;
+        }
+        let ready = std::env::var_os("TAPID_ACL_LOCK_READY").unwrap();
+        std::fs::write(ready, b"ready").unwrap();
+        let _lock =
+            lock_acl_mutations().expect("child must acquire ACL lock after parent releases");
+    }
 }

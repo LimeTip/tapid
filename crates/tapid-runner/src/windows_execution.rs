@@ -14,7 +14,7 @@ use crate::execution::{
         WindowsOutputCapture, WindowsStdioPipes, WindowsSuspendedChild,
     },
 };
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -22,6 +22,29 @@ use std::time::Duration;
 
 const INTERNAL_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+fn add_node_appcontainer_options(environment: &mut std::collections::BTreeMap<OsString, OsString>) {
+    const REQUIRED: [&str; 2] = ["--preserve-symlinks", "--preserve-symlinks-main"];
+    let existing_key = environment
+        .keys()
+        .find(|name| name.to_string_lossy().eq_ignore_ascii_case("NODE_OPTIONS"))
+        .cloned();
+    let key = existing_key.unwrap_or_else(|| OsString::from("NODE_OPTIONS"));
+    let mut options = environment.get(&key).cloned().unwrap_or_default();
+    let existing_options = options.to_string_lossy().into_owned();
+    for required in REQUIRED {
+        if !existing_options
+            .split_whitespace()
+            .any(|option| option == required)
+        {
+            if !options.is_empty() {
+                options.push(" ");
+            }
+            options.push(required);
+        }
+    }
+    environment.insert(key, options);
+}
 
 pub(super) struct PlatformBackend;
 
@@ -132,7 +155,11 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             &arguments,
             self.request.uses_windows_verbatim_arguments(),
         )?;
-        let environment = windows_environment_block_units(&self.preflight.child_environment)?;
+        let mut child_environment = self.preflight.child_environment.clone();
+        if self.request.trusted_node_runtime.is_some() {
+            add_node_appcontainer_options(&mut child_environment);
+        }
+        let environment = windows_environment_block_units(&child_environment)?;
         let working_directory = process_working_directory(&self.preflight.policy.project_root)?;
         let mut pipes = WindowsStdioPipes::new()?;
         self.child = Some(WindowsSuspendedChild::create_with_stdio(
@@ -397,6 +424,19 @@ fn wide(value: &OsStr) -> Vec<u16> {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    #[test]
+    fn trusted_node_appcontainer_options_preserve_caller_options_and_are_idempotent() {
+        let key = OsString::from("node_options");
+        let mut environment =
+            std::collections::BTreeMap::from([(key.clone(), OsString::from("--trace-warnings"))]);
+        add_node_appcontainer_options(&mut environment);
+        add_node_appcontainer_options(&mut environment);
+        assert_eq!(
+            environment.get(&key).unwrap(),
+            "--trace-warnings --preserve-symlinks --preserve-symlinks-main"
+        );
+    }
 
     #[test]
     fn cleanup_waits_for_a_verified_empty_job_before_releasing_grants() {
