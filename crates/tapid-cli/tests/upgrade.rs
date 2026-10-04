@@ -7,12 +7,10 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 use tapid_signatures::{TrustEnvelope, digest as envelope_digest};
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
-fn validity_window() -> (String, String) {
-    let now = OffsetDateTime::now_utc();
-    (
-        (now - Duration::hours(1)).format(&Rfc3339).unwrap(),
-        (now + Duration::hours(24)).format(&Rfc3339).unwrap(),
-    )
+fn immutable_creation_time() -> String {
+    (OffsetDateTime::now_utc() - Duration::days(3650))
+        .format(&Rfc3339)
+        .unwrap()
 }
 
 fn run_executable_with_retry(command: &mut Command) -> std::process::Output {
@@ -92,14 +90,13 @@ impl Fixture {
         )
         .unwrap();
         let record_bytes = fs::read(root.join("release.tsv")).unwrap();
-        let (created_at, expires_at) = validity_window();
+        let created_at = immutable_creation_time();
         let sidecar = TrustEnvelope::unsigned(
             "tapid-release-v1",
             envelope_digest(&record_bytes).unwrap(),
             serde_json::json!({
-                "schema": "tapid-release-v1-signature",
+                "schema": "tapid-release-v1-immutable-signature",
                 "created_at": created_at,
-                "expires_at": expires_at,
             }),
         )
         .sign("test-release-key", &secret)
@@ -144,14 +141,13 @@ esac
 
     fn resign_record(&self) {
         let record = fs::read(self.root.join("release.tsv")).unwrap();
-        let (created_at, expires_at) = validity_window();
+        let created_at = immutable_creation_time();
         let sidecar = TrustEnvelope::unsigned(
             "tapid-release-v1",
             envelope_digest(&record).unwrap(),
             serde_json::json!({
-                "schema": "tapid-release-v1-signature",
+                "schema": "tapid-release-v1-immutable-signature",
                 "created_at": created_at,
-                "expires_at": expires_at,
             }),
         )
         .sign("test-release-key", &[7_u8; 32])

@@ -1,6 +1,6 @@
 import { strictEqual, rejects, match } from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, createHash, createPrivateKey, sign as cryptoSign } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,6 +45,8 @@ for (const format of ["pem", "seed"]) {
         join(directory, "record.tsv"), join(directory, "record.tsv.sig"), join(directory, "keyring.json")]);
       const envelope = JSON.parse(await readFile(join(directory, "record.tsv.sig"), "utf8"));
       strictEqual(envelope.signature.key_id, "fixture-key");
+      strictEqual(envelope.claims.schema, "tapid-release-v1-immutable-signature");
+      strictEqual(Object.hasOwn(envelope.claims, "expires_at"), false);
     });
   });
 }
@@ -122,3 +124,42 @@ test("key-check workflow runs only trusted main code with protected approval and
   match(workflow, /sign\.ts check-key/);
   strictEqual(/contents: write|upload-artifact|cargo publish|gh release|gh api/.test(workflow), false);
 });
+
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+for (const scenario of ["old", "future", "expiry", "time-limited", "tampered"]) {
+  test(`release tooling enforces the immutable signature contract: ${scenario}`, async () => {
+    await fixture(async (directory, pem) => {
+      const recordPath = join(directory, "record.tsv");
+      const sidecarPath = join(directory, "record.tsv.sig");
+      const keyId = "fixture-key";
+      const claims: Record<string, string> = {
+        schema: scenario === "time-limited" ? "tapid-release-v1-signature" : "tapid-release-v1-immutable-signature",
+        created_at: scenario === "future" ? "2999-01-01T00:00:00Z" : "2000-01-01T00:00:00Z",
+      };
+      if (scenario === "expiry" || scenario === "time-limited") claims.expires_at = "2000-01-02T00:00:00Z";
+      const digest = "sha256-" + createHash("sha256").update(await readFile(recordPath)).digest("hex");
+      const payload = { artifact_digest: digest, claims, subject: "tapid-release-v1", version: "tapid-trust-envelope-v1",
+        signature_context: { algorithm: "ed25519", key_id: keyId } };
+      await writeFile(sidecarPath, JSON.stringify({ artifact_digest: digest, claims,
+        subject: payload.subject, version: payload.version, signature: { algorithm: "ed25519",
+          key_id: keyId, subject: payload.subject, artifact_digest: digest,
+          value: cryptoSign(null, Buffer.from(canonical(payload)), createPrivateKey(pem)).toString("base64") } }));
+      if (scenario === "tampered") await writeFile(recordPath, "changed record bytes");
+      const checks = [
+        () => execFileAsync(process.execPath, ["--experimental-strip-types", signer, "verify", recordPath, sidecarPath,
+          join(directory, "keyring.json")]),
+      ];
+      for (const check of checks) {
+        if (scenario === "old") await check();
+        else await rejects(check);
+      }
+    });
+  });
+}
