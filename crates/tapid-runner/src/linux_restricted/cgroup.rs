@@ -46,9 +46,17 @@ impl ExecutionCgroup {
         if process_limit.is_none() && memory_limit_bytes.is_none() {
             return Ok(());
         }
-        let cgroup = Self::create(process_limit, memory_limit_bytes)?;
-        cgroup.probe_process_migration()?;
-        cgroup.cleanup()
+        let mut cgroup = Self::create(process_limit, memory_limit_bytes)?;
+        let probe_result = cgroup.probe_process_migration();
+        let cleanup_result = cgroup.cleanup();
+        match (probe_result, cleanup_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(probe_error), Ok(())) => Err(probe_error),
+            (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+            (Err(probe_error), Err(cleanup_error)) => {
+                Err(format!("{probe_error}; {cleanup_error}"))
+            }
+        }
     }
 
     fn spawn_process_in_cgroup(&self, program: &str, arguments: &[&str]) -> Result<Child, String> {
@@ -60,7 +68,7 @@ impl ExecutionCgroup {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         unsafe {
-            command.pre_exec(move || write_current_pid_to_cgroup(fd));
+            command.pre_exec(move || write_current_pid_to_cgroup_and_close_fd(fd));
         }
         command.spawn().map_err(|error| {
             format!("cannot migrate preflight process into execution cgroup: {error}")
@@ -132,8 +140,8 @@ impl ExecutionCgroup {
         if !self.process_limit_enabled {
             return Ok(false);
         }
-        let events = read_event_counter(&self.path.join("pids.events"), "max")
-            .map_err(|error| format!("cannot read pids.events: {error}"))?;
+        let events = read_event_counter(&self.path.join("pids.events.local"), "max")
+            .map_err(|error| format!("cannot read pids.events.local: {error}"))?;
         Ok(events > self.initial_events.process_limit_hits)
     }
 
@@ -141,12 +149,12 @@ impl ExecutionCgroup {
         if !self.memory_limit_enabled {
             return Ok(false);
         }
-        let events = read_event_counter(&self.path.join("memory.events"), "max")
-            .map_err(|error| format!("cannot read memory.events: {error}"))?;
+        let events = read_event_counter(&self.path.join("memory.events.local"), "max")
+            .map_err(|error| format!("cannot read memory.events.local: {error}"))?;
         Ok(events > self.initial_events.memory_limit_hits)
     }
 
-    pub(super) fn cleanup(mut self) -> Result<(), String> {
+    pub(super) fn cleanup(&mut self) -> Result<(), String> {
         self.cleanup_inner()
             .map_err(|error| format!("cannot clean up execution cgroup: {error}"))
     }
@@ -170,7 +178,19 @@ impl Drop for ExecutionCgroup {
     }
 }
 
-pub(super) fn write_current_pid_to_cgroup(fd: RawFd) -> io::Result<()> {
+/// Moves the current process into the cgroup, then closes the inherited control descriptor.
+pub(super) fn write_current_pid_to_cgroup_and_close_fd(fd: RawFd) -> io::Result<()> {
+    let write_result = write_pid_to_cgroup(fd);
+    // SAFETY: the caller transfers this descriptor to the child for one-time membership setup.
+    let close_result = unsafe { libc::close(fd) };
+    write_result?;
+    if close_result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn write_pid_to_cgroup(fd: RawFd) -> io::Result<()> {
     let pid = unsafe { libc::getpid() };
     if pid <= 0 {
         return Err(io::Error::last_os_error());
@@ -361,12 +381,12 @@ fn read_words(path: &Path) -> Result<Vec<String>, String> {
 fn read_limit_events(path: &Path, pids: bool, memory: bool) -> io::Result<LimitEvents> {
     Ok(LimitEvents {
         process_limit_hits: if pids {
-            read_event_counter(&path.join("pids.events"), "max")?
+            read_event_counter(&path.join("pids.events.local"), "max")?
         } else {
             0
         },
         memory_limit_hits: if memory {
-            read_event_counter(&path.join("memory.events"), "max")?
+            read_event_counter(&path.join("memory.events.local"), "max")?
         } else {
             0
         },
@@ -484,7 +504,7 @@ mod tests {
             eprintln!("skipping: {CGROUP_ROOT_ENV} is not configured");
             return;
         };
-        let cgroup = ExecutionCgroup::create_at(&root, Some(8), None).unwrap();
+        let mut cgroup = ExecutionCgroup::create_at(&root, Some(8), None).unwrap();
         assert_eq!(read_trimmed(&cgroup.path.join("pids.max")).unwrap(), "8");
         let mut child = cgroup
             .spawn_process_in_cgroup("/bin/sleep", &["30"])
@@ -514,7 +534,7 @@ mod tests {
             eprintln!("skipping: {CGROUP_ROOT_ENV} is not configured");
             return;
         };
-        let cgroup = ExecutionCgroup::create_at(&root, Some(1), None).unwrap();
+        let mut cgroup = ExecutionCgroup::create_at(&root, Some(1), None).unwrap();
         let fd = cgroup.processes_fd();
         let mut command = Command::new("/bin/sh");
         command
@@ -523,7 +543,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         unsafe {
-            command.pre_exec(move || write_current_pid_to_cgroup(fd));
+            command.pre_exec(move || write_current_pid_to_cgroup_and_close_fd(fd));
         }
 
         let output = command.output().unwrap();
@@ -550,7 +570,7 @@ mod tests {
             return;
         };
         const MEMORY_LIMIT: u64 = 32 * 1024 * 1024;
-        let cgroup = ExecutionCgroup::create_at(&root, None, Some(MEMORY_LIMIT)).unwrap();
+        let mut cgroup = ExecutionCgroup::create_at(&root, None, Some(MEMORY_LIMIT)).unwrap();
         assert_eq!(
             read_trimmed(&cgroup.path.join("memory.max")).unwrap(),
             MEMORY_LIMIT.to_string()
@@ -567,7 +587,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         unsafe {
-            command.pre_exec(move || write_current_pid_to_cgroup(fd));
+            command.pre_exec(move || write_current_pid_to_cgroup_and_close_fd(fd));
         }
 
         let _ = command.output().unwrap();
@@ -577,6 +597,45 @@ mod tests {
             "memory.events must record the enforced memory.max boundary"
         );
         cgroup.cleanup().unwrap();
+    }
+
+    #[test]
+    fn limit_attribution_reads_only_local_event_counters() {
+        let root = std::env::temp_dir().join(format!(
+            "tapid-cgroup-events-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("pids.events"), "max 7\n").unwrap();
+        fs::write(root.join("pids.events.local"), "max 2\n").unwrap();
+        fs::write(root.join("memory.events"), "max 9\n").unwrap();
+        fs::write(root.join("memory.events.local"), "max 3\n").unwrap();
+
+        let events = read_limit_events(&root, true, true).unwrap();
+
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(events.process_limit_hits, 2);
+        assert_eq!(events.memory_limit_hits, 3);
+    }
+
+    #[test]
+    fn joining_cgroup_closes_the_inherited_control_descriptor() {
+        use std::os::fd::IntoRawFd;
+
+        let fd = OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap()
+            .into_raw_fd();
+
+        write_current_pid_to_cgroup_and_close_fd(fd).unwrap();
+
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
     }
 
     #[test]

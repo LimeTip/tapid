@@ -51,6 +51,12 @@ fn fails_closed_for_unavailable_kernel_enforcement(request: &ExecutionRequest) -
     if support.is_supported() {
         return false;
     }
+    if std::env::var_os("TAPID_REQUIRE_KERNEL_ENFORCEMENT_TESTS").is_some() {
+        panic!(
+            "required test lane lacks positive Linux kernel enforcement: {:?}",
+            support.unsupported_reason()
+        );
+    }
     assert!(
         matches!(
             support.unsupported_reason(),

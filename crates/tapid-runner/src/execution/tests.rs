@@ -794,7 +794,11 @@ fn post_spawn_failure_returns_only_after_checked_cleanup() {
     .unwrap_err();
     assert_eq!(cleanup_error.category(), ExecutionErrorCategory::Spawn);
     assert!(cleanup_error.completion().is_none());
-    assert!(cleanup_error.to_string().contains("cleanup could not be confirmed"));
+    assert!(
+        cleanup_error
+            .to_string()
+            .contains("cleanup could not be confirmed")
+    );
     assert_eq!(cleanup_checks.get(), 2);
 }
 

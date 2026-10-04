@@ -71,7 +71,7 @@ const PRIVATE_REPORT_SETUP_ERROR: u32 = 2;
 const PRIVATE_REPORT_EXEC_ERROR: u32 = 3;
 const LIMITATIONS: &[&str] = &[
     "Landlock grants use path bindings checked against held filesystem identities before setup",
-    "configured process-count and memory limits require an explicitly delegated cgroup v2 subtree named by TAPID_CGROUP_ROOT; the backend reads back pids.max and memory.max and uses cgroup.kill plus PID-namespace teardown for cleanup",
+    "configured process-count and memory limits require an explicitly delegated cgroup v2 subtree named by TAPID_CGROUP_ROOT; the backend reads back pids.max and memory.max, requires local pids.events.local and memory.events.local counters for accurate per-execution attribution, and uses cgroup.kill plus PID-namespace teardown for cleanup",
     "mount namespace setup leaves existing root propagation unchanged and is supported only when the root mount has no shared propagation group",
     "network-disabled policy denies Internet socket creation, connection, binding, listening, accepts, sendto, and recvfrom; AF_UNIX socketpairs with sendmsg/recvmsg and shutdown remain available for local runtime IPC; enabled networking is unrestricted",
     "Restricted does not own or guarantee cleanup of detached descendants; ManagedTree cleanup relies on the kernel PID namespace boundary",
@@ -683,7 +683,7 @@ fn private_launcher_setup(
         verify_private_namespaces(parent_pid_namespace, parent_mount_namespace)?;
     }
     if cgroup_procs_fd >= 3 {
-        cgroup::write_current_pid_to_cgroup(cgroup_procs_fd)?;
+        cgroup::write_current_pid_to_cgroup_and_close_fd(cgroup_procs_fd)?;
     }
     let filter = seccomp_filter(network, subprocess)
         .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error.to_string()))?;
@@ -1060,6 +1060,7 @@ impl ExecutionBackend for PlatformBackend {
                 termination: None,
                 supervisor: None,
                 process_started: false,
+                cgroup: None,
             }),
         ))
     }
@@ -1161,6 +1162,7 @@ struct LinuxLifecycle<'a> {
     termination: Option<Termination>,
     supervisor: Option<Child>,
     process_started: bool,
+    cgroup: Option<cgroup::ExecutionCgroup>,
 }
 
 fn terminate_supervisor(child: &mut Child) -> io::Result<ExitStatus> {
@@ -1288,10 +1290,11 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
     fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError> {
         let allow_process_memory_stats = self.request.allow_process_memory_stats();
         let limits = &self.preflight.policy.limits;
-        let cgroup = if self.request.policy().assurance() == AssuranceLevel::ManagedTree
+        if self.request.policy().assurance() == AssuranceLevel::ManagedTree
             && (limits.max_processes().is_some() || limits.max_memory_bytes().is_some())
+            && self.cgroup.is_none()
         {
-            Some(
+            self.cgroup = Some(
                 cgroup::ExecutionCgroup::create(
                     limits.max_processes(),
                     limits.max_memory_bytes(),
@@ -1301,16 +1304,14 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
                         "cannot configure ManagedTree cgroup v2 limits before execution: {reason}"
                     ))
                 })?,
-            )
-        } else {
-            None
-        };
+            );
+        }
         let use_private_pid_namespace = self.request.policy().assurance()
             == AssuranceLevel::ManagedTree
             || allow_process_memory_stats;
         let (mut command, private_report) = if use_private_pid_namespace {
             let (command, report) =
-                private_memory_stats_command(&self.request, &self.ruleset.0, cgroup.as_ref())?;
+                private_memory_stats_command(&self.request, &self.ruleset.0, self.cgroup.as_ref())?;
             (command, Some(report))
         } else {
             let mut command = Command::new(self.request.program());
@@ -1435,24 +1436,26 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
                 .expect("supervisor is set before waiting"),
             self.request.policy().limits().timeout_seconds(),
             output_exceeded.as_deref(),
-            cgroup.as_ref(),
+            self.cgroup.as_ref(),
         )?;
         self.supervisor.take();
         let process_limit_exceeded = process_limit_hit_during_wait
-            || cgroup
+            || self
+                .cgroup
                 .as_ref()
                 .map(cgroup::ExecutionCgroup::process_limit_exceeded)
                 .transpose()
                 .map_err(|reason| ExecutionError::new(ExecutionErrorCategory::Internal, reason))?
                 .unwrap_or(false);
         let memory_limit_exceeded = memory_limit_hit_during_wait
-            || cgroup
+            || self
+                .cgroup
                 .as_ref()
                 .map(cgroup::ExecutionCgroup::memory_limit_exceeded)
                 .transpose()
                 .map_err(|reason| ExecutionError::new(ExecutionErrorCategory::Internal, reason))?
                 .unwrap_or(false);
-        if let Some(cgroup) = cgroup {
+        if let Some(cgroup) = self.cgroup.as_mut() {
             cgroup
                 .cleanup()
                 .map_err(|reason| ExecutionError::new(ExecutionErrorCategory::Internal, reason))?;
@@ -1552,18 +1555,49 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
     }
 
     fn cleanup(&mut self) -> Result<Option<CompletionEvidence>, ExecutionError> {
-        if !self.process_started {
+        let process_started = self.process_started;
+        let supervisor = self.supervisor.as_mut();
+        let cgroup = self.cgroup.as_mut();
+        let cleanup_confirmed = cleanup_resources_before_completion(
+            process_started,
+            || {
+                supervisor.map_or(Ok(()), |supervisor| {
+                    terminate_supervisor(supervisor)
+                        .map(|_| ())
+                        .map_err(|error| {
+                            format!("cannot confirm ManagedTree supervisor termination during cleanup: {error}")
+                        })
+                })
+            },
+            || cgroup.map_or(Ok(()), cgroup::ExecutionCgroup::cleanup),
+        )
+        .map_err(|error| ExecutionError::new(ExecutionErrorCategory::Internal, error))?;
+        self.supervisor.take();
+        if !cleanup_confirmed {
             return Ok(None);
         }
-        if let Some(mut supervisor) = self.supervisor.take() {
-            terminate_supervisor(&mut supervisor).map_err(|error| {
-                ExecutionError::new(
-                    ExecutionErrorCategory::Internal,
-                    format!("cannot confirm ManagedTree supervisor termination during cleanup: {error}"),
-                )
-            })?;
-        }
         completion_for(self.preflight).map(Some)
+    }
+}
+
+fn cleanup_resources_before_completion(
+    process_started: bool,
+    terminate_supervisor: impl FnOnce() -> Result<(), String>,
+    cleanup_cgroup: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    let supervisor_result = if process_started {
+        terminate_supervisor()
+    } else {
+        Ok(())
+    };
+    let cgroup_result = cleanup_cgroup();
+    match (supervisor_result, cgroup_result) {
+        (Ok(()), Ok(())) => Ok(process_started),
+        (Err(supervisor), Ok(())) => Err(supervisor),
+        (Ok(()), Err(cgroup)) => Err(format!("cgroup cleanup failed: {cgroup}")),
+        (Err(supervisor), Err(cgroup)) => {
+            Err(format!("{supervisor}; cgroup cleanup failed: {cgroup}"))
+        }
     }
 }
 
@@ -1588,6 +1622,54 @@ fn completion_for(preflight: &ValidatedPreflight) -> Result<CompletionEvidence, 
             CleanupConfidence::NotGuaranteed
         },
     )
+}
+
+#[cfg(test)]
+mod lifecycle_cleanup_tests {
+    use super::cleanup_resources_before_completion;
+    use std::cell::Cell;
+
+    #[test]
+    fn cgroup_cleanup_failure_prevents_managed_tree_completion() {
+        let supervisor_terminated = Cell::new(false);
+        let cgroup_cleanup_attempted = Cell::new(false);
+
+        let result = cleanup_resources_before_completion(
+            true,
+            || {
+                supervisor_terminated.set(true);
+                Ok(())
+            },
+            || {
+                cgroup_cleanup_attempted.set(true);
+                Err("cgroup remains populated".to_owned())
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err("cgroup cleanup failed: cgroup remains populated".to_owned())
+        );
+        assert!(supervisor_terminated.get());
+        assert!(cgroup_cleanup_attempted.get());
+    }
+
+    #[test]
+    fn cgroup_cleanup_runs_when_no_process_was_started_without_completion_evidence() {
+        let cgroup_cleanup_attempted = Cell::new(false);
+
+        let result = cleanup_resources_before_completion(
+            false,
+            || panic!("must not terminate a supervisor before spawn"),
+            || {
+                cgroup_cleanup_attempted.set(true);
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Ok(false));
+        assert!(cgroup_cleanup_attempted.get());
+    }
 }
 
 #[cfg(test)]
@@ -1706,6 +1788,12 @@ mod legacy_tests {
         if support.is_supported() {
             return false;
         }
+        if std::env::var_os("TAPID_REQUIRE_KERNEL_ENFORCEMENT_TESTS").is_some() {
+            panic!(
+                "required test lane lacks positive Linux kernel enforcement: {:?}",
+                support.unsupported_reason()
+            );
+        }
         assert!(
             matches!(
                 support.unsupported_reason(),
@@ -1736,6 +1824,10 @@ mod legacy_tests {
             k: SECCOMP_RET_ALLOW,
         }];
         if !probe_seccomp_filter(&allow_filter) {
+            assert!(
+                std::env::var_os("TAPID_REQUIRE_KERNEL_ENFORCEMENT_TESTS").is_none(),
+                "required test lane cannot install seccomp filters"
+            );
             eprintln!("skipping: kernel cannot install seccomp filters in this container");
             return;
         }
@@ -2122,7 +2214,7 @@ mod legacy_tests {
     fn memory_limit_event_stops_the_supervisor_before_follow_on_commands() {
         let root = root();
         let marker = root.join("command-after-memory-limit");
-        let cgroup = cgroup::ExecutionCgroup::create(None, Some(32 * 1024 * 1024)).unwrap();
+        let mut cgroup = cgroup::ExecutionCgroup::create(None, Some(32 * 1024 * 1024)).unwrap();
         let cgroup_procs_fd = cgroup.processes_fd();
         let command_line = format!(
             "python3 -c 'import time; data=bytearray(128*1024*1024); data[::4096]=b\"x\"*(len(data)//4096)'; sleep 2; touch '{}'",
@@ -2135,7 +2227,9 @@ mod legacy_tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         unsafe {
-            command.pre_exec(move || cgroup::write_current_pid_to_cgroup(cgroup_procs_fd));
+            command.pre_exec(move || {
+                cgroup::write_current_pid_to_cgroup_and_close_fd(cgroup_procs_fd)
+            });
         }
         let mut child = command.spawn().unwrap();
 
