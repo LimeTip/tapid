@@ -611,8 +611,10 @@ impl WindowsSuspendedChild {
                             self.terminate_job_and_reap(job)?;
                             return Ok(WindowsChildTermination::TimedOut);
                         }
-                        if job.active_process_count()? == 0 {
-                            return Ok(WindowsChildTermination::Exited(exit_code));
+                        match job.wait_until_empty(10) {
+                            Ok(()) => return Ok(WindowsChildTermination::Exited(exit_code)),
+                            Err(error) if error.category() == ExecutionErrorCategory::Timeout => {}
+                            Err(error) => return Err(error),
                         }
                         std::thread::sleep(Duration::from_millis(10));
                     }
@@ -640,15 +642,7 @@ impl WindowsSuspendedChild {
         // process count. Job object handles are not signaled merely because members exit.
         let root_reaped = unsafe { WaitForSingleObject(self.process, 5_000) } == WAIT_OBJECT_0;
         self.exited = root_reaped;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut tree_reaped = false;
-        while Instant::now() < deadline {
-            if job.active_process_count()? == 0 {
-                tree_reaped = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let tree_reaped = job.wait_until_empty(5_000).is_ok();
         if !root_reaped || !tree_reaped {
             return Err(unsupported_job(
                 "reap child process tree after Job Object termination",

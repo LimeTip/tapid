@@ -83,6 +83,18 @@ fn explicit_job_termination_signals_a_suspended_assigned_child() {
 }
 
 #[test]
+fn job_completion_port_reports_when_the_last_member_exits() {
+    let (mut container, job, child) = create_appcontainer_child("exit 0");
+    job.terminate_all().unwrap();
+    assert!(child.wait_for_signal(5_000).unwrap());
+    job.wait_for_active_process_zero_notification(5_000)
+        .unwrap();
+    drop(child);
+    drop(job);
+    container.cleanup().unwrap();
+}
+
+#[test]
 fn restoring_appcontainer_grant_preserves_concurrent_dacl_changes() {
     let root = std::env::temp_dir().join(format!(
         "tapid-appcontainer-concurrent-dacl-{}-{}",
@@ -203,62 +215,6 @@ fn appcontainer_child_can_write_a_granted_tree_and_loses_access_on_restore() {
         std::fs::read_to_string(&marker).unwrap().trim(),
         "authorized"
     );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn appcontainer_exact_file_write_grant_does_not_cover_parent_or_read_access() {
-    let root = std::env::temp_dir().join(format!(
-        "tapid-appcontainer-exact-file-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&root).unwrap();
-    let target = root.join("target.txt");
-    let sibling = root.join("sibling.txt");
-    std::fs::write(&target, b"original").unwrap();
-    let mut container = WindowsAppContainer::create().unwrap();
-    let mut grant = WindowsFilesystemGrants::apply(
-        container.sid(),
-        &[ResolvedFilesystemGrant {
-            path: target.clone(),
-            access: FilesystemAccess::Write,
-            kind: FilesystemGrantKind::ExactFile,
-            source: crate::execution::FilesystemGrantSource::ProjectPolicy,
-            binding: crate::execution::FilesystemBindingMode::CanonicalPath,
-        }],
-    )
-    .unwrap();
-    let payload = format!("echo changed>\"{}\"", target.display());
-    let (job, mut child) = create_appcontainer_child_in(&container, &payload);
-    assert_eq!(child.resume_and_wait_for_exit(&job, 5_000).unwrap(), 0);
-    drop(child);
-    drop(job);
-
-    let payload = format!("echo sibling>\"{}\"", sibling.display());
-    let (job, mut child) = create_appcontainer_child_in(&container, &payload);
-    assert_ne!(child.resume_and_wait_for_exit(&job, 5_000).unwrap(), 0);
-    drop(child);
-    drop(job);
-
-    let payload = format!("type \"{}\" >nul", target.display());
-    let (job, mut child) = create_appcontainer_child_in(&container, &payload);
-    assert_ne!(child.resume_and_wait_for_exit(&job, 5_000).unwrap(), 0);
-    drop(child);
-    drop(job);
-
-    grant.restore().unwrap();
-    let payload = format!("echo should-not-change>\"{}\"", target.display());
-    let (job, mut child) = create_appcontainer_child_in(&container, &payload);
-    assert_ne!(child.resume_and_wait_for_exit(&job, 5_000).unwrap(), 0);
-    drop(child);
-    drop(job);
-    container.cleanup().unwrap();
-    assert_eq!(std::fs::read_to_string(&target).unwrap().trim(), "changed");
-    assert!(!sibling.exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 

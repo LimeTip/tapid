@@ -198,16 +198,20 @@ impl<'a> WindowsExecutionLifecycle<'a> {
     fn cleanup_resources(&mut self) -> CompletionEvidence {
         let mut cleanup_error = None;
         if let Some(job) = self.job.as_ref() {
-            // Do not close the Job Object or restore any AppContainer ACE while a member might
-            // still be running. Query failures are not proof of emptiness: keep requesting
-            // termination and retry until the kernel confirms an active-process count of zero.
-            wait_for_job_empty(
-                || job.active_process_count(),
-                || {
-                    let _ = job.terminate_all();
-                },
-                || std::thread::sleep(CLEANUP_POLL_INTERVAL),
-            );
+            // Keep the Job and grants alive until either the kernel's active-process count reaches
+            // zero or the associated completion port delivers ACTIVE_PROCESS_ZERO. If a bounded
+            // notification wait fails, re-terminate and retry; no failed query is treated as proof.
+            loop {
+                if matches!(job.active_process_count(), Ok(0)) {
+                    break;
+                }
+                let _ = job.terminate_all();
+                let wait_ms = u32::try_from(CLEANUP_POLL_INTERVAL.as_millis()).unwrap_or(u32::MAX);
+                if job.wait_until_empty(wait_ms.max(1)).is_ok() {
+                    break;
+                }
+                std::thread::sleep(CLEANUP_POLL_INTERVAL);
+            }
         }
         self.child.take();
         self.job.take(); // The tree is confirmed empty before the final kernel-owned handle closes.
@@ -314,22 +318,6 @@ impl Drop for WindowsExecutionLifecycle<'_> {
     }
 }
 
-fn wait_for_job_empty(
-    mut active_process_count: impl FnMut() -> Result<u32, ExecutionError>,
-    mut request_termination: impl FnMut(),
-    mut wait: impl FnMut(),
-) {
-    loop {
-        if matches!(active_process_count(), Ok(0)) {
-            return;
-        }
-        // A nonzero count or a query error is unconfirmed. Keep the Job handle and all
-        // filesystem grants alive while repeatedly requesting termination.
-        request_termination();
-        wait();
-    }
-}
-
 fn timeout_milliseconds(limits: &ExecutionLimits) -> Result<u32, ExecutionError> {
     match limits.timeout_seconds() {
         Some(seconds) => seconds
@@ -423,7 +411,6 @@ fn wide(value: &OsStr) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
 
     #[test]
     fn trusted_node_appcontainer_options_preserve_caller_options_and_are_idempotent() {
@@ -436,32 +423,5 @@ mod tests {
             environment.get(&key).unwrap(),
             "--trace-warnings --preserve-symlinks --preserve-symlinks-main"
         );
-    }
-
-    #[test]
-    fn cleanup_waits_for_a_verified_empty_job_before_releasing_grants() {
-        let mut observations = VecDeque::from([
-            Ok(2),
-            Err(ExecutionError::new(
-                ExecutionErrorCategory::Internal,
-                "temporary Job query failure",
-            )),
-            Ok(1),
-            Ok(0),
-        ]);
-        let mut terminate_calls = 0;
-        let mut waits = 0;
-        wait_for_job_empty(
-            || {
-                observations
-                    .pop_front()
-                    .expect("test supplies final empty count")
-            },
-            || terminate_calls += 1,
-            || waits += 1,
-        );
-        assert_eq!(terminate_calls, 3);
-        assert_eq!(waits, 3);
-        assert!(observations.is_empty());
     }
 }

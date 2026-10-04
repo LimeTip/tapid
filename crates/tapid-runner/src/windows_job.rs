@@ -13,7 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile,
@@ -23,14 +24,17 @@ use windows_sys::Win32::Security::{
     EqualSid, FreeSid, GetTokenInformation, IsValidSid, SECURITY_CAPABILITIES,
     TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TokenAppContainerSid, TokenIsAppContainer,
 };
+use windows_sys::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectAssociateCompletionPortInformation,
     JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::SystemServices::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO;
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
@@ -44,6 +48,8 @@ use windows_sys::Win32::System::Threading::{
 #[allow(dead_code)] // The Windows launch lifecycle will own this after suspended creation lands.
 pub(super) struct WindowsJob {
     handle: HANDLE,
+    completion_port: HANDLE,
+    process_was_assigned: AtomicBool,
 }
 
 #[allow(dead_code)] // Used by the Windows launch lifecycle and the native configuration test.
@@ -57,7 +63,17 @@ impl WindowsJob {
         if handle == 0 {
             return Err(unsupported_job("create Job Object"));
         }
-        let job = Self { handle };
+        let mut job = Self {
+            handle,
+            completion_port: 0,
+            process_was_assigned: AtomicBool::new(false),
+        };
+
+        // SAFETY: INVALID_HANDLE_VALUE requests a new, private I/O completion port.
+        job.completion_port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, 0, 0, 1) };
+        if job.completion_port == 0 {
+            return Err(unsupported_job("create Job Object completion port"));
+        }
 
         // SAFETY: the structure is a plain Win32 POD output/input structure; zero is the documented
         // baseline for every limit field that is not explicitly enabled below.
@@ -97,6 +113,24 @@ impl WindowsJob {
         if configured == 0 {
             return Err(unsupported_job("configure Job Object limits"));
         }
+        let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+            CompletionKey: job.handle as usize as *mut c_void,
+            CompletionPort: job.completion_port,
+        };
+        let association_size = u32::try_from(size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>())
+            .expect("Job Object completion-port association size fits u32");
+        // SAFETY: association contains a live completion-port handle and a stable per-job key.
+        let associated = unsafe {
+            SetInformationJobObject(
+                job.handle,
+                JobObjectAssociateCompletionPortInformation,
+                (&association as *const JOBOBJECT_ASSOCIATE_COMPLETION_PORT).cast::<c_void>(),
+                association_size,
+            )
+        };
+        if associated == 0 {
+            return Err(unsupported_job("associate Job Object completion port"));
+        }
         Ok(job)
     }
 
@@ -115,6 +149,7 @@ impl WindowsJob {
         if assigned == 0 {
             return Err(unsupported_job("assign suspended child to Job Object"));
         }
+        self.process_was_assigned.store(true, Ordering::Release);
 
         let mut in_job = 0;
         // SAFETY: both handles are valid for this call; `in_job` is a writable BOOL destination.
@@ -162,6 +197,68 @@ impl WindowsJob {
         Ok(information.ActiveProcesses)
     }
 
+    pub(super) fn wait_until_empty(&self, timeout_ms: u32) -> Result<(), ExecutionError> {
+        if !self.process_was_assigned.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if matches!(self.active_process_count(), Ok(0)) {
+            return Ok(());
+        }
+        self.wait_for_active_process_zero_notification(timeout_ms)
+    }
+
+    fn wait_for_active_process_zero_notification(
+        &self,
+        timeout_ms: u32,
+    ) -> Result<(), ExecutionError> {
+        let started = Instant::now();
+        loop {
+            let remaining_ms = if timeout_ms == u32::MAX {
+                u32::MAX
+            } else {
+                let elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+                if elapsed_ms >= timeout_ms {
+                    return Err(ExecutionError::new(
+                        ExecutionErrorCategory::Timeout,
+                        "timed out waiting for Windows Job Object active-process-zero notification",
+                    ));
+                }
+                timeout_ms - elapsed_ms
+            };
+            let mut bytes_transferred = 0u32;
+            let mut completion_key = 0usize;
+            let mut overlapped = null_mut();
+            // SAFETY: the completion port is owned by self and each output is writable.
+            let received = unsafe {
+                GetQueuedCompletionStatus(
+                    self.completion_port,
+                    &mut bytes_transferred,
+                    &mut completion_key,
+                    &mut overlapped,
+                    remaining_ms,
+                )
+            };
+            if received == 0 {
+                let error = unsafe { GetLastError() };
+                if error == WAIT_TIMEOUT {
+                    return Err(ExecutionError::new(
+                        ExecutionErrorCategory::Timeout,
+                        "timed out waiting for Windows Job Object active-process-zero notification",
+                    ));
+                }
+                return Err(unsupported_job(
+                    "receive Job Object completion notification",
+                ));
+            }
+            if completion_key == self.handle as usize
+                && bytes_transferred == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO
+                && overlapped.is_null()
+            {
+                return Ok(());
+            }
+        }
+    }
+
     #[cfg(test)]
     fn query_extended_limits(
         &self,
@@ -192,6 +289,10 @@ impl Drop for WindowsJob {
         if self.handle != 0 {
             // SAFETY: this wrapper uniquely owns the Job Object handle.
             unsafe { CloseHandle(self.handle) };
+        }
+        if self.completion_port != 0 {
+            // SAFETY: this wrapper uniquely owns the completion-port handle.
+            unsafe { CloseHandle(self.completion_port) };
         }
     }
 }
