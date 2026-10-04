@@ -268,12 +268,10 @@ fn versions_from_registry(
         JsrRegistry::new(transport, origin.clone())
             .fetch(&name.to_string())
             .map_err(|error| error.to_string())?
-    } else if origin.to_string() == "https://registry.npmjs.org" {
+    } else {
         NpmRegistry::new(transport, origin.clone())
             .fetch(&name.to_string())
             .map_err(|error| error.to_string())?
-    } else {
-        return Err(format!("unsupported registry origin {origin}"));
     };
     Ok(artifacts
         .into_iter()
@@ -289,6 +287,7 @@ pub(crate) fn outdated_report(
     let selection = resolve_workspace(project_dir, workspace_selector)?;
     let project_dir = selection.root_dir.as_path();
     let mut manifest = selection.manifest;
+    let registry_config = crate::registry::RegistryConfig::load(project_dir)?;
     let recovery_lock = if crate::filesystem::lifecycle_journal::has_pending(project_dir)? {
         Some(crate::filesystem::activation::ActivationLock::acquire(
             project_dir,
@@ -322,14 +321,8 @@ pub(crate) fn outdated_report(
         })
         .collect::<std::collections::BTreeMap<_, _>>();
     drop(recovery_lock);
-    let transport = if registry_fixture.is_none() {
-        Some(
-            HttpsTransport::standard()
-                .map_err(|error| format!("cannot initialize registry transport: {error}"))?,
-        )
-    } else {
-        None
-    };
+    let mut transports = std::collections::BTreeMap::new();
+    let allowed_origins = registry_config.configured_origins();
     let mut entries = Vec::new();
     for (identity, declared, kind) in direct_dependencies {
         if let Some(local_version) = local_workspace_versions.get(&identity) {
@@ -367,6 +360,11 @@ pub(crate) fn outdated_report(
             ));
         }
         let (origin, package_name) = crate::online::dep_parts(&identity)?;
+        let origin = if origin.to_string() == "https://jsr.io" {
+            origin
+        } else {
+            registry_config.origin_for_name(&package_name)?
+        };
         let locked_version = locked
             .iter()
             .filter(|(key, _)| {
@@ -380,11 +378,19 @@ pub(crate) fn outdated_report(
             .max();
         let versions = match registry_fixture {
             Some(path) => versions_from_fixture(path, &origin, &package_name),
-            None => versions_from_registry(
-                transport.as_ref().expect("transport"),
-                &origin,
-                &package_name,
-            ),
+            None => {
+                let transport = crate::online::metadata_transport_for_package(
+                    &mut transports,
+                    &registry_config,
+                    &origin,
+                    &package_name,
+                    &allowed_origins,
+                );
+                match transport {
+                    Ok(transport) => versions_from_registry(transport, &origin, &package_name),
+                    Err(error) => Err(error),
+                }
+            }
         };
         let requirement = declared.parse::<Requirement>().ok();
         let (newest_compatible, newest_available, diagnostic) = match versions {

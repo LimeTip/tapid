@@ -27,6 +27,8 @@ Integration tests must use `tapid-test-support` temporary projects and homes. Do
 
 ## Local verification
 
+Every visible CLI command and nested subcommand needs a help description. Add a doc comment or `#[command(about = "...")]` to its Clap definition. The CLI documentation workflow discovers commands automatically and reports any missing or blank descriptions. Hidden commands are excluded. Run the same check locally with `cargo test -p tapid --lib --locked commands::documentation::`.
+
 Run the narrowest relevant test first, then the full checks that are available in your environment:
 
 ```text

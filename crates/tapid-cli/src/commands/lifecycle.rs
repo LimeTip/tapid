@@ -4,6 +4,7 @@ use tapid_manifest::DependencyKind;
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct AddArgs {
+    /// Packages to add, such as react@^19.0.0. Defaults to * without a requirement.
     #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
     #[arg(
@@ -30,6 +31,7 @@ pub(crate) struct AddArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct RemoveArgs {
+    /// Declared package names to remove, without version requirements.
     #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
     #[command(flatten)]
@@ -38,11 +40,12 @@ pub(crate) struct RemoveArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct UpdateArgs {
+    /// Declared package names to select. Omit to select all direct dependencies.
     #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
     #[arg(
         long,
-        help = "Update package versions beyond their declared requirements"
+        help = "Replace selected version requirements with * in package.json and resolve again"
     )]
     pub(crate) latest: bool,
     #[command(flatten)]
@@ -61,7 +64,7 @@ pub(crate) struct CommonArgs {
         long,
         value_name = "PATH",
         default_value = ".",
-        help = "Project root directory"
+        help = "Project directory containing package.json and tapid.lock"
     )]
     pub(crate) project_dir: PathBuf,
     #[arg(
@@ -70,17 +73,21 @@ pub(crate) struct CommonArgs {
         help = "Select workspace member by name; default is the manifest in --project-dir"
     )]
     pub(crate) workspace: Option<String>,
-    #[arg(long, value_name = "PATH", help = "Verified package store directory")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Verified package store directory; defaults to tapid/store in the platform cache directory"
+    )]
     pub(crate) store_dir: Option<PathBuf>,
     #[arg(
         long,
         value_name = "PATH",
-        help = "Use a local registry fixture instead of live metadata"
+        help = "Read registry metadata from a local JSON fixture for tests or air-gapped development"
     )]
     pub(crate) registry_fixture: Option<PathBuf>,
     #[arg(
         long,
-        help = "Allow online use of registry artifacts without declared integrity; disables offline/frozen replay"
+        help = "Permit npm metadata without registry-declared integrity; resulting installs cannot use offline/frozen replay"
     )]
     pub(crate) allow_unverified_registry_artifacts: bool,
 }

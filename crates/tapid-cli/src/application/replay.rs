@@ -1,4 +1,4 @@
-use crate::{context, online};
+use crate::context;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 use tapid_core::{ArtifactDigest, PackageInstanceId};
 use tapid_linker::{
@@ -50,6 +50,7 @@ pub(crate) fn replay_input(
     lock: &Lockfile,
     manifest: &PackageManifest,
     store: &Store,
+    registry_config: &crate::registry::RegistryConfig,
     mut report_progress: impl FnMut(usize, usize),
 ) -> Result<(LayoutInput, BTreeMap<String, PathBuf>), String> {
     store
@@ -73,7 +74,7 @@ pub(crate) fn replay_input(
             .into_iter()
             .map(|(key, _)| key),
     );
-    let root_keys = replay_root_keys(lock, manifest, &typed_keys)?;
+    let root_keys = replay_root_keys_with_config(lock, manifest, &typed_keys, registry_config)?;
     let package_total = typed_packages.len();
     for (index, (key, package)) in typed_packages.iter().enumerate() {
         let completed = index + 1;
@@ -159,13 +160,28 @@ pub(crate) fn replay_input(
     ))
 }
 
+#[cfg(test)]
 fn replay_root_keys(
     lock: &Lockfile,
     manifest: &PackageManifest,
     typed_keys: &[tapid_lockfile::LockfilePackageKey],
 ) -> Result<Vec<String>, String> {
-    let root_identities = replay_root_identities(manifest)?;
-    let optional_only = optional_only_root_identities(manifest)?;
+    replay_root_keys_with_config(
+        lock,
+        manifest,
+        typed_keys,
+        &crate::registry::RegistryConfig::default(),
+    )
+}
+
+fn replay_root_keys_with_config(
+    lock: &Lockfile,
+    manifest: &PackageManifest,
+    typed_keys: &[tapid_lockfile::LockfilePackageKey],
+    registry_config: &crate::registry::RegistryConfig,
+) -> Result<Vec<String>, String> {
+    let root_identities = replay_root_identities_with_config(manifest, registry_config)?;
+    let optional_only = optional_only_root_identities_with_config(manifest, registry_config)?;
     if root_identities.is_empty() {
         let has_registry_root = lock.roots().iter().any(|root| {
             root.parse::<tapid_lockfile::LockfilePackageKey>()
@@ -231,7 +247,7 @@ fn replay_root_keys(
                     "lockfile workspace root {root} has inconsistent package identity"
                 ));
             }
-            let identity = online::dep_parts(key.name.as_str())?;
+            let identity = registry_config.identity_for_spec(key.name.as_str())?;
             matched_workspace.insert(identity);
             continue;
         }
@@ -269,19 +285,20 @@ fn workspace_root_matches(key: &tapid_lockfile::LockfilePackageKey) -> bool {
     })
 }
 
-fn optional_only_root_identities(
+fn optional_only_root_identities_with_config(
     manifest: &PackageManifest,
+    registry_config: &crate::registry::RegistryConfig,
 ) -> Result<std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>, String>
 {
     let mut required = std::collections::BTreeSet::new();
     for map in [manifest.dependencies(), manifest.dev_dependencies()] {
         for name in map.keys() {
-            required.insert(online::dep_parts(name)?);
+            required.insert(registry_config.identity_for_spec(name)?);
         }
     }
     let mut optional = std::collections::BTreeSet::new();
     for name in manifest.optional_dependencies().keys() {
-        let identity = online::dep_parts(name)?;
+        let identity = registry_config.identity_for_spec(name)?;
         if !required.contains(&identity) {
             optional.insert(identity);
         }
@@ -289,8 +306,22 @@ fn optional_only_root_identities(
     Ok(optional)
 }
 
+#[cfg(test)]
 pub(crate) fn replay_root_identities(
     manifest: &PackageManifest,
+) -> Result<
+    std::collections::BTreeMap<
+        (tapid_core::RegistryOrigin, tapid_core::PackageName),
+        Vec<tapid_resolver::Requirement>,
+    >,
+    String,
+> {
+    replay_root_identities_with_config(manifest, &crate::registry::RegistryConfig::default())
+}
+
+fn replay_root_identities_with_config(
+    manifest: &PackageManifest,
+    registry_config: &crate::registry::RegistryConfig,
 ) -> Result<
     std::collections::BTreeMap<
         (tapid_core::RegistryOrigin, tapid_core::PackageName),
@@ -305,7 +336,7 @@ pub(crate) fn replay_root_identities(
         manifest.optional_dependencies(),
     ] {
         for (name, requirement) in map {
-            let (registry, package) = online::dep_parts(name)?;
+            let (registry, package) = registry_config.identity_for_spec(name)?;
             if requirement.starts_with("workspace:") {
                 continue;
             }

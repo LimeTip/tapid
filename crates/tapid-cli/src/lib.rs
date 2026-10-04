@@ -5,6 +5,7 @@ mod filesystem;
 mod online;
 mod output;
 mod package_spec;
+mod registry;
 mod run;
 mod transport;
 

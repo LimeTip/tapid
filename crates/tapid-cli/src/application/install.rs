@@ -206,8 +206,9 @@ pub(crate) fn run_with_manifest_target(
     } else {
         project_dir.join(target_manifest_path)
     };
-    let target_metadata = fs::symlink_metadata(&target_candidate)
-        .map_err(|error| format!("cannot inspect target package.json: {error}"))?;
+    let target_metadata = fs::symlink_metadata(&target_candidate).map_err(|error| {
+        format!("cannot read manifest: cannot inspect target package.json: {error}")
+    })?;
     if !target_metadata.file_type().is_file() {
         return Err("target package.json must be a regular, non-symlink file".to_owned());
     }
@@ -292,6 +293,7 @@ pub(crate) fn run_with_manifest_target(
             Some(path) => path.to_owned(),
             None => default_store_root()?,
         });
+        let registry_config = crate::registry::RegistryConfig::load(&project_dir)?;
         let (lock, mut input, trees, store_transaction, workspace_links) =
             online::resolve_and_fetch(
                 &project_dir,
@@ -299,6 +301,7 @@ pub(crate) fn run_with_manifest_target(
                 &store,
                 registry_fixture,
                 allow_unverified_registry_artifacts,
+                &registry_config,
             )?;
         if lifecycle_journal.is_none() {
             lifecycle_journal = Some(
@@ -422,7 +425,8 @@ pub(crate) fn run_with_manifest_target(
     if let Err(error) = lock.validate_replay(&current_manifest_digest) {
         return Err(format!("invalid lockfile {}: {error}", lock_path.display()));
     }
-    let workspace = online::workspace_materialization(&project_dir)?;
+    let registry_config = crate::registry::RegistryConfig::load(&project_dir)?;
+    let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
     let current_workspace = workspace
         .locked
         .iter()
@@ -437,7 +441,7 @@ pub(crate) fn run_with_manifest_target(
         return Err("workspace membership or member manifest changed; regenerate tapid.lock with an online install".to_owned());
     }
     let workspace_registry_dependencies =
-        online::resolved_workspace_registry_dependencies(&manifest, &workspace)?;
+        online::resolved_workspace_registry_dependencies(&manifest, &workspace, &registry_config)?;
     validate_workspace_dependency_edges(&workspace, &workspace_registry_dependencies, &lock)?;
     let store = Store::new(match store_root {
         Some(path) => path.to_owned(),
@@ -449,8 +453,13 @@ pub(crate) fn run_with_manifest_target(
             .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
         journal.set_store_root(store.root())?;
     }
-    let (input, trees) =
-        crate::application::replay::replay_input(&lock, &manifest, &store, report_replay_progress)?;
+    let (input, trees) = crate::application::replay::replay_input(
+        &lock,
+        &manifest,
+        &store,
+        &registry_config,
+        report_replay_progress,
+    )?;
     let replayed = materialize_with_lock(
         &project_dir,
         input,

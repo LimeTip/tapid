@@ -54,6 +54,192 @@ fn cleanup(path: PathBuf) {
 }
 
 #[test]
+fn missing_private_registry_credentials_fail_before_committing_manifest_changes() {
+    let dir = temp_dir("missing-registry-credential");
+    let original = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), original).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_MISSING'\n",
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let previous_lock = b"previous lock bytes";
+    let previous_node_modules = b"previous installed tree marker";
+    let previous_store = b"pre-existing verified store marker";
+    fs::write(dir.join("tapid.lock"), previous_lock).unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join("node_modules/previous.txt"), previous_node_modules).unwrap();
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("previous.txt"), previous_store).unwrap();
+    let output = run_with_isolated_path(
+        &dir,
+        &[
+            "add",
+            "@acme/private@1.0.0",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+        OsStr::new(""),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("TAPID_ISSUE164_MISSING"), "{stderr}");
+    assert!(!stderr.contains("secret"), "{stderr}");
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        original.as_bytes()
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), previous_lock);
+    assert_eq!(
+        fs::read(dir.join("node_modules/previous.txt")).unwrap(),
+        previous_node_modules
+    );
+    assert_eq!(
+        fs::read(store.join("previous.txt")).unwrap(),
+        previous_store
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn invalid_private_registry_credentials_are_redacted_and_fail_transactionally() {
+    let dir = temp_dir("invalid-registry-credential");
+    let original = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), original).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_INVALID'\n",
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let invalid_secret = "synthetic-invalid-secret\nwith-newline";
+    let output = run_with_env(
+        &dir,
+        &[
+            "add",
+            "@acme/private@1.0.0",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+        "TAPID_ISSUE164_INVALID",
+        invalid_secret,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid registry credential"), "{stderr}");
+    assert!(!stderr.contains("synthetic-invalid-secret"), "{stderr}");
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        original.as_bytes()
+    );
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
+    cleanup(dir);
+}
+
+#[test]
+fn scoped_registry_routing_selects_private_and_default_origins_and_replays_offline() {
+    let dir = temp_dir("scoped-registry-routing");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"@acme/private":"1.0.0","left-pad":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.default]\nurl='https://mirror.example'\n[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_OFFLINE_ONLY'\n",
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://packages.example","name":"@acme/private","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}},{{"registry":"https://mirror.example","name":"left-pad","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock_json = fs::read_to_string(dir.join("tapid.lock")).unwrap();
+    let lock: serde_json::Value = serde_json::from_str(&lock_json).unwrap();
+    let registries = lock["packages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|package| package["registry"].as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        registries,
+        ["https://mirror.example", "https://packages.example"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let replay = run_with_isolated_path(
+        &dir,
+        &[
+            "install",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+        OsStr::new(""),
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn registry_credential_environment_variables_are_denied_to_root_scripts() {
+    let dir = temp_dir("registry-credential-child-env");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"test":"printf child-started"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_CHILD_SECRET'\n[run.scripts.test]\nenvironment=['TAPID_ISSUE164_CHILD_SECRET']\n",
+    )
+    .unwrap();
+    let secret = "synthetic-secret-value";
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(["run", "test", "--project-dir"])
+        .arg(&dir)
+        .env("TAPID_ISSUE164_CHILD_SECRET", secret)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("registry credential"), "{stderr}");
+    assert!(!stderr.contains(secret), "{stderr}");
+    cleanup(dir);
+}
+
+#[test]
 fn lifecycle_commands_are_exposed_as_cli_commands() {
     let dir = temp_dir("lifecycle-help");
     let output = run(&dir, &["--help"]);
@@ -208,6 +394,55 @@ fn outdated_reports_local_workspace_versions_without_registry_lookup() {
     ));
     assert!(!stdout.contains("registry metadata returned no versions"));
     assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_before);
+    cleanup(dir);
+}
+
+#[test]
+fn outdated_uses_configured_private_registry_identity() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let dir = temp_dir("outdated-private-registry");
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"@acme/widget":"^1.0.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.acme.example'\n",
+    )
+    .unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let package = LockedPackage::new_with_provenance(
+        "https://packages.acme.example",
+        "@acme/widget",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let key = package.key();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key]).unwrap();
+    fs::write(dir.join("tapid.lock"), lock.to_json().unwrap()).unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://packages.acme.example","name":"@acme/widget","version":"1.1.0"},{"registry":"https://packages.acme.example","name":"@acme/widget","version":"2.0.0"}]}"#,
+    )
+    .unwrap();
+
+    let output = run(
+        &dir,
+        &["outdated", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains(
+        "@acme/widget [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.1.0 available=2.0.0"
+    ));
     cleanup(dir);
 }
 
@@ -742,6 +977,77 @@ fn root_install_links_ordinary_workspace_dependencies_without_registry_resolutio
     );
     assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), original_lock);
     assert!(link.join("package.json").is_file());
+    cleanup(dir);
+}
+
+#[test]
+fn workspace_member_private_registry_dependency_resolves_and_replays_offline() {
+    let dir = temp_dir("workspace-private-route");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"@example/ui":"workspace:*"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("packages/ui")).unwrap();
+    fs::write(
+        dir.join("packages/ui/package.json"),
+        r#"{"name":"@example/ui","version":"1.0.0","dependencies":{"@acme/private":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\n",
+    )
+    .unwrap();
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://packages.example","name":"@acme/private","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "online install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    let member = lock["workspacePackages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|package| package["dependencies"].get("@acme/private").is_some())
+        .expect("member dependency was not locked");
+    let target = member["dependencies"]["@acme/private"].as_str().unwrap();
+    assert!(target.starts_with("https://packages.example|@acme/private@1.0.0"));
+    assert!(!target.starts_with("https://registry.npmjs.org|"));
+
+    for mode in ["--frozen", "--offline"] {
+        let replay = run(
+            &dir,
+            &["install", mode, "--store-dir", store.to_str().unwrap()],
+        );
+        assert!(
+            replay.status.success(),
+            "{mode} replay failed: {}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+    }
     cleanup(dir);
 }
 
@@ -3563,6 +3869,95 @@ fn legacy_registry_replay_rejects_without_mutation() {
         );
         cleanup(dir);
     }
+}
+
+/// Checks that both install spellings reject bare command words without changing the project.
+#[test]
+fn install_rejects_ambiguous_package_arguments_before_accessing_project() {
+    for command in ["install", "i"] {
+        for package in ["help", "install", " help ", " install "] {
+            for with_manifest in [false, true] {
+                let dir = temp_dir("ambiguous-install");
+                let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+                if with_manifest {
+                    fs::write(dir.join("package.json"), manifest).unwrap();
+                }
+                let store = dir.join("store");
+                let output = run(
+                    &dir,
+                    &[command, package, "--store-dir", store.to_str().unwrap()],
+                );
+                assert_eq!(output.status.code(), Some(2));
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(stderr.contains("is ambiguous here"), "{stderr}");
+                assert!(stderr.contains("tapid install"), "{stderr}");
+                assert!(!stderr.contains("cannot read manifest"), "{stderr}");
+                assert!(output.stdout.is_empty());
+                assert_eq!(
+                    fs::read_dir(&dir).unwrap().count(),
+                    usize::from(with_manifest)
+                );
+                if with_manifest {
+                    assert_eq!(
+                        fs::read_to_string(dir.join("package.json")).unwrap(),
+                        manifest
+                    );
+                }
+                cleanup(dir);
+            }
+        }
+    }
+}
+
+/// Checks that explicit specs for command-like package names pass argument validation.
+#[test]
+fn install_accepts_explicit_specs_for_ambiguous_package_names() {
+    let dir = temp_dir("explicit-install");
+    for command in ["install", "i"] {
+        for package in ["help@1.0.0", "install@1.0.0", "npm:help", "npm:install"] {
+            let output = run(&dir, &[command, package]);
+            assert_eq!(output.status.code(), Some(1));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("cannot read manifest"), "{stderr}");
+        }
+    }
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    cleanup(dir);
+}
+
+/// Checks frozen replay through `i`, installation help forms, and alias visibility in help.
+#[test]
+fn install_alias_replays_project_and_provides_help() {
+    let dir = temp_dir("install-alias");
+    let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(
+        dir.join("tapid.lock"),
+        lock_for_manifest(manifest).to_json().unwrap(),
+    )
+    .unwrap();
+    let output = run(&dir, &["i", "--frozen"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.join("node_modules").is_dir());
+    for args in [
+        &["i", "--help"][..],
+        &["install", "--help"],
+        &["help", "install"],
+    ] {
+        let output = run(&dir, args);
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Install dependencies"));
+    }
+    for args in [&["--help"][..], &["help"]] {
+        let output = run(&dir, args);
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("[alias: i]"));
+    }
+    cleanup(dir);
 }
 
 #[test]
