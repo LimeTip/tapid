@@ -345,7 +345,7 @@ pub(crate) fn workspace_materialization(
                     };
                     registry_dependencies.push(WorkspaceRegistryDependency {
                         member_key: locked[package_index].key(),
-                        manifest_name: name.clone(),
+                        manifest_name: local_package.to_string(),
                         registry,
                         package,
                         requirement,

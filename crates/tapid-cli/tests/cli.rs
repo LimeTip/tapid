@@ -1499,6 +1499,74 @@ fn workspace_member_private_registry_dependency_resolves_and_replays_offline() {
 }
 
 #[test]
+fn workspace_member_jsr_dependency_uses_stripped_local_name_and_replays() {
+    let dir = temp_dir("workspace-member-jsr-dependency");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    let member_dir = dir.join("packages/ui");
+    fs::create_dir_all(&member_dir).unwrap();
+    fs::write(
+        member_dir.join("package.json"),
+        r#"{"name":"@example/ui","version":"1.0.0","dependencies":{"jsr:@s/foo":"1.0.0"}}"#,
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        include_bytes!("fixtures/cross-registry-alias.json"),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "workspace member JSR dependency install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    let member = lock["workspacePackages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|package| package["source"]["name"] == "@example/ui")
+        .expect("workspace member missing from lockfile");
+    let target = member["dependencies"]["@s/foo"]
+        .as_str()
+        .expect("stripped JSR local name missing from member lock edges");
+    assert!(target.starts_with("https://jsr.io|@s/foo@1.0.0|"));
+    assert!(member["dependencies"].get("jsr:@s/foo").is_none());
+    assert!(dir.join("node_modules/@s/foo/package.json").is_file());
+
+    for mode in ["--frozen", "--offline"] {
+        let replay = run(
+            &dir,
+            &["install", mode, "--store-dir", store.to_str().unwrap()],
+        );
+        assert!(
+            replay.status.success(),
+            "{mode} replay failed: {}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert!(dir.join("node_modules/@s/foo/package.json").is_file());
+    }
+    cleanup(dir);
+}
+
+#[test]
 fn workspace_member_npm_alias_uses_private_scope_and_replays() {
     let dir = temp_dir("workspace-member-private-alias");
     fs::write(
