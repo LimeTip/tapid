@@ -17,6 +17,84 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  news-site-consumer:
+    name: News-site Tapid scripts (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      TMPDIR: ${{ github.workspace }}/examples/news-site-consumer/.tmp
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Build Tapid CLI
+        run: cargo build --locked --bin tapid
+      - name: Install Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Record baseline toolchain versions
+        run: |
+          node --version
+          npm --version
+          target/debug/tapid --version
+      - name: Prepare project-local build and temporary storage
+        run: mkdir -p examples/news-site-consumer/.next examples/news-site-consumer/.tmp
+      - name: Install npm reference tree
+        run: |
+          mkdir -p "$RUNNER_TEMP/news-site-npm-reference"
+          cp examples/news-site-consumer/package.json examples/news-site-consumer/package-lock.json "$RUNNER_TEMP/news-site-npm-reference/"
+          npm ci --prefix "$RUNNER_TEMP/news-site-npm-reference"
+      - name: Install fixture with Tapid and verify replays
+        shell: bash
+        run: |
+          set -euo pipefail
+          project=examples/news-site-consumer
+          target/debug/tapid install --project-dir "$project"
+          lock_hash=$(sha256sum "$project/tapid.lock" | cut -d' ' -f1)
+          target/debug/tapid install --frozen --project-dir "$project"
+          target/debug/tapid install --offline --frozen --project-dir "$project"
+          test "$(sha256sum "$project/tapid.lock" | cut -d' ' -f1)" = "$lock_hash"
+      - name: Compare installed dependency graphs
+        run: |
+          python3 scripts/compare-news-site-package-graphs.py \
+            --npm-root "$RUNNER_TEMP/news-site-npm-reference" \
+            --tapid-root examples/news-site-consumer \
+            --json "$RUNNER_TEMP/news-site-package-graph.json" \
+            --text "$RUNNER_TEMP/news-site-package-graph.txt"
+      - name: Retain dependency graph comparison
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: news-site-package-graph
+          path: |
+            ${{ runner.temp }}/news-site-package-graph.json
+            ${{ runner.temp }}/news-site-package-graph.txt
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Build and test via Tapid
+        run: |
+          sudo -n -- env PATH="$PATH" TMPDIR="$TMPDIR" NEXT_TELEMETRY_DISABLED=1 \
+            target/debug/tapid run build --allow-process-memory-stats --project-dir examples/news-site-consumer
+          target/debug/tapid run test --project-dir examples/news-site-consumer
+      - name: Start via Tapid and assert acceptance marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          target/debug/tapid run start --project-dir examples/news-site-consumer > "$RUNNER_TEMP/news-site-consumer.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          for _ in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/acceptance > "$RUNNER_TEMP/news-site-acceptance.txt"; then
+              break
+            fi
+            sleep 1
+          done
+          grep -Fx 'TAPID_NEWS_SITE_ACCEPTANCE_V1' "$RUNNER_TEMP/news-site-acceptance.txt"
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -41,6 +119,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
+      - name: Verify pinned node-semver compatibility oracle
+        working-directory: tests/node-semver-oracle
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test --offline
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Run Clippy
@@ -50,8 +133,7 @@ jobs:
         run: cargo test -p tapid --lib --locked native_windows_shim_materialization_rejects_collisions_before_writes
       - name: Run tests
         run: cargo test --workspace --all-features --locked
-      - name: Install documentation runner Python
-        if: runner.os != 'Windows'
+      - name: Install Python for development and documentation tests
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
@@ -65,6 +147,8 @@ jobs:
       - name: Test executable documentation runner (Unix)
         if: runner.os != 'Windows'
         run: python3 -m unittest discover -s tests -p test_doc_examples.py -v
+      - name: Test development build cache selection
+        run: python -m unittest discover -s tests -p test_dev.py -v
       - name: Verify source documentation artifact (Unix, offline)
         if: runner.os != 'Windows'
         run: python3 scripts/check-doc-examples.py --lane source --example init --example upgrade-help --report doc-contract-source.json

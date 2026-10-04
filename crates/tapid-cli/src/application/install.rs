@@ -7,7 +7,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tapid_linker::{LayoutInput, ManagedRoot, plan_layout};
+use tapid_linker::{ManagedRoot, NamedLayoutInput, plan_named_layout};
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 use tapid_store::Store;
@@ -176,6 +176,11 @@ pub(crate) fn run_with_manifest(
             ));
         }
     };
+    let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
+    online::manifest_roots(&preflight_manifest)?;
+    if let Some(updated) = manifest_override {
+        online::manifest_roots(updated)?;
+    }
     if offline || frozen {
         let lock_path = project_dir.join("tapid.lock");
         if lock_path.is_file() {
@@ -204,14 +209,20 @@ pub(crate) fn run_with_manifest(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(format!("cannot preserve tapid.lock for recovery: {error}")),
     };
-    let mut lifecycle_journal = Some(
-        crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
-            &project_dir,
-            activation_lock.owner_line(),
-            &original_manifest,
-            original_lock.as_deref(),
-        )?,
-    );
+    let lifecycle_journal_required_before_resolution =
+        offline || frozen || manifest_override.is_some() || package.is_some();
+    let mut lifecycle_journal = if lifecycle_journal_required_before_resolution {
+        Some(
+            crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
+                &project_dir,
+                activation_lock.owner_line(),
+                &original_manifest,
+                original_lock.as_deref(),
+            )?,
+        )
+    } else {
+        None
+    };
     let mut manifest_transaction = None;
     let manifest = if let Some(updated) = manifest_override {
         if package.is_some() {
@@ -244,19 +255,28 @@ pub(crate) fn run_with_manifest(
             Some(path) => path.to_owned(),
             None => default_store_root()?,
         });
-        if let Some(journal) = lifecycle_journal.as_mut() {
-            store
-                .recover_transactions()
-                .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
-            journal.set_store_root(store.root())?;
-        }
+        let registry_config = crate::registry::RegistryConfig::load(&project_dir)?;
         let (lock, mut input, trees, store_transaction) = online::resolve_and_fetch(
             &project_dir,
             &manifest,
             &store,
             registry_fixture,
             allow_unverified_registry_artifacts,
+            &registry_config,
         )?;
+        if lifecycle_journal.is_none() {
+            lifecycle_journal = Some(
+                crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
+                    &project_dir,
+                    activation_lock.owner_line(),
+                    &original_manifest,
+                    original_lock.as_deref(),
+                )?,
+            );
+        }
+        if let Some(journal) = lifecycle_journal.as_mut() {
+            journal.set_store_root(store.root())?;
+        }
         let lock_json = match lock.to_json() {
             Ok(value) => value,
             Err(error) => return Err(format!("cannot serialize lockfile: {error}")),
@@ -374,8 +394,14 @@ pub(crate) fn run_with_manifest(
             .map_err(|error| format!("cannot prepare shared store for recovery: {error}"))?;
         journal.set_store_root(store.root())?;
     }
-    let (input, trees) =
-        crate::application::replay::replay_input(&lock, &manifest, &store, report_replay_progress)?;
+    let registry_config = crate::registry::RegistryConfig::load(&project_dir)?;
+    let (input, trees) = crate::application::replay::replay_input(
+        &lock,
+        &manifest,
+        &store,
+        &registry_config,
+        report_replay_progress,
+    )?;
     let replayed = materialize_with_lock(
         &project_dir,
         input,
@@ -399,7 +425,7 @@ pub(crate) fn run_with_manifest(
 
 fn materialize_install(
     project_dir: &Path,
-    input: LayoutInput,
+    input: NamedLayoutInput,
     trees: BTreeMap<String, PathBuf>,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
@@ -416,7 +442,7 @@ fn materialize_install(
 
 fn materialize_with_lock(
     project_dir: &Path,
-    input: LayoutInput,
+    input: NamedLayoutInput,
     trees: BTreeMap<String, PathBuf>,
     replayed: bool,
     activation_lock: &ActivationLock,
@@ -432,7 +458,7 @@ fn materialize_with_lock(
         }
     };
     let platform = crate::application::replay::current_platform();
-    let plan = match plan_layout(root, input.clone(), platform) {
+    let plan = match plan_named_layout(root, input.clone(), platform) {
         Ok(value) => value,
         Err(error) => {
             if replayed {
@@ -450,16 +476,21 @@ fn materialize_with_lock(
             return Err(error);
         }
     };
-    let result =
-        crate::filesystem::tree::materialize_stage(&stage, &plan, &input, &trees, replayed)
-            .and_then(|_| {
-                crate::filesystem::activation::activate_node_modules_with_lock(
-                    project_dir,
-                    &stage,
-                    activation_lock,
-                    preserve_previous,
-                )
-            });
+    let result = crate::filesystem::tree::materialize_stage(
+        &stage,
+        &plan,
+        &input.instances,
+        &trees,
+        replayed,
+    )
+    .and_then(|_| {
+        crate::filesystem::activation::activate_node_modules_with_lock(
+            project_dir,
+            &stage,
+            activation_lock,
+            preserve_previous,
+        )
+    });
     if replayed {
         crate::application::replay::cleanup_replay_snapshots(&trees);
     }

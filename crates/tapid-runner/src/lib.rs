@@ -10,7 +10,7 @@ static LAUNCHER: std::sync::OnceLock<PrivateLauncher> = std::sync::OnceLock::new
 /// Call as the first operation in main. Private invocations dispatch and never return.
 /// Subsequent requests retain this opaque token; missing integration fails before spawn.
 pub fn initialize_or_dispatch_private_launcher() -> PrivateLauncher {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     execution::dispatch_private_launcher();
     LAUNCHER
         .get_or_init(|| {
@@ -39,6 +39,16 @@ pub fn initialize_or_dispatch_private_launcher() -> PrivateLauncher {
 #[used]
 #[unsafe(link_section = "__DATA,__mod_init_func")]
 static TEST_LAUNCHER_INIT: extern "C" fn() = {
+    extern "C" fn init() {
+        initialize_or_dispatch_private_launcher();
+    }
+    init
+};
+
+#[cfg(all(test, target_os = "linux"))]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static TEST_LAUNCHER_INIT_LINUX: extern "C" fn() = {
     extern "C" fn init() {
         initialize_or_dispatch_private_launcher();
     }

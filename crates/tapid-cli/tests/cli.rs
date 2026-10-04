@@ -54,6 +54,638 @@ fn cleanup(path: PathBuf) {
 }
 
 #[test]
+fn aliased_root_cycle_keeps_locked_dependencies_during_install_and_replay() {
+    let project = tapid_test_support::TempProject::new("aliased-root-cycle").unwrap();
+    let dir = project.path().to_path_buf();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"app":"npm:a@1.0.0","b":"2.0.0"}}"#).unwrap();
+    let fixture = project
+        .write(
+            "registry.json",
+            include_bytes!("fixtures/aliased-root-cycle.json"),
+        )
+        .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "i",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock_bytes = fs::read(dir.join("tapid.lock")).unwrap();
+    for replay in [false, true] {
+        if replay {
+            fs::remove_dir_all(dir.join("node_modules")).unwrap();
+            let output = run(
+                &dir,
+                &[
+                    "i",
+                    "--offline",
+                    "--frozen",
+                    "--store-dir",
+                    store.to_str().unwrap(),
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        for path in ["app/node_modules/b/index.js", "a/node_modules/b/index.js"] {
+            assert_eq!(
+                fs::read_to_string(dir.join("node_modules").join(path)).unwrap(),
+                "module.exports = \"b1\";\n"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/b/index.js")).unwrap(),
+            "module.exports = \"b2\";\n"
+        );
+        if let Ok(node) = Command::new("node")
+            .args([
+                "-e",
+                "console.log(require('app'), require('a'), require('b'))",
+            ])
+            .current_dir(&dir)
+            .output()
+        {
+            assert!(
+                node.status.success(),
+                "{}",
+                String::from_utf8_lossy(&node.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&node.stdout).trim(), "b1 b1 b2");
+        }
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_bytes);
+    }
+}
+
+#[test]
+fn cross_registry_aliases_install_distinct_artifacts_and_replay_offline() {
+    let project = tapid_test_support::TempProject::new("cross-registry-alias").unwrap();
+    let dir = project.path().to_path_buf();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"local":"npm:@s/foo@1.0.0","jsr:@s/foo":"1.0.0"}}"#).unwrap();
+    let fixture = project
+        .write(
+            "registry.json",
+            include_bytes!("fixtures/cross-registry-alias.json"),
+        )
+        .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "i",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock_bytes = fs::read(dir.join("tapid.lock")).unwrap();
+    let lock = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
+    assert_eq!(lock.packages().len(), 2);
+    for replay in [false, true] {
+        if replay {
+            fs::remove_dir_all(dir.join("node_modules")).unwrap();
+            let output = run(
+                &dir,
+                &[
+                    "i",
+                    "--offline",
+                    "--frozen",
+                    "--store-dir",
+                    store.to_str().unwrap(),
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/local/index.js")).unwrap(),
+            "module.exports = \"npm\";\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/@s/foo/index.js")).unwrap(),
+            "module.exports = \"jsr\";\n"
+        );
+        assert_ne!(
+            fs::canonicalize(dir.join("node_modules/local")).unwrap(),
+            fs::canonicalize(dir.join("node_modules/@s/foo")).unwrap()
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_bytes);
+    }
+}
+
+#[test]
+fn npm_aliases_preserve_local_names_actual_identities_and_offline_replay() {
+    let dir = temp_dir("npm-aliases");
+    fs::write(dir.join("package.json"), r#"{"name":"demo","version":"1.0.0","dependencies":{"first":"npm:h3@1","second":"npm:h3@2.0.0","third":"npm:h3@1","alias-parent":"1.0.0","@local/direct":"npm:@actual/scoped@^1"}}"#).unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(&fixture, include_str!("fixtures/npm-aliases.json")).unwrap();
+    let store = dir.join("store");
+    let output = run(
+        &dir,
+        &[
+            "i",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock_bytes = fs::read(dir.join("tapid.lock")).unwrap();
+    let lock = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
+    assert_eq!(lock.packages().len(), 5);
+    for args in [
+        vec!["install", "--frozen"],
+        vec!["install", "--offline", "--frozen"],
+    ] {
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/first/index.js")).unwrap(),
+            "module.exports = \"first\";\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/second/index.js")).unwrap(),
+            "module.exports = \"second\";\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/h3-v2/index.js")).unwrap(),
+            "module.exports = \"prerelease\";\n"
+        );
+        assert!(
+            fs::read_to_string(dir.join("node_modules/@local/direct/package.json"))
+                .unwrap()
+                .contains("@actual/scoped")
+        );
+        assert!(
+            dir.join("node_modules/.bin/scoped-tool").exists()
+                || dir.join("node_modules/.bin/scoped-tool.cmd").exists()
+        );
+        assert!(!dir.join("node_modules/first/node_modules/h3").exists());
+        assert!(dir.join("node_modules/third/index.js").is_file());
+        if let Ok(node) = Command::new("node").args(["-e", "console.log([require('first'), require('second'), require('third'), require('alias-parent'), require('@local/direct')].join('|'))"]).current_dir(&dir).output() {
+            assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
+            assert_eq!(String::from_utf8_lossy(&node.stdout).trim(), "first|second|first|prerelease:scoped|scoped");
+        }
+
+        fs::remove_dir_all(dir.join("node_modules")).unwrap();
+        let mut args = args;
+        args.extend(["--store-dir", store.to_str().unwrap()]);
+        let replay = run(&dir, &args);
+        assert!(
+            replay.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_bytes);
+    }
+    cleanup(dir);
+}
+
+#[test]
+fn npm_alias_cli_add_update_latest_and_outdated_keep_the_actual_target() {
+    let dir = temp_dir("npm-alias-lifecycle");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(&fixture, include_str!("fixtures/npm-aliases.json")).unwrap();
+    let store = dir.join("store");
+    let common = [
+        "--registry-fixture",
+        fixture.to_str().unwrap(),
+        "--store-dir",
+        store.to_str().unwrap(),
+    ];
+    let mut add = vec!["add", "local@npm:h3@1"];
+    add.extend(common);
+    let output = run(&dir, &add);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let outdated = run(
+        &dir,
+        &["outdated", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+    assert!(outdated.status.success());
+    let report = String::from_utf8(outdated.stdout).unwrap();
+    assert!(
+        report.contains("declared=npm:h3@1 locked=1.0.0 compatible=1.0.0 available=2.0.1-rc.20"),
+        "{report}"
+    );
+    let mut update = vec!["update", "local", "--latest"];
+    update.extend(common);
+    let output = run(&dir, &update);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("package.json")).unwrap()).unwrap();
+    assert_eq!(manifest["dependencies"]["local"], "npm:h3@*");
+    let installed: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("node_modules/local/package.json")).unwrap())
+            .unwrap();
+    assert_eq!(installed["name"], "h3");
+    assert_eq!(installed["version"], "2.0.0");
+    cleanup(dir);
+}
+
+#[test]
+fn npm_alias_routes_by_actual_scope_and_rejects_a_changed_route_on_replay() {
+    let dir = temp_dir("npm-alias-private-route");
+    fs::write(dir.join("package.json"), r#"{"name":"demo","version":"1.0.0","dependencies":{"@local/tool":"npm:@actual/scoped@^1"}}"#).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@actual']\nurl='https://packages.example'\n",
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    let mut registry: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    for package in registry["packages"].as_array_mut().unwrap() {
+        if package["name"] == "@actual/scoped" {
+            package["registry"] = "https://packages.example".into();
+        }
+    }
+    fs::write(&fixture, registry.to_string()).unwrap();
+    let store = dir.join("store");
+    let output = run(
+        &dir,
+        &[
+            "i",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock_bytes = fs::read(dir.join("tapid.lock")).unwrap();
+    let lock = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
+    assert!(lock.roots()[0].starts_with("https://packages.example|@actual/scoped@"));
+    let replay = run(
+        &dir,
+        &[
+            "i",
+            "--offline",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@actual']\nurl='https://different.example'\n",
+    )
+    .unwrap();
+    let rejected = run(
+        &dir,
+        &[
+            "i",
+            "--offline",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("does not satisfy the manifest declaration")
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_bytes);
+    assert!(dir.join("node_modules/@local/tool/index.js").is_file());
+    cleanup(dir);
+}
+
+#[test]
+fn invalid_npm_aliases_fail_before_project_or_store_mutation() {
+    for declaration in [
+        "npm:../outside@1",
+        "npm:actual@npm:other@1",
+        "npm:actual@latest",
+        "npm:actual@",
+    ] {
+        let dir = temp_dir("invalid-npm-alias");
+        let manifest = serde_json::json!({"name":"demo", "version":"1.0.0", "dependencies":{"local":declaration}}).to_string();
+        fs::write(dir.join("package.json"), &manifest).unwrap();
+        fs::write(dir.join("tapid.lock"), b"previous lock").unwrap();
+        fs::create_dir_all(dir.join("node_modules")).unwrap();
+        fs::write(dir.join("node_modules/keep"), b"previous install").unwrap();
+        let store = dir.join("store");
+        let output = run(&dir, &["i", "--store-dir", store.to_str().unwrap()]);
+        assert!(!output.status.success(), "{declaration}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains(declaration));
+        assert_eq!(
+            fs::read_to_string(dir.join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), b"previous lock");
+        assert_eq!(
+            fs::read(dir.join("node_modules/keep")).unwrap(),
+            b"previous install"
+        );
+        assert!(!store.exists());
+        cleanup(dir);
+    }
+}
+
+#[test]
+fn legacy_replay_rejects_same_local_name_from_different_registries() {
+    let dir = temp_dir("legacy-root-origin-collision");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"@actual/scoped":"1.2.0"}}"#,
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(&fixture, include_str!("fixtures/npm-aliases.json")).unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "i",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"@actual/scoped":"1.2.0","jsr:@actual/scoped":"1.2.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    let npm_key = lock["roots"][0].as_str().unwrap().to_owned();
+    let jsr_key = npm_key.replace("https://registry.npmjs.org", "https://jsr.io");
+    let mut jsr_package = lock["packages"][&npm_key].clone();
+    jsr_package["registry"] = "https://jsr.io".into();
+    lock["packages"][&jsr_key] = jsr_package;
+    let mut roots = vec![npm_key, jsr_key];
+    roots.sort();
+    lock["roots"] = serde_json::json!(roots);
+    lock["rootManifestDigest"] = format!(
+        "sha256-{}",
+        hex::encode(Sha256::digest(manifest.as_bytes()))
+    )
+    .into();
+    lock["lockfileVersion"] = 6.into();
+    lock.as_object_mut().unwrap().remove("rootBindings");
+    let lock_bytes = lock.to_string();
+    fs::write(dir.join("tapid.lock"), &lock_bytes).unwrap();
+    let replay = run(
+        &dir,
+        &[
+            "i",
+            "--offline",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!replay.status.success());
+    assert!(
+        String::from_utf8_lossy(&replay.stderr).contains("conflicting activation target"),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("tapid.lock")).unwrap(),
+        lock_bytes
+    );
+    assert!(dir.join("node_modules/@actual/scoped/index.js").is_file());
+    cleanup(dir);
+}
+
+#[test]
+fn missing_private_registry_credentials_fail_before_committing_manifest_changes() {
+    let dir = temp_dir("missing-registry-credential");
+    let original = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), original).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_MISSING'\n",
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let previous_lock = b"previous lock bytes";
+    let previous_node_modules = b"previous installed tree marker";
+    let previous_store = b"pre-existing verified store marker";
+    fs::write(dir.join("tapid.lock"), previous_lock).unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join("node_modules/previous.txt"), previous_node_modules).unwrap();
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("previous.txt"), previous_store).unwrap();
+    let output = run_with_isolated_path(
+        &dir,
+        &[
+            "add",
+            "@acme/private@1.0.0",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+        OsStr::new(""),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("TAPID_ISSUE164_MISSING"), "{stderr}");
+    assert!(!stderr.contains("secret"), "{stderr}");
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        original.as_bytes()
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), previous_lock);
+    assert_eq!(
+        fs::read(dir.join("node_modules/previous.txt")).unwrap(),
+        previous_node_modules
+    );
+    assert_eq!(
+        fs::read(store.join("previous.txt")).unwrap(),
+        previous_store
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn invalid_private_registry_credentials_are_redacted_and_fail_transactionally() {
+    let dir = temp_dir("invalid-registry-credential");
+    let original = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), original).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_INVALID'\n",
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let invalid_secret = "synthetic-invalid-secret\nwith-newline";
+    let output = run_with_env(
+        &dir,
+        &[
+            "add",
+            "@acme/private@1.0.0",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+        "TAPID_ISSUE164_INVALID",
+        invalid_secret,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid registry credential"), "{stderr}");
+    assert!(!stderr.contains("synthetic-invalid-secret"), "{stderr}");
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        original.as_bytes()
+    );
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
+    cleanup(dir);
+}
+
+#[test]
+fn scoped_registry_routing_selects_private_and_default_origins_and_replays_offline() {
+    let dir = temp_dir("scoped-registry-routing");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"@acme/private":"1.0.0","left-pad":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.default]\nurl='https://mirror.example'\n[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_OFFLINE_ONLY'\n",
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://packages.example","name":"@acme/private","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}},{{"registry":"https://mirror.example","name":"left-pad","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock_json = fs::read_to_string(dir.join("tapid.lock")).unwrap();
+    let lock: serde_json::Value = serde_json::from_str(&lock_json).unwrap();
+    let registries = lock["packages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|package| package["registry"].as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        registries,
+        ["https://mirror.example", "https://packages.example"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let replay = run_with_isolated_path(
+        &dir,
+        &[
+            "install",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+        OsStr::new(""),
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn registry_credential_environment_variables_are_denied_to_root_scripts() {
+    let dir = temp_dir("registry-credential-child-env");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"test":"printf child-started"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_ISSUE164_CHILD_SECRET'\n[run.scripts.test]\nenvironment=['TAPID_ISSUE164_CHILD_SECRET']\n",
+    )
+    .unwrap();
+    let secret = "synthetic-secret-value";
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(["run", "test", "--project-dir"])
+        .arg(&dir)
+        .env("TAPID_ISSUE164_CHILD_SECRET", secret)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("registry credential"), "{stderr}");
+    assert!(!stderr.contains(secret), "{stderr}");
+    cleanup(dir);
+}
+
+#[test]
 fn lifecycle_commands_are_exposed_as_cli_commands() {
     let dir = temp_dir("lifecycle-help");
     let output = run(&dir, &["--help"]);
@@ -156,6 +788,55 @@ fn outdated_reports_versions_without_mutating_project_state() {
         .map(|entry| entry.unwrap().file_name())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(entries_after, entries_before);
+    cleanup(dir);
+}
+
+#[test]
+fn outdated_uses_configured_private_registry_identity() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let dir = temp_dir("outdated-private-registry");
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"@acme/widget":"^1.0.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.acme.example'\n",
+    )
+    .unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let package = LockedPackage::new_with_provenance(
+        "https://packages.acme.example",
+        "@acme/widget",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let key = package.key();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key]).unwrap();
+    fs::write(dir.join("tapid.lock"), lock.to_json().unwrap()).unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://packages.acme.example","name":"@acme/widget","version":"1.1.0"},{"registry":"https://packages.acme.example","name":"@acme/widget","version":"2.0.0"}]}"#,
+    )
+    .unwrap();
+
+    let output = run(
+        &dir,
+        &["outdated", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains(
+        "@acme/widget [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.1.0 available=2.0.0"
+    ));
     cleanup(dir);
 }
 
@@ -504,6 +1185,86 @@ fn workspace_protocol_add_fails_closed_before_registry_or_project_mutation() {
 }
 
 #[test]
+fn install_rejects_unsupported_workspace_manifest_before_mutating_project_or_store() {
+    use std::collections::BTreeSet;
+    use tapid_store::Store;
+
+    let dir = temp_dir("workspace-manifest-install-fail-closed");
+    let root_manifest = r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"local":"workspace:*"}}"#;
+    fs::write(dir.join("package.json"), root_manifest).unwrap();
+    fs::create_dir_all(dir.join("packages/local")).unwrap();
+    fs::write(
+        dir.join("packages/local/package.json"),
+        r#"{"name":"local","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.lock"), "old lock bytes\\n").unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\\n").unwrap();
+    fs::write(dir.join("node_modules/KEEP"), "user data").unwrap();
+
+    let store_dir = dir.join("store");
+    let store = Store::new(&store_dir);
+    let prior_source = dir.join("prior-store-tree");
+    fs::create_dir_all(&prior_source).unwrap();
+    fs::write(prior_source.join("package.json"), "prior store tree").unwrap();
+    let prior_digest = tapid_archive::canonical_tree_digest(&prior_source)
+        .unwrap()
+        .parse::<tapid_core::ArtifactDigest>()
+        .unwrap();
+    store
+        .activate_verified_tree(&prior_digest, &prior_source)
+        .unwrap();
+    let store_entries_before = fs::read_dir(&store_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<BTreeSet<_>>();
+
+    let output = run(
+        &dir,
+        &["install", "--store-dir", store_dir.to_str().unwrap()],
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        !dir.join(".tapid-activation.lock").exists(),
+        "rejected manifest must not create activation state"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported workspace dependency reference: local@workspace:*")
+            && stderr.contains("workspace linking is not implemented"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        root_manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("tapid.lock")).unwrap(),
+        b"old lock bytes\\n"
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/KEEP")).unwrap(),
+        b"user data"
+    );
+    assert_eq!(
+        fs::read(dir.join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1\\n"
+    );
+    assert!(!dir.join(".tapid-activation.lock").exists());
+    assert_eq!(
+        fs::read_dir(&store_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>(),
+        store_entries_before
+    );
+    assert!(store.verified_tree_path(&prior_digest).is_ok());
+    cleanup(dir);
+}
+
+#[test]
 fn npm_and_jsr_registry_identities_remain_distinct_for_related_packages() {
     let dir = temp_dir("npm-jsr-distinct-identities");
     let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"is-char":"1.0.0","jsr:@arvid/is-char":"1.0.0"}}"#;
@@ -630,6 +1391,61 @@ fn lifecycle_add_rolls_back_manifest_when_resolution_fails() {
         .map(|entry| entry.unwrap().file_name())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(trees_after, trees_before);
+    cleanup(dir);
+}
+
+#[test]
+fn lifecycle_add_rejects_invalid_fetched_range_without_state_changes() {
+    let dir = temp_dir("lifecycle-invalid-fetched-range");
+    let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(dir.join("tapid.lock"), "old lock bytes\n").unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
+    fs::write(dir.join("node_modules/KEEP"), "user data").unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","artifact":"unused","dependencies":{"broken":"not a valid range"}}]}"#,
+    )
+    .unwrap();
+    let store = dir.join("previously-nonexistent-store");
+
+    let output = run(
+        &dir,
+        &[
+            "add",
+            "parent@1.0.0",
+            "--allow-unverified-registry-artifacts",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("dependency broken"), "{stderr}");
+    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("tapid.lock")).unwrap(),
+        b"old lock bytes\n"
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/KEEP")).unwrap(),
+        b"user data"
+    );
+    assert_eq!(
+        fs::read(dir.join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1\n"
+    );
+    assert!(!store.exists());
+    assert!(!dir.join(".tapid-lifecycle-journal.json").exists());
     cleanup(dir);
 }
 
@@ -810,6 +1626,69 @@ fn install_rolls_back_when_a_required_peer_provider_is_missing() {
         .map(|entry| entry.unwrap().file_name())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(trees_after, trees_before);
+    cleanup(dir);
+}
+
+#[test]
+fn invalid_fetched_dependency_range_does_not_create_store_state() {
+    let dir = temp_dir("invalid-fetched-range-no-store");
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"parent":"1.0.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","artifact":"unused","dependencies":{"broken":"not a valid range"}}]}"#,
+    )
+    .unwrap();
+    let store = dir.join("previously-nonexistent-store");
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--allow-unverified-registry-artifacts",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("dependency broken"), "{stderr}");
+    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
+    cleanup(dir);
+}
+
+#[test]
+fn invalid_online_root_range_does_not_create_store_state() {
+    let dir = temp_dir("invalid-range-no-store");
+    let manifest =
+        r#"{"name":"demo","version":"1.0.0","dependencies":{"broken":"not a valid range"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let store = dir.join("previously-nonexistent-store");
+
+    let output = run(&dir, &["install", "--store-dir", store.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("broken"), "{stderr}");
+    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
     cleanup(dir);
 }
 
@@ -1491,6 +2370,174 @@ fn run_requires_checked_in_configuration_before_execution() {
     cleanup(dir);
 }
 
+#[test]
+fn run_accepts_process_memory_stats_opt_in_and_aliases() {
+    let dir = temp_dir("run-process-memory-stats-arg");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"build":"exit 0"}}"#,
+    )
+    .unwrap();
+
+    for flag in [
+        "--allow-process-memory-stats",
+        "--allow-procfs",
+        "--allow-memory-read",
+    ] {
+        let output = run(
+            &dir,
+            &[
+                "run",
+                "build",
+                flag,
+                "--node-runtime",
+                env!("CARGO_BIN_EXE_tapid"),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "flag {flag}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "error: required run configuration is missing: tapid.toml\n",
+            "flag {flag} was not parsed as a Tapid option"
+        );
+        assert!(output.stdout.is_empty());
+    }
+    cleanup(dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn run_prints_libuv_process_memory_opt_in_hint_once() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir("run-process-memory-stats-hint");
+    fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"build":"node"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[run.defaults]\nassurance = \"restricted\"\nread = [\".\"]\nsubprocess = true\n\n[run.scripts.build]\n",
+    )
+    .unwrap();
+    let runtime_dir = dir.join("runtime");
+    fs::create_dir(&runtime_dir).unwrap();
+    let fake_node = runtime_dir.join("node");
+    fs::write(
+        &fake_node,
+        "#!/bin/sh\nprintf '%s\\n' 'RUN_MARKER [Error: EACCES: permission denied, uv_resident_set_memory]' >&2\nexit 19\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_node, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = run(
+        &dir,
+        &[
+            "run",
+            "build",
+            "--node-runtime",
+            fake_node.to_str().unwrap(),
+        ],
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(19), "{stderr}");
+    assert_eq!(stderr.matches("RUN_MARKER").count(), 1, "{stderr}");
+    assert_eq!(
+        stderr
+            .matches("retry with --allow-process-memory-stats")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("aliases: --allow-memory-read, --allow-procfs"),
+        "{stderr}"
+    );
+    cleanup(dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn run_memory_stats_opt_in_uses_private_procfs_or_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir("run-process-memory-stats-opt-in");
+    fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"demo","version":"1.0.0","scripts":{"probe":"node"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[run.defaults]\nassurance = \"restricted\"\nread = [\".\"]\nsubprocess = true\nenvironment = [\"TAPID_TEST_HOST_PID\"]\n\n[run.scripts.probe]\n",
+    )
+    .unwrap();
+    let runtime_dir = dir.join("runtime");
+    fs::create_dir(&runtime_dir).unwrap();
+    let fake_node = runtime_dir.join("node");
+    fs::write(
+        &fake_node,
+        "#!/bin/sh\n/bin/cat /proc/self/statm\nstatus=$?\nif [ \"$status\" -ne 0 ]; then exit \"$status\"; fi\nif [ -r \"/proc/$TAPID_TEST_HOST_PID/statm\" ]; then exit 43; fi\nif printf x > /proc/self/comm; then exit 44; fi\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_node, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let host_pid = std::process::id().to_string();
+    let arguments = [
+        "run",
+        "probe",
+        "--allow-process-memory-stats",
+        "--node-runtime",
+        fake_node.to_str().unwrap(),
+    ];
+    let is_root = unsafe { libc::geteuid() == 0 };
+    let can_use_sudo = !is_root
+        && Command::new("sudo")
+            .args(["-n", "true"])
+            .output()
+            .is_ok_and(|output| output.status.success());
+    let output = if can_use_sudo {
+        Command::new("sudo")
+            .args(["-n", "--", "env"])
+            .arg(format!("TAPID_TEST_HOST_PID={host_pid}"))
+            .arg(env!("CARGO_BIN_EXE_tapid"))
+            .args(arguments)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+    } else {
+        run_with_env(&dir, &arguments, "TAPID_TEST_HOST_PID", &host_pid)
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && stderr.contains("unsupported-containment") {
+        assert!(
+            stdout.is_empty(),
+            "child ran before fail-closed rejection: {stdout}"
+        );
+        cleanup(dir);
+        return;
+    }
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    let stats = stdout.split_whitespace().collect::<Vec<_>>();
+    assert!(!stats.is_empty(), "expected process stats, stdout={stdout}");
+    assert!(
+        stats.iter().all(|field| field.parse::<u64>().is_ok()),
+        "stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("private PID and mount namespaces"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("procfs read-only"), "{stderr}");
+    cleanup(dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn run_rejects_a_non_regular_configuration_without_opening_it() {
@@ -1994,6 +3041,95 @@ fn legacy_registry_replay_rejects_without_mutation() {
     }
 }
 
+/// Checks that both install spellings reject bare command words without changing the project.
+#[test]
+fn install_rejects_ambiguous_package_arguments_before_accessing_project() {
+    for command in ["install", "i"] {
+        for package in ["help", "install", " help ", " install "] {
+            for with_manifest in [false, true] {
+                let dir = temp_dir("ambiguous-install");
+                let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+                if with_manifest {
+                    fs::write(dir.join("package.json"), manifest).unwrap();
+                }
+                let store = dir.join("store");
+                let output = run(
+                    &dir,
+                    &[command, package, "--store-dir", store.to_str().unwrap()],
+                );
+                assert_eq!(output.status.code(), Some(2));
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(stderr.contains("is ambiguous here"), "{stderr}");
+                assert!(stderr.contains("tapid install"), "{stderr}");
+                assert!(!stderr.contains("cannot read manifest"), "{stderr}");
+                assert!(output.stdout.is_empty());
+                assert_eq!(
+                    fs::read_dir(&dir).unwrap().count(),
+                    usize::from(with_manifest)
+                );
+                if with_manifest {
+                    assert_eq!(
+                        fs::read_to_string(dir.join("package.json")).unwrap(),
+                        manifest
+                    );
+                }
+                cleanup(dir);
+            }
+        }
+    }
+}
+
+/// Checks that explicit specs for command-like package names pass argument validation.
+#[test]
+fn install_accepts_explicit_specs_for_ambiguous_package_names() {
+    let dir = temp_dir("explicit-install");
+    for command in ["install", "i"] {
+        for package in ["help@1.0.0", "install@1.0.0", "npm:help", "npm:install"] {
+            let output = run(&dir, &[command, package]);
+            assert_eq!(output.status.code(), Some(1));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("cannot read manifest"), "{stderr}");
+        }
+    }
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    cleanup(dir);
+}
+
+/// Checks frozen replay through `i`, installation help forms, and alias visibility in help.
+#[test]
+fn install_alias_replays_project_and_provides_help() {
+    let dir = temp_dir("install-alias");
+    let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(
+        dir.join("tapid.lock"),
+        lock_for_manifest(manifest).to_json().unwrap(),
+    )
+    .unwrap();
+    let output = run(&dir, &["i", "--frozen"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.join("node_modules").is_dir());
+    for args in [
+        &["i", "--help"][..],
+        &["install", "--help"],
+        &["help", "install"],
+    ] {
+        let output = run(&dir, args);
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Install dependencies"));
+    }
+    for args in [&["--help"][..], &["help"]] {
+        let output = run(&dir, args);
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("[alias: i]"));
+    }
+    cleanup(dir);
+}
+
 #[test]
 fn install_requires_lockfile_in_offline_and_frozen_modes() {
     for mode in ["offline", "frozen"] {
@@ -2179,6 +3315,10 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
         .clone();
 
     let mut transitive_root = canonical.clone();
+    transitive_root
+        .as_object_mut()
+        .unwrap()
+        .remove("rootBindings");
     let mut invalid_roots = vec![debug_three, parent.clone()];
     invalid_roots.sort();
     transitive_root["roots"] = serde_json::json!(invalid_roots);
@@ -2200,6 +3340,7 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
     assert!(!dir.join("node_modules").exists());
 
     let mut missing_root = canonical.clone();
+    missing_root.as_object_mut().unwrap().remove("rootBindings");
     missing_root["roots"] = serde_json::json!([parent]);
     fs::write(
         &lock_path,
@@ -2217,6 +3358,7 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
     let mut legacy = canonical;
     legacy["lockfileVersion"] = 4.into();
     legacy.as_object_mut().unwrap().remove("roots");
+    legacy.as_object_mut().unwrap().remove("rootBindings");
     fs::write(
         &lock_path,
         format!("{}\n", serde_json::to_string_pretty(&legacy).unwrap()),

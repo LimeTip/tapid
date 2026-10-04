@@ -3,19 +3,19 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
-    /// Explicit legacy signed discovery endpoint(s), tried in the given order.
+    /// Legacy signed discovery URL. Repeat to try endpoints in order; cannot be combined with --release-url.
     #[arg(long = "endpoint", value_name = "HTTPS_URL")]
     pub(crate) endpoints: Vec<String>,
-    /// Release record URL (defaults to tapid.dev, or TAPID_RELEASE_RECORD_URL).
+    /// Signed release record URL. Defaults to tapid.dev; TAPID_RELEASE_RECORD_URL overrides the default.
     #[arg(long, value_name = "HTTPS_URL", conflicts_with_all = ["endpoints", "keyring"])]
     pub(crate) release_url: Option<String>,
-    /// Optional trusted release keyring JSON. Uses the embedded production trust root by default.
+    /// Trusted release keyring JSON for controlled testing. Defaults to the embedded production keyring.
     #[arg(long)]
     pub(crate) keyring: Option<PathBuf>,
-    /// Destination executable (defaults to the current executable).
+    /// Executable path to replace. Defaults to the currently running Tapid executable.
     #[arg(long)]
     pub(crate) destination: Option<PathBuf>,
-    /// Inspect and verify without replacing the executable.
+    /// Download and verify the selected release without replacing the executable.
     #[arg(long)]
     pub(crate) dry_run: bool,
 }

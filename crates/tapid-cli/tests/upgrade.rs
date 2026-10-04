@@ -15,6 +15,19 @@ fn validity_window() -> (String, String) {
     )
 }
 
+fn run_executable_with_retry(command: &mut Command) -> std::process::Output {
+    for attempt in 0..5 {
+        match command.output() {
+            Ok(output) => return output,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 4 => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => panic!("failed to execute test binary: {error}"),
+        }
+    }
+    unreachable!("the retry loop always returns or panics");
+}
+
 struct Fixture {
     root: PathBuf,
 }
@@ -421,16 +434,16 @@ fn fresh_self_upgrade_rejects_an_older_release_without_state() {
     )
     .unwrap();
     fixture.resign_record();
-    let output = Command::new(&executable)
-        .arg("upgrade")
-        .env_remove("TAPID_RELEASE_RECORD_URL")
-        .env_remove("TAPID_STABLE_ENDPOINTS")
-        .env_remove("TAPID_RELEASE_KEYRING")
-        .env("PATH", fixture.root.join("bin"))
-        .env("FIXTURE", &fixture.root)
-        .env("TAPID_RELEASE_KEYRING", fixture.root.join("keyring.json"))
-        .output()
-        .unwrap();
+    let output = run_executable_with_retry(
+        Command::new(&executable)
+            .arg("upgrade")
+            .env_remove("TAPID_RELEASE_RECORD_URL")
+            .env_remove("TAPID_STABLE_ENDPOINTS")
+            .env_remove("TAPID_RELEASE_KEYRING")
+            .env("PATH", fixture.root.join("bin"))
+            .env("FIXTURE", &fixture.root)
+            .env("TAPID_RELEASE_KEYRING", fixture.root.join("keyring.json")),
+    );
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("refusing to downgrade running Tapid")

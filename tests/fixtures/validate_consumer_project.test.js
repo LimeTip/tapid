@@ -15,6 +15,11 @@ const source = fs.readFileSync(path.join(__dirname, 'validate_consumer_project.j
 function validate(platform, failure, releaseTag = 'v0.0.10') {
   const calls = [];
   const binary = path.resolve('published', 'tapid');
+  const validatorArgs = releaseTag
+    ? ['--binary', binary, '--release-tag', releaseTag]
+    : ['--binary', binary];
+  const nativeRestricted = releaseTag !== 'v0.0.9' &&
+    (platform === 'darwin' || (platform === 'linux' && !releaseTag));
   const context = {
     require(name) {
       if (name === 'node:fs') return {
@@ -27,7 +32,7 @@ function validate(platform, failure, releaseTag = 'v0.0.10') {
         calls.push(args);
         const result = { status: 0, signal: null, stdout: '', stderr: '' };
         if (args[0] === 'install') return result;
-        if (platform !== 'darwin' && releaseTag !== 'v0.0.9') {
+        if (!nativeRestricted && releaseTag !== 'v0.0.9') {
           result.status = failure === 'success' ? 0 : 1;
           result.stderr = failure === 'unrelated' ? 'unrelated failure' :
             'sandbox execution failed (unsupported-containment): no process was started and no enforcement receipt was issued';
@@ -40,7 +45,8 @@ function validate(platform, failure, releaseTag = 'v0.0.10') {
           options.env.TAPID_FIXTURE !== '1' ? 42 : Number(forwarded[1]);
         result.stdout = 'TAPID_FIXTURE_STARTED=' + JSON.stringify(forwarded) + '\n';
         result.stderr = JSON.stringify({ schema_version: 1, assurance: 'Restricted',
-          backend: { name: 'tapid-runner/macos-seatbelt-restricted-experimental' },
+          backend: { name: platform === 'linux' ? 'tapid-runner/linux-landlock-seccomp-restricted' :
+            'tapid-runner/macos-seatbelt-restricted-experimental' },
           enforced: { filesystem_read: true, filesystem_write: true, network: true, environment_sanitization: true },
           termination: `Exited(${result.status})`, configured_limits: { timeout_seconds: null } });
         if (releaseTag === 'v0.0.9') {
@@ -53,7 +59,7 @@ function validate(platform, failure, releaseTag = 'v0.0.10') {
       } };
       return require(name);
     },
-    process: { platform, argv: ['node', 'validator', '--binary', binary, '--release-tag', releaseTag],
+    process: { platform, argv: ['node', 'validator', ...validatorArgs],
       env: { TAPID_FIXTURE_PROJECT: '/fixture' }, stdout: { write() {} }, stderr: { write() {} } },
     console: { log() {} },
   };
@@ -81,4 +87,7 @@ for (const failure of ['argv', 'exit']) {
 }
 test('unknown published releases require an explicit reviewed contract', () => {
   assert.throws(() => validate('linux', undefined, 'v9.9.9'), /unreviewed root-script release/);
+});
+test('linux source validation exercises native Restricted execution', () => {
+  assert.equal(validate('linux', undefined, null).length, 7);
 });

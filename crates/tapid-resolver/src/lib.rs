@@ -24,11 +24,12 @@ fn requirement_base_parse_count() -> usize {
     REQUIREMENT_BASE_PARSE_COUNT.with(std::cell::Cell::get)
 }
 
-/// A validated dependency requirement in Tapid's supported npm range subset.
+/// A validated npm version range, optionally bound to an alias target.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Requirement {
     /// Canonical trimmed source requirement used for deterministic diagnostics.
     pub raw: String,
+    alias: Option<PackageName>,
     clauses: Vec<RequirementClause>,
 }
 
@@ -80,8 +81,31 @@ impl FromStr for Requirement {
     type Err = ResolveError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let raw = s.trim();
+        if let Some(spec) = raw.strip_prefix("npm:") {
+            let (name, range) = match spec.rfind('@').filter(|index| *index > 0) {
+                Some(index) => (&spec[..index], &spec[index + 1..]),
+                None => (spec, "*"),
+            };
+            let name = name
+                .parse::<PackageName>()
+                .map_err(|_| ResolveError::UnsupportedRange(raw.into()))?;
+            let range = range.trim();
+            if range.is_empty() || range.starts_with("npm:") {
+                return Err(ResolveError::UnsupportedRange(raw.into()));
+            }
+            let mut requirement = range
+                .parse::<Requirement>()
+                .map_err(|_| ResolveError::UnsupportedRange(raw.into()))?;
+            requirement.raw = raw.into();
+            requirement.alias = Some(name);
+            return Ok(requirement);
+        }
         if raw.is_empty() {
-            return Err(ResolveError::InvalidRequirement(s.into()));
+            return Ok(Self {
+                raw: raw.into(),
+                alias: None,
+                clauses: vec![RequirementClause::AnyStable],
+            });
         }
         let mut clauses = Vec::new();
         for clause in raw.split("||") {
@@ -89,15 +113,64 @@ impl FromStr for Requirement {
             if clause.is_empty() {
                 return Err(ResolveError::UnsupportedRange(raw.into()));
             }
-            if clause == "*" {
+            if clause == "*" || clause.eq_ignore_ascii_case("x") {
                 clauses.push(RequirementClause::AnyStable);
                 continue;
             }
             let mut comparators = Vec::new();
+            if let Some(comparators_for_wildcard) = parse_x_range(clause) {
+                if comparators_for_wildcard.is_empty() {
+                    clauses.push(RequirementClause::AnyStable);
+                } else {
+                    clauses.push(RequirementClause::Comparators(comparators_for_wildcard));
+                }
+                continue;
+            }
             let tokens = clause.split_whitespace().collect::<Vec<_>>();
+            if let Some((lower, upper)) =
+                tokens.as_slice().split_first().and_then(|(first, rest)| {
+                    if rest.first() == Some(&"-") && rest.len() == 2 {
+                        Some((*first, rest[1]))
+                    } else {
+                        None
+                    }
+                })
+            {
+                let Some(lower) = parse_requirement_base(RequirementOperator::GreaterEqual, lower)
+                else {
+                    return Err(ResolveError::UnsupportedRange(raw.into()));
+                };
+                let Some(upper) = parse_requirement_base(RequirementOperator::LessEqual, upper)
+                else {
+                    return Err(ResolveError::UnsupportedRange(raw.into()));
+                };
+                comparators.push(RequirementComparator {
+                    op: RequirementOperator::GreaterEqual,
+                    base: lower,
+                });
+                comparators.push(RequirementComparator {
+                    op: RequirementOperator::LessEqual,
+                    base: upper,
+                });
+                clauses.push(RequirementClause::Comparators(comparators));
+                continue;
+            }
             let mut index = 0;
             while index < tokens.len() {
                 let token = tokens[index];
+                let separated_wildcard_comparators = separated_operator(token)
+                    .and_then(|_| tokens.get(index + 1).copied())
+                    .and_then(|value| parse_x_range(&format!("{token}{value}")));
+                if let Some(wildcard_comparators) = separated_wildcard_comparators {
+                    comparators.extend(wildcard_comparators);
+                    index += 2;
+                    continue;
+                }
+                if let Some(wildcard_comparators) = parse_x_range(token) {
+                    comparators.extend(wildcard_comparators);
+                    index += 1;
+                    continue;
+                }
                 let (op, value) = if let Some(op) = separated_operator(token) {
                     index += 1;
                     let Some(value) = tokens.get(index).copied() else {
@@ -117,16 +190,116 @@ impl FromStr for Requirement {
         }
         Ok(Self {
             raw: raw.into(),
+            alias: None,
             clauses,
         })
     }
 }
 
 impl Requirement {
+    /// Actual registry name for an npm alias, or the declared dependency name.
+    pub fn package_name<'a>(&'a self, declared: &'a PackageName) -> &'a PackageName {
+        self.alias.as_ref().unwrap_or(declared)
+    }
+
+    pub fn is_alias(&self) -> bool {
+        self.alias.is_some()
+    }
     /// Returns whether an exact version satisfies this validated requirement.
     pub fn matches(&self, version: &PackageVersion) -> bool {
         matches_requirement(version, self)
     }
+}
+
+fn parse_x_range(clause: &str) -> Option<Vec<RequirementComparator>> {
+    let (op, value) = requirement_token(clause);
+    let value = value.strip_prefix('v').unwrap_or(value);
+    let value = if let Some((version, build)) = value.split_once('+') {
+        semver::BuildMetadata::new(build).ok()?;
+        version
+    } else {
+        value
+    };
+    let parts = value.split('.').collect::<Vec<_>>();
+    let wildcard_at = parts
+        .iter()
+        .position(|part| matches!(part.to_ascii_lowercase().as_str(), "x" | "*"));
+    let wildcard_at = wildcard_at?;
+    if parts[wildcard_at..]
+        .iter()
+        .any(|part| !matches!(part.to_ascii_lowercase().as_str(), "x" | "*"))
+    {
+        return None;
+    }
+    if parts[..wildcard_at].iter().any(|part| {
+        part.is_empty()
+            || !part.bytes().all(|b| b.is_ascii_digit())
+            || (part.len() > 1 && part.starts_with('0'))
+    }) {
+        return None;
+    }
+    let supported_op = matches!(
+        op,
+        RequirementOperator::Exact
+            | RequirementOperator::Caret
+            | RequirementOperator::Tilde
+            | RequirementOperator::Greater
+            | RequirementOperator::GreaterEqual
+            | RequirementOperator::Less
+            | RequirementOperator::LessEqual
+    );
+    if !supported_op {
+        return None;
+    }
+    if wildcard_at == 0 {
+        return Some(match op {
+            RequirementOperator::Greater | RequirementOperator::Less => {
+                vec![RequirementComparator {
+                    op: RequirementOperator::Less,
+                    base: RequirementBase {
+                        version: PackageVersion::stable(0, 0, 0),
+                        precision: RequirementPrecision::Full,
+                    },
+                }]
+            }
+            _ => Vec::new(),
+        });
+    }
+
+    let prefix = parts[..wildcard_at].join(".");
+    let lower = parse_requirement_base(RequirementOperator::GreaterEqual, &prefix)?;
+    let lower_comparator = RequirementComparator {
+        op: RequirementOperator::GreaterEqual,
+        base: lower.clone(),
+    };
+    let partial_upper = RequirementBase {
+        version: partial_upper_bound(&lower.version, lower.precision)?,
+        precision: RequirementPrecision::Full,
+    };
+    let less_than = |base| RequirementComparator {
+        op: RequirementOperator::Less,
+        base,
+    };
+
+    Some(match op {
+        RequirementOperator::Greater => vec![RequirementComparator {
+            op: RequirementOperator::GreaterEqual,
+            base: partial_upper,
+        }],
+        RequirementOperator::GreaterEqual => vec![lower_comparator],
+        RequirementOperator::Less => vec![less_than(lower)],
+        RequirementOperator::LessEqual => vec![less_than(partial_upper)],
+        RequirementOperator::Caret => vec![
+            lower_comparator,
+            less_than(RequirementBase {
+                version: caret_upper_bound(&lower)?,
+                precision: RequirementPrecision::Full,
+            }),
+        ],
+        RequirementOperator::Tilde | RequirementOperator::Exact => {
+            vec![lower_comparator, less_than(partial_upper)]
+        }
+    })
 }
 
 fn separated_operator(token: &str) -> Option<RequirementOperator> {
@@ -136,6 +309,7 @@ fn separated_operator(token: &str) -> Option<RequirementOperator> {
         ">=" => Some(RequirementOperator::GreaterEqual),
         "<" => Some(RequirementOperator::Less),
         "<=" => Some(RequirementOperator::LessEqual),
+        "=" => Some(RequirementOperator::Exact),
         _ => None,
     }
 }
@@ -174,46 +348,45 @@ fn parse_requirement_base(op: RequirementOperator, value: &str) -> Option<Requir
     #[cfg(test)]
     REQUIREMENT_BASE_PARSE_COUNT.with(|count| count.set(count.get() + 1));
 
-    value
-        .parse::<PackageVersion>()
-        .ok()
-        .map(|version| RequirementBase {
-            version,
+    let value = value.strip_prefix('v').unwrap_or(value);
+    if let Ok(mut version) = semver::Version::parse(value) {
+        version.build = semver::BuildMetadata::EMPTY;
+        return Some(RequirementBase {
+            version: version.to_string().parse().ok()?,
             precision: RequirementPrecision::Full,
+        });
+    }
+    let components = value.split('.').collect::<Vec<_>>();
+    if !matches!(components.len(), 1 | 2)
+        || components.iter().any(|component| {
+            component.is_empty()
+                || !component.bytes().all(|byte| byte.is_ascii_digit())
+                || (component.len() > 1 && component.starts_with('0'))
         })
-        .or_else(|| {
-            let components = value.split('.').collect::<Vec<_>>();
-            if !matches!(components.len(), 1 | 2)
-                || components.iter().any(|component| {
-                    component.is_empty()
-                        || !component.bytes().all(|byte| byte.is_ascii_digit())
-                        || (component.len() > 1 && component.starts_with('0'))
-                })
-                || (!matches!(
-                    op,
-                    RequirementOperator::Exact
-                        | RequirementOperator::Tilde
-                        | RequirementOperator::Greater
-                        | RequirementOperator::GreaterEqual
-                        | RequirementOperator::Less
-                        | RequirementOperator::LessEqual
-                ) && !(op == RequirementOperator::Caret && components.len() == 1))
-            {
-                return None;
-            }
-            let major = components[0].parse().ok()?;
-            let minor = components
-                .get(1)
-                .map_or(Some(0), |value| value.parse().ok())?;
-            Some(RequirementBase {
-                version: PackageVersion::stable(major, minor, 0),
-                precision: if components.len() == 1 {
-                    RequirementPrecision::Major
-                } else {
-                    RequirementPrecision::Minor
-                },
-            })
-        })
+        || (!matches!(
+            op,
+            RequirementOperator::Exact
+                | RequirementOperator::Tilde
+                | RequirementOperator::Greater
+                | RequirementOperator::GreaterEqual
+                | RequirementOperator::Less
+                | RequirementOperator::LessEqual
+        ) && !(op == RequirementOperator::Caret && matches!(components.len(), 1 | 2)))
+    {
+        return None;
+    }
+    let major = components[0].parse().ok()?;
+    let minor = components
+        .get(1)
+        .map_or(Some(0), |value| value.parse().ok())?;
+    Some(RequirementBase {
+        version: PackageVersion::stable(major, minor, 0),
+        precision: if components.len() == 1 {
+            RequirementPrecision::Major
+        } else {
+            RequirementPrecision::Minor
+        },
+    })
 }
 
 /// Normalized metadata supplied by a registry adapter. The resolver never fetches it.
@@ -228,6 +401,8 @@ pub struct PackageVersionMetadata {
     /// Peer requirements declared by this exact version. These are never merged
     /// into `dependencies` and are retained for context validation.
     pub peer_dependencies: BTreeMap<PackageName, Requirement>,
+    /// Peer requirements explicitly marked optional by the registry.
+    pub optional_peer_dependencies: BTreeSet<PackageName>,
 }
 
 /// Normalized deterministic package records belonging to one registry origin.
@@ -272,6 +447,8 @@ pub struct Resolution {
     pub selected: Vec<RegistryPackageId>,
     /// Exact identities selected for direct manifest dependencies.
     pub roots: Vec<RegistryPackageId>,
+    /// Local root names bound to exact actual package identities.
+    pub root_bindings: BTreeMap<(RegistryOrigin, PackageName), RegistryPackageId>,
     /// Exact dependency edges used by lockfile and linker construction.
     pub dependencies: Vec<ResolvedDependency>,
     /// Peer providers bound to each selected package identity.
@@ -295,6 +472,7 @@ pub enum ResolveError {
     InvalidRequirement(String),
     UnsupportedRange(String),
     UnsupportedMode(&'static str),
+    RegistryRouting(String),
     DuplicateMetadata {
         package: String,
     },
@@ -353,6 +531,20 @@ pub fn resolve_graph(
     metadata: &[RegistryMetadata],
     options: ResolutionOptions,
 ) -> Result<Resolution, ResolveError> {
+    resolve_graph_with_routing(ds, metadata, options, |parent, _| Ok(parent.clone()))
+}
+
+/// Resolves a graph while selecting each transitive package's registry from its
+/// parent registry and dependency name. Root identities remain caller-selected.
+pub fn resolve_graph_with_routing<F>(
+    ds: &[Dependency],
+    metadata: &[RegistryMetadata],
+    options: ResolutionOptions,
+    mut registry_for_dependency: F,
+) -> Result<Resolution, ResolveError>
+where
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+{
     if options.frozen {
         return Err(ResolveError::UnsupportedMode(
             "frozen resolution requires a lockfile replay input",
@@ -364,11 +556,20 @@ pub fn resolve_graph(
         ));
     }
     let candidate_index = candidate_index(metadata);
-    let mut root_constraints: BTreeMap<(RegistryOrigin, PackageName), BTreeSet<Requirement>> =
-        BTreeMap::new();
+    let mut root_constraints: BTreeMap<
+        (RegistryOrigin, PackageName, PackageName),
+        BTreeSet<Requirement>,
+    > = BTreeMap::new();
     for dependency in ds {
         root_constraints
-            .entry((dependency.registry.clone(), dependency.name.clone()))
+            .entry((
+                dependency.registry.clone(),
+                dependency.name.clone(),
+                dependency
+                    .requirement
+                    .package_name(&dependency.name)
+                    .clone(),
+            ))
             .or_default()
             .insert(dependency.requirement.clone());
     }
@@ -376,9 +577,10 @@ pub fn resolve_graph(
     let mut selected = BTreeSet::new();
     let mut selected_packages = BTreeMap::new();
     let mut roots = Vec::new();
+    let mut root_bindings = BTreeMap::new();
     let mut queue = Vec::new();
     let mut missing_metadata = BTreeSet::new();
-    for ((registry, name), requirements) in root_constraints {
+    for ((registry, local_name, name), requirements) in root_constraints {
         let package = match select_package(&registry, &name, &requirements, &candidate_index) {
             Ok(package) => package,
             Err(ResolveError::MissingCandidate { .. })
@@ -389,10 +591,17 @@ pub fn resolve_graph(
             }
             Err(error) => return Err(error),
         };
-        let id = RegistryPackageId::new(registry, name, package.version.clone());
+        let id = RegistryPackageId::new(registry.clone(), name, package.version.clone());
         selected.insert(id.clone());
         selected_packages.insert(id.clone(), package);
         roots.push(id.clone());
+        if let Some(previous) = root_bindings.insert((registry, local_name.clone()), id.clone())
+            && previous != id
+        {
+            return Err(ResolveError::RegistryRouting(format!(
+                "conflicting root binding for {local_name}"
+            )));
+        }
         queue.push(id);
     }
 
@@ -408,28 +617,24 @@ pub fn resolve_graph(
             .dependencies
             .clone();
         for (dependency, requirement) in package_dependencies {
+            let actual_name = requirement.package_name(&dependency).clone();
+            let registry = registry_for_dependency(&parent.registry, &actual_name)
+                .map_err(ResolveError::RegistryRouting)?;
             let requirements = BTreeSet::from([requirement]);
-            let child_package = match select_package(
-                &parent.registry,
-                &dependency,
-                &requirements,
-                &candidate_index,
-            ) {
-                Ok(package) => package,
-                Err(ResolveError::MissingCandidate { .. })
-                    if !candidate_index
-                        .contains_key(&(parent.registry.clone(), dependency.clone())) =>
-                {
-                    missing_metadata.insert((parent.registry.to_string(), dependency.to_string()));
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let child = RegistryPackageId::new(
-                parent.registry.clone(),
-                dependency.clone(),
-                child_package.version.clone(),
-            );
+            let child_package =
+                match select_package(&registry, &actual_name, &requirements, &candidate_index) {
+                    Ok(package) => package,
+                    Err(ResolveError::MissingCandidate { .. })
+                        if !candidate_index
+                            .contains_key(&(registry.clone(), actual_name.clone())) =>
+                    {
+                        missing_metadata.insert((registry.to_string(), actual_name.to_string()));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+            let child =
+                RegistryPackageId::new(registry, actual_name, child_package.version.clone());
             dependencies.insert(ResolvedDependency {
                 parent: parent.clone(),
                 dependency: dependency.clone(),
@@ -448,31 +653,64 @@ pub fn resolve_graph(
         });
     }
 
-    let root_providers = roots
-        .iter()
-        .map(|root| {
-            (
-                (root.registry.clone(), root.name.clone()),
-                root.version.clone(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    roots.sort();
+    roots.dedup();
+    let mut root_providers: BTreeMap<PackageName, Vec<&RegistryPackageId>> = BTreeMap::new();
+    for ((_, local_name), root) in &root_bindings {
+        root_providers
+            .entry(local_name.clone())
+            .or_default()
+            .push(root);
+    }
     let mut peer_contexts = BTreeMap::new();
     for (id, package) in &selected_packages {
         let mut context = PeerContext::default();
         for (peer, requirement) in &package.peer_dependencies {
-            let provider = root_providers.get(&(id.registry.clone(), peer.clone()));
-            if !provider.is_some_and(|version| requirement.matches(version)) {
+            let candidates = root_providers.get(peer);
+            let mut provider = None;
+            for candidate in candidates.into_iter().flatten() {
+                let actual_name = if requirement.is_alias() {
+                    requirement.package_name(peer)
+                } else {
+                    &candidate.name
+                };
+                let peer_registry = registry_for_dependency(&id.registry, actual_name)
+                    .map_err(ResolveError::RegistryRouting)?;
+                if candidate.registry != peer_registry {
+                    continue;
+                }
+                if provider.replace(*candidate).is_some() {
+                    return Err(ResolveError::RegistryRouting(format!(
+                        "ambiguous root peer binding for {peer}"
+                    )));
+                }
+            }
+            if candidates.is_none() {
+                // Preserve route validation even when no local provider exists.
+                registry_for_dependency(&id.registry, requirement.package_name(peer))
+                    .map_err(ResolveError::RegistryRouting)?;
+            }
+            if provider.is_none() && package.optional_peer_dependencies.contains(peer) {
+                continue;
+            }
+
+            if !provider.is_some_and(|provider| {
+                requirement.matches(&provider.version)
+                    && (!requirement.is_alias() || requirement.package_name(peer) == &provider.name)
+            }) {
                 return Err(ResolveError::PeerDependency {
                     package: id.to_string(),
                     peer: peer.to_string(),
                     requirement: requirement.raw.clone(),
-                    provider: provider.map(ToString::to_string),
+                    provider: provider.map(|provider| provider.version.to_string()),
                 });
             }
             context = context.with(
                 peer.clone(),
-                provider.expect("validated root peer provider").clone(),
+                provider
+                    .expect("validated root peer provider")
+                    .version
+                    .clone(),
             );
         }
         peer_contexts.insert(id.clone(), context);
@@ -481,6 +719,7 @@ pub fn resolve_graph(
     Ok(Resolution {
         selected: selected.into_iter().collect(),
         roots,
+        root_bindings,
         dependencies: dependencies.into_iter().collect(),
         peer_contexts,
     })
@@ -577,6 +816,25 @@ fn partial_upper_bound(
     }
 }
 
+fn caret_upper_bound(base: &RequirementBase) -> Option<PackageVersion> {
+    if base.precision == RequirementPrecision::Major || base.version.major() > 0 {
+        base.version
+            .major()
+            .checked_add(1)
+            .map(|major| PackageVersion::stable(major, 0, 0))
+    } else if base.precision == RequirementPrecision::Minor || base.version.minor() > 0 {
+        base.version
+            .minor()
+            .checked_add(1)
+            .map(|minor| PackageVersion::stable(0, minor, 0))
+    } else {
+        base.version
+            .patch()
+            .checked_add(1)
+            .map(|patch| PackageVersion::stable(0, 0, patch))
+    }
+}
+
 fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> bool {
     requirement.clauses.iter().any(|clause| match clause {
         RequirementClause::AnyStable => version.prerelease().is_none(),
@@ -604,49 +862,23 @@ fn matches_requirement(version: &PackageVersion, requirement: &Requirement) -> b
                                     && version.minor() == base.minor()
                             }
                         },
-                        RequirementOperator::Caret => {
-                            if comparator.base.precision == RequirementPrecision::Major {
-                                return base
-                                    .major()
-                                    .checked_add(1)
-                                    .map(|major| {
-                                        let upper = PackageVersion::stable(major, 0, 0);
-                                        version >= base && version < &upper
-                                    })
-                                    .unwrap_or(version >= base);
-                            }
-                            if base.major() > 0 {
-                                return base
-                                    .major()
-                                    .checked_add(1)
-                                    .map(|major| {
-                                        let upper = PackageVersion::stable(major, 0, 0);
-                                        version >= base && version < &upper
-                                    })
-                                    .unwrap_or(version >= base);
-                            }
-                            if base.minor() > 0 {
-                                return base
-                                    .minor()
-                                    .checked_add(1)
-                                    .map(|minor| {
-                                        let upper = PackageVersion::stable(0, minor, 0);
-                                        version >= base && version < &upper
-                                    })
-                                    .unwrap_or(
-                                        version >= base
-                                            && version.major() == 0
-                                            && version.minor() == base.minor(),
-                                    );
-                            }
-                            base.patch()
-                                .checked_add(1)
-                                .map(|patch| {
-                                    let upper = PackageVersion::stable(0, 0, patch);
-                                    version >= base && version < &upper
-                                })
-                                .unwrap_or(version == base)
-                        }
+                        RequirementOperator::Caret => caret_upper_bound(&comparator.base)
+                            .map(|upper| version >= base && version < &upper)
+                            .unwrap_or_else(|| {
+                                if comparator.base.precision == RequirementPrecision::Major
+                                    || base.major() > 0
+                                {
+                                    version >= base && version.major() == base.major()
+                                } else if comparator.base.precision == RequirementPrecision::Minor
+                                    || base.minor() > 0
+                                {
+                                    version >= base
+                                        && version.major() == base.major()
+                                        && version.minor() == base.minor()
+                                } else {
+                                    version == base
+                                }
+                            }),
                         RequirementOperator::Tilde => {
                             version >= base
                                 && version.major() == base.major()
@@ -701,6 +933,7 @@ pub fn resolve(
                     version: p.identity.version.clone(),
                     dependencies: BTreeMap::new(),
                     peer_dependencies: BTreeMap::new(),
+                    optional_peer_dependencies: BTreeSet::new(),
                 })
                 .collect(),
         })
@@ -709,708 +942,5 @@ pub fn resolve(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use proptest::prelude::*;
-    fn req(s: &str) -> Requirement {
-        s.parse().unwrap()
-    }
-
-    #[test]
-    fn validated_requirement_reuses_its_parsed_form_when_matching_candidates() {
-        reset_requirement_base_parse_count();
-        let requirement = req("^1.2.3");
-        let parses_after_validation = requirement_base_parse_count();
-        assert!(parses_after_validation > 0);
-
-        for version in ["1.2.3", "1.9.0", "2.0.0"] {
-            assert_eq!(
-                requirement.matches(&version.parse().unwrap()),
-                version != "2.0.0"
-            );
-        }
-
-        assert_eq!(
-            requirement_base_parse_count(),
-            parses_after_validation,
-            "candidate matching must not repeatedly parse the validated requirement"
-        );
-    }
-
-    proptest! {
-        #[test]
-        fn generated_exact_requirements_trim_and_match_their_version(
-            major in 0u64..1000, minor in 0u64..1000, patch in 0u64..1000,
-        ) {
-            let version_text = format!("{major}.{minor}.{patch}");
-            let version: PackageVersion = version_text.parse().unwrap();
-            let requirement: Requirement = format!("  ={version_text}  ").parse().unwrap();
-            prop_assert_eq!(&requirement.raw, &format!("={version_text}"));
-            prop_assert!(requirement.matches(&version));
-        }
-    }
-
-    fn dep(registry: &str, name: &str, range: &str) -> Dependency {
-        Dependency::new(registry.parse().unwrap(), name.parse().unwrap(), req(range))
-    }
-    fn package(name: &str, version: &str, dependencies: &[(&str, &str)]) -> PackageVersionMetadata {
-        PackageVersionMetadata {
-            name: name.parse().unwrap(),
-            version: version.parse().unwrap(),
-            dependencies: dependencies
-                .iter()
-                .map(|(n, r)| (n.parse().unwrap(), req(r)))
-                .collect(),
-            peer_dependencies: BTreeMap::new(),
-        }
-    }
-    fn registry(url: &str, packages: Vec<PackageVersionMetadata>) -> RegistryMetadata {
-        RegistryMetadata::normalize(url.parse().unwrap(), packages).unwrap()
-    }
-
-    #[test]
-    fn exact_prerelease_selects_only_the_matching_candidate() {
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![
-                package("foo", "2.0.0-rc.23", &[]),
-                package("foo", "2.0.0-rc.24", &[]),
-                package("foo", "2.0.0", &[]),
-            ],
-        );
-        let r = resolve_graph(
-            &[dep("https://registry.npmjs.org", "foo", "2.0.0-rc.24")],
-            &[m],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            r.selected[0].to_string(),
-            "https://registry.npmjs.org:foo@2.0.0-rc.24"
-        );
-    }
-
-    #[test]
-    fn prerelease_caret_selects_matching_prereleases_and_stable_release() {
-        let prerelease_only = registry(
-            "https://registry.npmjs.org",
-            vec![
-                package("foo", "2.0.0-next.4", &[]),
-                package("foo", "2.0.0-next.6", &[]),
-                package("foo", "2.1.0-next.1", &[]),
-            ],
-        );
-        let selected = resolve_graph(
-            &[dep("https://registry.npmjs.org", "foo", "^2.0.0-next.5")],
-            &[prerelease_only],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            selected.selected[0].to_string(),
-            "https://registry.npmjs.org:foo@2.0.0-next.6"
-        );
-
-        let with_stable = registry(
-            "https://registry.npmjs.org",
-            vec![
-                package("foo", "2.0.0-next.6", &[]),
-                package("foo", "2.0.0", &[]),
-            ],
-        );
-        let selected = resolve_graph(
-            &[dep("https://registry.npmjs.org", "foo", "^2.0.0-next.5")],
-            &[with_stable],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            selected.selected[0].to_string(),
-            "https://registry.npmjs.org:foo@2.0.0"
-        );
-    }
-
-    #[test]
-    fn stable_ranges_do_not_select_prerelease_candidates() {
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![package("foo", "2.0.0-rc.24", &[])],
-        );
-        let error = resolve_graph(
-            &[dep("https://registry.npmjs.org", "foo", "*")],
-            &[m],
-            Default::default(),
-        )
-        .unwrap_err();
-        assert!(matches!(error, ResolveError::MissingCandidate { .. }));
-    }
-
-    #[test]
-    fn npm_or_ranges_select_the_highest_matching_alternative() {
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![
-                package("foo", "2.4.1", &[]),
-                package("foo", "2.9.0", &[]),
-                package("foo", "3.1.0", &[]),
-                package("foo", "4.0.0", &[]),
-            ],
-        );
-        let selected = resolve_graph(
-            &[dep("https://registry.npmjs.org", "foo", "^2.4.1 || ^3.0.0")],
-            &[m],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            selected.selected[0].to_string(),
-            "https://registry.npmjs.org:foo@3.1.0"
-        );
-    }
-
-    #[test]
-    fn malformed_or_ranges_are_rejected() {
-        for requirement in ["|| ^1.0.0", "^1.0.0 ||", "^1.0.0 || || ^2.0.0"] {
-            assert!(matches!(
-                requirement.parse::<Requirement>(),
-                Err(ResolveError::UnsupportedRange(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn exact_and_caret_are_deterministic() {
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![
-                package("foo", "1.1.0", &[]),
-                package("foo", "1.9.0", &[]),
-                package("foo", "2.0.0", &[]),
-            ],
-        );
-        let r = resolve_graph(
-            &[dep("https://registry.npmjs.org", "foo", "^1.0.0")],
-            &[m],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            r.selected[0].to_string(),
-            "https://registry.npmjs.org:foo@1.9.0"
-        );
-    }
-
-    #[test]
-    fn npm_comparison_intersections_support_spaced_and_compact_operators() {
-        for text in [">= 2.1.2 < 3", ">=2.1.2 <3"] {
-            let requirement: Requirement = text.parse().unwrap();
-            assert!(!requirement.matches(&"2.1.1".parse().unwrap()), "{text}");
-            assert!(requirement.matches(&"2.1.2".parse().unwrap()), "{text}");
-            assert!(requirement.matches(&"2.9.9".parse().unwrap()), "{text}");
-            assert!(!requirement.matches(&"3.0.0".parse().unwrap()), "{text}");
-            assert!(
-                !requirement.matches(&"2.2.0-beta.1".parse().unwrap()),
-                "{text}"
-            );
-        }
-    }
-
-    #[test]
-    fn partial_comparison_bounds_follow_npm_x_range_semantics() {
-        for (text, matching, rejected) in [
-            (">2", "3.0.0", "2.9.9"),
-            ("<=2", "2.9.9", "3.0.0"),
-            (">2.1", "2.2.0", "2.1.99"),
-            ("<=2.1", "2.1.99", "2.2.0"),
-        ] {
-            let requirement: Requirement = text.parse().unwrap();
-            assert!(requirement.matches(&matching.parse().unwrap()), "{text}");
-            assert!(!requirement.matches(&rejected.parse().unwrap()), "{text}");
-        }
-
-        for text in ["<3 3.0.0-beta.1", "<=2 3.0.0-beta.1"] {
-            let requirement: Requirement = text.parse().unwrap();
-            assert!(
-                !requirement.matches(&"3.0.0-beta.1".parse().unwrap()),
-                "{text} must preserve npm's -0 partial upper bound"
-            );
-        }
-    }
-
-    #[test]
-    fn partial_range_intersection_allows_explicit_matching_prerelease() {
-        let below_major_floor: Requirement = "2 2.0.0-beta.1".parse().unwrap();
-        assert!(!below_major_floor.matches(&"2.0.0-beta.1".parse().unwrap()));
-
-        let major: Requirement = "2 2.1.0-beta.1".parse().unwrap();
-        assert!(major.matches(&"2.1.0-beta.1".parse().unwrap()));
-        assert!(!major.matches(&"2.1.0-beta.2".parse().unwrap()));
-
-        let below_minor_floor: Requirement = "2.1 2.1.0-beta.1".parse().unwrap();
-        assert!(!below_minor_floor.matches(&"2.1.0-beta.1".parse().unwrap()));
-
-        let minor: Requirement = "2.1 2.1.1-beta.1".parse().unwrap();
-        assert!(minor.matches(&"2.1.1-beta.1".parse().unwrap()));
-        assert!(!minor.matches(&"2.1.2-beta.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn bare_major_range_selects_highest_matching_major() {
-        let requirement = req("2");
-        assert!(!requirement.matches(&"2.0.0-beta.1".parse().unwrap()));
-        assert!(requirement.matches(&"2.0.0".parse().unwrap()));
-        assert!(requirement.matches(&"2.9.9".parse().unwrap()));
-        assert!(!requirement.matches(&"3.0.0".parse().unwrap()));
-    }
-
-    #[test]
-    fn bare_minor_range_selects_highest_matching_minor() {
-        let requirement = req("2.1");
-        assert!(!requirement.matches(&"2.1.0-beta.1".parse().unwrap()));
-        assert!(requirement.matches(&"2.1.0".parse().unwrap()));
-        assert!(requirement.matches(&"2.1.9".parse().unwrap()));
-        assert!(!requirement.matches(&"2.2.0".parse().unwrap()));
-    }
-
-    #[test]
-    fn partial_tilde_ranges_follow_npm_semantics() {
-        for text in ["~2", "~ 2"] {
-            let requirement: Requirement = text.parse().unwrap();
-            assert!(
-                !requirement.matches(&"2.0.0-beta.1".parse().unwrap()),
-                "{text}"
-            );
-            assert!(requirement.matches(&"2.0.0".parse().unwrap()), "{text}");
-            assert!(requirement.matches(&"2.9.9".parse().unwrap()), "{text}");
-            assert!(!requirement.matches(&"3.0.0".parse().unwrap()), "{text}");
-        }
-
-        for text in ["~2.1", "~ 2.1"] {
-            let requirement: Requirement = text.parse().unwrap();
-            assert!(
-                !requirement.matches(&"2.1.0-beta.1".parse().unwrap()),
-                "{text}"
-            );
-            assert!(requirement.matches(&"2.1.0".parse().unwrap()), "{text}");
-            assert!(requirement.matches(&"2.1.99".parse().unwrap()), "{text}");
-            assert!(!requirement.matches(&"2.2.0".parse().unwrap()), "{text}");
-        }
-
-        let explicit_prerelease: Requirement = "~2 2.1.0-beta.1".parse().unwrap();
-        assert!(explicit_prerelease.matches(&"2.1.0-beta.1".parse().unwrap()));
-        assert!(!explicit_prerelease.matches(&"2.1.0-beta.2".parse().unwrap()));
-    }
-
-    #[test]
-    fn partial_ranges_reject_noncanonical_components() {
-        for requirement in ["02", "2.01", "2.", ".2", "2.1.0.0"] {
-            assert!(matches!(
-                requirement.parse::<Requirement>(),
-                Err(ResolveError::UnsupportedRange(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn major_only_caret_range_selects_highest_matching_major() {
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![
-                package("foo", "3.0.0", &[]),
-                package("foo", "3.9.0", &[]),
-                package("foo", "4.0.0", &[]),
-            ],
-        );
-
-        let r = resolve_graph(
-            &[dep("https://registry.npmjs.org", "foo", "^3")],
-            &[m],
-            Default::default(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            r.selected[0].to_string(),
-            "https://registry.npmjs.org:foo@3.9.0"
-        );
-    }
-
-    #[test]
-    fn zero_major_only_caret_range_uses_next_major_as_upper_bound() {
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![
-                package("foo", "0.0.1", &[]),
-                package("foo", "0.9.0", &[]),
-                package("foo", "1.0.0", &[]),
-            ],
-        );
-
-        let r = resolve_graph(
-            &[dep("https://registry.npmjs.org", "foo", "^0")],
-            &[m],
-            Default::default(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            r.selected[0].to_string(),
-            "https://registry.npmjs.org:foo@0.9.0"
-        );
-    }
-
-    #[test]
-    fn resolves_peer_requirements_from_root_providers_without_installing_peer_as_root() {
-        let mut plugin = package("plugin", "1.0.0", &[]);
-        plugin.peer_dependencies = BTreeMap::from([("react".parse().unwrap(), req("^18.0.0"))]);
-        let metadata = registry(
-            "https://registry.npmjs.org",
-            vec![plugin, package("react", "18.2.0", &[])],
-        );
-        let result = resolve_graph(
-            &[
-                dep("https://registry.npmjs.org", "plugin", "1.0.0"),
-                dep("https://registry.npmjs.org", "react", "^18.0.0"),
-            ],
-            &[metadata],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(result.roots.len(), 2);
-        assert_eq!(result.selected.len(), 2);
-        let plugin_id = RegistryPackageId::new(
-            "https://registry.npmjs.org".parse().unwrap(),
-            "plugin".parse().unwrap(),
-            "1.0.0".parse().unwrap(),
-        );
-        let expected_context = tapid_core::PeerContext::default()
-            .with("react".parse().unwrap(), "18.2.0".parse().unwrap());
-        assert_eq!(
-            result.peer_contexts.get(&plugin_id),
-            Some(&expected_context)
-        );
-
-        let mut missing = package("plugin", "1.0.0", &[]);
-        missing.peer_dependencies = BTreeMap::from([("react".parse().unwrap(), req("^18.0.0"))]);
-        let metadata = registry("https://registry.npmjs.org", vec![missing]);
-        let error = resolve_graph(
-            &[dep("https://registry.npmjs.org", "plugin", "1.0.0")],
-            &[metadata],
-            Default::default(),
-        )
-        .unwrap_err();
-        assert!(matches!(error, ResolveError::PeerDependency { .. }));
-        assert!(error.to_string().contains("peer dependency unresolved"));
-    }
-
-    #[test]
-    fn preserves_peer_requirements_separately_from_ordinary_dependencies() {
-        let peer: PackageVersionMetadata = PackageVersionMetadata {
-            name: "plugin".parse().unwrap(),
-            version: "1.0.0".parse().unwrap(),
-            dependencies: BTreeMap::from([("runtime".parse().unwrap(), req("^1.0.0"))]),
-            peer_dependencies: BTreeMap::from([("react".parse().unwrap(), req("^18.0.0"))]),
-        };
-
-        assert!(peer.dependencies.contains_key(&"runtime".parse().unwrap()));
-        assert!(!peer.dependencies.contains_key(&"react".parse().unwrap()));
-        assert_eq!(
-            peer.peer_dependencies[&"react".parse().unwrap()].raw,
-            "^18.0.0"
-        );
-    }
-
-    #[test]
-    fn available_versions_use_semver_order_before_rendering() {
-        let first = PackageVersionMetadata {
-            name: "pkg".parse().unwrap(),
-            version: "10.0.0".parse().unwrap(),
-            dependencies: BTreeMap::new(),
-            peer_dependencies: BTreeMap::new(),
-        };
-        let second = PackageVersionMetadata {
-            name: "pkg".parse().unwrap(),
-            version: "2.0.0".parse().unwrap(),
-            dependencies: BTreeMap::new(),
-            peer_dependencies: BTreeMap::new(),
-        };
-
-        assert_eq!(available(&[&first, &second]), vec!["2.0.0", "10.0.0"]);
-    }
-
-    #[test]
-    fn missing_metadata_is_reported_as_a_sorted_frontier() {
-        let registry: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
-        let app: PackageName = "app".parse().unwrap();
-        let metadata = RegistryMetadata::normalize(
-            registry.clone(),
-            vec![PackageVersionMetadata {
-                name: app.clone(),
-                version: "1.0.0".parse().unwrap(),
-                dependencies: BTreeMap::from([
-                    ("z-child".parse().unwrap(), req("1.0.0")),
-                    ("a-child".parse().unwrap(), req("1.0.0")),
-                ]),
-                peer_dependencies: BTreeMap::new(),
-            }],
-        )
-        .unwrap();
-
-        let error = resolve_graph(
-            &[Dependency::new(registry, app, req("1.0.0"))],
-            &[metadata],
-            ResolutionOptions::default(),
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error,
-            ResolveError::MissingMetadata {
-                packages: vec![
-                    (
-                        "https://registry.npmjs.org".to_owned(),
-                        "a-child".to_owned()
-                    ),
-                    (
-                        "https://registry.npmjs.org".to_owned(),
-                        "z-child".to_owned()
-                    ),
-                ],
-            }
-        );
-    }
-
-    #[test]
-    fn major_only_caret_range_rejects_leading_zeroes() {
-        assert!(matches!(
-            "^03".parse::<Requirement>(),
-            Err(ResolveError::UnsupportedRange(_))
-        ));
-    }
-
-    #[test]
-    fn npm_and_jsr_registries_remain_distinct() {
-        let npm = registry(
-            "https://registry.npmjs.org",
-            vec![package("foo", "1.0.0", &[])],
-        );
-        let jsr = registry("https://jsr.io", vec![package("foo", "1.0.0", &[])]);
-        let result = resolve_graph(
-            &[
-                dep("https://registry.npmjs.org", "foo", "1.0.0"),
-                dep("https://jsr.io", "foo", "1.0.0"),
-            ],
-            &[npm, jsr],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(result.selected[0].registry.to_string(), "https://jsr.io");
-        assert_eq!(
-            result.selected[1].registry.to_string(),
-            "https://registry.npmjs.org"
-        );
-    }
-
-    #[test]
-    fn shuffled_metadata_normalizes_and_tilde_is_supported() {
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![
-                package("foo", "1.2.1", &[]),
-                package("foo", "1.2.9", &[]),
-                package("foo", "1.3.0", &[]),
-            ],
-        );
-        let result = resolve_graph(
-            &[dep("https://registry.npmjs.org", "foo", "~1.2.0")],
-            &[m],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(result.selected[0].version.to_string(), "1.2.9");
-    }
-
-    #[test]
-    fn transitive_dependencies_and_cycles_are_finite_and_sorted() {
-        let m = registry(
-            "https://jsr.io",
-            vec![
-                package("a", "1.0.0", &[("b", "1.0.0")]),
-                package("b", "1.0.0", &[("a", "1.0.0")]),
-            ],
-        );
-        let result = resolve_graph(
-            &[dep("https://jsr.io", "a", "1.0.0")],
-            &[m],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            result
-                .selected
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-            vec!["https://jsr.io:a@1.0.0", "https://jsr.io:b@1.0.0"]
-        );
-    }
-
-    #[test]
-    fn different_parents_can_select_different_versions_of_one_dependency() {
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![
-                package("a", "1.0.0", &[("debug", "^3.0.0")]),
-                package("b", "1.0.0", &[("debug", "^4.0.0")]),
-                package("debug", "3.2.7", &[]),
-                package("debug", "4.3.7", &[]),
-            ],
-        );
-
-        let result = resolve_graph(
-            &[
-                dep("https://registry.npmjs.org", "a", "*"),
-                dep("https://registry.npmjs.org", "b", "*"),
-            ],
-            &[m],
-            Default::default(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            result
-                .selected
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-            vec![
-                "https://registry.npmjs.org:a@1.0.0",
-                "https://registry.npmjs.org:b@1.0.0",
-                "https://registry.npmjs.org:debug@3.2.7",
-                "https://registry.npmjs.org:debug@4.3.7",
-            ]
-        );
-    }
-
-    #[test]
-    fn incompatible_constraints_are_structured_and_deterministic() {
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![package("foo", "1.0.0", &[]), package("foo", "2.0.0", &[])],
-        );
-        let result = resolve_graph(
-            &[
-                dep("https://registry.npmjs.org", "foo", "^1.0.0"),
-                dep("https://registry.npmjs.org", "foo", "^2.0.0"),
-            ],
-            &[m],
-            Default::default(),
-        );
-        assert!(
-            matches!(result, Err(ResolveError::Conflict { requirements, .. }) if requirements == vec!["^1.0.0", "^2.0.0"])
-        );
-    }
-
-    #[test]
-    fn npm_zero_major_caret_bounds_are_respected() {
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![
-                package("foo", "0.2.3", &[]),
-                package("foo", "0.2.9", &[]),
-                package("foo", "0.3.0", &[]),
-            ],
-        );
-        let result = resolve_graph(
-            &[dep("https://registry.npmjs.org", "foo", "^0.2.3")],
-            &[m],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(result.selected[0].version.to_string(), "0.2.9");
-    }
-
-    #[test]
-    fn caret_ranges_at_integer_bounds_fail_closed_without_panicking() {
-        let max = u64::MAX;
-        let m = registry(
-            "https://registry.npmjs.org",
-            vec![package("foo", &format!("{max}.0.0"), &[])],
-        );
-        let result = resolve_graph(
-            &[dep(
-                "https://registry.npmjs.org",
-                "foo",
-                &format!("^{max}.0.0"),
-            )],
-            &[m],
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(result.selected[0].version.to_string(), format!("{max}.0.0"));
-    }
-
-    #[test]
-    fn zero_major_caret_ranges_at_integer_bounds_fail_closed_without_panicking() {
-        let max = u64::MAX;
-        for (version, requirement) in [
-            (format!("0.{max}.0"), format!("^0.{max}.0")),
-            (format!("0.0.{max}"), format!("^0.0.{max}")),
-        ] {
-            let m = registry(
-                "https://registry.npmjs.org",
-                vec![
-                    package("foo", &version, &[]),
-                    package(
-                        "foo",
-                        if requirement.starts_with("^0.")
-                            && requirement.contains(&format!(".{max}."))
-                        {
-                            "1.0.0"
-                        } else {
-                            "0.1.0"
-                        },
-                        &[],
-                    ),
-                ],
-            );
-            let result = resolve_graph(
-                &[dep("https://registry.npmjs.org", "foo", &requirement)],
-                &[m],
-                Default::default(),
-            )
-            .unwrap();
-            assert_eq!(result.selected[0].version.to_string(), version);
-        }
-    }
-
-    #[test]
-    fn unsupported_ranges_and_modes_fail_closed() {
-        assert!(matches!(
-            "!=1.0.0".parse::<Requirement>(),
-            Err(ResolveError::UnsupportedRange(_))
-        ));
-        assert!(matches!(
-            resolve_graph(
-                &[],
-                &[],
-                ResolutionOptions {
-                    offline: true,
-                    frozen: false
-                }
-            ),
-            Err(ResolveError::UnsupportedMode(_))
-        ));
-        assert!(matches!(
-            resolve_graph(
-                &[],
-                &[],
-                ResolutionOptions {
-                    offline: false,
-                    frozen: true
-                }
-            ),
-            Err(ResolveError::UnsupportedMode(_))
-        ));
-    }
-}
+#[path = "tests.rs"]
+mod tests;

@@ -29,6 +29,9 @@ impl PackageManifest {
         if let Some(value) = object.get("peerDependencies") {
             manifest.peer_dependencies = parse_string_map(value, "peerDependencies", true)?;
         }
+        if let Some(value) = object.get("overrides") {
+            manifest.overrides = parse_string_map(value, "overrides", false)?;
+        }
         if let Some(value) = object.get("scripts") {
             manifest.scripts = parse_string_map(value, "scripts", false)?;
         }
@@ -45,6 +48,7 @@ impl PackageManifest {
             "devDependencies",
             "optionalDependencies",
             "peerDependencies",
+            "overrides",
             "scripts",
             "bin",
         ];

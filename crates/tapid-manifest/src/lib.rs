@@ -30,6 +30,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_preserves_simple_overrides_when_updating_dependencies() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"example-app","version":"1.2.3","overrides":{"postcss":"8.5.28"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.overrides()["postcss"], "8.5.28");
+        let updated = manifest.with_dependency("next", "15.5.27").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&updated.to_json()).unwrap();
+        assert_eq!(value["overrides"]["postcss"], "8.5.28");
+    }
+
+    #[test]
+    fn preserves_version_qualified_override_selectors_from_package_manifests() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"typescript","version":"5.9.3","overrides":{"typescript@*":"$typescript"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.overrides()["typescript@*"], "$typescript");
+        let value: serde_json::Value = serde_json::from_str(&manifest.to_json()).unwrap();
+        assert_eq!(value["overrides"]["typescript@*"], "$typescript");
+    }
+
+    #[test]
     fn discovers_workspace_members_in_deterministic_order() {
         let root = unique_temp_dir("workspace-array");
         std::fs::create_dir_all(root.join("packages/zeta")).unwrap();
