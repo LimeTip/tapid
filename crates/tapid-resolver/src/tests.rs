@@ -525,20 +525,48 @@ fn local_alias_peers_use_the_actual_targets_private_registry() {
         for requirement in ["^1", "npm:@actual/host@^1", "npm:@actual/other@^1", "^2"] {
             let mut plugin = package("plugin", "1.0.0", &[]);
             let peer: PackageName = "host".parse().unwrap();
-            plugin.peer_dependencies.insert(peer.clone(), req(requirement));
-            if optional { plugin.optional_peer_dependencies.insert(peer.clone()); }
+            plugin
+                .peer_dependencies
+                .insert(peer.clone(), req(requirement));
+            if optional {
+                plugin.optional_peer_dependencies.insert(peer.clone());
+            }
             let result = resolve_graph_with_routing(
-                &[dep(public, "plugin", "1"), dep(private, "host", "npm:@actual/host@^1")],
-                &[registry(public, vec![plugin]), registry(private, vec![package("@actual/host", "1.2.0", &[])])],
+                &[
+                    dep(public, "plugin", "1"),
+                    dep(private, "host", "npm:@actual/host@^1"),
+                ],
+                &[
+                    registry(public, vec![plugin]),
+                    registry(private, vec![package("@actual/host", "1.2.0", &[])]),
+                ],
                 Default::default(),
-                |_, name| Ok(if name.as_str().starts_with("@actual/") { private } else { public }.parse().unwrap()),
+                |_, name| {
+                    Ok(if name.as_str().starts_with("@actual/") {
+                        private
+                    } else {
+                        public
+                    }
+                    .parse()
+                    .unwrap())
+                },
             );
             if requirement == "^2" || requirement.contains("other") {
-                assert!(matches!(result, Err(ResolveError::PeerDependency { .. })), "{optional}: {requirement}");
+                assert!(
+                    matches!(result, Err(ResolveError::PeerDependency { .. })),
+                    "{optional}: {requirement}"
+                );
             } else {
                 let result = result.unwrap();
-                let plugin_id = RegistryPackageId::new(public.parse().unwrap(), "plugin".parse().unwrap(), "1.0.0".parse().unwrap());
-                assert_eq!(result.peer_contexts[&plugin_id], PeerContext::default().with(peer, "1.2.0".parse().unwrap()));
+                let plugin_id = RegistryPackageId::new(
+                    public.parse().unwrap(),
+                    "plugin".parse().unwrap(),
+                    "1.0.0".parse().unwrap(),
+                );
+                assert_eq!(
+                    result.peer_contexts[&plugin_id],
+                    PeerContext::default().with(peer, "1.2.0".parse().unwrap())
+                );
             }
         }
     }
@@ -557,16 +585,38 @@ fn alias_peer_lookup_preserves_npm_jsr_isolation() {
             let mut plugin = package("@s/plugin", "1.0.0", &[]);
             let peer: PackageName = "@s/host".parse().unwrap();
             plugin.peer_dependencies.insert(peer.clone(), req("^1"));
-            if optional { plugin.optional_peer_dependencies.insert(peer); }
+            if optional {
+                plugin.optional_peer_dependencies.insert(peer);
+            }
             let result = resolve_graph_with_routing(
-                &[dep(plugin_origin, "@s/plugin", "1"), dep(host_origin, "@s/host", host_requirement)],
-                &[registry(plugin_origin, vec![plugin]), registry(host_origin, vec![package(host_name, "1.2.0", &[])])],
+                &[
+                    dep(plugin_origin, "@s/plugin", "1"),
+                    dep(host_origin, "@s/host", host_requirement),
+                ],
+                &[
+                    registry(plugin_origin, vec![plugin]),
+                    registry(host_origin, vec![package(host_name, "1.2.0", &[])]),
+                ],
                 Default::default(),
-                |parent, name| Ok(if parent.as_str() == jsr { jsr } else if name.as_str().starts_with("@actual/") { private } else { public }.parse().unwrap()),
+                |parent, name| {
+                    Ok(if parent.as_str() == jsr {
+                        jsr
+                    } else if name.as_str().starts_with("@actual/") {
+                        private
+                    } else {
+                        public
+                    }
+                    .parse()
+                    .unwrap())
+                },
             );
             if optional {
                 let result = result.unwrap();
-                let plugin_id = RegistryPackageId::new(plugin_origin.parse().unwrap(), "@s/plugin".parse().unwrap(), "1.0.0".parse().unwrap());
+                let plugin_id = RegistryPackageId::new(
+                    plugin_origin.parse().unwrap(),
+                    "@s/plugin".parse().unwrap(),
+                    "1.0.0".parse().unwrap(),
+                );
                 assert_eq!(result.peer_contexts[&plugin_id], PeerContext::default());
             } else {
                 assert!(matches!(result, Err(ResolveError::PeerDependency { .. })));

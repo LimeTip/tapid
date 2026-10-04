@@ -655,18 +655,41 @@ where
 
     roots.sort();
     roots.dedup();
-    let root_providers = root_bindings
-        .iter()
-        .map(|((registry, local_name), root)| ((registry.clone(), local_name.clone()), root))
-        .collect::<BTreeMap<_, _>>();
+    let mut root_providers: BTreeMap<PackageName, Vec<&RegistryPackageId>> = BTreeMap::new();
+    for ((_, local_name), root) in &root_bindings {
+        root_providers
+            .entry(local_name.clone())
+            .or_default()
+            .push(root);
+    }
     let mut peer_contexts = BTreeMap::new();
     for (id, package) in &selected_packages {
         let mut context = PeerContext::default();
         for (peer, requirement) in &package.peer_dependencies {
-            let peer_registry =
+            let candidates = root_providers.get(peer);
+            let mut provider = None;
+            for candidate in candidates.into_iter().flatten() {
+                let actual_name = if requirement.is_alias() {
+                    requirement.package_name(peer)
+                } else {
+                    &candidate.name
+                };
+                let peer_registry = registry_for_dependency(&id.registry, actual_name)
+                    .map_err(ResolveError::RegistryRouting)?;
+                if candidate.registry != peer_registry {
+                    continue;
+                }
+                if provider.replace(*candidate).is_some() {
+                    return Err(ResolveError::RegistryRouting(format!(
+                        "ambiguous root peer binding for {peer}"
+                    )));
+                }
+            }
+            if candidates.is_none() {
+                // Preserve route validation even when no local provider exists.
                 registry_for_dependency(&id.registry, requirement.package_name(peer))
                     .map_err(ResolveError::RegistryRouting)?;
-            let provider = root_providers.get(&(peer_registry, peer.clone()));
+            }
             if provider.is_none() && package.optional_peer_dependencies.contains(peer) {
                 continue;
             }
