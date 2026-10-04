@@ -14,11 +14,10 @@ def cargo_environment(root, environment):
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
             cwd=root, check=True, capture_output=True, text=True,
         )
-        common_dir = Path(result.stdout.strip())
+        common_dir = Path(result.stdout.strip()).resolve()
         # Worktrees have separate sources but share Git's common directory.
-        # Bare and custom Git directories must retain their repository identity.
-        cache_root = common_dir.parent if common_dir.name == ".git" else common_dir
-        env["CARGO_TARGET_DIR"] = str(cache_root / "target" / "dev")
+        # Anchor artifacts to that exact repository identity for every Git layout.
+        env["CARGO_TARGET_DIR"] = str(common_dir / "target" / "dev")
     return env
 
 

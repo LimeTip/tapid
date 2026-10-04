@@ -30,7 +30,7 @@ class DevelopmentCacheTests(unittest.TestCase):
             main_env = dev.cargo_environment(repo, {})
             self.assertEqual(main_env, dev.cargo_environment(worktree, {}))
             self.assertNotEqual(main_env, dev.cargo_environment(other, {}))
-            self.assertEqual(Path(main_env["CARGO_TARGET_DIR"]), repo.resolve() / "target" / "dev")
+            self.assertEqual(Path(main_env["CARGO_TARGET_DIR"]), repo.resolve() / ".git" / "target" / "dev")
 
     def test_explicit_target_and_other_environment_are_preserved(self):
         env = {"CARGO_TARGET_DIR": "custom-target", "RUSTFLAGS": "-Dwarnings"}
@@ -55,6 +55,23 @@ class DevelopmentCacheTests(unittest.TestCase):
                 self.assertEqual(first, second)
                 caches.append(first)
             self.assertNotEqual(caches[0], caches[1])
+
+    def test_nested_git_directories_keep_distinct_repository_caches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shared = root / "shared.git"
+            subprocess.run(["git", "init", "--quiet", "--bare", str(shared)], check=True)
+            # A separate conventional repository can coexist with this bare Git directory.
+            subprocess.run(["git", "init", "--quiet", str(shared)], check=True)
+            bare_worktree = root / "bare-worktree"
+            subprocess.run(
+                ["git", "--git-dir", str(shared), "worktree", "add", "--quiet",
+                 "--orphan", "-b", "fixture", str(bare_worktree)],
+                check=True,
+            )
+            bare_cache = dev.cargo_environment(bare_worktree, {})["CARGO_TARGET_DIR"]
+            conventional_cache = dev.cargo_environment(shared, {})["CARGO_TARGET_DIR"]
+            self.assertNotEqual(bare_cache, conventional_cache)
 
 
 if __name__ == "__main__":
