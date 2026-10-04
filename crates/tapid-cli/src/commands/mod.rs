@@ -24,6 +24,7 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Create a private package.json manifest.
     Init(init::Args),
+    /// Validate package.json manifests.
     Manifest(manifest::Args),
     Lock(lock::Args),
     /// Run a root package script.
