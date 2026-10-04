@@ -20,24 +20,14 @@ fi
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential ca-certificates curl git pkg-config libssl-dev python3 util-linux >/dev/null
 
-workspace_uid="$(stat -c %u /work)"
-workspace_gid="$(stat -c %g /work)"
-if [[ "$workspace_uid" -eq 0 ]]; then
-  workspace_uid=12345
-  workspace_gid=12345
-fi
-
 mkdir -p /tmp/tapid-cargo /tmp/tapid-rustup /tmp/tapid-target /tmp/tapid-home
-chown -R "$workspace_uid:$workspace_gid" /tmp/tapid-cargo /tmp/tapid-rustup /tmp/tapid-target /tmp/tapid-home
 
-setpriv --reuid="$workspace_uid" --regid="$workspace_gid" --clear-groups \
-  --inh-caps=+sys_admin --ambient-caps=+sys_admin -- \
-  env HOME=/tmp/tapid-home \
-    CARGO_HOME=/tmp/tapid-cargo \
-    RUSTUP_HOME=/tmp/tapid-rustup \
-    CARGO_TARGET_DIR=/tmp/tapid-target \
-    PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}" \
-    bash -c '
+env HOME=/tmp/tapid-home \
+  CARGO_HOME=/tmp/tapid-cargo \
+  RUSTUP_HOME=/tmp/tapid-rustup \
+  CARGO_TARGET_DIR=/tmp/tapid-target \
+  PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}" \
+  bash -c '
       set -euo pipefail
       curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       source "$CARGO_HOME/env"
