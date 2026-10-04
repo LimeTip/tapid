@@ -2,10 +2,15 @@
 set -euo pipefail
 
 mode="${1:-}"
+test_filter="${2:-}"
 case "$mode" in
-  test|nextest|coverage) ;;
-  *) printf 'usage: %s {test|nextest|coverage}\n' "$0" >&2; exit 2 ;;
+  test|test-filter|nextest|coverage) ;;
+  *) printf 'usage: %s {test|test-filter <pattern>|nextest|coverage}\n' "$0" >&2; exit 2 ;;
 esac
+if [[ "$mode" == test-filter && -z "$test_filter" ]]; then
+  printf 'test-filter requires a non-empty pattern\n' >&2
+  exit 2
+fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
   printf 'run this setup script as root inside the namespace-capable Ubuntu container\n' >&2
@@ -40,6 +45,9 @@ setpriv --reuid="$workspace_uid" --regid="$workspace_gid" --clear-groups \
         test)
           cargo test --workspace --all-features --locked
           ;;
+        test-filter)
+          cargo test --workspace --all-features --locked "$2"
+          ;;
         nextest)
           cargo nextest run --workspace --all-features --locked
           ;;
@@ -48,7 +56,7 @@ setpriv --reuid="$workspace_uid" --regid="$workspace_gid" --clear-groups \
           cargo llvm-cov --workspace --all-features --locked --lcov --output-path /tmp/tapid-coverage-lcov.info
           ;;
       esac
-    ' _ "$mode"
+    ' _ "$mode" "$test_filter"
 
 if [[ "$mode" == coverage ]]; then
   install -m 0644 /tmp/tapid-coverage-lcov.info /work/lcov.info

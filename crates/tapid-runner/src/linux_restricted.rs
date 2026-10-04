@@ -66,6 +66,7 @@ const PRIVATE_REPORT_EXEC_ERROR: u32 = 3;
 const LIMITATIONS: &[&str] = &[
     "Landlock grants use path bindings checked against held filesystem identities before setup",
     "configured output, process-count, and memory limits are unsupported without writable per-tree cgroup v2 delegation; ManagedTree timeouts kill the namespace supervisor and rely on kernel --kill-child cleanup",
+    "mount namespace setup leaves existing root propagation unchanged and is supported only when the root mount has no shared propagation group",
     "network-disabled policy denies Internet socket creation, connection, binding, listening, accepts, sendto, and recvfrom; AF_UNIX socketpairs with sendmsg/recvmsg and shutdown remain available for local runtime IPC; enabled networking is unrestricted",
     "Restricted does not own or guarantee cleanup of detached descendants; ManagedTree cleanup relies on the kernel PID namespace boundary",
     "standard streams remain connected; other inherited descriptors are closed",
@@ -813,10 +814,39 @@ fn unshare_namespace_arguments(needs_user_namespace: bool) -> Vec<&'static str> 
         "--kill-child",
         "--mount-proc",
         "--propagation",
-        "private",
+        "unchanged",
         "--",
     ]);
     arguments
+}
+
+fn root_mount_is_not_shared(mountinfo: &str) -> bool {
+    let mut found_root = false;
+    for line in mountinfo.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.get(4) != Some(&"/") {
+            continue;
+        }
+        let Some(separator) = fields.iter().position(|field| *field == "-") else {
+            return false;
+        };
+        if separator < 6 || fields.len() < separator + 4 {
+            return false;
+        }
+        if fields[6..separator]
+            .iter()
+            .any(|field| field.starts_with("shared:"))
+        {
+            return false;
+        }
+        found_root = true;
+    }
+    found_root
+}
+
+fn current_root_mount_is_not_shared() -> bool {
+    fs::read_to_string("/proc/self/mountinfo")
+        .is_ok_and(|mountinfo| root_mount_is_not_shared(&mountinfo))
 }
 
 fn duplicate_fd_above_private_range(fd: libc::c_int) -> Result<OwnedFd, ExecutionError> {
@@ -1015,6 +1045,14 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
                 "Linux ManagedTree requires the initialized private launcher and util-linux unshare",
             );
         }
+    }
+    if (request.policy().assurance() == AssuranceLevel::ManagedTree
+        || request.allow_process_memory_stats())
+        && !current_root_mount_is_not_shared()
+    {
+        return unsupported(
+            "private mount namespaces require a readable root mount with no shared propagation group",
+        );
     }
     if landlock_abi().is_none_or(|abi| abi < 3) {
         return unsupported("Landlock ABI 3 or newer is unavailable");
@@ -1445,7 +1483,7 @@ mod tests {
                 "--kill-child",
                 "--mount-proc",
                 "--propagation",
-                "private",
+                "unchanged",
                 "--",
             ]
         );
@@ -1453,6 +1491,16 @@ mod tests {
             &unshare_namespace_arguments(true)[..2],
             &["--user", "--map-root-user"]
         );
+    }
+
+    #[test]
+    fn mount_namespace_preflight_rejects_shared_or_missing_root_mounts() {
+        let private_root = "36 25 0:32 / / rw,relatime - ext4 /dev/root rw\n";
+        let shared_root = "36 25 0:32 / / rw shared:1 - ext4 /dev/root rw\n";
+        let unrelated_mount = "36 25 0:32 / /proc rw,nosuid - proc proc rw\n";
+        assert!(root_mount_is_not_shared(private_root));
+        assert!(!root_mount_is_not_shared(shared_root));
+        assert!(!root_mount_is_not_shared(unrelated_mount));
     }
 
     #[test]
