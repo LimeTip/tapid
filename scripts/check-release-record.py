@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -109,9 +110,8 @@ def sign_record(record, signature, keyring):
     }))
     now = datetime.now(timezone.utc)
     claims = {
-        'schema': 'tapid-release-v1-signature',
-        'created_at': (now - timedelta(minutes=1)).isoformat().replace('+00:00', 'Z'),
-        'expires_at': (now + timedelta(days=1)).isoformat().replace('+00:00', 'Z'),
+        'schema': 'tapid-release-v1-immutable-signature',
+        'created_at': (now - timedelta(days=3650)).isoformat().replace('+00:00', 'Z'),
     }
     digest = 'sha256-' + hashlib.sha256(record_bytes).hexdigest()
     envelope = {
@@ -209,20 +209,27 @@ else:
         mapping, first_payload = release(
             directory / 'first', '1.2.3',
             'https://gitlab.example/tapid/releases/v1.2.3/downloads', env, keyring)
-        fixture_verifier_url = 'https://fixture.example/verify-release-record.py'
-        fixture_verifier = directory / 'verify-release-record.py'
-        fixture_verifier_text = (ROOT / 'scripts/verify-release-record.py').read_text()
-        fixture_public_key = json.loads(keyring.read_text())['keys'][0]['public_key']
-        fixture_verifier.write_text(fixture_verifier_text.replace(
-            'eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc=',
-            fixture_public_key))
-        fixture_verifier_hash = hashlib.sha256(fixture_verifier.read_bytes()).hexdigest()
-        installer = directory / 'install.sh'
-        installer.write_text((ROOT / 'scripts/install.sh').read_text()
-                             .replace('https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py', fixture_verifier_url)
-                             .replace('4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d', fixture_verifier_hash))
-        installer.chmod(0o755)
-        mapping[fixture_verifier_url] = str(fixture_verifier)
+        # Authenticate a native bootstrap archive through the generated installer's
+        # pinned digest. The fixture wrapper selects an explicit ephemeral keyring;
+        # published installers never pass a keyring override.
+        bootstrap = directory / 'bootstrap'
+        bootstrap.mkdir()
+        bootstrap_provider = 'https://fixture.example/bootstrap/v1.0.0'
+        wrapper = ('#!/bin/sh\nexec ' + shlex.quote(str(binary)) + ' "$@" --keyring '
+                   + shlex.quote(str(keyring)) + '\n').encode()
+        bootstrap_mapping = {}
+        for target in TARGETS:
+            name = f'tapid-1.0.0-{target}.tar.gz'
+            with tarfile.open(bootstrap / name, 'w:gz', format=tarfile.USTAR_FORMAT) as archive:
+                member = tarfile.TarInfo('tapid.exe' if 'windows' in target else 'tapid')
+                member.mode = 0o755
+                member.size = len(wrapper)
+                archive.addfile(member, io.BytesIO(wrapper))
+            bootstrap_mapping[f'{bootstrap_provider}/{name}'] = str(bootstrap / name)
+        command(['node', '--experimental-strip-types', str(ROOT / 'tools/release/bootstrap.ts'),
+                 str(bootstrap), '1.0.0', bootstrap_provider], env, directory)
+        installer = bootstrap / 'install.sh'
+        mapping.update(bootstrap_mapping)
         (directory / 'mapping.json').write_text(json.dumps(mapping))
         command(['sh', str(installer), '--install-dir', str(installed)], env, directory)
         require(destination.read_bytes() == first_payload, 'installer changed executable bytes')
@@ -247,7 +254,7 @@ else:
         mapping, second_payload = release(
             directory / 'second', '1.2.4',
             'https://downloads.example.net/tapid/v1.2.4', env, keyring)
-        mapping['https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py'] = str(ROOT / 'scripts/verify-release-record.py')
+        mapping.update(bootstrap_mapping)
         (directory / 'mapping.json').write_text(json.dumps(mapping))
         output = command(upgrade, env, directory)
         require('Upgraded Tapid to 1.2.4' in output, 'provider migration did not upgrade')

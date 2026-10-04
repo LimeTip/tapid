@@ -33,6 +33,9 @@ jobs:
   resolve-and-verify:
     name: Resolve and verify exact draft assets
     runs-on: ubuntu-latest
+    # GitHub requires push access to read unpublished releases and their assets.
+    permissions:
+      contents: write
     steps:
       - name: Resolve exact draft and tag commit
         env:
@@ -79,9 +82,9 @@ jobs:
             "tapid-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
             "tapid-$VERSION-x86_64-apple-darwin.tar.gz" \
             "tapid-$VERSION-x86_64-pc-windows-msvc.tar.gz" \
-            "tapid-$VERSION-x86_64-unknown-linux-gnu.tar.gz" SHA256SUMS tapid-release-v1.tsv tapid-release-v1.tsv.sig | LC_ALL=C sort > "$expected_assets_file"
+            "tapid-$VERSION-x86_64-unknown-linux-gnu.tar.gz" SHA256SUMS tapid-release-v1.tsv tapid-release-v1.tsv.sig install.sh install.ps1 | LC_ALL=C sort > "$expected_assets_file"
           jq -r '.assets[] | [.name, .id, .size] | @tsv' "$release_json" | LC_ALL=C sort -k1,1 > "$RUNNER_TEMP/assets.tsv"
-          test "$(wc -l < "$RUNNER_TEMP/assets.tsv" | tr -d ' ')" = 9 || { echo "expected exactly nine draft assets" >&2; exit 1; }
+          test "$(wc -l < "$RUNNER_TEMP/assets.tsv" | tr -d ' ')" = 11 || { echo "expected exactly eleven draft assets" >&2; exit 1; }
           cut -f1 "$RUNNER_TEMP/assets.tsv" | diff -u "$expected_assets_file" - || { echo "unexpected draft asset" >&2; exit 1; }
 
           mkdir -p "$RUNNER_TEMP/assets"
@@ -123,6 +126,23 @@ jobs:
             test "$(file --brief --mime-type "$archive")" = application/gzip || { echo "unexpected archive type" >&2; exit 1; }
           done
           printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Verify generated installer pins against downloaded draft archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          generated="$RUNNER_TEMP/generated-installers"
+          mkdir "$generated"
+          cp "$RUNNER_TEMP/assets/"*.tar.gz "$generated/"
+          node --experimental-strip-types tools/release/bootstrap.ts "$generated" "$VERSION" "https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
+          cmp "$generated/install.sh" "$RUNNER_TEMP/assets/install.sh"
+          cmp "$generated/install.ps1" "$RUNNER_TEMP/assets/install.ps1"
       - name: Publish exact verified assets for platform jobs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -163,6 +183,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/assets/tapid-${RELEASE_TAG#v}-${{ matrix.archive }}.tar.gz" -C "$install_dir"
           test "$("$install_dir/${{ matrix.binary }}" --version)" = "tapid ${RELEASE_TAG#v}"
           "$install_dir/${{ matrix.binary }}" --help >/dev/null
+          "$install_dir/${{ matrix.binary }}" __verify-release-record "$RUNNER_TEMP/assets/tapid-release-v1.tsv" "$RUNNER_TEMP/assets/tapid-release-v1.tsv.sig"
       - name: Install and execute draft binary (Windows)
         if: runner.os == 'Windows'
         shell: powershell
@@ -173,4 +194,6 @@ jobs:
           tar -xzf (Join-Path $env:RUNNER_TEMP "assets/tapid-$($env:RELEASE_TAG.Substring(1))-x86_64-pc-windows-msvc.tar.gz") -C $installDir
           $actual = & (Join-Path $installDir 'tapid.exe') --version
           if ($actual -ne "tapid $($env:RELEASE_TAG.Substring(1))") { throw "installed version mismatch" }
+          & (Join-Path $installDir 'tapid.exe') __verify-release-record (Join-Path $env:RUNNER_TEMP 'assets/tapid-release-v1.tsv') (Join-Path $env:RUNNER_TEMP 'assets/tapid-release-v1.tsv.sig')
+          if ($LASTEXITCODE -ne 0) { throw 'Draft signature verification failed' }
           & (Join-Path $installDir 'tapid.exe') --help | Out-Null
