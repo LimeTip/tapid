@@ -15,3 +15,4 @@ path = "src/lib.rs"
 [dependencies]
 tapid-core = { version = "0.0.5", path = "../tapid-core" }
 tapid-manifest = { version = "0.0.7", path = "../tapid-manifest" }
+sha2 = "0.10"

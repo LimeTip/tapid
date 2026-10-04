@@ -124,8 +124,20 @@ pub(crate) fn plan_update(
         .cloned()
         .unwrap();
         mutations.push(DependencyMutation {
+            requirement: Some(if latest {
+                let parsed = requirement
+                    .parse::<Requirement>()
+                    .map_err(|error| format!("invalid dependency '{name}': {error}"))?;
+                if parsed.is_alias() {
+                    let (_, declared) = crate::online::dep_parts(&name)?;
+                    format!("npm:{}@*", parsed.package_name(&declared))
+                } else {
+                    "*".to_owned()
+                }
+            } else {
+                requirement
+            }),
             name,
-            requirement: Some(if latest { "*".to_owned() } else { requirement }),
             kind,
         });
     }
@@ -323,15 +335,26 @@ pub(crate) fn outdated_report(
     let allowed_origins = registry_config.configured_origins();
     let mut entries = Vec::new();
     for (identity, declared, kind) in direct_dependencies {
-        let (manifest_origin, package_name) = crate::online::dep_parts(&identity)?;
+        let (manifest_origin, local_name) = crate::online::dep_parts(&identity)?;
+        let requirement = declared.parse::<Requirement>().ok();
+        let package_name = requirement
+            .as_ref()
+            .map(|requirement| requirement.package_name(&local_name))
+            .unwrap_or(&local_name)
+            .clone();
         let origin = if manifest_origin.to_string() == "https://jsr.io" {
             manifest_origin
         } else {
             registry_config.origin_for_name(&package_name)?
         };
+        let bound_root = lock.root_bindings().get(local_name.as_str());
         let locked_version = locked
             .iter()
-            .filter(|(key, _)| key.registry == origin && key.name == package_name)
+            .filter(|(key, _)| {
+                key.registry == origin
+                    && key.name == package_name
+                    && bound_root.is_none_or(|target| key.to_string() == *target)
+            })
             .map(|(key, _)| key.version.clone())
             .max();
         let versions = match registry_fixture {
@@ -350,7 +373,6 @@ pub(crate) fn outdated_report(
                 }
             }
         };
-        let requirement = declared.parse::<Requirement>().ok();
         let (newest_compatible, newest_available, diagnostic) = match versions {
             Ok(mut versions) => {
                 versions.sort();

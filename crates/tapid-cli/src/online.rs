@@ -32,7 +32,8 @@ use std::{
 use tapid_archive::{ArchiveFormat, ArchiveLimits, canonical_tree_digest, extract_to};
 use tapid_core::{ArtifactDigest, PackageIntegrity, PackageName, PackageVersion, RegistryOrigin};
 use tapid_linker::{
-    DependencyEdge, InstanceKey, LayoutInput, PackageInstance, VerifiedTreeReference,
+    InstanceKey, NamedDependency, NamedDependencyEdge, NamedLayoutInput, PackageInstance,
+    VerifiedTreeReference,
 };
 use tapid_lockfile::{LockedPackage, Lockfile, LockfilePackageKey, RegistryIntegrityProvenance};
 use tapid_manifest::PackageManifest;
@@ -247,7 +248,7 @@ pub fn resolve_and_fetch(
 ) -> Result<
     (
         Lockfile,
-        LayoutInput,
+        NamedLayoutInput,
         BTreeMap<String, PathBuf>,
         StoreTransaction,
     ),
@@ -308,7 +309,8 @@ pub fn resolve_and_fetch(
             if dependency.registry.to_string() == JSR {
                 Ok(dependency)
             } else {
-                let origin = registry_config.origin_for_name(&dependency.name)?;
+                let origin = registry_config
+                    .origin_for_name(dependency.requirement.package_name(&dependency.name))?;
                 Ok(Dependency::new(
                     origin,
                     dependency.name,
@@ -534,7 +536,7 @@ pub fn resolve_and_fetch(
                 )
                 .to_string();
                 locked
-                    .add_dependency(&edge.dependency.to_string(), &target_key)
+                    .add_alias_dependency(&edge.dependency.to_string(), &target_key)
                     .map_err(|e| e.to_string())?;
             }
             Ok(locked)
@@ -556,6 +558,29 @@ pub fn resolve_and_fetch(
         .to_string()
     }))
     .map_err(|e| e.to_string())?;
+    lock.set_root_bindings(
+        resolution
+            .root_bindings
+            .iter()
+            .map(|((_, name), id)| {
+                let platform = platform_contexts
+                    .get(id)
+                    .expect("selected root platform context");
+                (
+                    name.to_string(),
+                    LockfilePackageKey::new(
+                        id.registry.clone(),
+                        id.name.clone(),
+                        id.version.clone(),
+                        resolution.peer_contexts.get(id).unwrap_or(&empty_peer),
+                        platform,
+                    )
+                    .to_string(),
+                )
+            })
+            .collect(),
+    )
+    .map_err(|error| error.to_string())?;
     let instance_keys = instances
         .iter()
         .map(|instance| {
@@ -597,12 +622,15 @@ pub fn resolve_and_fetch(
                     .unwrap_or_default(),
             ))
             .ok_or_else(|| format!("missing child instance for {}", edge.child))?;
-        edge_list.push(DependencyEdge {
+        edge_list.push(NamedDependencyEdge {
             parent: parent.clone(),
-            child: child.clone(),
+            dependency: NamedDependency {
+                name: edge.dependency.clone(),
+                child: child.clone(),
+            },
         });
     }
-    for id in &resolution.roots {
+    for ((_, name), id) in &resolution.root_bindings {
         let instance = instance_keys
             .get(&(
                 id.registry.clone(),
@@ -615,11 +643,14 @@ pub fn resolve_and_fetch(
                     .unwrap_or_default(),
             ))
             .ok_or_else(|| format!("missing root instance for {id}"))?;
-        root_deps.push(instance.clone());
+        root_deps.push(NamedDependency {
+            name: name.clone(),
+            child: instance.clone(),
+        });
     }
     Ok((
         lock,
-        LayoutInput {
+        NamedLayoutInput {
             instances,
             root_dependencies: root_deps,
             dependency_edges: edge_list,

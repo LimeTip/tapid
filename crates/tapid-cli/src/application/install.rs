@@ -7,7 +7,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tapid_linker::{LayoutInput, ManagedRoot, plan_layout};
+use tapid_linker::{ManagedRoot, NamedLayoutInput, plan_named_layout};
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 use tapid_store::Store;
@@ -425,7 +425,7 @@ pub(crate) fn run_with_manifest(
 
 fn materialize_install(
     project_dir: &Path,
-    input: LayoutInput,
+    input: NamedLayoutInput,
     trees: BTreeMap<String, PathBuf>,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
@@ -442,7 +442,7 @@ fn materialize_install(
 
 fn materialize_with_lock(
     project_dir: &Path,
-    input: LayoutInput,
+    input: NamedLayoutInput,
     trees: BTreeMap<String, PathBuf>,
     replayed: bool,
     activation_lock: &ActivationLock,
@@ -458,7 +458,7 @@ fn materialize_with_lock(
         }
     };
     let platform = crate::application::replay::current_platform();
-    let plan = match plan_layout(root, input.clone(), platform) {
+    let plan = match plan_named_layout(root, input.clone(), platform) {
         Ok(value) => value,
         Err(error) => {
             if replayed {
@@ -476,16 +476,21 @@ fn materialize_with_lock(
             return Err(error);
         }
     };
-    let result =
-        crate::filesystem::tree::materialize_stage(&stage, &plan, &input, &trees, replayed)
-            .and_then(|_| {
-                crate::filesystem::activation::activate_node_modules_with_lock(
-                    project_dir,
-                    &stage,
-                    activation_lock,
-                    preserve_previous,
-                )
-            });
+    let result = crate::filesystem::tree::materialize_stage(
+        &stage,
+        &plan,
+        &input.instances,
+        &trees,
+        replayed,
+    )
+    .and_then(|_| {
+        crate::filesystem::activation::activate_node_modules_with_lock(
+            project_dir,
+            &stage,
+            activation_lock,
+            preserve_previous,
+        )
+    });
     if replayed {
         crate::application::replay::cleanup_replay_snapshots(&trees);
     }

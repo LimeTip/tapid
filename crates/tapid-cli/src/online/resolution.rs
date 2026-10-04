@@ -93,6 +93,19 @@ pub(super) fn normalize_record(package: &PackageRecord) -> Result<NormalizedReco
             Ok((parsed_name, parsed_requirement))
         })
         .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
+    if package.registry.as_str() == JSR
+        && metadata
+            .dependencies
+            .values()
+            .chain(metadata.peer_dependencies.values())
+            .chain(optional_dependencies.values())
+            .any(Requirement::is_alias)
+    {
+        return Err(
+            "npm aliases in JSR package metadata are not supported; refusing JSR registry fallback"
+                .into(),
+        );
+    }
     Ok(NormalizedRecord {
         metadata,
         optional_dependencies,
@@ -125,12 +138,11 @@ where
     for mut package in packages {
         if package.registry.to_string() == NPM {
             for (name, requirement) in overrides {
-                let name = name.to_string();
-                if let Some(dependency) = package.dependencies.get_mut(&name) {
-                    *dependency = requirement.raw.clone();
+                if let Some(dependency) = package.dependencies.get_mut(name.as_str()) {
+                    *dependency = overridden_requirement(name, dependency, requirement);
                 }
-                if let Some(dependency) = package.optional_dependencies.get_mut(&name) {
-                    *dependency = requirement.raw.clone();
+                if let Some(dependency) = package.optional_dependencies.get_mut(name.as_str()) {
+                    *dependency = overridden_requirement(name, dependency, requirement);
                 }
             }
         }
@@ -184,8 +196,9 @@ where
         let package = records.get(key).expect("record inserted before metadata");
         let mut package_metadata = record.metadata.clone();
         for (name, requirement) in &record.optional_dependencies {
-            let target_registry = registry_for_dependency(&package.registry, name)?;
-            if candidate_matches(&target_registry, name, requirement) {
+            let actual_name = requirement.package_name(name);
+            let target_registry = registry_for_dependency(&package.registry, actual_name)?;
+            if candidate_matches(&target_registry, actual_name, requirement) {
                 package_metadata
                     .dependencies
                     .insert(name.clone(), requirement.clone());
@@ -235,11 +248,12 @@ where
                 continue;
             };
             for (name, requirement) in &parent_record.optional_dependencies {
-                let target_registry = registry_for_dependency(&parent_registry, name)?;
+                let actual_name = requirement.package_name(name);
+                let target_registry = registry_for_dependency(&parent_registry, actual_name)?;
                 if inserted_names
                     .get(&target_registry.to_string())
-                    .is_some_and(|names| names.contains(name))
-                    && candidate_matches(&target_registry, name, requirement)
+                    .is_some_and(|names| names.contains(actual_name))
+                    && candidate_matches(&target_registry, actual_name, requirement)
                 {
                     parent
                         .dependencies
@@ -249,6 +263,17 @@ where
         }
     }
     Ok(())
+}
+
+fn overridden_requirement(name: &PackageName, previous: &str, replacement: &Requirement) -> String {
+    if previous.trim().starts_with("npm:") {
+        return match previous.parse::<Requirement>() {
+            Ok(alias) => format!("npm:{}@{}", alias.package_name(name), replacement.raw),
+            // Keep malformed aliases invalid rather than changing their source.
+            Err(_) => previous.to_owned(),
+        };
+    }
+    replacement.raw.clone()
 }
 
 fn discarded_version_diagnostics(
@@ -359,10 +384,16 @@ where
                         parent.version.to_string(),
                     );
                     if let Some(record) = records.get(&key) {
-                        for raw_name in record.optional_dependencies.keys() {
+                        for (raw_name, raw_requirement) in &record.optional_dependencies {
                             let name: PackageName = raw_name
                                 .parse()
                                 .map_err(|error: tapid_core::DomainError| error.to_string())?;
+                            let requirement = parse_registry_requirement(
+                                &name.to_string(),
+                                "optional dependency",
+                                raw_requirement,
+                            )?;
+                            let name = requirement.package_name(&name).clone();
                             let registry = registry_for_dependency(&parent.registry, &name)?;
                             if !fetched.contains(&(registry.to_string(), name.to_string())) {
                                 optional_frontier.insert((registry, name));
@@ -488,6 +519,11 @@ pub(crate) fn manifest_overrides(
         let requirement = range
             .parse::<Requirement>()
             .map_err(|error| format!("invalid override '{name}' range '{range}': {error}"))?;
+        if requirement.is_alias() {
+            return Err(format!(
+                "unsupported alias override '{name}': override values must be version ranges"
+            ));
+        }
         match overrides.insert(package.clone(), requirement.clone()) {
             Some(previous) if previous != requirement => {
                 return Err(format!("conflicting override declarations for '{package}'"));
@@ -516,6 +552,11 @@ pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependenc
             let requirement = range.parse::<Requirement>().map_err(|error| {
                 format!("invalid {kind} dependency '{name}' range '{range}': {error}")
             })?;
+            if registry.as_str() == JSR && requirement.is_alias() {
+                return Err(format!(
+                    "npm alias '{name}@{range}' cannot use a JSR dependency name"
+                ));
+            }
             roots.push(Dependency::new(registry, package, requirement));
         }
     }

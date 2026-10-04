@@ -1,0 +1,20 @@
+{
+  "packages": [
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "@s/foo",
+      "version": "1.0.0",
+      "dependencies": {},
+      "integrity": "sha512-yC7xnrJuCw47p54VebywPK9a0S8AMNLSlTE45NGxcnwXA65SV4OHtt87LfUYwRYWA4LodyQTbWC8c5G8gbDcbA==",
+      "artifact": "base64:H4sIAAAAAAAC/+3TsQrCMBSF4cw+RcgsbarSgiL4KsFGqdqkNFUE8d1tqyK4uKgg/t9yw1nucHMqs9yatY2r64w2wTvxZrqVTib9bD1PrbPx493lSZKOUiG1+IJ9aEzdrhf/6aScKa2aSrUI8cp7NZTqYOtQeNeFSaQj3WWlKfqgcLk9tr9EnQcCv+/W+/h+10/seNn/sX7qv84y+v8Vpc/3OxvZY+XrJsi5VK4q1YxyAwAAAAAAAAAAAAAA/IgL6Wu++gAoAAA="
+    },
+    {
+      "registry": "https://jsr.io",
+      "name": "@s/foo",
+      "version": "1.0.0",
+      "dependencies": {},
+      "integrity": "sha512-/cS0WY6zUv0yrzIf350jf0N3uaP2WRN4ykygM61KNrC5pMLZcGUO7+ysRyR+NSl+z7qguTwmhHZf2OEZgF2Q6g==",
+      "artifact": "base64:H4sIAAAAAAAC/+3TvQrCMBSG4cxeRcgsbarSgiJ4K0GjVG1TmlYK4r3b+oPg4qKF4vssJ3zLGU6+wqwPZmfD4j6DvXe5+DLdimez22y9T62T6evd5VEUT2IhtehB7StTtuvFfzqr3GRWzaVa+XDrnBpLdbKlT13ehVGgA91lmUlvQZpvbNP+EnUZCQzfo/fh866/2PGx/1P91n+dJPS/F5nb1Ecb2KZwZeXlUqq9L9WCcgMAAAAAAAAAAAAAAAzEFf+x/LoAKAAA"
+    }
+  ]
+}

@@ -5,6 +5,105 @@ fn req(s: &str) -> Requirement {
 }
 
 #[test]
+fn npm_aliases_validate_actual_names_and_ranges() {
+    let local: PackageName = "local".parse().unwrap();
+    for (spec, target) in [
+        ("npm:h3@2.0.1-rc.20", "h3"),
+        ("npm:@scope/pkg@^1", "@scope/pkg"),
+        ("npm:@scope/pkg", "@scope/pkg"),
+    ] {
+        let requirement = req(spec);
+        assert_eq!(requirement.raw, spec);
+        assert_eq!(requirement.package_name(&local).as_str(), target);
+        assert!(requirement.is_alias());
+    }
+    assert!(req("npm:h3@2.0.1-rc.20").matches(&"2.0.1-rc.20".parse().unwrap()));
+    assert!(!req("npm:h3@2.0.1-rc.20").matches(&"2.0.1".parse().unwrap()));
+    for spec in [
+        "npm:",
+        "npm:pkg@",
+        "npm:pkg@latest",
+        "npm:../pkg@1",
+        "npm:@scope@1",
+        "npm:pkg@npm:other@1",
+        "npm:https://example.test/pkg@1",
+        "npm:pkg@workspace:*",
+    ] {
+        assert!(spec.parse::<Requirement>().is_err(), "{spec}");
+    }
+}
+
+#[test]
+fn npm_aliases_reject_whitespace_prefixed_nested_aliases_and_blank_ranges() {
+    for spec in [
+        "npm:pkg@ npm:other",
+        "npm:pkg@\tnpm:other",
+        "npm:pkg@\nnpm:@scope/other",
+        "npm:pkg@\u{00a0}npm:other",
+        "npm:pkg@ ",
+    ] {
+        assert_eq!(
+            spec.parse::<Requirement>(),
+            Err(ResolveError::UnsupportedRange(spec.trim().to_owned())),
+            "{spec:?}",
+        );
+    }
+    let requirement = req("npm:pkg@ ^1 ");
+    assert_eq!(
+        requirement.package_name(&"local".parse().unwrap()).as_str(),
+        "pkg"
+    );
+    assert!(requirement.matches(&"1.2.3".parse().unwrap()));
+    assert!(!requirement.matches(&"2.0.0".parse().unwrap()));
+}
+
+#[test]
+fn aliases_select_distinct_root_versions_and_route_transitives_by_actual_name() {
+    let public = "https://registry.npmjs.org";
+    let private = "https://packages.example";
+    let metadata = vec![
+        registry(
+            public,
+            vec![
+                package("h3", "1.0.0", &[]),
+                package("h3", "2.0.0", &[]),
+                package("parent", "1.0.0", &[("local", "npm:@actual/pkg@^1")]),
+            ],
+        ),
+        registry(private, vec![package("@actual/pkg", "1.2.0", &[])]),
+    ];
+    let resolution = resolve_graph_with_routing(
+        &[
+            dep(public, "first", "npm:h3@1"),
+            dep(public, "second", "npm:h3@2"),
+            dep(public, "parent", "1"),
+        ],
+        &metadata,
+        Default::default(),
+        |parent, name| {
+            Ok(if name.as_str() == "@actual/pkg" {
+                private.parse().unwrap()
+            } else {
+                parent.clone()
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(resolution.selected.len(), 4);
+    let bindings = resolution
+        .root_bindings
+        .iter()
+        .map(|((_, name), id)| (name.as_str(), id.version.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(bindings["first"], "1.0.0");
+    assert_eq!(bindings["second"], "2.0.0");
+    let edge = &resolution.dependencies[0];
+    assert_eq!(edge.dependency.as_str(), "local");
+    assert_eq!(edge.child.name.as_str(), "@actual/pkg");
+    assert_eq!(edge.child.registry.as_str(), private);
+}
+
+#[test]
 fn validated_requirement_reuses_its_parsed_form_when_matching_candidates() {
     reset_requirement_base_parse_count();
     let requirement = req("^1.2.3");
@@ -416,6 +515,114 @@ fn resolves_peer_requirements_from_root_providers_without_installing_peer_as_roo
     .unwrap_err();
     assert!(matches!(error, ResolveError::PeerDependency { .. }));
     assert!(error.to_string().contains("peer dependency unresolved"));
+}
+
+#[test]
+fn local_alias_peers_use_the_actual_targets_private_registry() {
+    let public = "https://registry.npmjs.org";
+    let private = "https://packages.example";
+    for optional in [false, true] {
+        for requirement in ["^1", "npm:@actual/host@^1", "npm:@actual/other@^1", "^2"] {
+            let mut plugin = package("plugin", "1.0.0", &[]);
+            let peer: PackageName = "host".parse().unwrap();
+            plugin
+                .peer_dependencies
+                .insert(peer.clone(), req(requirement));
+            if optional {
+                plugin.optional_peer_dependencies.insert(peer.clone());
+            }
+            let result = resolve_graph_with_routing(
+                &[
+                    dep(public, "plugin", "1"),
+                    dep(private, "host", "npm:@actual/host@^1"),
+                ],
+                &[
+                    registry(public, vec![plugin]),
+                    registry(private, vec![package("@actual/host", "1.2.0", &[])]),
+                ],
+                Default::default(),
+                |_, name| {
+                    Ok(if name.as_str().starts_with("@actual/") {
+                        private
+                    } else {
+                        public
+                    }
+                    .parse()
+                    .unwrap())
+                },
+            );
+            if requirement == "^2" || requirement.contains("other") {
+                assert!(
+                    matches!(result, Err(ResolveError::PeerDependency { .. })),
+                    "{optional}: {requirement}"
+                );
+            } else {
+                let result = result.unwrap();
+                let plugin_id = RegistryPackageId::new(
+                    public.parse().unwrap(),
+                    "plugin".parse().unwrap(),
+                    "1.0.0".parse().unwrap(),
+                );
+                assert_eq!(
+                    result.peer_contexts[&plugin_id],
+                    PeerContext::default().with(peer, "1.2.0".parse().unwrap())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn alias_peer_lookup_preserves_npm_jsr_isolation() {
+    let public = "https://registry.npmjs.org";
+    let private = "https://packages.example";
+    let jsr = "https://jsr.io";
+    for (plugin_origin, host_origin, host_name, host_requirement) in [
+        (jsr, private, "@actual/host", "npm:@actual/host@^1"),
+        (public, jsr, "@s/host", "^1"),
+    ] {
+        for optional in [false, true] {
+            let mut plugin = package("@s/plugin", "1.0.0", &[]);
+            let peer: PackageName = "@s/host".parse().unwrap();
+            plugin.peer_dependencies.insert(peer.clone(), req("^1"));
+            if optional {
+                plugin.optional_peer_dependencies.insert(peer);
+            }
+            let result = resolve_graph_with_routing(
+                &[
+                    dep(plugin_origin, "@s/plugin", "1"),
+                    dep(host_origin, "@s/host", host_requirement),
+                ],
+                &[
+                    registry(plugin_origin, vec![plugin]),
+                    registry(host_origin, vec![package(host_name, "1.2.0", &[])]),
+                ],
+                Default::default(),
+                |parent, name| {
+                    Ok(if parent.as_str() == jsr {
+                        jsr
+                    } else if name.as_str().starts_with("@actual/") {
+                        private
+                    } else {
+                        public
+                    }
+                    .parse()
+                    .unwrap())
+                },
+            );
+            if optional {
+                let result = result.unwrap();
+                let plugin_id = RegistryPackageId::new(
+                    plugin_origin.parse().unwrap(),
+                    "@s/plugin".parse().unwrap(),
+                    "1.0.0".parse().unwrap(),
+                );
+                assert_eq!(result.peer_contexts[&plugin_id], PeerContext::default());
+            } else {
+                assert!(matches!(result, Err(ResolveError::PeerDependency { .. })));
+            }
+        }
+    }
 }
 
 #[test]
