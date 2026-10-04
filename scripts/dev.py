@@ -16,7 +16,9 @@ def cargo_environment(root, environment):
         )
         common_dir = Path(result.stdout.strip())
         # Worktrees have separate sources but share Git's common directory.
-        env["CARGO_TARGET_DIR"] = str(common_dir.parent / "target" / "dev")
+        # Bare and custom Git directories must retain their repository identity.
+        cache_root = common_dir.parent if common_dir.name == ".git" else common_dir
+        env["CARGO_TARGET_DIR"] = str(cache_root / "target" / "dev")
     return env
 
 

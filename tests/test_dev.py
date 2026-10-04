@@ -36,6 +36,26 @@ class DevelopmentCacheTests(unittest.TestCase):
         env = {"CARGO_TARGET_DIR": "custom-target", "RUSTFLAGS": "-Dwarnings"}
         self.assertEqual(dev.cargo_environment(Path("missing-repository"), env), env)
 
+    def test_sibling_bare_repositories_keep_separate_worktree_caches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            caches = []
+            for name in ["tapid", "other"]:
+                repo = root / f"{name}.git"
+                subprocess.run(["git", "init", "--quiet", "--bare", str(repo)], check=True)
+                worktrees = [root / f"{name}-first", root / f"{name}-second"]
+                for index, worktree in enumerate(worktrees):
+                    subprocess.run(
+                        ["git", "--git-dir", str(repo), "worktree", "add", "--quiet",
+                         "--orphan", "-b", f"fixture-{index}", str(worktree)],
+                        check=True,
+                    )
+                first = dev.cargo_environment(worktrees[0], {})["CARGO_TARGET_DIR"]
+                second = dev.cargo_environment(worktrees[1], {})["CARGO_TARGET_DIR"]
+                self.assertEqual(first, second)
+                caches.append(first)
+            self.assertNotEqual(caches[0], caches[1])
+
 
 if __name__ == "__main__":
     unittest.main()

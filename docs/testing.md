@@ -24,7 +24,7 @@ python3 scripts/dev.py <cargo arguments>
 
 On Windows, use `python` if that is the name of your Python 3 executable.
 
-The wrapper selects `<primary-checkout>/target/dev` through Git's common directory. All worktrees of the same repository and the nested integration workspace reuse that directory. Unrelated repositories have separate caches. Cargo still checks source changes, toolchains, profiles, features, and compiler flags; incompatible artifacts are rebuilt. Concurrent Cargo builds sharing a target directory may wait for its build lock. Keep compiler flags consistent to maximize reuse.
+For ordinary `.git` directories, the wrapper selects `<primary-checkout>/target/dev` through Git's common directory. Bare or custom Git directory layouts use `<git-common-dir>/target/dev` to retain the repository identity. All worktrees of the same repository and the nested integration workspace reuse that directory. Unrelated repositories have separate caches. Cargo still checks source changes, toolchains, profiles, features, and compiler flags; incompatible artifacts are rebuilt. Concurrent Cargo builds sharing a target directory may wait for its build lock. Keep compiler flags consistent to maximize reuse.
 
 An explicit `CARGO_TARGET_DIR` takes precedence. Direct `cargo` commands use the root worktree's `target` directory for both workspaces through `.cargo/config.toml`, but do not share it across worktrees. Commands and documentation that need a binary should obtain the target path from `python3 scripts/dev.py metadata --no-deps --format-version 1 --locked` rather than assume `target/debug/tapid` after a wrapper build.
 
