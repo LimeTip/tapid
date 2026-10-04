@@ -33,6 +33,9 @@ jobs:
   resolve-and-verify:
     name: Resolve and verify exact draft assets
     runs-on: ubuntu-latest
+    # GitHub requires push access to read unpublished releases and their assets.
+    permissions:
+      contents: write
     steps:
       - name: Resolve exact draft and tag commit
         env:
