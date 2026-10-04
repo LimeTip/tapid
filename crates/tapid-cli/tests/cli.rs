@@ -346,6 +346,55 @@ fn outdated_reports_versions_without_mutating_project_state() {
 }
 
 #[test]
+fn outdated_uses_configured_private_registry_identity() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let dir = temp_dir("outdated-private-registry");
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"@acme/widget":"^1.0.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.acme.example'\n",
+    )
+    .unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let package = LockedPackage::new_with_provenance(
+        "https://packages.acme.example",
+        "@acme/widget",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let key = package.key();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key]).unwrap();
+    fs::write(dir.join("tapid.lock"), lock.to_json().unwrap()).unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        r#"{"packages":[{"registry":"https://packages.acme.example","name":"@acme/widget","version":"1.1.0"},{"registry":"https://packages.acme.example","name":"@acme/widget","version":"2.0.0"}]}"#,
+    )
+    .unwrap();
+
+    let output = run(
+        &dir,
+        &["outdated", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains(
+        "@acme/widget [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.1.0 available=2.0.0"
+    ));
+    cleanup(dir);
+}
+
+#[test]
 fn remove_resolves_remaining_dependencies_and_cleans_stale_materialization() {
     let dir = temp_dir("remove-re-resolve");
     let manifest =

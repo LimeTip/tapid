@@ -103,7 +103,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
         );
         return ExitCode::from(1);
     }
-    let registry_config = match crate::registry::RegistryConfig::load(&project_dir) {
+    let registry_config = match crate::registry::RegistryConfig::parse_toml_bytes(&config_bytes) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("error: {error}");
@@ -176,17 +176,28 @@ pub(crate) fn run(args: Args) -> ExitCode {
     }
 }
 
-enum ConfigReadError {
+pub(crate) enum ConfigReadError {
     CapacityExceeded,
     Io(io::Error),
 }
 
 fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigReadError> {
+    read_bounded_config_file(path, tapid_runner::MAX_CONFIG_BYTES)
+}
+
+pub(crate) fn read_bounded_config_file(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ConfigReadError> {
+    let max_bytes = u64::try_from(max_bytes).map_err(|_| ConfigReadError::CapacityExceeded)?;
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or(ConfigReadError::CapacityExceeded)?;
     let metadata = fs::symlink_metadata(path).map_err(ConfigReadError::Io)?;
     if !metadata.file_type().is_file() {
         return Err(ConfigReadError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "run configuration is not a regular file",
+            "configuration is not a regular file",
         )));
     }
     let mut options = fs::OpenOptions::new();
@@ -203,17 +214,17 @@ fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigReadError> {
     if !metadata.is_file() {
         return Err(ConfigReadError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "run configuration is not a regular file",
+            "configuration is not a regular file",
         )));
     }
-    if metadata.len() > tapid_runner::MAX_CONFIG_BYTES as u64 {
+    if metadata.len() > max_bytes {
         return Err(ConfigReadError::CapacityExceeded);
     }
     let mut bytes = Vec::new();
-    file.take(tapid_runner::MAX_CONFIG_BYTES as u64 + 1)
+    file.take(read_limit)
         .read_to_end(&mut bytes)
         .map_err(ConfigReadError::Io)?;
-    if bytes.len() > tapid_runner::MAX_CONFIG_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(ConfigReadError::CapacityExceeded);
     }
     Ok(bytes)

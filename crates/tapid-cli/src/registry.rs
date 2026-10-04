@@ -27,6 +27,7 @@ struct RegistryEntry {
 pub(crate) struct RegistryRoute {
     pub(crate) origin: RegistryOrigin,
     pub(crate) token: Option<String>,
+    pub(crate) policy: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -37,21 +38,32 @@ pub(crate) struct RegistryConfig {
 impl RegistryConfig {
     pub(crate) fn load(project: &std::path::Path) -> Result<Self, String> {
         let path = project.join("tapid.toml");
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        let input = match crate::commands::run::read_bounded_config_file(
+            &path,
+            MAX_CONFIG_BYTES as usize,
+        ) {
+            Ok(bytes) => bytes,
+            Err(crate::commands::run::ConfigReadError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
                 return Ok(Self::default());
             }
-            Err(error) => return Err(format!("cannot inspect registry configuration: {error}")),
+            Err(crate::commands::run::ConfigReadError::CapacityExceeded) => {
+                return Err(
+                    "registry configuration must be a regular file no larger than 64 KiB".into(),
+                );
+            }
+            Err(crate::commands::run::ConfigReadError::Io(error)) => {
+                return Err(format!("cannot read registry configuration: {error}"));
+            }
         };
-        if !metadata.file_type().is_file() || metadata.len() > MAX_CONFIG_BYTES {
-            return Err(
-                "registry configuration must be a regular file no larger than 64 KiB".into(),
-            );
-        }
-        let input = std::fs::read_to_string(&path)
-            .map_err(|error| format!("cannot read registry configuration: {error}"))?;
-        Self::parse(&input)
+        Self::parse_toml_bytes(&input)
+    }
+
+    pub(crate) fn parse_toml_bytes(input: &[u8]) -> Result<Self, String> {
+        let input = std::str::from_utf8(input)
+            .map_err(|_| "registry configuration is not valid UTF-8".to_owned())?;
+        Self::parse(input)
     }
 
     fn parse(input: &str) -> Result<Self, String> {
@@ -95,12 +107,49 @@ impl RegistryConfig {
             .or_else(|| self.routes.get("default")))
     }
 
+    fn policy_for(&self, package: &str) -> Result<String, String> {
+        let name: PackageName = package
+            .parse()
+            .map_err(|_| "invalid package name".to_owned())?;
+        let scope = name
+            .as_str()
+            .split_once('/')
+            .and_then(|(scope, _)| scope.starts_with('@').then_some(scope));
+        if let Some(scope) = scope.filter(|scope| self.routes.contains_key(*scope)) {
+            return Ok(scope.to_owned());
+        }
+        if self.routes.contains_key("default") {
+            Ok("default".to_owned())
+        } else {
+            Ok("public-fallback".to_owned())
+        }
+    }
+
     pub(crate) fn origin_for(&self, package: &str) -> Result<RegistryOrigin, String> {
-        self.selected_entry(package)?
+        let name: PackageName = package
+            .parse()
+            .map_err(|_| "invalid package name".to_owned())?;
+        self.origin_for_name(&name)
+    }
+
+    pub(crate) fn origin_for_name(&self, name: &PackageName) -> Result<RegistryOrigin, String> {
+        self.selected_entry(name.as_str())?
             .map(|entry| entry.url.as_str())
             .unwrap_or(NPM)
             .parse()
             .map_err(|_| "invalid registry origin".to_owned())
+    }
+
+    pub(crate) fn registry_for_dependency(
+        &self,
+        parent: &RegistryOrigin,
+        dependency: &PackageName,
+    ) -> Result<RegistryOrigin, String> {
+        if parent.to_string() == JSR {
+            Ok(parent.clone())
+        } else {
+            self.origin_for_name(dependency)
+        }
     }
 
     pub(crate) fn identity_for_spec(
@@ -128,13 +177,14 @@ impl RegistryConfig {
         self.route_with_env(package, |name| env::var(name).ok())
     }
 
-    fn route_with_env(
+    pub(crate) fn route_with_env(
         &self,
         package: &str,
         mut read_env: impl FnMut(&str) -> Option<String>,
     ) -> Result<RegistryRoute, String> {
         let entry = self.selected_entry(package)?;
         let origin = self.origin_for(package)?;
+        let policy = self.policy_for(package)?;
         let token = if let Some(variable) = entry.and_then(|entry| entry.token_env.as_deref()) {
             let value = read_env(variable)
                 .filter(|value| !value.is_empty())
@@ -147,7 +197,11 @@ impl RegistryConfig {
         } else {
             None
         };
-        Ok(RegistryRoute { origin, token })
+        Ok(RegistryRoute {
+            origin,
+            token,
+            policy,
+        })
     }
 
     pub(crate) fn configured_origins(&self) -> Vec<String> {
@@ -157,13 +211,7 @@ impl RegistryConfig {
             .collect()
     }
 
-    pub(crate) fn credentials_for(
-        &self,
-        packages: &[String],
-    ) -> Result<Vec<(String, String)>, String> {
-        self.credentials_for_with_env(packages, |name| env::var(name).ok())
-    }
-
+    #[cfg(test)]
     fn credentials_for_with_env(
         &self,
         packages: &[String],
@@ -210,6 +258,7 @@ impl RegistryConfig {
     }
 }
 
+#[cfg(test)]
 fn insert_credential(
     credentials: &mut BTreeMap<String, String>,
     origin: String,
@@ -246,6 +295,94 @@ fn valid_env_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_TEST_PROJECT: AtomicU64 = AtomicU64::new(0);
+
+    struct TestProject(PathBuf);
+
+    impl TestProject {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "tapid-registry-config-{}-{}",
+                std::process::id(),
+                NEXT_TEST_PROJECT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestProject {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn run_and_registry_policies_parse_from_the_same_configuration_snapshot() {
+        let input = br#"[registries.'@acme']
+url='https://packages.example'
+token-env='ACME_TOKEN'
+[run.scripts.dev]
+environment=['ACME_TOKEN']
+"#;
+        let run = tapid_runner::RunConfig::parse_toml_bytes(input).unwrap();
+        let registry = RegistryConfig::parse_toml_bytes(input).unwrap();
+        assert!(registry.allowlist_contains_registry_credentials(
+            run.exact_profile("dev").unwrap().environment(),
+            false,
+        ));
+        let route = registry
+            .route_with_env("@acme/widget", |name| {
+                assert_eq!(name, "ACME_TOKEN");
+                Some("fixture-value".to_owned())
+            })
+            .unwrap();
+        assert_eq!(route.origin.to_string(), "https://packages.example");
+        assert_eq!(route.token.as_deref(), Some("fixture-value"));
+    }
+
+    #[test]
+    fn load_accepts_a_configuration_exactly_at_the_byte_limit() {
+        let project = TestProject::new();
+        fs::write(
+            project.0.join("tapid.toml"),
+            vec![b'#'; MAX_CONFIG_BYTES as usize],
+        )
+        .unwrap();
+
+        let config = RegistryConfig::load(&project.0).unwrap();
+
+        assert_eq!(config.origin_for("left-pad").unwrap().to_string(), NPM);
+    }
+
+    #[test]
+    fn load_rejects_configuration_over_the_byte_limit() {
+        let project = TestProject::new();
+        fs::write(
+            project.0.join("tapid.toml"),
+            vec![b'#'; MAX_CONFIG_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        let error = RegistryConfig::load(&project.0).unwrap_err();
+
+        assert!(error.contains("64 KiB"));
+    }
+
+    #[test]
+    fn missing_configuration_uses_public_registry_defaults() {
+        let project = TestProject::new();
+
+        let config = RegistryConfig::load(&project.0).unwrap();
+
+        assert_eq!(config.origin_for("left-pad").unwrap().to_string(), NPM);
+    }
 
     #[test]
     fn scoped_registry_overrides_default_and_unmapped_packages_keep_public_npm() {
