@@ -1,0 +1,41 @@
+"""Exercise build cache selection with real temporary Git worktrees."""
+
+import importlib.util
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+
+spec = importlib.util.spec_from_file_location(
+    "dev", Path(__file__).resolve().parents[1] / "scripts" / "dev.py"
+)
+dev = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(dev)
+
+
+class DevelopmentCacheTests(unittest.TestCase):
+    def test_worktrees_share_cache_but_unrelated_repositories_do_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            other = root / "other"
+            for path in [repo, other]:
+                subprocess.run(["git", "init", "--quiet", str(path)], check=True)
+            worktree = root / "worktree"
+            subprocess.run(
+                ["git", "worktree", "add", "--quiet", "--orphan", "-b", "fixture", str(worktree)],
+                cwd=repo, check=True,
+            )
+            main_env = dev.cargo_environment(repo, {})
+            self.assertEqual(main_env, dev.cargo_environment(worktree, {}))
+            self.assertNotEqual(main_env, dev.cargo_environment(other, {}))
+            self.assertEqual(Path(main_env["CARGO_TARGET_DIR"]), repo.resolve() / "target" / "dev")
+
+    def test_explicit_target_and_other_environment_are_preserved(self):
+        env = {"CARGO_TARGET_DIR": "custom-target", "RUSTFLAGS": "-Dwarnings"}
+        self.assertEqual(dev.cargo_environment(Path("missing-repository"), env), env)
+
+
+if __name__ == "__main__":
+    unittest.main()
