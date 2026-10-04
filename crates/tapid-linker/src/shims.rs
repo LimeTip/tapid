@@ -61,8 +61,13 @@ pub fn plan_shims(
         if !managed_root.contains(&package.bin_dir) {
             return Err(PlanError::PathOutsideManagedRoot(package.bin_dir));
         }
-        let manifest = tapid_manifest::PackageManifest::parse(&package.package_json)
-            .map_err(|error| PlanError::InvalidPackageMetadata(error.to_string()))?;
+        let manifest =
+            tapid_manifest::PackageManifest::parse(&package.package_json).map_err(|error| {
+                PlanError::InvalidPackageMetadata(format!(
+                    "{}: {error}",
+                    package.tree_root.display()
+                ))
+            })?;
         let Some(bin) = manifest.bin() else { continue };
         let bin_dir = package.bin_dir.join(".bin");
         for target in bin.targets() {
@@ -205,6 +210,29 @@ mod tests {
             package_json: format!(r#"{{"name":"{name}","version":"1.0.0","bin":{bin}}}"#),
             bin_dir: root.join("node_modules"),
         }
+    }
+
+    #[test]
+    fn invalid_package_metadata_error_identifies_package_directory() {
+        let root = test_root("invalid-metadata");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let invalid = ShimPackage {
+            tree_root: root.join("bad-package"),
+            package_json: r#"{"name":"typescript@*","version":"1.0.0"}"#.to_owned(),
+            bin_dir: root.join("node_modules"),
+        };
+
+        let error = plan_shims(
+            ManagedRoot::new(&root).unwrap(),
+            vec![invalid],
+            Platform::Unix,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("bad-package"), "{error}");
+        assert!(error.contains("typescript@*"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub struct PackageManifest {
     pub(crate) dev_dependencies: BTreeMap<String, String>,
     pub(crate) optional_dependencies: BTreeMap<String, String>,
     pub(crate) peer_dependencies: BTreeMap<String, String>,
+    pub(crate) overrides: BTreeMap<String, String>,
     pub(crate) scripts: BTreeMap<String, String>,
     pub(crate) bin: Option<PackageBin>,
     pub(crate) extra: BTreeMap<String, serde_json::Value>,
@@ -65,6 +66,7 @@ impl PackageManifest {
             dev_dependencies: BTreeMap::new(),
             optional_dependencies: BTreeMap::new(),
             peer_dependencies: BTreeMap::new(),
+            overrides: BTreeMap::new(),
             scripts: BTreeMap::new(),
             bin: None,
             extra: BTreeMap::new(),
@@ -178,6 +180,9 @@ impl PackageManifest {
     pub fn peer_dependencies(&self) -> &BTreeMap<String, String> {
         &self.peer_dependencies
     }
+    pub fn overrides(&self) -> &BTreeMap<String, String> {
+        &self.overrides
+    }
     pub fn scripts(&self) -> &BTreeMap<String, String> {
         &self.scripts
     }
@@ -198,6 +203,7 @@ impl PackageManifest {
                 .then_some(&self.optional_dependencies),
             peer_dependencies: (!self.peer_dependencies.is_empty())
                 .then_some(&self.peer_dependencies),
+            overrides: (!self.overrides.is_empty()).then_some(&self.overrides),
             scripts: (!self.scripts.is_empty()).then_some(&self.scripts),
             bin: self.bin.as_ref().map(|bin| {
                 bin.targets
@@ -239,6 +245,8 @@ struct ManifestDocument<'a> {
     optional_dependencies: Option<&'a BTreeMap<String, String>>,
     #[serde(rename = "peerDependencies", skip_serializing_if = "Option::is_none")]
     peer_dependencies: Option<&'a BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overrides: Option<&'a BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scripts: Option<&'a BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
