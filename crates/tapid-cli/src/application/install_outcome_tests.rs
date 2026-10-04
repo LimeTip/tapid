@@ -124,14 +124,15 @@ fn inject(fault: Fault) -> FaultGuard {
 }
 
 // Mutate only this thread's temporary fixture at real filesystem boundaries.
-pub(super) fn checkpoint(point: &str, project: &Path) -> Result<(), OperationalError> {
+pub(super) fn checkpoint(point: &str, project: &Path, owner: &str) -> Result<(), OperationalError> {
     match (FAULT.get(), point) {
         (Some(Fault::AfterCommit), "after_commit") => Err(OperationalError::new(
             ErrorKind::Transaction,
             "injected post-commit failure",
         )),
         (Some(Fault::CleanupPending), "after_commit") => {
-            let owner = fs::read_to_string(project.join(".tapid-activation.lock")).unwrap();
+            // Windows rejects reads through another handle while the lock is held.
+            // Use the owning guard's identity to obstruct its cleanup path.
             fs::write(
                 project.join(format!(".tapid-node-modules-old-{}", owner.trim_end())),
                 b"not a directory",

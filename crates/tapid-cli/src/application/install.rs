@@ -344,7 +344,11 @@ fn perform_install(
                 .context("cannot update package.json")
         })?;
         #[cfg(test)]
-        outcome_tests::checkpoint("manifest_written", &project_dir)?;
+        outcome_tests::checkpoint(
+            "manifest_written",
+            &project_dir,
+            activation_lock.owner_line(),
+        )?;
     }
     let store = Store::new(match store_root {
         Some(path) => path.to_owned(),
@@ -431,7 +435,7 @@ fn perform_install(
             OperationalError::from(error).context("cannot finalize verified store transaction")
         })?;
         #[cfg(test)]
-        outcome_tests::checkpoint("after_commit", &project_dir)?;
+        outcome_tests::checkpoint("after_commit", &project_dir, activation_lock.owner_line())?;
         crate::filesystem::atomic::discard_lockfile_backup(lock_backup.as_deref()).map_err(
             |error| {
                 OperationalError::new(ErrorKind::Transaction, error)
