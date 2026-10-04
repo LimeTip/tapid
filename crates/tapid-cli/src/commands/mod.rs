@@ -30,7 +30,7 @@ pub(crate) enum Command {
     Run(run::Args),
 
     /// Install dependencies, optionally adding one package first.
-    #[command(alias = "i")]
+    #[command(visible_alias = "i")]
     Install(install::Args),
     /// Add direct dependencies and resolve the resulting graph.
     Add(lifecycle::AddArgs),
@@ -46,6 +46,7 @@ pub(crate) enum Command {
     Upgrade(upgrade::Args),
 }
 
+/// Routes a parsed command to its handler, or prints usage guidance when no command is given.
 pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
     match command {
         None => {

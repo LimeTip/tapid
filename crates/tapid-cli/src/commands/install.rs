@@ -4,6 +4,7 @@ use std::{path::PathBuf, process::ExitCode};
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
     /// Optional package name to add to dependencies before installation.
+    #[arg(value_parser = parse_package_argument)]
     pub(crate) package: Option<String>,
     #[arg(long)]
     pub(crate) offline: bool,
@@ -22,6 +23,22 @@ pub(crate) struct Args {
     pub(crate) registry_fixture: Option<PathBuf>,
 }
 
+/// Rejects bare command words before project access while preserving explicit package specs.
+fn parse_package_argument(value: &str) -> Result<String, String> {
+    match value.trim() {
+        "help" => Err(
+            "'help' is ambiguous here. Use 'tapid install --help' or 'tapid help install' for usage; use an explicit package spec such as 'help@1.0.0' to install that package."
+                .into(),
+        ),
+        "install" => Err(
+            "'install' is ambiguous here. Use 'tapid install' to install project dependencies; use an explicit package spec such as 'install@1.0.0' to install that package."
+                .into(),
+        ),
+        _ => Ok(value.into()),
+    }
+}
+
+/// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
 pub(crate) fn run(args: Args) -> ExitCode {
     if args.allow_unverified_registry_artifacts && !args.offline && !args.frozen {
         eprintln!(
