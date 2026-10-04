@@ -26,4 +26,5 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Check all CLI command descriptions
-        run: cargo test -p tapid --lib --locked commands::documentation::
+        run: |
+          cargo test -p tapid --lib --locked commands::documentation::
