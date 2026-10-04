@@ -32,19 +32,7 @@ fn windows_file_identity(path: &Path) -> Result<(u32, u64), ExecutionError> {
     Ok((information.dwVolumeSerialNumber, file_index))
 }
 
-/// Platform-neutral, validated request passed to a private execution backend.
-///
-/// Search paths remain private adapter input: external callers can add them only through the
-/// checked builder and cannot replace validated paths after construction.
-///
-/// ```compile_fail
-/// use tapid_runner::ExecutionRequest;
-/// let request = ExecutionRequest::builder("node")
-///     .executable_search_path("/runtime/bin")
-///     .build()
-///     .unwrap();
-/// let _ = request.executable_search_paths();
-/// ```
+/// Canonical trusted Node executable with its native file identity captured at construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct TrustedNodeRuntime {
     pub(super) path: PathBuf,
@@ -144,6 +132,19 @@ fn is_node_executable_name(path: &Path) -> bool {
     })
 }
 
+/// Platform-neutral, validated request passed to a private execution backend.
+///
+/// Search paths remain private adapter input: external callers can add them only through the
+/// checked builder and cannot replace validated paths after construction.
+///
+/// ```compile_fail
+/// use tapid_runner::ExecutionRequest;
+/// let request = ExecutionRequest::builder("node")
+///     .executable_search_path("/runtime/bin")
+///     .build()
+///     .unwrap();
+/// let _ = request.executable_search_paths();
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRequest {
     #[cfg(target_os = "macos")]
