@@ -478,6 +478,35 @@ fn windows_runtime_directory_ace_allows_launching_read_execute_binaries() {
 }
 
 #[test]
+fn windows_write_policy_fails_closed_before_spawn_until_native_acceptance() {
+    let root = temporary_project("write-policy-pending");
+    let writable = root.join("writable");
+    fs::create_dir(&writable).unwrap();
+    let marker = writable.join("must-not-spawn.txt");
+    let command = format!("echo should-not-run>\"{}\"", marker.display());
+    let policy = SandboxPolicy::new_with_assurance(
+        SandboxMode::Required,
+        AssuranceLevel::ManagedTree,
+        FilesystemPolicy::new(vec![".".into()], vec!["writable".into()]).unwrap(),
+        false,
+        vec!["TAPID_TEST_MARKER".into()],
+        false,
+        ExecutionLimits::new(Some(10), Some(4096), Some(4), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let request = command_request_with_policy(&root, &command, policy);
+
+    let error = execute(&request).expect_err("unverified Windows writes must fail closed");
+    assert_eq!(
+        error.category(),
+        ExecutionErrorCategory::UnsupportedContainment
+    );
+    assert!(!marker.exists(), "unsupported write policy started a child");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "re-enable after AppContainer existing-file writes pass on Windows 11"]
 fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
     let root = temporary_project("write-existing-file");
     let writable = root.join("writable");
