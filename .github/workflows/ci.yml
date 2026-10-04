@@ -470,7 +470,9 @@ jobs:
         with:
           node-version: 22
       - name: Test release helpers and workflows
-        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts tools/release/installers_test.ts
+        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts tools/release/installers_test.ts tools/release/sign_test.ts
+      - name: Test consumer capability contracts
+        run: node --test tests/fixtures/consumer_contract.test.js tests/fixtures/validate_consumer_project.test.js
       - name: Check source architecture
         run: node --experimental-strip-types tools/check_architecture.ts
       - name: Validate Unix installer syntax and help
