@@ -23,7 +23,7 @@ The explicit `--allow-unverified-registry-artifacts` compatibility option can re
 ## Remaining limitations
 
 - Live JSR installation and integrity behavior are not verified.
-- Full npm range, alias, tag, automatic peer placement/nested peer lookup, complete optional-dependency and platform-condition semantics, workspace linking, and private registry authentication are incomplete.
+- Full npm range and tag support (alias targets accept supported semver ranges, but dist-tags remain unsupported; see [npm aliases](compatibility.md#npm-aliases)), automatic peer placement/nested peer lookup, complete optional-dependency and platform-condition semantics, workspace linking, and private registry authentication are incomplete.
 - Metadata and artifact downloads remain sequential; retry delays and per-attempt timeouts are bounded but can extend a single resource fetch.
 - Frozen replay does not yet implement every npm frozen-lockfile policy rule.
 
