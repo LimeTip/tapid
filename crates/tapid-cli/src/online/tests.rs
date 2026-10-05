@@ -83,8 +83,14 @@ fn custom_private_origins_use_the_npm_metadata_protocol() {
     )
     .err()
     .unwrap();
-    assert!(error.contains("cannot fetch metadata"), "{error}");
-    assert!(!error.contains("unsupported registry origin"), "{error}");
+    assert!(
+        error.to_string().contains("cannot fetch metadata"),
+        "{error}"
+    );
+    assert!(
+        !error.to_string().contains("unsupported registry origin"),
+        "{error}"
+    );
 }
 
 #[test]
