@@ -75,7 +75,11 @@ jobs:
           VERSION="$(jq -r .version "$INTENT")"
           TAG="v$VERSION"
           test -z "$REQUESTED_TAG" || test "$TAG" = "$REQUESTED_TAG"
-          (cd "$RUNNER_TEMP/tapid-release-source" && node --experimental-strip-types "$GITHUB_WORKSPACE/tools/release/release.ts" check-tag "$TAG")
+          SOURCE_VERSION="$(cd "$RUNNER_TEMP/tapid-release-source" && node --experimental-strip-types "$GITHUB_WORKSPACE/tools/release/release.ts" current-version)"
+          test "$SOURCE_VERSION" = "$VERSION" || {
+            echo "source package version $SOURCE_VERSION does not match release intent $VERSION" >&2
+            exit 1
+          }
           test -s "$RUNNER_TEMP/tapid-release-source/$(jq -r .notes "$INTENT")"
           printf 'commit=%s\ntag=%s\nversion=%s\n' "$SOURCE_SHA" "$TAG" "$VERSION" >> "$GITHUB_OUTPUT"
       - name: Wait for successful CI on exact main commit

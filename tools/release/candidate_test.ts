@@ -119,6 +119,25 @@ test('promotion downloads again, promotes once and resumes immutable public rele
     await publishCandidate(mock.api,c,f.notes,f.plan);assert.equal(mock.patches.length,1);
   }finally{await f.cleanup();}
 });
+test('recovery verifies an older immutable public release without changing latest',async()=>{
+  const f=await fixture();try{
+    const mock=adapter({...f.release,draft:false,immutable:true});
+    let latestReads=0,downloads=0;
+    mock.api.latest=async()=>{latestReads++;return {...f.release,id:321,tag_name:'v0.0.13',draft:false,immutable:true};};
+    mock.api.download=async(asset,path)=>{downloads++;await copyFile(join(f.directory,asset.name),path);};
+    const approved=await attestCandidate(mock.api,f.directory,f.notes,f.plan,tag,commit,123);
+    assert.deepEqual(await publishCandidate(mock.api,approved,f.notes,f.plan),{release_id:123,tag,published:true});
+    assert.equal(downloads,11,'public recovery must still verify every asset');
+    assert.equal(latestReads,0,'verified public recovery needs no latest-release lookup');
+    assert.equal(mock.patches.length,0,'public recovery must not promote or change latest');
+    mock.setRelease({...f.release,draft:false,immutable:false});
+    await assert.rejects(()=>publishCandidate(mock.api,approved,f.notes,f.plan),/immutable/);
+    mock.setRelease({...f.release,draft:false,immutable:true});
+    await writeFile(f.plan,'unapproved plan');
+    await assert.rejects(()=>publishCandidate(mock.api,approved,f.notes,f.plan),/changed/);
+    assert.equal(mock.patches.length,0);
+  }finally{await f.cleanup();}
+});
 test('promotion rejects tampering, newer latest release and nonimmutable public state',async()=>{
   const f=await fixture();try{
     const mock=adapter(f.release);const c=await attestCandidate(mock.api,f.directory,f.notes,f.plan,tag,commit,123);

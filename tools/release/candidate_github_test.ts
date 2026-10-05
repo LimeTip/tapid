@@ -20,7 +20,7 @@ test('GitHub adapter creates annotated tag with structured payload and preserves
   assert.equal((calls[2].payload as {body:string}).body,'notes\nwith actual newlines\n');
   assert.equal((calls[2].payload as {draft:boolean}).draft,true);
 });
-test('GitHub adapter treats only an explicit404 as missing and rejects lightweight or nested tags',async()=>{
+test('GitHub adapter treats only an explicit 404 as missing and rejects lightweight or nested tags',async()=>{
   const missing=githubAdapter('LimeTip/tapid',async()=>{throw Error('gh: Not Found (HTTP 404)');});assert.equal(await missing.tag('v0.0.12'),null);
   const denied=githubAdapter('LimeTip/tapid',async()=>{throw Error('gh: Resource not accessible (HTTP 403)');});await assert.rejects(()=>denied.tag('v0.0.12'),/403/);
   const lightweight=githubAdapter('LimeTip/tapid',async()=> 'HTTP/2.0 200\n\n'+JSON.stringify({object:{type:'commit',sha:commit}}));await assert.rejects(()=>lightweight.tag('v0.0.12'),/annotated/);

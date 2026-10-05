@@ -1,4 +1,4 @@
-import { doesNotThrow, throws } from "node:assert/strict";
+import { deepEqual, throws } from "node:assert/strict";
 import { test } from "node:test";
 import { validateReleasePolicy } from "./policy.ts";
 
@@ -12,7 +12,30 @@ function fixture() {
 }
 
 test("one independent approval and enforced freshness permit automation", () => {
-  doesNotThrow(() => validateReleasePolicy(fixture()));
+  deepEqual(validateReleasePolicy(fixture()), { additionalCratesApproval: false });
+});
+
+test("activation permits the existing crates reviewer and reports the additional approval", () => {
+  const state = fixture();
+  state.cratesRelease.protection_rules = structuredClone(state.stableRelease.protection_rules);
+  deepEqual(validateReleasePolicy(state), { additionalCratesApproval: true });
+  state.stableRelease.protection_rules = [];
+  throws(() => validateReleasePolicy(state), /independent reviewer/);
+});
+
+test("an extra crates approval cannot substitute for publication protections", () => {
+  for (const mutate of [
+    (state: ReturnType<typeof fixture>) => { state.cratesRelease.can_admins_bypass = true; },
+    (state: ReturnType<typeof fixture>) => { state.cratesPolicies.branch_policies[0].name = "*"; },
+    (state: ReturnType<typeof fixture>) => { state.cratesRelease.protection_rules[0].reviewers[0].reviewer.id = 0; },
+    (state: ReturnType<typeof fixture>) => { state.rulesets[0].enforcement = "evaluate"; },
+    (state: ReturnType<typeof fixture>) => { state.rulesets[0].rules[1].parameters.require_last_push_approval = false; },
+  ]) {
+    const state = fixture();
+    state.cratesRelease.protection_rules = structuredClone(state.stableRelease.protection_rules);
+    mutate(state);
+    throws(() => validateReleasePolicy(state), /docs\/release-automation\.md/);
+  }
 });
 
 test("missing or bypassable environment approval fails with setup guidance", () => {
@@ -21,7 +44,6 @@ test("missing or bypassable environment approval fails with setup guidance", () 
     (state: ReturnType<typeof fixture>) => { state.stableRelease.protection_rules[0].prevent_self_review = false; },
     (state: ReturnType<typeof fixture>) => { state.stableRelease.protection_rules[0].reviewers = []; },
     (state: ReturnType<typeof fixture>) => { state.stableRelease.protection_rules = []; },
-    (state: ReturnType<typeof fixture>) => { state.cratesRelease.protection_rules = state.stableRelease.protection_rules; },
     (state: ReturnType<typeof fixture>) => { state.cratesRelease.can_admins_bypass = true; },
   ]) {
     const state = fixture(); mutate(state);

@@ -14,7 +14,7 @@ function array(value: unknown): unknown[] {
   return value;
 }
 
-function environmentPolicy(environment: unknown, policies: unknown, name: string, approved: boolean): void {
+function environmentPolicy(environment: unknown, policies: unknown, name: string, approved: boolean): boolean {
   const env = object(environment), branch = object(env.deployment_branch_policy), policy = object(policies);
   if (env.name !== name || env.can_admins_bypass !== false) fail(`${name} must disable administrator environment bypass`);
   const entries = array(policy.branch_policies);
@@ -24,13 +24,14 @@ function environmentPolicy(environment: unknown, policies: unknown, name: string
   const rules = array(env.protection_rules).map(object).filter((rule) => rule.type === "required_reviewers");
   if (approved) {
     if (rules.length !== 1 || rules[0].prevent_self_review !== true || array(rules[0].reviewers).length === 0) fail(`${name} requires an independent reviewer and must prevent self-approval`);
-    for (const reviewer of array(rules[0].reviewers).map(object)) {
+  }
+  for (const rule of rules) {
+    for (const reviewer of array(rule.reviewers).map(object)) {
       const id = object(reviewer.reviewer).id;
       if (!["User", "Team"].includes(String(reviewer.type)) || !Number.isSafeInteger(id) || Number(id) < 1) fail(`${name} has a malformed required reviewer`);
     }
-  } else if (rules.some((rule) => array(rule.reviewers).length !== 0)) {
-    fail(`${name} must have no separate reviewers under the one-release-approval policy`);
   }
+  return rules.some((rule) => array(rule.reviewers).length !== 0);
 }
 
 function matchesMain(pattern: unknown, defaultBranch: unknown): boolean {
@@ -38,10 +39,10 @@ function matchesMain(pattern: unknown, defaultBranch: unknown): boolean {
 }
 
 /** Read-only policy validation. Malformed or inaccessible protections never permit publication. */
-export function validateReleasePolicy(value: unknown): void {
+export function validateReleasePolicy(value: unknown): { additionalCratesApproval: boolean } {
   const state = object(value);
   environmentPolicy(state.stableRelease, state.stablePolicies, "stable-release", true);
-  environmentPolicy(state.cratesRelease, state.cratesPolicies, "crates-io-release", false);
+  const additionalCratesApproval = environmentPolicy(state.cratesRelease, state.cratesPolicies, "crates-io-release", false);
   const mainRules = array(state.rulesets).map(object).filter((ruleset) => {
     if (ruleset.target !== "branch" || ruleset.enforcement !== "active") return false;
     const refs = object(object(ruleset.conditions).ref_name);
@@ -59,6 +60,7 @@ export function validateReleasePolicy(value: unknown): void {
     return Number.isSafeInteger(count) && Number(count) >= 1 && parameters.dismiss_stale_reviews_on_push === true && parameters.require_last_push_approval === true;
   });
   if (!review) fail("An active main ruleset must require independent PR review, stale review dismissal, and last-push approval");
+  return { additionalCratesApproval };
 }
 
 const execFileAsync = promisify(execFile);
@@ -81,7 +83,10 @@ async function check(): Promise<void> {
     if (!Number.isSafeInteger(rule.id) || Number(rule.id) < 1) fail("Malformed GitHub ruleset identifier");
     return api(`rulesets/${rule.id}`);
   }));
-  validateReleasePolicy({ defaultBranch: object(repo).default_branch, stableRelease, stablePolicies, cratesRelease, cratesPolicies, rulesets });
+  const policy = validateReleasePolicy({ defaultBranch: object(repo).default_branch, stableRelease, stablePolicies, cratesRelease, cratesPolicies, rulesets });
+  if (policy.additionalCratesApproval) {
+    console.warn("crates-io-release still requires an additional approval. Keep it until the stable-release candidate gate is verified, then remove it as described in docs/release-automation.md.");
+  }
   console.log("GitHub release protection policy verified");
 }
 

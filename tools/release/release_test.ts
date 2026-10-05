@@ -145,9 +145,10 @@ test("binary release builds the exact source and gates one complete candidate", 
   assert(workflow.includes("workflow_call:"));
   assert(!workflow.includes("\n  push:"));
   assert(!workflow.includes("softprops/action-gh-release"));
-  assert(workflow.includes("ref: ${{ inputs.commit_sha }}"));
-  assert(workflow.includes('git checkout --detach "$TAG_COMMIT"'));
-  assert(workflow.includes('test "$(git rev-parse HEAD)" = "$TAG_COMMIT"'));
+  assert(!workflow.includes("ref: ${{ inputs.commit_sha }}"));
+  assert(workflow.includes("tools/release/verify-source.sh"));
+  assert(workflow.includes('git checkout --detach "$verified_commit"'));
+  assert(workflow.includes('test "$(git rev-parse HEAD)" = "$verified_commit"'));
   assert(workflow.includes('"staging/$BINARY" --version | grep -Fx "tapid $VERSION"'));
   assert(workflow.includes("pattern: tapid-*"));
   assert(workflow.includes("merge-multiple: true"));
@@ -267,7 +268,9 @@ test("crates publication preserves OIDC identity and requires same-run release e
   assert(workflow.includes("environment: crates-io-release"));
   assert(workflow.includes("rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5"));
   assert(workflow.includes("cargo package --workspace --locked"));
-  assert(workflow.includes('check-tag "$TAG"'));
+  assert(workflow.includes('tools/release/release.ts" current-version'));
+  assert(workflow.includes('test "$SOURCE_VERSION" = "$VERSION"'));
+  assert(!workflow.includes('check-tag "$TAG"'));
   assert(workflow.includes('git cat-file -t "refs/tags/$REQUESTED_TAG"'));
   assert(workflow.includes('git merge-base --is-ancestor "$SOURCE_SHA" origin/main'));
   assert(workflow.includes("if: github.ref == 'refs/heads/main'"));

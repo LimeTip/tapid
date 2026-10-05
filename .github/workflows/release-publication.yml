@@ -28,16 +28,18 @@ permissions:
 
 jobs:
   prepare:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
       release_tag: ${{ inputs.release_tag }}
-      tag_commit: ${{ inputs.commit_sha }}
+      tag_commit: ${{ steps.version.outputs.tag_commit }}
       release_id: ${{ inputs.release_id }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.commit_sha }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -45,10 +47,16 @@ jobs:
       - id: version
         env:
           TAG: ${{ inputs.release_tag }}
+          TAG_COMMIT: ${{ inputs.commit_sha }}
+          TAG_OBJECT: ${{ inputs.tag_object }}
         run: |
           set -euo pipefail
-          version="$(node --experimental-strip-types tools/release/release.ts check-tag "$TAG")"
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          verified_commit="$(bash tools/release/verify-source.sh "$TAG" "$TAG_COMMIT" "$TAG_OBJECT")"
+          source_dir="$RUNNER_TEMP/tapid-verified-source"
+          git worktree add --detach "$source_dir" "$verified_commit"
+          # Execute the trusted workflow's helper against the verified source.
+          version="$(cd "$source_dir" && node --experimental-strip-types "$GITHUB_WORKSPACE/tools/release/release.ts" check-tag "$TAG")"
+          printf 'version=%s\ntag_commit=%s\n' "$version" "$verified_commit" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
@@ -82,16 +90,20 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.commit_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Check out verified release commit
         shell: bash
         env:
           TAG_COMMIT: ${{ needs.prepare.outputs.tag_commit }}
+          TAG: ${{ needs.prepare.outputs.release_tag }}
+          TAG_OBJECT: ${{ inputs.tag_object }}
         run: |
-          git checkout --detach "$TAG_COMMIT"
-          test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
+          set -euo pipefail
+          verified_commit="$(bash tools/release/verify-source.sh "$TAG" "$TAG_COMMIT" "$TAG_OBJECT")"
+          git checkout --detach "$verified_commit"
+          test "$(git rev-parse HEAD)" = "$verified_commit"
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
@@ -158,7 +170,7 @@ jobs:
           else
             node --experimental-strip-types tools/release/release.ts checksums release "$VERSION"
             node --experimental-strip-types tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
-            node --experimental-strip-types tools/release/bootstrap.ts release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+            node --experimental-strip-types tools/release/bootstrap.ts release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" "$SOURCE_SHA"
           fi
           node --experimental-strip-types tools/release/candidate.ts unsigned release candidate/notes.md candidate/intent.json "$TAG" "$SOURCE_SHA" "$TAG_OBJECT" > candidate/unsigned-result.json
           jq .candidate candidate/unsigned-result.json > candidate/unsigned.json

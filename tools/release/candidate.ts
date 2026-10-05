@@ -1,13 +1,11 @@
 import { createHash } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { createReadStream } from 'node:fs';
 import { copyFile, lstat, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checksumLines, releaseRecord, releaseVersion } from './release.ts';
-import { renderInstallers, type InstallerTemplates } from './bootstrap.ts';
+import { renderInstallers, templatesForCommit, type InstallerTemplates } from './bootstrap.ts';
 
 export type Asset = { id: number; name: string; size: number };
 export type ReleaseState = { id: number; tag_name: string; name: string; body: string; draft: boolean; prerelease: boolean; immutable?: boolean; assets: Asset[] };
@@ -283,12 +281,12 @@ export async function publishCandidate(api: ReleaseAdapter,input: Candidate,note
     for(const asset of candidate.assets) await api.download(asset,join(directory,asset.name));
     const actual=await attestCandidate(api,directory,notes,plan,candidate.tag,candidate.commit,candidate.release_id,templates);
     if(candidateFingerprint(candidate)!==candidateFingerprint(actual)) throw Error('release candidate changed after approval');
-    const latest=await api.latest();
-    if(latest && compare(latest.tag_name.slice(1),candidate.tag.slice(1))>0) throw Error('newer latest release exists; refusing rollback');
     if(!state.draft) {
       if(state.immutable!==true) throw Error('published release must be immutable');
       return {release_id:candidate.release_id,tag:candidate.tag,published:true};
     }
+    const latest=await api.latest();
+    if(latest && compare(latest.tag_name.slice(1),candidate.tag.slice(1))>0) throw Error('newer latest release exists; refusing rollback');
     await api.promote(candidate.release_id,!latest || compare(candidate.tag.slice(1),latest.tag_name.slice(1))>=0);
     const publicState=await api.release(candidate.release_id);
     if(publicState.draft || publicState.immutable!==true) throw Error('publication read-back is not public and immutable');
@@ -298,16 +296,6 @@ export async function publishCandidate(api: ReleaseAdapter,input: Candidate,note
   } finally {await rm(directory,{recursive:true,force:true});}
 }
 
-const git=promisify(execFile);
-async function templatesForCommit(commit:string):Promise<InstallerTemplates> {
-  if(!/^[a-f0-9]{40}$/.test(commit))throw Error('invalid template source commit');
-  const templates={} as InstallerTemplates;
-  for(const name of ['install.sh','install.ps1'] as const){
-    const {stdout}=await git('git',['show',`${commit}:scripts/${name}`],{encoding:'utf8',maxBuffer:1024*1024,timeout:60000});
-    templates[name]=stdout;
-  }
-  return templates;
-}
 
 if(process.argv[1] && pathToFileURL(resolve(process.argv[1])).href===import.meta.url) {
   const {githubAdapter}=await import('./candidate_github.ts');
