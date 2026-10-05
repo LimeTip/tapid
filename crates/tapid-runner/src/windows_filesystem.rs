@@ -106,11 +106,31 @@ impl WindowsPathAcl {
     ) -> Result<Self, ExecutionError> {
         let mut parent_grants = Vec::new();
         let _transaction = lock_acl_mutations()?;
+        let system_root = std::env::var_os("SystemRoot")
+            .ok_or_else(|| unsupported_acl("resolve SystemRoot before parent ACL changes", 2))?;
+        let system_root = std::fs::canonicalize(system_root).map_err(|error| {
+            unsupported_acl(
+                "canonicalize SystemRoot before parent ACL changes",
+                error.raw_os_error().unwrap_or(1) as u32,
+            )
+        })?;
         let mut parent = path.parent().map(std::path::Path::to_path_buf);
         while let Some(directory) = parent {
-            // The volume root is not user-writable. Windows path traversal normally
-            // relies on SeChangeNotifyPrivilege there; never try to rewrite its DACL.
-            if directory.parent().is_none() || !Self::parent_dacl_is_writable(&directory)? {
+            // The volume root is not user-writable. Native AppContainer probes also show that
+            // declared descendants remain accessible without parent ACEs, so never modify shared
+            // SystemRoot DACLs such as the default SystemTemp directory.
+            if directory.parent().is_none() {
+                break;
+            }
+            let canonical_directory = std::fs::canonicalize(&directory).map_err(|error| {
+                unsupported_acl(
+                    "canonicalize parent directory before ACL changes",
+                    error.raw_os_error().unwrap_or(1) as u32,
+                )
+            })?;
+            if canonical_directory.starts_with(&system_root)
+                || !Self::parent_dacl_is_writable(&directory)?
+            {
                 break;
             }
             parent_grants.push(Self::grant_parent_traversal_unlocked(&directory, sid)?);
@@ -701,6 +721,73 @@ mod tests {
     use super::lock_acl_mutations;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn project_grant_does_not_modify_systemtemp_ancestor() {
+        let system_root = std::fs::canonicalize(
+            std::env::var_os("SystemRoot").expect("Windows SystemRoot is required"),
+        )
+        .unwrap();
+        let system_temp = std::env::temp_dir();
+        let canonical_system_temp = std::fs::canonicalize(&system_temp).unwrap();
+        if !canonical_system_temp.starts_with(&system_root) {
+            eprintln!(
+                "SystemTemp-specific ACL check skipped: temp directory is outside SystemRoot"
+            );
+            return;
+        }
+        let root = system_temp.join(format!(
+            "tapid-systemtemp-parent-acl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let writable = root.join("writable");
+        if let Err(error) = std::fs::create_dir_all(&writable) {
+            let _ = std::fs::remove_dir_all(&root);
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                eprintln!("SystemTemp-specific ACL check skipped: cannot create a probe directory");
+                return;
+            }
+            panic!("create SystemTemp ACL probe directory: {error}");
+        }
+        let icacls = system_root.join("System32/icacls.exe");
+        let read_acl = |path: &std::path::Path| {
+            let output = Command::new(&icacls).arg(path).output().unwrap();
+            assert!(
+                output.status.success(),
+                "icacls failed: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            output.stdout
+        };
+        let baseline_acl = read_acl(&system_temp);
+        let mut container = crate::execution::windows_job::WindowsAppContainer::create().unwrap();
+        let mut grant = super::WindowsPathAcl::grant(
+            &writable,
+            container.sid(),
+            crate::execution::FilesystemAccess::Write,
+            crate::execution::FilesystemGrantKind::DirectorySubtree,
+        )
+        .unwrap();
+        let active_acl = read_acl(&system_temp);
+        let restore = grant.restore();
+        let restored_acl = read_acl(&system_temp);
+        let cleanup = container.cleanup();
+        std::fs::remove_dir_all(root).unwrap();
+        restore.unwrap();
+        cleanup.unwrap();
+        assert_eq!(
+            restored_acl, baseline_acl,
+            "normal cleanup must restore SystemTemp DACL"
+        );
+        assert_eq!(
+            active_acl, baseline_acl,
+            "project grants must not add temporary ACEs to shared SystemTemp"
+        );
+    }
 
     #[test]
     fn directory_write_grant_propagates_to_existing_files() {

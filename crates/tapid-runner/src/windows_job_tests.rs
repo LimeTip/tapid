@@ -30,8 +30,9 @@ fn appcontainer_actual_token_file_access_probe() {
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CREATE_ALWAYS, CREATE_NEW, CreateFileW, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL,
-        FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FILE_WRITE_DATA, OPEN_ALWAYS, OPEN_EXISTING, WriteFile,
+        FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, OPEN_ALWAYS,
+        OPEN_EXISTING, WriteFile,
     };
     use windows_sys::Win32::System::Threading::OpenProcessToken;
 
@@ -87,27 +88,65 @@ fn appcontainer_actual_token_file_access_probe() {
 
     fn probe_directory(path: &std::path::Path, label: &str) -> bool {
         let wide = path_wide(path);
-        let handle = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                FILE_EXECUTE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
-                0,
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            eprintln!("{label}: TRAVERSE_DENIED win32={}", unsafe {
-                GetLastError()
-            });
-            false
-        } else {
-            eprintln!("{label}: TRAVERSE_OK");
-            unsafe { CloseHandle(handle) };
-            true
+        let mut execute_ok = false;
+        for (access, access_label) in [
+            (FILE_EXECUTE, "FILE_TRAVERSE"),
+            (FILE_READ_ATTRIBUTES, "FILE_READ_ATTRIBUTES"),
+            (FILE_LIST_DIRECTORY, "FILE_LIST_DIRECTORY"),
+            (
+                FILE_EXECUTE | FILE_READ_ATTRIBUTES,
+                "FILE_TRAVERSE|FILE_READ_ATTRIBUTES",
+            ),
+        ] {
+            let handle = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    access,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                    0,
+                )
+            };
+            let succeeded = handle != INVALID_HANDLE_VALUE;
+            if succeeded {
+                unsafe { CloseHandle(handle) };
+            }
+            let error = if succeeded {
+                0
+            } else {
+                unsafe { GetLastError() }
+            };
+            eprintln!(
+                "{label}: {access_label} {}{}",
+                if succeeded { "OK" } else { "DENIED win32=" },
+                if succeeded {
+                    String::new()
+                } else {
+                    error.to_string()
+                }
+            );
+            if access == FILE_EXECUTE {
+                execute_ok = succeeded;
+            }
         }
+        execute_ok
+    }
+
+    fn query_acl(icacls: &std::path::Path, path: &std::path::Path) -> Vec<u8> {
+        let output = std::process::Command::new(icacls)
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "icacls failed for {}: {}{}",
+            path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
     }
 
     let root = std::env::temp_dir().join(format!(
@@ -125,7 +164,7 @@ fn appcontainer_actual_token_file_access_probe() {
     std::fs::write(&existing, b"before").unwrap();
 
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
-    let icacls = std::path::PathBuf::from(system_root).join("System32/icacls.exe");
+    let icacls = std::path::PathBuf::from(&system_root).join("System32/icacls.exe");
     let label = std::process::Command::new(&icacls)
         .arg(&writable)
         .args(["/setintegritylevel", "(OI)(CI)L", "/c"])
@@ -141,6 +180,23 @@ fn appcontainer_actual_token_file_access_probe() {
     let root = std::fs::canonicalize(&root).unwrap();
     let writable = std::fs::canonicalize(&writable).unwrap();
     let existing = std::fs::canonicalize(&existing).unwrap();
+    let system_root_canonical =
+        std::fs::canonicalize(std::path::PathBuf::from(&system_root)).unwrap();
+    let volume_root = system_root_canonical.parent().unwrap().to_path_buf();
+    let mut audit_paths = vec![
+        root.clone(),
+        writable.clone(),
+        existing.clone(),
+        root.parent().unwrap().to_path_buf(),
+        system_root_canonical.clone(),
+        volume_root.clone(),
+    ];
+    audit_paths.sort();
+    audit_paths.dedup();
+    let baseline_acls = audit_paths
+        .iter()
+        .map(|path| query_acl(&icacls, path))
+        .collect::<Vec<_>>();
 
     let mut container = WindowsAppContainer::create().unwrap();
     let payload = format!("echo TAPID_FROM_CMD>\"{}\"", command_target.display());
@@ -185,6 +241,29 @@ fn appcontainer_actual_token_file_access_probe() {
         },
     ];
     let mut grants = WindowsFilesystemGrants::apply(container.sid(), &resolved_grants).unwrap();
+    let active_acls = audit_paths
+        .iter()
+        .map(|path| query_acl(&icacls, path))
+        .collect::<Vec<_>>();
+    for ((path, before), active) in audit_paths.iter().zip(&baseline_acls).zip(&active_acls) {
+        eprintln!(
+            "active DACL path={} changed={}\n{}",
+            path.display(),
+            before != active,
+            String::from_utf8_lossy(active)
+        );
+    }
+    let system_temp = root.parent().unwrap().to_path_buf();
+    let system_temp_index = audit_paths
+        .iter()
+        .position(|path| path == &system_temp)
+        .unwrap();
+    assert_eq!(
+        active_acls[system_temp_index], baseline_acls[system_temp_index],
+        "project grant must not modify shared SystemTemp"
+    );
+    eprintln!("SystemTemp DACL unchanged; testing declared descendant access");
+
     let dacl = std::process::Command::new(&icacls)
         .arg(&existing)
         .output()
@@ -239,10 +318,17 @@ fn appcontainer_actual_token_file_access_probe() {
         probe_directory(&writable, "write directory"),
         "AppContainer cannot traverse write directory"
     );
-    assert!(
-        probe_directory(writable.parent().unwrap(), "system temp ancestor"),
-        "AppContainer cannot traverse the SystemTemp ancestor"
-    );
+    for (path, label) in [
+        (root.parent().unwrap(), "SystemTemp ancestor"),
+        (system_root_canonical.as_path(), "Windows ancestor"),
+        (volume_root.as_path(), "volume-root ancestor"),
+    ] {
+        eprintln!(
+            "ancestor access label={label} path={} traverse={}",
+            path.display(),
+            probe_directory(path, label)
+        );
+    }
     for (path, access, disposition, label) in [
         (
             &existing,
@@ -329,6 +415,18 @@ fn appcontainer_actual_token_file_access_probe() {
     drop(child);
     drop(job);
     grants.restore().unwrap();
+    let restored_acls = audit_paths
+        .iter()
+        .map(|path| query_acl(&icacls, path))
+        .collect::<Vec<_>>();
+    for ((path, before), restored) in audit_paths.iter().zip(&baseline_acls).zip(&restored_acls) {
+        assert_eq!(
+            before,
+            restored,
+            "DACL was not restored for {}",
+            path.display()
+        );
+    }
     container.cleanup().unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
