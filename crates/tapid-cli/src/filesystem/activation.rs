@@ -1,3 +1,4 @@
+use crate::application::outcome::{ErrorKind, OperationalError};
 use fs4::{FileExt, TryLockError};
 use std::{
     fs,
@@ -15,7 +16,7 @@ pub(crate) fn test_crash_at(point: &str) {
 
 #[cfg(all(test, unix))]
 fn activate_node_modules(project: &Path, stage: &Path) -> Result<(), String> {
-    let activation_lock = ActivationLock::acquire(project)?;
+    let activation_lock = ActivationLock::acquire(project).map_err(|error| error.to_string())?;
     activate_node_modules_with_lock(project, stage, &activation_lock, false)
 }
 
@@ -277,48 +278,68 @@ fn restore_node_modules_backup(destination: &Path, backup: &Path) -> Result<(), 
 pub(crate) struct ActivationLock {
     file: fs::File,
     owner: String,
+    pub(crate) recovered: bool,
 }
 
 impl ActivationLock {
-    pub(crate) fn acquire(project: &Path) -> Result<Self, String> {
+    pub(crate) fn acquire(project: &Path) -> Result<Self, OperationalError> {
         let path = project.join(".tapid-activation.lock");
-        let mut file = open_lock_file(&path)?;
+        let mut file =
+            open_lock_file(&path).map_err(|e| OperationalError::new(ErrorKind::Transaction, e))?;
         FileExt::try_lock(&file).map_err(|error| match error {
-            TryLockError::WouldBlock => format!(
-                "another node_modules activation is already in progress (lock: {})",
-                path.display()
+            TryLockError::WouldBlock => OperationalError::new(
+                ErrorKind::ProjectBusy,
+                format!(
+                    "another node_modules activation is already in progress (lock: {})",
+                    path.display()
+                ),
             ),
             TryLockError::Error(error) => {
-                format!("cannot acquire node_modules activation lock: {error}")
+                OperationalError::from_source(ErrorKind::Transaction, error)
+                    .context("cannot acquire node_modules activation lock")
             }
         })?;
         let previous_owner = read_bounded_owner(&mut file).map_err(|error| {
             if error.kind() == io::ErrorKind::InvalidData {
-                "refusing to recover an oversized node_modules activation lock".to_owned()
+                OperationalError::new(
+                    ErrorKind::Recovery,
+                    "refusing to recover an oversized node_modules activation lock",
+                )
             } else {
-                format!("cannot read node_modules activation lock: {error}")
+                OperationalError::from_source(ErrorKind::Recovery, error)
+                    .context("cannot read node_modules activation lock")
             }
         })?;
         let previous_owner = String::from_utf8(previous_owner).map_err(|_| {
-            "refusing to recover a malformed node_modules activation lock".to_owned()
+            OperationalError::new(
+                ErrorKind::Recovery,
+                "refusing to recover a malformed node_modules activation lock",
+            )
         })?;
         if !previous_owner.is_empty() && !activation_owner_is_valid(&previous_owner) {
-            return Err("refusing to recover a malformed node_modules activation lock".into());
+            return Err(OperationalError::new(
+                ErrorKind::Recovery,
+                "refusing to recover a malformed node_modules activation lock",
+            ));
         }
         let decision = crate::filesystem::lifecycle_journal::recover(
             project,
             (!previous_owner.is_empty()).then_some(previous_owner.as_str()),
-        )?;
+        )
+        .map_err(|e| OperationalError::new(ErrorKind::Recovery, e))?;
         let recovery_owner = decision
             .as_ref()
             .map(|decision| decision.owner.as_str())
             .unwrap_or(&previous_owner);
         if !recovery_owner.is_empty() {
-            recover_owned_activation(project, recovery_owner, decision.clone())?;
-            recover_owned_stages(project, recovery_owner)?;
+            recover_owned_activation(project, recovery_owner, decision.clone())
+                .map_err(|e| OperationalError::new(ErrorKind::Recovery, e))?;
+            recover_owned_stages(project, recovery_owner)
+                .map_err(|e| OperationalError::new(ErrorKind::Recovery, e))?;
         }
         if decision.is_some() {
-            crate::filesystem::lifecycle_journal::finish_recovery(project)?;
+            crate::filesystem::lifecycle_journal::finish_recovery(project)
+                .map_err(|e| OperationalError::new(ErrorKind::Recovery, e))?;
         }
         let owner = format!(
             "{}-{:x}\n",
@@ -329,8 +350,15 @@ impl ActivationLock {
             .and_then(|()| file.rewind())
             .and_then(|()| file.write_all(owner.as_bytes()))
             .and_then(|()| file.sync_all())
-            .map_err(|error| format!("cannot initialize node_modules activation lock: {error}"))?;
-        Ok(Self { file, owner })
+            .map_err(|error| {
+                OperationalError::from_source(ErrorKind::Transaction, error)
+                    .context("cannot initialize node_modules activation lock")
+            })?;
+        Ok(Self {
+            file,
+            owner,
+            recovered: decision.is_some(),
+        })
     }
 
     pub(crate) fn create_stage(&self, project: &Path) -> Result<PathBuf, String> {
@@ -854,7 +882,7 @@ mod activation_tests {
             Err(error) => error,
         };
 
-        assert!(error.contains(&lock_path.display().to_string()));
+        assert!(error.to_string().contains(&lock_path.display().to_string()));
         let _ = fs::remove_dir_all(project);
     }
 
@@ -911,7 +939,7 @@ mod activation_tests {
             Err(error) => error,
         };
 
-        assert!(error.contains("already in progress"));
+        assert!(error.to_string().contains("already in progress"));
         assert!(stage.is_dir());
         drop(first);
         let _ = fs::remove_dir_all(project);
@@ -930,7 +958,7 @@ mod activation_tests {
             Err(error) => error,
         };
 
-        assert!(error.contains("malformed"));
+        assert!(error.to_string().contains("malformed"));
         assert!(stage.is_dir());
         let _ = fs::remove_dir_all(project);
     }
@@ -946,7 +974,7 @@ mod activation_tests {
             Err(error) => error,
         };
 
-        assert!(error.contains("oversized"));
+        assert!(error.to_string().contains("oversized"));
         let _ = fs::remove_dir_all(project);
     }
 
@@ -963,7 +991,11 @@ mod activation_tests {
 
         let error = create_stage_owner_marker(&stage, "123-deadbeef\n").unwrap_err();
 
-        assert!(error.contains("cannot create install staging owner marker"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot create install staging owner marker")
+        );
         assert_eq!(fs::read(&target).unwrap(), b"unchanged");
         let _ = fs::remove_dir_all(project);
     }
@@ -979,7 +1011,7 @@ mod activation_tests {
 
         let error = activate_node_modules(&project, &stage).unwrap_err();
 
-        assert!(error.contains("non-regular"));
+        assert!(error.to_string().contains("non-regular"));
         assert_eq!(fs::read(&target).unwrap(), b"must remain unchanged");
         assert!(
             fs::symlink_metadata(project.join(".tapid-managed"))
@@ -1036,7 +1068,11 @@ mod activation_tests {
 
         let error = activate_node_modules(&project, &stage).unwrap_err();
 
-        assert!(error.contains("non-directory install staging tree"));
+        assert!(
+            error
+                .to_string()
+                .contains("non-directory install staging tree")
+        );
         assert_eq!(
             fs::read(project.join("node_modules/retained")).unwrap(),
             b"old layout"

@@ -532,6 +532,10 @@ fn missing_private_registry_credentials_fail_before_committing_manifest_changes(
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("TAPID_ISSUE164_MISSING"), "{stderr}");
+    assert!(
+        stderr.contains("diagnostic: REGISTRY_AUTH_MISSING"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("secret"), "{stderr}");
     assert_eq!(
         fs::read(dir.join("package.json")).unwrap(),
@@ -4740,6 +4744,7 @@ fn install_requires_lockfile_in_offline_and_frozen_modes() {
         let output = run(&dir, &["install", &format!("--{mode}")]);
         assert_eq!(output.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&output.stderr).contains("requires tapid.lock"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("diagnostic: LOCKFILE_MISSING"));
         assert!(!dir.join("node_modules").exists());
         cleanup(dir);
     }

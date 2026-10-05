@@ -1,3 +1,4 @@
+use crate::application::outcome::{ErrorKind, OperationFailure, OperationalError};
 use clap::Args as ClapArgs;
 use std::{path::PathBuf, process::ExitCode};
 use tapid_manifest::DependencyKind;
@@ -94,7 +95,13 @@ pub(crate) struct CommonArgs {
 
 pub(crate) fn add(args: AddArgs) -> ExitCode {
     if args.packages.is_empty() {
-        eprintln!("error: add requires at least one package");
+        crate::output::report_failure(&OperationFailure::unchanged(
+            &args.common.project_dir,
+            OperationalError::new(
+                ErrorKind::InvalidRequest,
+                "add requires at least one package",
+            ),
+        ));
         return ExitCode::from(1);
     }
     let kind = if args.dev {
@@ -126,7 +133,13 @@ pub(crate) fn add(args: AddArgs) -> ExitCode {
 
 pub(crate) fn remove(args: RemoveArgs) -> ExitCode {
     if args.packages.is_empty() {
-        eprintln!("error: remove requires at least one package");
+        crate::output::report_failure(&OperationFailure::unchanged(
+            &args.common.project_dir,
+            OperationalError::new(
+                ErrorKind::InvalidRequest,
+                "remove requires at least one package",
+            ),
+        ));
         return ExitCode::from(1);
     }
     let result = mutate_and_install(&args.common, |manifest| {
@@ -154,8 +167,9 @@ pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
         args.common.workspace.as_deref(),
         args.common.registry_fixture.as_deref(),
     ) {
-        Ok(entries) => {
-            for entry in entries {
+        Ok(report) => {
+            crate::output::report_warnings(&report.outcome.warnings);
+            for entry in report.entries {
                 println!(
                     "{}",
                     crate::application::lifecycle::format_outdated_entry(&entry)
@@ -164,25 +178,30 @@ pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("error: {error}");
+            crate::output::report_failure(&error);
             ExitCode::from(1)
         }
     }
 }
 
 pub(crate) fn prune(args: ReadOnlyArgs) -> ExitCode {
-    let project_dir = match crate::application::lifecycle::resolve_workspace(
+    let selection = match crate::application::lifecycle::resolve_workspace(
         &args.common.project_dir,
         args.common.workspace.as_deref(),
     ) {
-        Ok(selection) => selection.root_dir,
+        Ok(selection) => selection,
         Err(error) => {
-            eprintln!("error: {error}");
+            crate::output::report_failure(&OperationFailure::unchanged(
+                &args.common.project_dir,
+                error,
+            ));
             return ExitCode::from(1);
         }
     };
-    match crate::application::install::run(
-        &project_dir,
+    match crate::application::install::run_with_manifest_target(
+        &selection.root_dir,
+        &selection.manifest_path,
+        None,
         None,
         args.common.store_dir.as_deref(),
         crate::application::install::InstallMode::Frozen,
@@ -191,11 +210,12 @@ pub(crate) fn prune(args: ReadOnlyArgs) -> ExitCode {
         |_, _| {},
     ) {
         Ok(report) => {
+            crate::output::report_warnings(&report.outcome.warnings);
             println!("Pruned ({} package(s))", report.package_count);
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("error: {error}");
+            crate::output::report_failure(&error);
             ExitCode::from(1)
         }
     }
@@ -205,13 +225,15 @@ fn mutate_and_install(
     common: &CommonArgs,
     planner: impl FnOnce(
         &tapid_manifest::PackageManifest,
-    ) -> Result<crate::application::lifecycle::LifecyclePlan, String>,
-) -> Result<crate::application::install::InstallReport, String> {
+    ) -> Result<crate::application::lifecycle::LifecyclePlan, OperationalError>,
+) -> Result<crate::application::install::InstallReport, OperationFailure> {
     let selection = crate::application::lifecycle::resolve_workspace(
         &common.project_dir,
         common.workspace.as_deref(),
-    )?;
-    let plan = planner(&selection.manifest)?;
+    )
+    .map_err(|error| OperationFailure::unchanged(&common.project_dir, error))?;
+    let plan = planner(&selection.manifest)
+        .map_err(|error| OperationFailure::unchanged(&selection.root_dir, error))?;
     crate::application::install::run_with_manifest_target(
         &selection.root_dir,
         &selection.manifest_path,
@@ -226,16 +248,17 @@ fn mutate_and_install(
 }
 
 fn report(
-    result: Result<crate::application::install::InstallReport, String>,
+    result: Result<crate::application::install::InstallReport, OperationFailure>,
     action: &str,
 ) -> ExitCode {
     match result {
         Ok(report) => {
+            crate::output::report_warnings(&report.outcome.warnings);
             println!("{action} ({} package(s))", report.package_count);
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("error: {error}");
+            crate::output::report_failure(&error);
             ExitCode::from(1)
         }
     }

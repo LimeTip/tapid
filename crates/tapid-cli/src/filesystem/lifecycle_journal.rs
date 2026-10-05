@@ -38,6 +38,8 @@ enum State {
 pub(crate) struct LifecycleJournal {
     project: std::path::PathBuf,
     record: Record,
+    finished: bool,
+    settlement_attempted: bool,
 }
 
 fn relative_manifest_path(project: &Path, manifest_path: &Path) -> Result<String, String> {
@@ -112,6 +114,8 @@ impl LifecycleJournal {
         Ok(Self {
             project: project.to_owned(),
             record,
+            finished: false,
+            settlement_attempted: false,
         })
     }
 
@@ -136,35 +140,41 @@ impl LifecycleJournal {
         write_record(&self.project, &self.record)
     }
 
-    pub(crate) fn finish(self) -> Result<(), String> {
+    pub(crate) fn finish(&mut self) -> Result<(), String> {
         crate::filesystem::activation::commit_owned_activation(&self.project, &self.record.owner)?;
-        remove_journal(&self.project)
+        remove_journal(&self.project)?;
+        self.finished = true;
+        Ok(())
+    }
+
+    /// Explicitly settle the durable decision while the caller still owns the
+    /// project lock. Return whether the transaction committed, not just whether
+    /// cleanup succeeded.
+    pub(crate) fn settle(&mut self) -> Result<bool, String> {
+        if self.finished {
+            return Ok(self.record.state == State::Committed);
+        }
+        self.settlement_attempted = true;
+        let decision = recover(&self.project, Some(&self.record.owner))?
+            .ok_or("lifecycle journal disappeared before recovery")?;
+        crate::filesystem::activation::recover_owned_activation(
+            &self.project,
+            &decision.owner,
+            Some(decision.clone()),
+        )?;
+        crate::filesystem::activation::recover_owned_stages(&self.project, &decision.owner)?;
+        remove_journal(&self.project)?;
+        self.finished = true;
+        Ok(decision.committed)
     }
 }
 
 impl Drop for LifecycleJournal {
     fn drop(&mut self) {
-        let recovered = (|| {
-            let Some(decision) = recover(&self.project, Some(&self.record.owner))? else {
-                return Ok(());
-            };
-            if let Some(store_root) = &self.record.store_root {
-                tapid_store::Store::new(store_root)
-                    .recover_transactions()
-                    .map_err(|error| format!("cannot recover shared store transaction: {error}"))?;
-            }
-            if !decision.committed {
-                recover_record(&self.project, &self.record)?;
-            }
-            crate::filesystem::activation::recover_owned_activation(
-                &self.project,
-                &decision.owner,
-                Some(decision.clone()),
-            )?;
-            crate::filesystem::activation::recover_owned_stages(&self.project, &decision.owner)?;
-            remove_journal(&self.project)
-        })();
-        let _ = recovered;
+        // Panic fallback only; application results use explicit settlement.
+        if !self.finished && !self.settlement_attempted {
+            let _ = self.settle();
+        }
     }
 }
 
@@ -724,6 +734,8 @@ mod tests {
         .unwrap();
 
         drop(LifecycleJournal {
+            finished: false,
+            settlement_attempted: false,
             project: project.clone(),
             record: prepared,
         });

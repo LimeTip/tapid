@@ -76,19 +76,32 @@ pub(crate) fn run(args: Args) -> ExitCode {
     } else {
         crate::application::install::InstallMode::Online
     };
-    let result = crate::application::install::run_with_manifest_target(
-        &args.project_dir,
-        &target_manifest_path,
-        None,
-        args.package.as_deref(),
-        args.store_dir.as_deref(),
-        mode,
-        args.registry_fixture.as_deref(),
-        args.allow_unverified_registry_artifacts,
-        |completed, total| eprintln!("Replay snapshot progress: {completed}/{total}"),
-    );
+    let result = if args.workspace.is_some() {
+        crate::application::install::run_with_manifest_target(
+            &args.project_dir,
+            &target_manifest_path,
+            None,
+            args.package.as_deref(),
+            args.store_dir.as_deref(),
+            mode,
+            args.registry_fixture.as_deref(),
+            args.allow_unverified_registry_artifacts,
+            |completed, total| eprintln!("Replay snapshot progress: {completed}/{total}"),
+        )
+    } else {
+        crate::application::install::run(
+            &args.project_dir,
+            args.package.as_deref(),
+            args.store_dir.as_deref(),
+            mode,
+            args.registry_fixture.as_deref(),
+            args.allow_unverified_registry_artifacts,
+            |completed, total| eprintln!("Replay snapshot progress: {completed}/{total}"),
+        )
+    };
     match result {
         Ok(report) => {
+            crate::output::report_warnings(&report.outcome.warnings);
             if report.replayed {
                 println!("Replayed lockfile: {} package(s)", report.package_count);
             } else {
@@ -97,7 +110,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("error: {error}");
+            crate::output::report_failure(&error);
             ExitCode::from(1)
         }
     }

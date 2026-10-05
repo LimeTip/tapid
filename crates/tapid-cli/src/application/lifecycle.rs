@@ -1,3 +1,4 @@
+use super::outcome::{ErrorKind, OperationFailure, OperationOutcome, OperationalError, Warning};
 use serde::Deserialize;
 use std::{
     fs,
@@ -37,16 +38,21 @@ pub(crate) struct LifecyclePlan {
 pub(crate) fn plan_add(
     manifest: &PackageManifest,
     mutations: &[DependencyMutation],
-) -> Result<LifecyclePlan, String> {
+) -> Result<LifecyclePlan, OperationalError> {
     let mut next = manifest.clone();
     for mutation in mutations {
-        let requirement = mutation
-            .requirement
-            .as_deref()
-            .ok_or_else(|| format!("add requires a requirement for '{}'", mutation.name))?;
+        let requirement = mutation.requirement.as_deref().ok_or_else(|| {
+            OperationalError::new(
+                ErrorKind::InvalidRequest,
+                format!("add requires a requirement for '{}'", mutation.name),
+            )
+        })?;
         next = next
             .with_dependency_kind(mutation.kind, &mutation.name, requirement)
-            .map_err(|error| format!("cannot add dependency '{}': {error}", mutation.name))?;
+            .map_err(|error| {
+                OperationalError::from_source(ErrorKind::InvalidRequest, error)
+                    .context(format!("cannot add dependency '{}'", mutation.name))
+            })?;
     }
     Ok(LifecyclePlan {
         action: LifecycleAction::Add,
@@ -59,21 +65,26 @@ pub(crate) fn plan_add(
 pub(crate) fn plan_remove(
     manifest: &PackageManifest,
     names: &[String],
-) -> Result<LifecyclePlan, String> {
+) -> Result<LifecyclePlan, OperationalError> {
     let mut next = manifest.clone();
     let mut mutations = Vec::new();
     for name in names {
         if name.starts_with("workspace:") {
-            return Err(format!(
-                "unsupported workspace dependency reference: {name}"
+            return Err(OperationalError::new(
+                ErrorKind::InvalidRequest,
+                format!("unsupported workspace dependency reference: {name}"),
             ));
         }
         let kind = next.dependency_kind(name).ok_or_else(|| {
-            format!("cannot remove '{name}': dependency is not declared in package.json")
+            OperationalError::new(
+                ErrorKind::InvalidRequest,
+                format!("cannot remove '{name}': dependency is not declared in package.json"),
+            )
         })?;
-        next = next
-            .without_dependency(name)
-            .map_err(|error| format!("cannot remove dependency '{name}': {error}"))?;
+        next = next.without_dependency(name).map_err(|error| {
+            OperationalError::from_source(ErrorKind::InvalidRequest, error)
+                .context(format!("cannot remove dependency '{name}'"))
+        })?;
         mutations.push(DependencyMutation {
             name: name.clone(),
             requirement: None,
@@ -92,7 +103,7 @@ pub(crate) fn plan_update(
     manifest: &PackageManifest,
     names: &[String],
     latest: bool,
-) -> Result<LifecyclePlan, String> {
+) -> Result<LifecyclePlan, OperationalError> {
     let selected = if names.is_empty() {
         manifest
             .dependencies()
@@ -107,9 +118,12 @@ pub(crate) fn plan_update(
     };
     let mut mutations = Vec::new();
     for name in selected {
-        let kind = manifest
-            .dependency_kind(&name)
-            .ok_or_else(|| format!("cannot update '{name}': dependency is not declared"))?;
+        let kind = manifest.dependency_kind(&name).ok_or_else(|| {
+            OperationalError::new(
+                ErrorKind::InvalidRequest,
+                format!("cannot update '{name}': dependency is not declared"),
+            )
+        })?;
         let requirement = [
             manifest.dependencies(),
             manifest.dev_dependencies(),
@@ -122,9 +136,10 @@ pub(crate) fn plan_update(
         .unwrap();
         mutations.push(DependencyMutation {
             requirement: Some(if latest {
-                let parsed = requirement
-                    .parse::<Requirement>()
-                    .map_err(|error| format!("invalid dependency '{name}': {error}"))?;
+                let parsed = requirement.parse::<Requirement>().map_err(|error| {
+                    OperationalError::from_source(ErrorKind::InvalidRequest, error)
+                        .context(format!("invalid dependency '{name}'"))
+                })?;
                 if parsed.is_alias() {
                     let (_, declared) = crate::online::dep_parts(&name)?;
                     format!("npm:{}@*", parsed.package_name(&declared))
@@ -155,20 +170,36 @@ pub(crate) struct WorkspaceSelection {
 pub(crate) fn resolve_workspace(
     project_dir: &Path,
     selector: Option<&str>,
-) -> Result<WorkspaceSelection, String> {
+) -> Result<WorkspaceSelection, OperationalError> {
     if selector.is_some_and(|value| value.starts_with("workspace:")) {
-        return Err(
-            "workspace protocol references are not implemented; refusing registry fallback"
-                .to_owned(),
-        );
+        return Err(OperationalError::new(
+            ErrorKind::InvalidRequest,
+            "workspace protocol references are not implemented; refusing registry fallback",
+        ));
     }
-    let workspace = Workspace::discover(project_dir)?;
-    let manifest = workspace.select(selector)?.clone();
-    let manifest_path = workspace.select_path(selector)?.to_path_buf();
+    let project_dir = fs::canonicalize(project_dir).map_err(|error| {
+        OperationalError::from_source(ErrorKind::Project, error)
+            .context("cannot open project directory")
+    })?;
+    let workspace = Workspace::discover(&project_dir)
+        .map_err(|error| OperationalError::new(ErrorKind::Project, error))?;
+    let manifest = workspace
+        .select(selector)
+        .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?
+        .clone();
+    let manifest_path = workspace
+        .select_path(selector)
+        .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?
+        .to_path_buf();
     let root_dir = workspace
         .root_path()
         .parent()
-        .ok_or("workspace root manifest has no parent directory")?
+        .ok_or_else(|| {
+            OperationalError::new(
+                ErrorKind::Project,
+                "workspace root manifest has no parent directory",
+            )
+        })?
         .to_path_buf();
     Ok(WorkspaceSelection {
         root_dir,
@@ -188,13 +219,13 @@ pub(crate) fn format_outdated_entry(entry: &OutdatedEntry) -> String {
         entry.newest_available.as_deref().unwrap_or("unavailable"),
         entry
             .diagnostic
-            .as_deref()
+            .as_ref()
             .map(|value| format!(" diagnostic={value}"))
             .unwrap_or_default()
     )
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct OutdatedEntry {
     pub(crate) identity: String,
     pub(crate) kind: String,
@@ -202,7 +233,7 @@ pub(crate) struct OutdatedEntry {
     pub(crate) locked: Option<String>,
     pub(crate) newest_compatible: Option<String>,
     pub(crate) newest_available: Option<String>,
-    pub(crate) diagnostic: Option<String>,
+    pub(crate) diagnostic: Option<OperationalError>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,12 +281,15 @@ fn versions_from_fixture(
     path: &Path,
     origin: &RegistryOrigin,
     name: &PackageName,
-) -> Result<Vec<PackageVersion>, String> {
-    let fixture: Fixture = serde_json::from_str(
-        &fs::read_to_string(path)
-            .map_err(|error| format!("cannot read registry fixture: {error}"))?,
-    )
-    .map_err(|error| format!("invalid registry fixture: {error}"))?;
+) -> Result<Vec<PackageVersion>, OperationalError> {
+    let fixture: Fixture = serde_json::from_str(&fs::read_to_string(path).map_err(|error| {
+        OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+            .context("cannot read registry fixture")
+    })?)
+    .map_err(|error| {
+        OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+            .context("invalid registry fixture")
+    })?;
     fixture
         .packages
         .into_iter()
@@ -266,7 +300,9 @@ fn versions_from_fixture(
             package
                 .version
                 .parse()
-                .map_err(|error: tapid_core::DomainError| error.to_string())
+                .map_err(|error: tapid_core::DomainError| {
+                    OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+                })
         })
         .collect()
 }
@@ -275,15 +311,15 @@ fn versions_from_registry(
     transport: &HttpsTransport,
     origin: &RegistryOrigin,
     name: &PackageName,
-) -> Result<Vec<PackageVersion>, String> {
+) -> Result<Vec<PackageVersion>, OperationalError> {
     let artifacts = if origin.to_string() == "https://jsr.io" {
         JsrRegistry::new(transport, origin.clone())
             .fetch(&name.to_string())
-            .map_err(|error| error.to_string())?
+            .map_err(OperationalError::from)?
     } else {
         NpmRegistry::new(transport, origin.clone())
             .fetch(&name.to_string())
-            .map_err(|error| error.to_string())?
+            .map_err(OperationalError::from)?
     };
     Ok(artifacts
         .into_iter()
@@ -291,16 +327,49 @@ fn versions_from_registry(
         .collect())
 }
 
+#[derive(Debug)]
+pub(crate) struct OutdatedReport {
+    pub(crate) entries: Vec<OutdatedEntry>,
+    pub(crate) outcome: OperationOutcome,
+}
+
 pub(crate) fn outdated_report(
     project_dir: &Path,
     workspace_selector: Option<&str>,
     registry_fixture: Option<&Path>,
-) -> Result<Vec<OutdatedEntry>, String> {
+) -> Result<OutdatedReport, OperationFailure> {
+    let mut outcome = OperationOutcome::unchanged(project_dir);
+    match outdated_entries(
+        project_dir,
+        workspace_selector,
+        registry_fixture,
+        &mut outcome,
+    ) {
+        Ok(entries) => Ok(OutdatedReport { entries, outcome }),
+        Err(error) => {
+            if error.kind == ErrorKind::Recovery {
+                outcome.state = super::outcome::ChangeState::RecoveryRequired;
+            }
+            Err(OperationFailure::new(error, outcome, None))
+        }
+    }
+}
+
+fn outdated_entries(
+    project_dir: &Path,
+    workspace_selector: Option<&str>,
+    registry_fixture: Option<&Path>,
+    outcome: &mut OperationOutcome,
+) -> Result<Vec<OutdatedEntry>, OperationalError> {
     let selection = resolve_workspace(project_dir, workspace_selector)?;
+    outcome.project_dir = selection.root_dir.clone();
     let project_dir = selection.root_dir.as_path();
     let mut manifest = selection.manifest;
-    let registry_config = crate::registry::RegistryConfig::load(project_dir)?;
-    let recovery_lock = if crate::filesystem::lifecycle_journal::has_pending(project_dir)? {
+    let registry_config = crate::registry::RegistryConfig::load(project_dir)
+        .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+    let recovery_lock = if crate::filesystem::lifecycle_journal::has_pending(project_dir)
+        .map_err(|error| OperationalError::new(ErrorKind::Recovery, error))?
+    {
         Some(crate::filesystem::activation::ActivationLock::acquire(
             project_dir,
         )?)
@@ -308,19 +377,27 @@ pub(crate) fn outdated_report(
         None
     };
     if recovery_lock.is_some() {
-        let recovered_manifest = fs::read_to_string(&selection.manifest_path)
-            .map_err(|error| format!("cannot read recovered package manifest: {error}"))?;
-        manifest = PackageManifest::parse(&recovered_manifest)
-            .map_err(|error| format!("invalid recovered package manifest: {error}"))?;
+        let recovered_manifest = fs::read_to_string(&selection.manifest_path).map_err(|error| {
+            OperationalError::from_source(ErrorKind::Recovery, error)
+                .context("cannot read recovered package manifest")
+        })?;
+        manifest = PackageManifest::parse(&recovered_manifest).map_err(|error| {
+            OperationalError::new(ErrorKind::Manifest, error)
+                .context("invalid recovered package manifest")
+        })?;
+        outcome.warnings.push(Warning::PreviousTransactionRecovered);
     }
-    let lock = Lockfile::from_json(
-        &fs::read_to_string(project_dir.join("tapid.lock"))
-            .map_err(|error| format!("cannot read lockfile: {error}"))?,
-    )
-    .map_err(|error| format!("invalid lockfile: {error}"))?;
-    let locked = lock
-        .packages_typed()
-        .map_err(|error| format!("invalid lockfile package identity: {error}"))?;
+    let lock_path = project_dir.join("tapid.lock");
+    let bytes = fs::read_to_string(&lock_path).map_err(|error| {
+        let kind = if error.kind() == std::io::ErrorKind::NotFound {
+            ErrorKind::LockfileMissing
+        } else {
+            ErrorKind::Lockfile
+        };
+        OperationalError::from_source(kind, error).context("cannot read lockfile")
+    })?;
+    let lock = Lockfile::from_json(&bytes).map_err(OperationalError::from)?;
+    let locked = lock.packages_typed().map_err(OperationalError::from)?;
     let direct_dependencies = direct_dependencies(&manifest);
     let local_workspace_versions = Workspace::discover(project_dir)?
         .members()
@@ -359,16 +436,22 @@ pub(crate) fn outdated_report(
                 newest_compatible: compatible.then(|| local_version.to_string()),
                 newest_available: Some(local_version.to_string()),
                 diagnostic: (!compatible).then(|| {
-                    format!(
-                        "local workspace version {local_version} does not satisfy declared range {declared}"
+                    OperationalError::new(
+                        ErrorKind::InvalidRequest,
+                        format!(
+                            "local workspace version {local_version} does not satisfy declared range {declared}"
+                        ),
                     )
                 }),
             });
             continue;
         }
         if declared.starts_with("workspace:") {
-            return Err(format!(
-                "workspace dependency '{identity}@{declared}' has no matching local workspace member; refusing registry fallback"
+            return Err(OperationalError::new(
+                ErrorKind::InvalidRequest,
+                format!(
+                    "workspace dependency '{identity}@{declared}' has no matching local workspace member; refusing registry fallback"
+                ),
             ));
         }
         let (manifest_origin, local_name) = crate::online::dep_parts(&identity)?;
@@ -381,7 +464,9 @@ pub(crate) fn outdated_report(
         let origin = if manifest_origin.to_string() == "https://jsr.io" {
             manifest_origin
         } else {
-            registry_config.origin_for_name(&package_name)?
+            registry_config
+                .origin_for_name(&package_name)
+                .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?
         };
         let bound_root = lock.root_bindings().get(local_name.as_str());
         let locked_version = locked
@@ -425,9 +510,15 @@ pub(crate) fn outdated_report(
                         .cloned()
                 });
                 let diagnostic = if versions.is_empty() {
-                    Some("registry metadata returned no versions".to_owned())
+                    Some(OperationalError::new(
+                        ErrorKind::RegistryMetadata,
+                        "registry metadata returned no versions",
+                    ))
                 } else if requirement.is_none() {
-                    Some(format!("unsupported declared requirement: {declared}"))
+                    Some(OperationalError::new(
+                        ErrorKind::InvalidRequest,
+                        format!("unsupported declared requirement: {declared}"),
+                    ))
                 } else {
                     None
                 };
@@ -436,7 +527,7 @@ pub(crate) fn outdated_report(
             Err(error) => (
                 None,
                 None,
-                Some(format!("registry metadata unavailable: {error}")),
+                Some(error.context("registry metadata unavailable")),
             ),
         };
         entries.push(OutdatedEntry {
@@ -455,6 +546,26 @@ pub(crate) fn outdated_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outdated_missing_lock_reports_typed_unchanged_context() {
+        let project = tapid_test_support::TempProject::new("outdated-outcome").unwrap();
+        fs::write(
+            project.path().join("package.json"),
+            r#"{"name":"app","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let failure = outdated_report(project.path(), None, None).unwrap_err();
+        assert_eq!(failure.error.kind, ErrorKind::LockfileMissing);
+        assert_eq!(
+            failure.outcome.state,
+            super::super::outcome::ChangeState::Unchanged
+        );
+        assert_eq!(
+            failure.outcome.project_dir,
+            project.path().canonicalize().unwrap()
+        );
+    }
 
     fn manifest() -> PackageManifest {
         PackageManifest::new("app", "1.0.0", true).unwrap()
