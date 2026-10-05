@@ -51,7 +51,7 @@ fn cancelled_termination_maps_to_sigint_exit_code() {
 }
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED** with `cargo test -p tapid-cli cancelled_termination_maps_to_sigint_exit_code`. Expected: compile failure because `Termination::Cancelled` does not exist.
+- [ ] **Step 2: Run the focused test and verify RED** with `cargo test -p tapid cancelled_termination_maps_to_sigint_exit_code`. Expected: compile failure because `Termination::Cancelled` does not exist.
 - [ ] **Step 3: Add the public result variant** in `crates/tapid-runner/src/execution.rs`:
 
 ```rust
@@ -68,7 +68,7 @@ pub enum Termination {
 
 Update exhaustive matches without changing existing mappings. In `crates/tapid-cli/src/commands/run.rs`, render `error: root package script cancelled by Ctrl+C` and return 130 for `Termination::Cancelled`.
 
-- [ ] **Step 4: Run focused CLI tests** with `cargo test -p tapid-cli cancelled_termination_maps_to_sigint_exit_code`; expected: PASS.
+- [ ] **Step 4: Run focused CLI tests** with `cargo test -p tapid cancelled_termination_maps_to_sigint_exit_code`; expected: PASS.
 - [ ] **Step 5: Run runner contract tests** with `cargo test -p tapid-runner`; expected: all existing tests pass, confirming the new result is not incorrectly constrained by a resource limit.
 - [ ] **Step 6: Commit** the result contract and CLI mapping as `feat(run): represent graceful cancellation`.
 

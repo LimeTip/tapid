@@ -54,3 +54,11 @@ fn nonzero_and_limit_terminations_map_to_stable_cli_exits() {
         assert_eq!(termination_exit_code(&termination), ExitCode::from(1));
     }
 }
+
+#[test]
+fn cancelled_termination_maps_to_sigint_exit_code() {
+    assert_eq!(
+        termination_exit_code(&tapid_runner::Termination::Cancelled),
+        ExitCode::from(130)
+    );
+}

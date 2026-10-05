@@ -294,6 +294,9 @@ fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> Ex
         tapid_runner::Termination::MemoryLimitExceeded => {
             eprintln!("error: root package script exceeded its memory limit");
         }
+        tapid_runner::Termination::Cancelled => {
+            eprintln!("error: root package script cancelled by Ctrl+C");
+        }
         tapid_runner::Termination::Exited(_) | tapid_runner::Termination::Signaled(_) => {}
     }
     termination_exit_code(outcome.termination())
@@ -309,6 +312,7 @@ fn termination_exit_code(termination: &tapid_runner::Termination) -> ExitCode {
         | tapid_runner::Termination::OutputLimitExceeded
         | tapid_runner::Termination::ProcessLimitExceeded
         | tapid_runner::Termination::MemoryLimitExceeded => ExitCode::from(1),
+        tapid_runner::Termination::Cancelled => ExitCode::from(130),
     }
 }
 

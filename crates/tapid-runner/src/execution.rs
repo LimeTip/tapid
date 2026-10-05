@@ -1166,6 +1166,7 @@ pub enum Termination {
     OutputLimitExceeded,
     ProcessLimitExceeded,
     MemoryLimitExceeded,
+    Cancelled,
 }
 
 /// Captured execution result paired with an enforcement receipt.
@@ -4008,6 +4009,12 @@ mod tests {
             (
                 Termination::MemoryLimitExceeded,
                 ExecutionLimits::new(None, None, None, Some(1)).unwrap(),
+                vec![],
+                vec![],
+            ),
+            (
+                Termination::Cancelled,
+                ExecutionLimits::default(),
                 vec![],
                 vec![],
             ),
