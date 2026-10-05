@@ -22,6 +22,19 @@ fn temporary_project(label: &str) -> PathBuf {
     path
 }
 
+fn project_dacl(path: &PathBuf) -> Vec<u8> {
+    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
+    let icacls = PathBuf::from(system_root).join("System32/icacls.exe");
+    let output = Command::new(icacls).arg(path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "icacls failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
 fn managed_policy() -> SandboxPolicy {
     managed_policy_with_limits(
         ExecutionLimits::new(Some(30), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
@@ -98,6 +111,7 @@ fn command_request_with_policy(
 #[test]
 fn windows_managed_tree_executes_with_checked_appcontainer_and_job_evidence() {
     let root = temporary_project("managed-tree");
+    let baseline_acl = project_dacl(&root);
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
     let system32 = fs::canonicalize(PathBuf::from(system_root).join("System32")).unwrap();
     let command = system32.join("cmd.exe");
@@ -161,6 +175,11 @@ fn windows_managed_tree_executes_with_checked_appcontainer_and_job_evidence() {
         outcome.completion().cleanup_confidence(),
         CleanupConfidence::KernelOwnedComplete
     );
+    assert_eq!(
+        project_dacl(&root),
+        baseline_acl,
+        "normal exit must restore the project DACL"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -204,6 +223,7 @@ fn windows_appcontainer_cannot_write_outside_the_project_grant() {
 #[test]
 fn windows_appcontainer_enforces_the_combined_output_limit() {
     let root = temporary_project("output-limit");
+    let baseline_acl = project_dacl(&root);
     let request = command_request(
         &root,
         "for /L %i in (1,1,100000) do @echo TAPID_OUTPUT_LINE",
@@ -216,12 +236,18 @@ fn windows_appcontainer_enforces_the_combined_output_limit() {
         outcome.completion().cleanup_confidence(),
         CleanupConfidence::KernelOwnedComplete
     );
+    assert_eq!(
+        project_dacl(&root),
+        baseline_acl,
+        "output-limit cleanup must restore the project DACL"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn windows_appcontainer_timeout_terminates_the_managed_job() {
     let root = temporary_project("timeout");
+    let baseline_acl = project_dacl(&root);
     let request = command_request(
         &root,
         "for /L %i in (1,1,2147483647) do @rem",
@@ -232,6 +258,35 @@ fn windows_appcontainer_timeout_terminates_the_managed_job() {
     assert_eq!(
         outcome.completion().cleanup_confidence(),
         CleanupConfidence::KernelOwnedComplete
+    );
+    assert_eq!(
+        project_dacl(&root),
+        baseline_acl,
+        "timeout cleanup must restore the project DACL"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn windows_missing_executable_failure_restores_project_dacl() {
+    let root = temporary_project("missing-executable");
+    let baseline_acl = project_dacl(&root);
+    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
+    let system32 = fs::canonicalize(PathBuf::from(system_root).join("System32")).unwrap();
+    let missing = root.join("missing.exe");
+    let request = ExecutionRequest::builder(missing.as_os_str())
+        .executable_search_path(&system32)
+        .project_root(&root)
+        .policy(managed_policy())
+        .build()
+        .unwrap();
+
+    let error = execute(&request).expect_err("missing executable must fail before spawn");
+    assert_eq!(error.category(), ExecutionErrorCategory::Spawn);
+    assert_eq!(
+        project_dacl(&root),
+        baseline_acl,
+        "pre-spawn failure must restore the project DACL"
     );
     fs::remove_dir_all(root).unwrap();
 }
