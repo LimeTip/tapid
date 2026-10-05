@@ -635,6 +635,70 @@ fn appcontainer_child_can_write_a_granted_tree_and_loses_access_on_restore() {
 }
 
 #[test]
+fn appcontainer_policy_only_allows_declared_write_subtree() {
+    use super::super::{FilesystemBindingMode, FilesystemGrantSource, ResolvedFilesystemGrant};
+
+    let root = std::env::temp_dir().join(format!(
+        "tapid-appcontainer-policy-split-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let writable = root.join("writable");
+    std::fs::create_dir_all(&writable).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let writable = std::fs::canonicalize(&writable).unwrap();
+    let readonly_file = root.join("read-only.txt");
+    let allowed_file = writable.join("allowed.txt");
+    std::fs::write(&readonly_file, b"read-only baseline").unwrap();
+    let mut container = WindowsAppContainer::create().unwrap();
+    let resolved_grants = [
+        ResolvedFilesystemGrant {
+            path: root.clone(),
+            access: FilesystemAccess::Read,
+            kind: FilesystemGrantKind::DirectorySubtree,
+            source: FilesystemGrantSource::ProjectPolicy,
+            binding: FilesystemBindingMode::CanonicalPath,
+        },
+        ResolvedFilesystemGrant {
+            path: writable,
+            access: FilesystemAccess::Write,
+            kind: FilesystemGrantKind::DirectorySubtree,
+            source: FilesystemGrantSource::ProjectPolicy,
+            binding: FilesystemBindingMode::CanonicalPath,
+        },
+    ];
+    let mut grants = WindowsFilesystemGrants::apply(container.sid(), &resolved_grants).unwrap();
+
+    let payload = format!("echo authorized>\"{}\"", allowed_file.display());
+    let (job, mut child) = create_appcontainer_child_in(&container, &payload);
+    let allowed_exit = child.resume_and_wait_for_exit(&job, 5_000).unwrap();
+    drop(child);
+    drop(job);
+
+    let payload = format!("echo unauthorized>\"{}\"", readonly_file.display());
+    let (job, mut child) = create_appcontainer_child_in(&container, &payload);
+    let denied_exit = child.resume_and_wait_for_exit(&job, 5_000).unwrap();
+    drop(child);
+    drop(job);
+    let allowed_contents = std::fs::read_to_string(&allowed_file).unwrap();
+    let readonly_contents = std::fs::read(&readonly_file).unwrap();
+
+    grants.restore().unwrap();
+    container.cleanup().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+
+    assert_eq!(allowed_exit, 0, "declared write subtree must be writable");
+    assert_eq!(allowed_contents.trim(), "authorized");
+    assert_eq!(
+        readonly_contents, b"read-only baseline",
+        "write to read-only project sibling changed the file (cmd exit {denied_exit})"
+    );
+}
+
+#[test]
 fn appcontainer_child_cannot_write_an_ungranted_temp_file() {
     let marker =
         std::env::temp_dir().join(format!("tapid-appcontainer-{}.txt", std::process::id()));
