@@ -27,6 +27,21 @@ test('candidate jobs start from trusted main and validate before executing selec
   assert.match(prepare, /tag_commit: \$\{\{ steps.version.outputs.tag_commit \}\}/);
 });
 
+test('standalone draft verification validates main ancestry and runs trusted tools with source templates', async () => {
+  const workflow = await readFile(new URL('../../.github/workflows/release-draft-verify.yml', import.meta.url), 'utf8');
+  const job = workflow.slice(workflow.indexOf('\n  resolve-and-verify:'), workflow.indexOf('\n  install:'));
+  assert.match(job, /if: github.ref == 'refs\/heads\/main'/);
+  assert.match(job, /ref: \$\{\{ github.sha \}\}/);
+  assert.doesNotMatch(job, /ref: \$\{\{ inputs.commit_sha \}\}/);
+  assert.match(job, /fetch-depth: 0/);
+  assert.match(job, /persist-credentials: false/);
+  assert.match(job, /TAG_OBJECT: \$\{\{ steps.resolve.outputs.tag_object \}\}/);
+  assert.match(job, /verify-source.sh "\$RELEASE_TAG" "\$COMMIT_SHA" "\$TAG_OBJECT"/);
+  assert(job.indexOf('verify-source.sh') < job.indexOf('tools/release/bootstrap.ts'));
+  assert.match(job, /bootstrap.ts "\$generated" "\$VERSION" "https:[^"\n]+" "\$COMMIT_SHA"/);
+  assert.doesNotMatch(job, /git checkout|git worktree add/);
+});
+
 test('source verification permits reviewed historical commits and rejects arbitrary or changed refs', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'tapid-release-source-'));
   const remote = join(directory, 'remote');
