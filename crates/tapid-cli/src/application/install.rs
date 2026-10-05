@@ -392,6 +392,12 @@ fn perform_install(
             activation_lock.owner_line(),
         )?;
     }
+    let root_manifest_path = project_dir.join("package.json");
+    let root_manifest = if manifest_path == root_manifest_path {
+        manifest.clone()
+    } else {
+        read_manifest(&root_manifest_path)?
+    };
     let store = Store::new(match store_root {
         Some(path) => path.to_owned(),
         None => {
@@ -404,7 +410,7 @@ fn perform_install(
         let (lock, mut input, trees, store_transaction, workspace_links) =
             online::resolve_and_fetch(
                 &project_dir,
-                &manifest,
+                &root_manifest,
                 &store,
                 registry_fixture,
                 allow_unverified_registry_artifacts,
@@ -540,8 +546,11 @@ fn perform_install(
                 .into(),
         );
     }
-    let workspace_registry_dependencies =
-        online::resolved_workspace_registry_dependencies(&manifest, &workspace, &registry_config)?;
+    let workspace_registry_dependencies = online::resolved_workspace_registry_dependencies(
+        &root_manifest,
+        &workspace,
+        &registry_config,
+    )?;
     validate_workspace_dependency_edges(&workspace, &workspace_registry_dependencies, &lock)?;
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")
@@ -552,7 +561,7 @@ fn perform_install(
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
     let (input, trees) = crate::application::replay::replay_input(
         &lock,
-        &manifest,
+        &root_manifest,
         &store,
         &registry_config,
         report_replay_progress,
