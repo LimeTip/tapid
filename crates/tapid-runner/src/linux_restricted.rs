@@ -501,7 +501,9 @@ fn establish_private_read_only_procfs(
         )
     } != 0
     {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        eprintln!("tapid: cannot make the private mount tree private: {error}");
+        return Err(error);
     }
     if unsafe {
         libc::mount(
@@ -513,7 +515,9 @@ fn establish_private_read_only_procfs(
         )
     } != 0
     {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        eprintln!("tapid: cannot mount the private read-only procfs: {error}");
+        return Err(error);
     }
     let mut proc_stats: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(c"/proc".as_ptr(), &mut proc_stats) } != 0 {
