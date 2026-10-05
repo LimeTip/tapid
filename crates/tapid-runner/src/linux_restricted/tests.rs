@@ -167,7 +167,7 @@ fn network_denial_preserves_unix_ipc_but_blocks_inet_socket_creation() {
 #[test]
 fn root_namespace_launch_does_not_create_an_unprivileged_user_namespace() {
     assert_eq!(
-        unshare_namespace_arguments(false, false),
+        unshare_namespace_arguments(false),
         [
             "--mount",
             "--pid",
@@ -179,8 +179,19 @@ fn root_namespace_launch_does_not_create_an_unprivileged_user_namespace() {
         ]
     );
     assert_eq!(
-        &unshare_namespace_arguments(true, false)[..2],
+        &unshare_namespace_arguments(true)[..2],
         &["--user", "--map-root-user"]
+    );
+}
+
+#[test]
+fn private_proc_namespace_does_not_delegate_mounting_to_unshare() {
+    let arguments = unshare_namespace_arguments(false);
+    assert!(!arguments.contains(&"--mount-proc"));
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["--propagation", "unchanged"])
     );
 }
 

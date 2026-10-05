@@ -505,10 +505,10 @@ fn establish_private_read_only_procfs(
     }
     if unsafe {
         libc::mount(
-            std::ptr::null(),
+            c"proc".as_ptr(),
             c"/proc".as_ptr(),
-            std::ptr::null(),
-            libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            c"proc".as_ptr(),
+            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
             std::ptr::null(),
         )
     } != 0
@@ -836,18 +836,12 @@ fn has_effective_sys_admin() -> bool {
     data[word].effective & mask != 0
 }
 
-fn unshare_namespace_arguments(
-    needs_user_namespace: bool,
-    private_proc: bool,
-) -> Vec<&'static str> {
+fn unshare_namespace_arguments(needs_user_namespace: bool) -> Vec<&'static str> {
     let mut arguments = Vec::with_capacity(8);
     if needs_user_namespace {
         arguments.extend(["--user", "--map-root-user"]);
     }
     arguments.extend(["--mount", "--pid", "--fork", "--kill-child"]);
-    if private_proc {
-        arguments.push("--mount-proc");
-    }
     arguments.extend(["--propagation", "unchanged", "--"]);
     arguments
 }
@@ -930,10 +924,7 @@ fn private_memory_stats_command(
         .transpose()?;
     let mut command = Command::new(unshare);
     command
-        .args(unshare_namespace_arguments(
-            !has_effective_sys_admin(),
-            request.allow_process_memory_stats(),
-        ))
+        .args(unshare_namespace_arguments(!has_effective_sys_admin()))
         .arg(launcher)
         .arg(PRIVATE_LAUNCHER_MARKER)
         .arg(if request.policy().network() { "1" } else { "0" })
@@ -1921,7 +1912,7 @@ mod legacy_tests {
     #[test]
     fn namespace_arguments_use_user_namespace_only_when_requested() {
         assert_eq!(
-            unshare_namespace_arguments(false, false),
+            unshare_namespace_arguments(false),
             [
                 "--mount",
                 "--pid",
@@ -1932,9 +1923,9 @@ mod legacy_tests {
                 "--",
             ]
         );
-        assert!(unshare_namespace_arguments(false, true).contains(&"--mount-proc"));
+        assert!(!unshare_namespace_arguments(false).contains(&"--mount-proc"));
         assert_eq!(
-            &unshare_namespace_arguments(true, false)[..2],
+            &unshare_namespace_arguments(true)[..2],
             &["--user", "--map-root-user"]
         );
     }
@@ -1965,7 +1956,7 @@ mod legacy_tests {
         }
         assert!(has_effective_sys_admin());
         assert_eq!(
-            unshare_namespace_arguments(!has_effective_sys_admin(), false).first(),
+            unshare_namespace_arguments(!has_effective_sys_admin()).first(),
             Some(&"--mount"),
             "an effective CAP_SYS_ADMIN holder should use its existing user namespace"
         );
@@ -2295,10 +2286,7 @@ mod legacy_tests {
         let unshare = locate_unshare().unwrap();
         let mut command = Command::new(unshare);
         command
-            .args(unshare_namespace_arguments(
-                !has_effective_sys_admin(),
-                false,
-            ))
+            .args(unshare_namespace_arguments(!has_effective_sys_admin()))
             .arg("/bin/sh")
             .arg("-c")
             .arg(format!("sleep 2; touch '{}'", marker.display()))
@@ -2368,10 +2356,7 @@ mod legacy_tests {
         let parent_pid = unsafe { libc::getpid() };
         let mut command = Command::new(unshare);
         command
-            .args(unshare_namespace_arguments(
-                !has_effective_sys_admin(),
-                false,
-            ))
+            .args(unshare_namespace_arguments(!has_effective_sys_admin()))
             .arg("/bin/sh")
             .arg("-c")
             .arg("printf ready > \"$1\"; sleep 2; printf survived > \"$2\"")
