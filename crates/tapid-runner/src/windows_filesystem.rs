@@ -623,10 +623,12 @@ impl WindowsFilesystemGrants {
                     "Windows AppContainer filesystem policy cannot grant character devices",
                 ));
             }
-            // Windows system files already grant read/execute access to application packages.
-            // Do not attempt to rewrite TrustedInstaller-owned DACLs; if the OS ACL has been
-            // hardened beyond that baseline, CreateProcess/read access fails closed at use time.
+            // Backend system files already grant read/execute access to application packages.
+            // Do not rewrite TrustedInstaller-owned DACLs for backend-runtime paths. Project grants
+            // are still applied when the project happens to live below SystemRoot (for example,
+            // Windows' default SystemTemp directory).
             if grant.access != FilesystemAccess::Write
+                && grant.source() == crate::execution::FilesystemGrantSource::BackendRuntime
                 && system_root
                     .as_ref()
                     .is_some_and(|root| grant.path.starts_with(root))

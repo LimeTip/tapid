@@ -19,11 +19,13 @@
 
 ---
 
-## Current Evidence and Open Question
+## Current Evidence and Confirmed Cause
 
-The native test `windows_appcontainer_can_modify_existing_file_in_declared_subtree` on VM 126 starts the child, but the child exits 1 with `Access is denied`. During the run, `icacls` showed the existing target file with an inherited ACE for the per-run AppContainer SID (`(I)(W,Rc)`), inherited SYSTEM full control, and an inherited Low mandatory label (`(I)(NW)`). A separate token probe measured the AppContainer token user as `S-1-5-18` (SYSTEM) and integrity RID `4096` (Low). A sequential native shell probe created a new file in the granted subtree, then attempted append and overwrite on that file and on the pre-existing file; all four later operations emitted `Access is denied`. The new file retained only its initial content and the pre-existing file was unchanged. This localizes the symptom to reopening/modifying file objects rather than directory-entry creation, but does not prove which access check denies the opens. A PowerShell child probe exited with status `-1073741502` before producing script output, so PowerShell is not a usable diagnostic helper in this configuration.
+The original failure is now explained. VM 126's default temp directory is `C:\Windows\SystemTemp`, which is below `SystemRoot`. `WindowsFilesystemGrants::apply` skipped every non-write grant beneath `SystemRoot`, regardless of whether it came from backend runtime or the project policy. Consequently it skipped the project-root read grant. The existing file still inherited the per-run AppContainer write ACE (`(I)(W,Rc)`) and Low mandatory label (`(I)(NW)`), but the AppContainer lacked traversal/read access to the project path. Under the exact production grant list, the child-token probe reproduced Win32 error 5 on the project root, write directory, ancestor, and existing-file opens; creating a new file still succeeded. The DACL inspection showed no inherited project-read ACE. This distinguishes the issue from a missing file-write ACE or a bad integrity level.
 
-Do not treat any single hypothesis as the root cause until the probe below differentiates it. The latest safety commit is `096f29a` on `feat/windows-2025-runner`; the Windows support gate for write policies is restored, the existing-file acceptance test is retained but ignored, and Windows write support remains unverified.
+The minimal fix now skips only `BackendRuntime` read grants under `SystemRoot`; project-policy grants are still applied even when the project is in `SystemTemp`. With the fix, the same native probe showed the inherited read ACE (`(I)(R)`), traversal and existing/new-file open/write operations succeeded under an impersonation token duplicated from the actual child, and `cmd.exe` redirection succeeded. The integrated existing-file write test also passed on VM 126 in a one-off diagnostic build with the fail-closed support gate temporarily bypassed; the repository gate was restored afterward. Rust 1.99.0 was used for the Windows cross-build and native test binaries; the compiler upgrade itself did not fix the failure. With the gate restored, the native `tapid-runner` unit suite passed 109 tests (1 diagnostic ignored), including existing grant/restore, undeclared-write denial, timeout, and concurrent-DACL tests; the separate fail-closed write-policy integration test also passed.
+
+A normal-exit cleanup check found no per-run SID ACE remaining on `C:\`, `C:\Windows`, or `C:\Windows\SystemTemp`, and the probe directory was removed. The diagnostic child reports that `cmd.exe` defaults away from the extended (`\\?\`) current-directory path; this did not prevent the absolute-path write, but relative working-directory behavior remains to be checked during CLI acceptance. Negative-path isolation and cleanup after errors, timeouts, and cancellation remain unverified. Keep Windows writes fail-closed until those checks and integrated `tapid run` acceptance pass.
 
 ## File Map
 
@@ -38,27 +40,27 @@ Do not treat any single hypothesis as the root cause until the probe below diffe
 
 **Files:** `crates/tapid-runner/src/windows_execution.rs`, `crates/tapid-runner/tests/windows_containment.rs`
 
-- [ ] Restore a structured `UnsupportedContainment` support-gate response for non-empty project write policies until the native write test passes. Keep the message specific that Windows project writes are unavailable pending native verification.
-- [ ] Keep the currently failing native success-path test as the red acceptance test, but run a separate low-level ACL diagnostic test that bypasses the support gate; do not change the acceptance test to expect a silent success or weaken its assertion.
-- [ ] Cross-compile the Windows targets and verify the support-gate test proves no child marker was created. The user-facing CLI must not start a child for an unsupported write policy.
+- [x] Restore a structured `UnsupportedContainment` support-gate response for non-empty project write policies until the native write test passes. Keep the message specific that Windows project writes are unavailable pending native verification.
+- [x] Keep the existing native success-path test as a red/green acceptance test, and run a separate low-level ACL diagnostic test that bypasses the support gate; do not weaken the acceptance assertion.
+- [x] Cross-compile the Windows targets and verify the support-gate test proves no child marker was created. The user-facing CLI must not start a child for an unsupported write policy.
 
 ## Task 2: Build a Decisive Native Access Probe
 
 **Files:** `crates/tapid-runner/src/windows_filesystem.rs`, `crates/tapid-runner/src/windows_job_tests.rs`, `crates/tapid-runner/tests/windows_containment.rs`
 
-- [ ] Add one Windows-only probe that creates a project directory, an existing file, and a new-file target; applies the same read-root and write-subtree grants as the failing integration test; and launches an AppContainer child on VM 126.
+- [x] Add one Windows-only probe that creates a project directory, an existing file, and a new-file target; applies the same read-root and write-subtree grants as the failing integration test; and launches an AppContainer child on VM 126.
 - [ ] In the probe, capture and report: AppContainer SID, token user SID, enabled groups, restricted SIDs, capability SIDs, integrity RID, exact file and directory SDDL while grants are active, requested access mask, and Win32 error code for each denied open. Use the actual child token, not assumptions from the parent process.
-- [ ] Separate three operations: open/write the existing file; create/write a new file; invoke the existing `cmd.exe` redirection path. This distinguishes target-file ACL, directory-create rights, and shell behavior.
+- [x] Separate three operations: open/write the existing file; create/write and reopen a new file; invoke the `cmd.exe` redirection path. This distinguished the skipped project-root read/traversal grant from file-write rights and shell behavior.
 - [ ] Use a duplicated impersonation token plus `AccessCheck`/`CreateFileW` for the exact desired access against the existing file and each path ancestor. Record effective access for both the package SID and normal user/group identity; do not infer access solely from `icacls` text.
 - [ ] Run only one variable-changing experiment at a time. Test separately whether the denial is caused by a missing ancestor `FILE_TRAVERSE`, an insufficient file/directory access mask, a protected/non-inheriting DACL, token SID/group mismatch, or the shell's open mode. Do not modify the volume-root DACL in the product path; any temporary diagnostic ACE must be unique to the test AppContainer and its before/after ACL must be checked.
-- [ ] Confirm the probe itself is red on the current VM setup and emits enough evidence to discriminate these hypotheses before changing production code.
+- [x] Confirm the probe itself is red on the current VM setup and emits enough evidence to discriminate these hypotheses before changing production code.
 
 ## Task 3: Apply the Smallest Proven ACL Fix
 
 **Files:** `crates/tapid-runner/src/windows_filesystem.rs`, `crates/tapid-runner/tests/windows_containment.rs`
 
-- [ ] Write the regression assertion for the specific missing right or boundary identified by Task 2; demonstrate it fails before the fix.
-- [ ] Implement only the proven change. For directory traversal, grant `FILE_EXECUTE` only on directories and never inherit it to files unless an explicit executable grant requires it. For write access, preserve the distinction between rights on the grant root and rights inherited by descendant files/directories.
+- [x] Write the regression assertion for the specific missing right or boundary identified by Task 2; demonstrate it fails before the fix.
+- [x] Implement only the proven change: skip `SystemRoot` read grants only for `BackendRuntime` paths, not project-policy grants. This preserves the no-broad-system-DACL rule while allowing projects under the default `SystemTemp` directory to receive their declared read/traversal grant.
 - [ ] If a required ancestor cannot be safely granted without changing a shared/protected/system DACL, fail closed with a precise unsupported-containment diagnostic rather than broadening access or silently skipping enforcement.
 - [ ] Re-run the targeted native positive test for existing-file modification and new-file creation, then negative tests proving writes to a sibling, parent, undeclared temp/home path, and a reparse/link escape remain denied.
 - [ ] Verify read-only grants do not acquire write access and write grants do not grant execute access to ordinary files.

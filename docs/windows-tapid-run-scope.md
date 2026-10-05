@@ -39,4 +39,12 @@ A baseline red run was recorded on Windows 11 Pro x64 build 26300 in Proxmox VM 
 sandbox execution failed (unsupported-containment): sandbox containment is unavailable on windows: no platform execution backend is implemented; no process was started and no enforcement receipt was issued
 ```
 
-This is only a baseline reproduction of the missing backend, not Windows support acceptance: it did not run the complete build/test/start workload or prove ManagedTree controls. The implementation must be ported to the current modular runner architecture, then pass the exact CLI and native ManagedTree acceptance above before documentation or release claims change.
+This is only a baseline reproduction of the missing backend, not Windows support acceptance: it did not run the complete build/test/start workload or prove ManagedTree controls. The Windows runner has since been ported to the modular architecture, but it must still pass the exact CLI and native ManagedTree acceptance above before documentation or release claims change.
+
+## Current Windows-write investigation (2026-10-05)
+
+The native `Access is denied` failure in the declared-write path was traced to `WindowsFilesystemGrants::apply` skipping project-policy read grants whenever the canonical path was beneath `SystemRoot`. VM 126 uses `C:\Windows\SystemTemp` for temporary project roots, so the project-root read/traversal grant was skipped even though the writable subtree received its inherited write ACE. The fix now skips only backend-runtime read grants beneath `SystemRoot`; it does not enable Windows write support.
+
+On Windows 11 VM 126, the probe using Rust 1.99.0 confirmed the failure with Win32 error 5 before the fix, and after the fix verified traversal, existing-file open/write, new-file create/reopen/write, and `cmd.exe` redirection with the actual AppContainer child token and production grant path. The integrated existing-file write test passed in a diagnostic build with the support gate temporarily bypassed. The gate is restored in source, and its fail-closed test passed natively. The Rust 1.99.0 native `tapid-runner` unit suite passed 109 tests with 1 diagnostic test ignored, including grant restoration, undeclared-write denial, timeout, and concurrent-DACL tests. Normal-exit cleanup left no probe SID ACE on `C:\`, `C:\Windows`, or `C:\Windows\SystemTemp`.
+
+Windows `tapid run` remains **not supported**. Outside-grant denial, failure/timeout/cancellation cleanup, and full `examples/news-site-consumer` CLI acceptance are still pending. `cmd.exe` also warns that an extended (`\\?\`) current-directory path is unsupported and defaults to the Windows directory; verify relative-working-directory behavior during CLI acceptance.

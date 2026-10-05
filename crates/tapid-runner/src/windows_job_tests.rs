@@ -16,6 +16,324 @@ fn assigning_an_invalid_process_handle_fails_closed() {
 }
 
 #[test]
+#[ignore = "one-off Windows 11 ACL diagnosis; not a support acceptance test"]
+fn appcontainer_actual_token_file_access_probe() {
+    use super::super::{FilesystemBindingMode, FilesystemGrantSource, ResolvedFilesystemGrant};
+    use std::io::Read;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::{
+        DuplicateTokenEx, ImpersonateLoggedOnUser, RevertToSelf, SecurityImpersonation,
+        TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY, TokenImpersonation,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_ALWAYS, CREATE_NEW, CreateFileW, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL,
+        FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_WRITE_DATA, OPEN_ALWAYS, OPEN_EXISTING, WriteFile,
+    };
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
+
+    struct RevertImpersonation;
+    impl Drop for RevertImpersonation {
+        fn drop(&mut self) {
+            unsafe { RevertToSelf() };
+        }
+    }
+
+    fn path_wide(path: &std::path::Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    fn probe_file(
+        path: &std::path::Path,
+        access: u32,
+        disposition: u32,
+        label: &str,
+    ) -> (bool, bool) {
+        let wide = path_wide(path);
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                disposition,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            eprintln!("{label}: OPEN_DENIED win32={}", unsafe { GetLastError() });
+            return (false, false);
+        }
+        if disposition == CREATE_NEW {
+            eprintln!("{label}: CREATE_OPEN_OK");
+        }
+        let byte = [b'X'];
+        let mut written = 0;
+        let result =
+            unsafe { WriteFile(handle, byte.as_ptr(), 1, &mut written, std::ptr::null_mut()) };
+        let write_succeeded = result != 0;
+        if !write_succeeded {
+            eprintln!("{label}: WRITE_DENIED win32={}", unsafe { GetLastError() });
+        } else {
+            eprintln!("{label}: WRITE_OK bytes={written}");
+        }
+        unsafe { CloseHandle(handle) };
+        (true, write_succeeded)
+    }
+
+    fn probe_directory(path: &std::path::Path, label: &str) -> bool {
+        let wide = path_wide(path);
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_EXECUTE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                0,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            eprintln!("{label}: TRAVERSE_DENIED win32={}", unsafe {
+                GetLastError()
+            });
+            false
+        } else {
+            eprintln!("{label}: TRAVERSE_OK");
+            unsafe { CloseHandle(handle) };
+            true
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "tapid-actual-token-acl-probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let writable = root.join("writable");
+    std::fs::create_dir_all(&writable).unwrap();
+    let existing = writable.join("existing.txt");
+    let created = writable.join("created.txt");
+    std::fs::write(&existing, b"before").unwrap();
+
+    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
+    let icacls = std::path::PathBuf::from(system_root).join("System32/icacls.exe");
+    let label = std::process::Command::new(&icacls)
+        .arg(&writable)
+        .args(["/setintegritylevel", "(OI)(CI)L", "/c"])
+        .output()
+        .unwrap();
+    assert!(
+        label.status.success(),
+        "icacls failed: {}",
+        String::from_utf8_lossy(&label.stdout)
+    );
+
+    let command_target = existing.clone();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let writable = std::fs::canonicalize(&writable).unwrap();
+    let existing = std::fs::canonicalize(&existing).unwrap();
+
+    let mut container = WindowsAppContainer::create().unwrap();
+    let payload = format!("echo TAPID_FROM_CMD>\"{}\"", command_target.display());
+    let mut pipes = WindowsStdioPipes::new().unwrap();
+    let limits =
+        ExecutionLimits::new(Some(10), Some(4096), Some(4), Some(128 * 1024 * 1024)).unwrap();
+    let (job, mut child) = create_appcontainer_child_inner_with_cwd(
+        &container,
+        &payload,
+        &root,
+        &limits,
+        true,
+        true,
+        Some(&mut pipes),
+    );
+    let (mut stdout_pipe, mut stderr_pipe) = pipes.into_parent_readers().unwrap();
+    let system32 = std::fs::canonicalize(
+        std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32"),
+    )
+    .unwrap();
+    let resolved_grants = vec![
+        ResolvedFilesystemGrant {
+            path: root.clone(),
+            access: FilesystemAccess::Read,
+            kind: FilesystemGrantKind::DirectorySubtree,
+            source: FilesystemGrantSource::ProjectPolicy,
+            binding: FilesystemBindingMode::CanonicalPath,
+        },
+        ResolvedFilesystemGrant {
+            path: system32,
+            access: FilesystemAccess::Read,
+            kind: FilesystemGrantKind::DirectorySubtree,
+            source: FilesystemGrantSource::BackendRuntime,
+            binding: FilesystemBindingMode::CanonicalPath,
+        },
+        ResolvedFilesystemGrant {
+            path: writable.clone(),
+            access: FilesystemAccess::Write,
+            kind: FilesystemGrantKind::DirectorySubtree,
+            source: FilesystemGrantSource::ProjectPolicy,
+            binding: FilesystemBindingMode::CanonicalPath,
+        },
+    ];
+    let mut grants = WindowsFilesystemGrants::apply(container.sid(), &resolved_grants).unwrap();
+    let dacl = std::process::Command::new(&icacls)
+        .arg(&existing)
+        .output()
+        .unwrap();
+    eprintln!(
+        "actual grant target DACL: {}",
+        String::from_utf8_lossy(&dacl.stdout)
+    );
+
+    let mut primary_token = 0;
+    assert_ne!(
+        unsafe {
+            OpenProcessToken(
+                child.process_handle(),
+                TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+                &mut primary_token,
+            )
+        },
+        0,
+        "OpenProcessToken win32={}",
+        unsafe { GetLastError() }
+    );
+    let mut impersonation_token = 0;
+    assert_ne!(
+        unsafe {
+            DuplicateTokenEx(
+                primary_token,
+                TOKEN_QUERY | TOKEN_IMPERSONATE,
+                std::ptr::null(),
+                SecurityImpersonation,
+                TokenImpersonation,
+                &mut impersonation_token,
+            )
+        },
+        0,
+        "DuplicateTokenEx win32={}",
+        unsafe { GetLastError() }
+    );
+    assert_ne!(
+        unsafe { ImpersonateLoggedOnUser(impersonation_token) },
+        0,
+        "ImpersonateLoggedOnUser win32={}",
+        unsafe { GetLastError() }
+    );
+    let revert = RevertImpersonation;
+
+    assert!(
+        probe_directory(&root, "project root"),
+        "AppContainer cannot traverse project root"
+    );
+    assert!(
+        probe_directory(&writable, "write directory"),
+        "AppContainer cannot traverse write directory"
+    );
+    assert!(
+        probe_directory(writable.parent().unwrap(), "system temp ancestor"),
+        "AppContainer cannot traverse the SystemTemp ancestor"
+    );
+    for (path, access, disposition, label) in [
+        (
+            &existing,
+            FILE_WRITE_DATA,
+            OPEN_EXISTING,
+            "existing FILE_WRITE_DATA",
+        ),
+        (
+            &existing,
+            FILE_APPEND_DATA,
+            OPEN_EXISTING,
+            "existing FILE_APPEND_DATA",
+        ),
+        (
+            &existing,
+            GENERIC_WRITE,
+            OPEN_EXISTING,
+            "existing GENERIC_WRITE",
+        ),
+        (
+            &existing,
+            GENERIC_WRITE,
+            CREATE_ALWAYS,
+            "existing CREATE_ALWAYS + GENERIC_WRITE",
+        ),
+        (
+            &existing,
+            GENERIC_WRITE,
+            OPEN_ALWAYS,
+            "existing OPEN_ALWAYS + GENERIC_WRITE",
+        ),
+        (
+            &created,
+            FILE_WRITE_DATA,
+            CREATE_NEW,
+            "new CREATE_NEW + FILE_WRITE_DATA",
+        ),
+        (
+            &created,
+            FILE_WRITE_DATA,
+            OPEN_EXISTING,
+            "new reopen FILE_WRITE_DATA",
+        ),
+        (
+            &created,
+            FILE_APPEND_DATA,
+            OPEN_EXISTING,
+            "new reopen FILE_APPEND_DATA",
+        ),
+    ] {
+        assert_eq!(
+            probe_file(path, access, disposition, label),
+            (true, true),
+            "{label} failed"
+        );
+    }
+    drop(revert);
+    unsafe {
+        CloseHandle(impersonation_token);
+        CloseHandle(primary_token);
+    }
+
+    let termination = child.resume_and_wait_for_exit(&job, 5_000).unwrap();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    stdout_pipe.read_to_end(&mut stdout).unwrap();
+    stderr_pipe.read_to_end(&mut stderr).unwrap();
+    eprintln!(
+        "actual cmd child termination={termination:?}; stdout={:?}; stderr={:?}; file={:?}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr),
+        std::fs::read_to_string(&existing).unwrap_or_else(|error| format!("READ_ERROR: {error}"))
+    );
+    assert_eq!(
+        termination,
+        0,
+        "cmd.exe write failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&existing).unwrap().trim(),
+        "TAPID_FROM_CMD"
+    );
+    drop(child);
+    drop(job);
+    grants.restore().unwrap();
+    container.cleanup().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn appcontainer_child_is_verified_and_assigned_before_resume() {
     let (mut container, job, mut child) = create_appcontainer_child("exit 0");
     assert_eq!(child.resume_and_wait_for_exit(&job, 5_000).unwrap(), 0);
@@ -272,11 +590,39 @@ fn create_appcontainer_child_inner(
     payload: &str,
     stdio: Option<&mut WindowsStdioPipes>,
 ) -> (WindowsJob, WindowsSuspendedChild) {
+    let current_directory = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+    let limits = ExecutionLimits::new(None, None, None, None).unwrap();
+    create_appcontainer_child_inner_with_cwd(
+        container,
+        payload,
+        &current_directory,
+        &limits,
+        false,
+        false,
+        stdio,
+    )
+}
+
+fn create_appcontainer_child_inner_with_cwd(
+    container: &WindowsAppContainer,
+    payload: &str,
+    current_directory: &std::path::Path,
+    limits: &ExecutionLimits,
+    restrict_subprocesses: bool,
+    canonicalize_program: bool,
+    stdio: Option<&mut WindowsStdioPipes>,
+) -> (WindowsJob, WindowsSuspendedChild) {
     use std::os::windows::ffi::OsStrExt;
 
     let system_root = std::env::var_os("SystemRoot").unwrap();
-    let current_directory = std::path::PathBuf::from(&system_root);
-    let program_path = current_directory.join("System32").join("cmd.exe");
+    let system_directory = std::path::PathBuf::from(&system_root);
+    let program_path = system_directory.join("System32").join("cmd.exe");
+    let program_path = if canonicalize_program {
+        std::fs::canonicalize(program_path).unwrap()
+    } else {
+        program_path
+    };
+    let current_directory = current_directory.to_path_buf();
     let program = program_path.as_os_str().encode_wide().collect::<Vec<_>>();
     let arguments = ["/D", "/S", "/C", payload]
         .into_iter()
@@ -298,11 +644,7 @@ fn create_appcontainer_child_inner(
         .collect::<Vec<_>>();
     working_directory.push(0);
 
-    let job = WindowsJob::new(
-        &ExecutionLimits::new(None, None, None, None).unwrap(),
-        false,
-    )
-    .unwrap();
+    let job = WindowsJob::new(limits, restrict_subprocesses).unwrap();
     let child = match stdio {
         Some(pipes) => WindowsSuspendedChild::create_with_stdio(
             container,
