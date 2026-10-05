@@ -2,7 +2,7 @@
 
 ## Status
 
-Design approved in chat on 2026-10-05. This design covers graceful Ctrl+C only; forced termination, crashes, and crash-recovery cleanup are explicitly out of scope. Windows project writes remain fail-closed.
+Design approved in chat on 2026-10-05. Graceful Ctrl+C implementation and its native cancellation/ACL-cleanup acceptance are verified on Windows 11 VM 126. This design covers Ctrl+C only; forced termination, crashes, and crash-recovery cleanup remain out of scope. Windows project writes remain fail-closed, and this does not establish overall Windows `tapid run` support.
 
 ## Goal
 
@@ -36,6 +36,16 @@ The approved scope is graceful console Ctrl+C while Tapid is alive. No guarantee
 - **Hard-termination recovery:** requires an external process/service or later recovery mechanism, which is outside the user's chosen graceful-only scope.
 - **Generic execution error instead of a cancellation result:** obscures an expected user action and does not provide a stable CLI result.
 
-## Open implementation detail
+## Resolved implementation detail
 
-The native Ctrl+C test must isolate its console/process group so signaling the helper cannot interrupt the test runner or VM management session. The implementation must demonstrate this isolation on VM 126 before the test is accepted.
+The native integration test isolates Ctrl+C in a `CREATE_NEW_CONSOLE` helper process. The test passed five consecutive times on VM 126 without signaling the parent test runner or VM management console.
+
+## Verification result (2026-10-05)
+
+- Environment: Windows 11 Pro x64 VM 126, build 26300; Rust 1.99.0; Windows GNU target `x86_64-pc-windows-gnu`.
+- `windows_ctrl_c_cancels_execution_and_restores_project_dacl`: passed 5/5 on the native VM. Each run sent `CTRL_C_EVENT` from a `CREATE_NEW_CONSOLE` helper only after the per-run project DACL changed; it returned `Termination::Cancelled`, reported `KernelOwnedComplete`, and restored the project DACL exactly.
+- Full `windows_containment` test binary: 17 passed, 0 failed, 1 ignored; exit 0. This includes timeout/output-limit paths and `windows_write_policy_fails_closed_before_spawn_until_native_acceptance`.
+- Runner library unit tests: 115 passed, 0 failed, 1 ignored; exit 0. All four cancellation-state tests passed.
+- CLI cancellation mapping test `cancelled_termination_maps_to_sigint_exit_code`: passed. The full 95-test CLI unit binary had 93 passed and 2 failed (exit 101); the failures are existing tar-upgrade fixture tests that require an unavailable program on the Windows VM (`program not found`).
+- Cross-compilation of the runner library tests, Windows containment integration test, and CLI library tests succeeded with Rust 1.99.0.
+- Project writes still return `UnsupportedContainment` before spawn. Nonzero-exit/write-grant cleanup, external-path and reparse-point denial coverage, and full CLI/ManagedTree acceptance remain outstanding.

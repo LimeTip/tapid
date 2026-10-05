@@ -72,7 +72,8 @@ A normal-exit cleanup check found no per-run SID ACE remaining on `C:\`, `C:\Win
 
 - [x] Normal-exit ACL cleanup is verified: the native probe snapshots project root, writable subtree, existing file, SystemTemp, SystemRoot, and volume-root DACLs while grants are active and compares them to the pre-grant snapshots after restore. The standalone regression also verifies SystemTemp stays unchanged during the run.
 - [x] On Windows 11 VM 126, integration tests compared the project-root DACL before and after the production read-only execution lifecycle for normal exit, output-limit termination, timeout, and pre-spawn missing-executable resolution failure; all matched exactly. These runs exercise read-grant cleanup only because write grants remain fail-closed.
-- [ ] Test cleanup after nonzero exit, actual child-creation failure, and cancellation; compare DACLs before/after and verify no per-run SID ACE remains for each.
+- [ ] Test cleanup after nonzero exit and actual child-creation failure; compare DACLs before/after and verify no per-run SID ACE remains for each.
+- [x] Graceful Ctrl+C cleanup is verified on Windows 11 VM 126 with a read-only project grant: the test confirms Job Object completion, `Termination::Cancelled`, and exact project DACL restoration (5/5 repeated passes). This does not verify write-grant cleanup or hard termination.
 - [ ] Assert each temporary ACE is applied before child resume and remains until the Job Object confirms the entire process tree is empty.
 - [ ] During revocation, preserve unrelated concurrent DACL changes and remove only the current run's unique AppContainer ACE. If revocation fails, return an explicit cleanup error and do not report complete cleanup.
 - [ ] Test that denied writes do not create/modify data and that no child starts when grant application fails.
