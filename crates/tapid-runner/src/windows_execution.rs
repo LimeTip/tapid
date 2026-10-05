@@ -1,4 +1,5 @@
 #![cfg(target_os = "windows")]
+use super::windows_cancellation::WindowsCancellation;
 use super::{
     BackendIdentity, CleanupConfidence, CompletionEvidence, ContainmentSupport,
     EnforcementDimensions, EnforcementReceipt, ExecutionBackend, ExecutionError,
@@ -118,6 +119,7 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
 struct WindowsExecutionLifecycle<'a> {
     request: ExecutionRequest,
     preflight: &'a ValidatedPreflight,
+    cancellation: Option<WindowsCancellation>,
     appcontainer: Option<WindowsAppContainer>,
     grants: Option<WindowsFilesystemGrants>,
     job: Option<WindowsJob>,
@@ -131,6 +133,7 @@ impl<'a> WindowsExecutionLifecycle<'a> {
         Self {
             request,
             preflight,
+            cancellation: None,
             appcontainer: None,
             grants: None,
             job: None,
@@ -141,6 +144,7 @@ impl<'a> WindowsExecutionLifecycle<'a> {
     }
 
     fn prepare(&mut self) -> Result<(), PreparationError> {
+        self.cancellation = Some(WindowsCancellation::install_and_activate()?);
         self.appcontainer = Some(WindowsAppContainer::create()?);
         let appcontainer = self.appcontainer.as_ref().expect("AppContainer prepared");
         self.grants = Some(WindowsFilesystemGrants::apply(
@@ -278,8 +282,16 @@ impl ExecutionLifecycle for WindowsExecutionLifecycle<'_> {
             .output_limit_exceeded();
         let child = self.child.as_mut().expect("prepared suspended child");
         let job = self.job.as_ref().expect("prepared Job Object");
-        let termination =
-            child.resume_and_wait_for_status(job, timeout_ms, output_limit_exceeded)?;
+        let cancellation = self
+            .cancellation
+            .as_ref()
+            .expect("prepared cancellation scope");
+        let termination = child.resume_and_wait_for_status(
+            job,
+            timeout_ms,
+            output_limit_exceeded,
+            Some(cancellation),
+        )?;
         let (stdout, stderr) = self.capture.take().expect("prepared capture").finish()?;
         let completion = self.cleanup_resources();
         if let Some(error) = self.cleanup_error.clone() {
@@ -293,6 +305,7 @@ impl ExecutionLifecycle for WindowsExecutionLifecycle<'_> {
             {
                 Termination::OutputLimitExceeded
             }
+            WindowsChildTermination::Cancelled => Termination::Cancelled,
             WindowsChildTermination::OutputLimitExceeded => {
                 return Err(ExecutionError::new(
                     ExecutionErrorCategory::OutputLimit,

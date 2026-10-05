@@ -22,11 +22,10 @@
 ## File Map
 
 - `crates/tapid-runner/src/windows_cancellation.rs` — new console handler registration, active-run tracking, cancellation generation, and unit tests.
-- `crates/tapid-runner/src/lib.rs` — register the private Windows-only cancellation module.
 - `crates/tapid-runner/Cargo.toml` — enable the Windows Console API feature in the existing `windows-sys` dependency.
+- `crates/tapid-runner/src/execution.rs` — add and validate public `Termination::Cancelled`; register the private Windows-only cancellation module.
 - `crates/tapid-runner/src/windows_process.rs` — inspect cancellation during the child/Job Object wait and return an internal cancelled termination only after killing/reaping the job.
 - `crates/tapid-runner/src/windows_execution.rs` — own the cancellation scope before grant/process setup and translate internal cancellation to the public result after the normal cleanup sequence.
-- `crates/tapid-runner/src/execution.rs` — add and validate public `Termination::Cancelled`.
 - `crates/tapid-cli/src/commands/run.rs` — render the cancellation diagnostic and map it to exit code 130.
 - `crates/tapid-cli/src/commands/run/tests.rs` — test stable CLI cancellation exit behavior.
 - `crates/tapid-runner/tests/windows_containment.rs` — native Ctrl+C helper-process integration test and exact DACL restoration assertion.

@@ -466,7 +466,7 @@ fn appcontainer_output_limit_terminates_and_bounds_combined_capture() {
     );
     let capture = WindowsOutputCapture::start(pipes.into_parent_readers().unwrap(), Some(128));
     let termination = child
-        .resume_and_wait_for_status(&job, 5_000, capture.output_limit_exceeded())
+        .resume_and_wait_for_status(&job, 5_000, capture.output_limit_exceeded(), None)
         .unwrap();
     let (stdout, stderr) = capture.finish().unwrap();
     drop(child);

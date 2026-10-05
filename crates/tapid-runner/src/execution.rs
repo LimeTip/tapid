@@ -2828,6 +2828,10 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
 }
 
 #[cfg(windows)]
+#[path = "windows_cancellation.rs"]
+mod windows_cancellation;
+
+#[cfg(windows)]
 #[path = "windows_job.rs"]
 mod windows_job;
 

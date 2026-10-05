@@ -1,5 +1,6 @@
 #![cfg(windows)]
 use super::*;
+use crate::execution::windows_cancellation::WindowsCancellation;
 
 struct ProcThreadAttributeList {
     storage: Vec<usize>,
@@ -213,6 +214,7 @@ pub enum WindowsChildTermination {
     Exited(u32),
     TimedOut,
     OutputLimitExceeded,
+    Cancelled,
 }
 
 /// Concurrently drains both output pipes while retaining at most the configured aggregate limit.
@@ -549,7 +551,7 @@ impl WindowsSuspendedChild {
         timeout_ms: u32,
     ) -> Result<u32, ExecutionError> {
         let no_output_limit = AtomicBool::new(false);
-        match self.resume_and_wait_for_status(job, timeout_ms, &no_output_limit)? {
+        match self.resume_and_wait_for_status(job, timeout_ms, &no_output_limit, None)? {
             WindowsChildTermination::Exited(code) => Ok(code),
             WindowsChildTermination::TimedOut => Err(ExecutionError::new(
                 ExecutionErrorCategory::Timeout,
@@ -559,6 +561,10 @@ impl WindowsSuspendedChild {
                 ExecutionErrorCategory::OutputLimit,
                 "Windows child exceeded its output limit; the complete Job Object was terminated",
             )),
+            WindowsChildTermination::Cancelled => Err(ExecutionError::new(
+                ExecutionErrorCategory::Internal,
+                "Windows child cancellation requires an active cancellation scope",
+            )),
         }
     }
 
@@ -567,6 +573,7 @@ impl WindowsSuspendedChild {
         job: &WindowsJob,
         timeout_ms: u32,
         output_limit_exceeded: &AtomicBool,
+        cancellation: Option<&WindowsCancellation>,
     ) -> Result<WindowsChildTermination, ExecutionError> {
         // SAFETY: this thread handle belongs to the child created suspended by this wrapper.
         let previous_suspend_count = unsafe { ResumeThread(self.thread) };
@@ -581,6 +588,10 @@ impl WindowsSuspendedChild {
 
         let started = Instant::now();
         loop {
+            if cancellation.is_some_and(WindowsCancellation::is_cancelled) {
+                self.terminate_job_and_reap(job)?;
+                return Ok(WindowsChildTermination::Cancelled);
+            }
             if output_limit_exceeded.load(Ordering::Acquire) {
                 self.terminate_job_and_reap(job)?;
                 return Ok(WindowsChildTermination::OutputLimitExceeded);
@@ -601,6 +612,10 @@ impl WindowsSuspendedChild {
                         return Err(unsupported_job("read suspended child exit code"));
                     }
                     loop {
+                        if cancellation.is_some_and(WindowsCancellation::is_cancelled) {
+                            self.terminate_job_and_reap(job)?;
+                            return Ok(WindowsChildTermination::Cancelled);
+                        }
                         if output_limit_exceeded.load(Ordering::Acquire) {
                             self.terminate_job_and_reap(job)?;
                             return Ok(WindowsChildTermination::OutputLimitExceeded);

@@ -268,6 +268,99 @@ fn windows_appcontainer_timeout_terminates_the_managed_job() {
 }
 
 #[test]
+fn windows_ctrl_c_cancels_execution_and_restores_project_dacl() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+
+    const HELPER_ENV: &str = "TAPID_WINDOWS_CTRL_C_HELPER";
+    if std::env::var_os(HELPER_ENV).is_some() {
+        windows_ctrl_c_helper();
+        return;
+    }
+
+    let mut helper = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "windows_ctrl_c_cancels_execution_and_restores_project_dacl",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(HELPER_ENV, "1")
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if helper.try_wait().unwrap().is_some() {
+            let output = helper.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "isolated Ctrl+C helper failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let output = String::from_utf8_lossy(&output.stdout);
+            assert!(output.contains("CTRL_C_HELPER_SUCCESS"), "{output}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = helper.kill();
+            let _ = helper.wait();
+            panic!("isolated Ctrl+C helper did not finish before the deadline");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn windows_ctrl_c_helper() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::System::Console::{CTRL_C_EVENT, GenerateConsoleCtrlEvent};
+
+    let root = temporary_project("ctrl-c");
+    let baseline_acl = project_dacl(&root);
+    let request = command_request(
+        &root,
+        "for /L %i in (1,1,2147483647) do @rem",
+        ExecutionLimits::new(Some(30), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
+    );
+    let (sender, receiver) = mpsc::channel();
+    let worker = std::thread::spawn(move || sender.send(execute(&request)).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while project_dacl(&root) == baseline_acl {
+        assert!(
+            Instant::now() < deadline,
+            "execution did not apply its project grant before Ctrl+C"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    println!("DACL_ACTIVE");
+    use std::io::Write;
+    std::io::stdout().flush().unwrap();
+    // SAFETY: this helper owns an isolated console; the event is sent only after the project DACL
+    // shows that the execution is active and its cancellation handler should be installed.
+    assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+    let outcome = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("execution did not finish after Ctrl+C")
+        .expect("graceful cancellation must return a checked outcome");
+    worker.join().unwrap();
+    assert_eq!(outcome.termination(), &Termination::Cancelled);
+    assert_eq!(
+        outcome.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+    assert_eq!(project_dacl(&root), baseline_acl);
+    fs::remove_dir_all(root).unwrap();
+    println!("CTRL_C_HELPER_SUCCESS");
+}
+
+#[test]
 fn windows_missing_executable_failure_restores_project_dacl() {
     let root = temporary_project("missing-executable");
     let baseline_acl = project_dacl(&root);
