@@ -16,6 +16,21 @@ on:
         required: true
         type: string
 
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      release_id:
+        required: true
+        type: string
+      commit_sha:
+        required: true
+        type: string
+      allow_public:
+        default: false
+        type: boolean
+
 permissions:
   contents: read
 
@@ -40,6 +55,7 @@ jobs:
       - name: Resolve exact draft and tag commit
         env:
           GH_TOKEN: ${{ github.token }}
+          ALLOW_PUBLIC: ${{ inputs.allow_public || false }}
         shell: bash
         run: |
           set -euo pipefail
@@ -48,8 +64,8 @@ jobs:
           [[ "$COMMIT_SHA" =~ ^[a-f0-9]{40}$ ]]
           release_json="$RUNNER_TEMP/release.json"
           gh api "repos/$REPOSITORY/releases/$RELEASE_ID" > "$release_json"
-          jq -e --arg tag "$RELEASE_TAG" --argjson id "$RELEASE_ID" \
-            '.id == $id and .tag_name == $tag and .draft == true and .prerelease == false' \
+          jq -e --arg tag "$RELEASE_TAG" --argjson id "$RELEASE_ID" --argjson public "$ALLOW_PUBLIC" \
+            '.id == $id and .tag_name == $tag and .prerelease == false and (.draft == true or ($public and .draft == false and .immutable == true))' \
             "$release_json" >/dev/null || {
             echo "draft identity mismatch" >&2
             exit 1
@@ -149,6 +165,7 @@ jobs:
           name: exact-draft-assets
           path: ${{ runner.temp }}/assets
           if-no-files-found: error
+          overwrite: true
           retention-days: 1
 
   install:
@@ -161,11 +178,20 @@ jobs:
           - runner: ubuntu-latest
             archive: x86_64-unknown-linux-gnu
             binary: tapid
-          - runner: macos-latest
+          - runner: ubuntu-24.04-arm
+            archive: aarch64-unknown-linux-gnu
+            binary: tapid
+          - runner: macos-15-intel
             archive: x86_64-apple-darwin
+            binary: tapid
+          - runner: macos-14
+            archive: aarch64-apple-darwin
             binary: tapid
           - runner: windows-latest
             archive: x86_64-pc-windows-msvc
+            binary: tapid.exe
+          - runner: windows-11-vs2026-arm
+            archive: aarch64-pc-windows-msvc
             binary: tapid.exe
     runs-on: ${{ matrix.runner }}
     steps:
@@ -191,7 +217,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid-install'
           New-Item -ItemType Directory -Force $installDir | Out-Null
-          tar -xzf (Join-Path $env:RUNNER_TEMP "assets/tapid-$($env:RELEASE_TAG.Substring(1))-x86_64-pc-windows-msvc.tar.gz") -C $installDir
+          tar -xzf (Join-Path $env:RUNNER_TEMP "assets/tapid-$($env:RELEASE_TAG.Substring(1))-${{ matrix.archive }}.tar.gz") -C $installDir
           $actual = & (Join-Path $installDir 'tapid.exe') --version
           if ($actual -ne "tapid $($env:RELEASE_TAG.Substring(1))") { throw "installed version mismatch" }
           & (Join-Path $installDir 'tapid.exe') __verify-release-record (Join-Path $env:RUNNER_TEMP 'assets/tapid-release-v1.tsv') (Join-Path $env:RUNNER_TEMP 'assets/tapid-release-v1.tsv.sig')

@@ -1,78 +1,60 @@
-name: Build release
+name: Build release candidate
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      commit_sha:
+        required: true
+        type: string
+      release_id:
+        required: false
+        type: string
+      tag_object:
+        required: true
+        type: string
+    outputs:
+      release_id:
+        value: ${{ jobs.draft-release.outputs.release_id }}
+      candidate_sha256:
+        value: ${{ jobs.draft-release.outputs.candidate_sha256 }}
+      artifact_id:
+        value: ${{ jobs.draft-release.outputs.artifact_id }}
 
 permissions:
   contents: read
-
-concurrency:
-  group: release-publication
-  cancel-in-progress: false
 
 jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      release_tag: ${{ steps.version.outputs.release_tag }}
-      tag_commit: ${{ steps.version.outputs.tag_commit }}
+      release_tag: ${{ inputs.release_tag }}
+      tag_commit: ${{ inputs.commit_sha }}
+      release_id: ${{ inputs.release_id }}
     steps:
-      - uses: actions/checkout@v6
-        if: github.event_name != 'workflow_dispatch'
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 0
+          ref: ${{ inputs.commit_sha }}
           persist-credentials: false
-      - uses: actions/checkout@v6
-        if: github.event_name == 'workflow_dispatch'
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
       - id: version
-        name: Validate annotated tag and Cargo version
-        shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = workflow_dispatch ]; then
-            RELEASE_TAG="v$(node --experimental-strip-types tools/release/release.ts current-version)"
-          else
-            RELEASE_TAG="$GITHUB_REF_NAME"
-          fi
-          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
-            echo "release tag must be a stable vX.Y.Z release" >&2
-            exit 1
-          }
-          git tag -d "$RELEASE_TAG" >/dev/null 2>&1 || true
-          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag || {
-            echo "release tag must be annotated" >&2
-            exit 1
-          }
-          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
-          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$tag_commit" origin/main || {
-            echo "release tag must point to a commit on main" >&2
-            exit 1
-          }
-          git checkout --detach "$tag_commit"
-          version="$(node --experimental-strip-types tools/release/release.ts check-tag "$RELEASE_TAG")"
-          {
-            echo "version=$version"
-            echo "release_tag=$RELEASE_TAG"
-            echo "tag_commit=$tag_commit"
-          } >> "$GITHUB_OUTPUT"
+          version="$(node --experimental-strip-types tools/release/release.ts check-tag "$TAG")"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
+    if: needs.prepare.outputs.release_id == ''
+    permissions:
+      contents: read
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -98,8 +80,9 @@ jobs:
             target: aarch64-pc-windows-msvc
             binary: tapid.exe
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.commit_sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Check out verified release commit
@@ -109,7 +92,7 @@ jobs:
         run: |
           git checkout --detach "$TAG_COMMIT"
           test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
       - name: Build and archive
@@ -125,130 +108,187 @@ jobs:
           cp "target/$TARGET/release/$BINARY" "staging/$BINARY"
           "staging/$BINARY" --version | grep -Fx "tapid $VERSION"
           tar -czf "release/tapid-$VERSION-$TARGET.tar.gz" -C staging "$BINARY"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: tapid-${{ matrix.target }}
           path: release/*.tar.gz
           if-no-files-found: error
+          overwrite: true
 
-  draft-release:
-    environment: stable-release
+  assemble:
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     needs: [prepare, build]
     runs-on: ubuntu-latest
+    # Write access is necessary only to read an existing unpublished draft.
     permissions:
       contents: write
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Check out verified release commit
-        shell: bash
-        env:
-          TAG_COMMIT: ${{ needs.prepare.outputs.tag_commit }}
-        run: |
-          git checkout --detach "$TAG_COMMIT"
-          test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
-      - uses: actions/download-artifact@v8
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: inputs.release_id == ''
         with:
           pattern: tapid-*
           path: release
           merge-multiple: true
-      - uses: actions/setup-node@v7
+      - name: Assemble or reuse exact unsigned candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.commit_sha }}
+          TAG_OBJECT: ${{ inputs.tag_object }}
+        run: |
+          set -euo pipefail
+          mkdir -p candidate release
+          git show "$SOURCE_SHA:docs/releases/intent.json" > candidate/intent.json
+          NOTES="$(jq -r .notes candidate/intent.json)"
+          git show "$SOURCE_SHA:$NOTES" > candidate/notes.md
+          VERSION="${TAG#v}"
+          if test -n "$RELEASE_ID"; then
+            node --experimental-strip-types tools/release/candidate.ts download "$RELEASE_ID" release "$TAG" "$SOURCE_SHA"
+          else
+            node --experimental-strip-types tools/release/release.ts checksums release "$VERSION"
+            node --experimental-strip-types tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+            node --experimental-strip-types tools/release/bootstrap.ts release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          fi
+          node --experimental-strip-types tools/release/candidate.ts unsigned release candidate/notes.md candidate/intent.json "$TAG" "$SOURCE_SHA" "$TAG_OBJECT" > candidate/unsigned-result.json
+          jq .candidate candidate/unsigned-result.json > candidate/unsigned.json
+          mkdir -p candidate/assets
+          cp -R release/. candidate/assets/
+          {
+            printf '### Candidate awaiting release approval\n\n'
+            # shellcheck disable=SC2016
+            printf 'Source: `%s`\n\nTag: `%s`\n\n' "$SOURCE_SHA" "$TAG"
+            # shellcheck disable=SC2016
+            printf 'Unsigned asset, notes and crate plan digests:\n\n```json\n'
+            cat candidate/unsigned.json
+            # shellcheck disable=SC2016
+            printf '\n```\n\nReviewed release notes:\n\n'
+            cat candidate/notes.md
+            # shellcheck disable=SC2016
+            printf '\n\nCrate versions authorized by this approval:\n\n```json\n'
+            cat candidate/intent.json
+            # shellcheck disable=SC2016
+            printf '\n```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: upload
+        with:
+          name: unsigned-release-candidate-${{ github.run_attempt }}
+          path: candidate
+          if-no-files-found: error
+          retention-days: 30
+
+  draft-release:
+    environment: stable-release
+    needs: assemble
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      candidate_sha256: ${{ steps.release.outputs.candidate_sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.assemble.outputs.artifact_id }}
+          path: candidate
+          merge-multiple: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Create checksums
-        run: node --experimental-strip-types tools/release/release.ts checksums release "${{ needs.prepare.outputs.version }}"
-      - name: Create release metadata
+      - name: Recheck candidate approved by this job
+        run: |
+          set -euo pipefail
+          mv candidate/assets release
+          node --experimental-strip-types tools/release/candidate.ts validate-unsigned release candidate/notes.md candidate/intent.json candidate/unsigned.json
+      - name: Find retained authorized payload from this run
+        id: retained
         env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
-        run: node --experimental-strip-types tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"
-      - name: Generate runtime-free installers with authenticated bootstrap pins
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
-        run: node --experimental-strip-types tools/release/bootstrap.ts release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ids="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" --jq '.artifacts[] | select(.name == "authorized-release-payload" and .expired == false) | .id')"
+          test "$(printf '%s\n' "$ids" | sed '/^$/d' | wc -l)" -le 1
+          printf 'artifact_id=%s\n' "$ids" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: steps.retained.outputs.artifact_id != ''
+        with:
+          artifact-ids: ${{ steps.retained.outputs.artifact_id }}
+          path: retained
+          merge-multiple: true
+      - name: Reuse the signature from the previously authorized payload
+        if: steps.retained.outputs.artifact_id != ''
+        run: |
+          set -euo pipefail
+          cmp retained/unsigned.json candidate/unsigned.json
+          node --experimental-strip-types tools/release/candidate.ts validate-unsigned retained/assets retained/notes.md retained/intent.json retained/unsigned.json
+          cp retained/assets/tapid-release-v1.tsv.sig release/tapid-release-v1.tsv.sig
       - name: Sign release metadata
         env:
           TAPID_RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_ED25519_PRIVATE_KEY }}
           TAPID_RELEASE_SIGNING_KEY_ID: ${{ vars.TAPID_RELEASE_SIGNING_KEY_ID }}
-        run: node --experimental-strip-types tools/release/sign.ts sign release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig
+        run: |
+          set -euo pipefail
+          # Reuse an existing signature byte-for-byte; its creation time is signed.
+          if ! test -f release/tapid-release-v1.tsv.sig; then
+            node --experimental-strip-types tools/release/sign.ts sign release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig
+          fi
       - name: Verify release metadata signature
         run: node --experimental-strip-types tools/release/sign.ts verify release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig crates/tapid-signatures/data/release-keyring.json
+      - name: Retain signed bytes before the first GitHub asset upload
+        if: steps.retained.outputs.artifact_id == ''
+        run: |
+          mkdir -p candidate/assets
+          cp -R release/. candidate/assets/
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: steps.retained.outputs.artifact_id == ''
+        with:
+          name: authorized-release-payload
+          path: candidate
+          if-no-files-found: error
+          retention-days: 30
       - name: Create draft GitHub release
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
         run: |
-          existing_releases="$(mktemp)"
-          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$existing_releases"
-          if grep -Fxq "$RELEASE_TAG" "$existing_releases"; then
-            echo "refusing to replace existing release $RELEASE_TAG" >&2
-            exit 1
-          fi
-
-          release_fields="$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
-            -f tag_name="$RELEASE_TAG" \
-            -f name="$RELEASE_TAG" \
-            -F draft=true \
-            -F prerelease=false \
-            -F generate_release_notes=true --jq '[.id, .upload_url] | @tsv')"
-          IFS=$'\t' read -r release_id upload_url <<< "$release_fields"
-          case "$release_id" in
-            ''|*[!0-9]*) echo "release creation returned an invalid ID" >&2; exit 1 ;;
-          esac
-          expected_upload_url="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets{?name,label}"
-          test "$upload_url" = "$expected_upload_url"
-
-          matching_ids="$(mktemp)"
-          release_visible=false
-          for attempt in 1 2 3 4 5; do
-            gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
-              --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id" > "$matching_ids"
-            if test "$(wc -l < "$matching_ids" | tr -d ' ')" = 1 && \
-              test "$(tr -d '\r\n' < "$matching_ids")" = "$release_id"; then
-              release_visible=true
-              break
-            fi
-            [ "$attempt" = 5 ] || sleep 2
-          done
-          test "$release_visible" = true || {
-            echo "release read-back did not converge on exact ID $release_id" >&2
-            exit 1
-          }
-          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
-          echo "upload_url=${upload_url%%\{*}" >> "$GITHUB_OUTPUT"
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ steps.release.outputs.release_id }}
-          UPLOAD_URL: ${{ steps.release.outputs.upload_url }}
-        run: |
-          release_id="$RELEASE_ID"
-          case "$release_id" in
-            ''|*[!0-9]*) echo "invalid release ID" >&2; exit 1 ;;
-          esac
-          for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig release/install.sh release/install.ps1; do
-            name="${asset##*/}"
-            curl --fail --silent --show-error \
-              --request POST \
-              --header "Authorization: Bearer $GH_TOKEN" \
-              --header "Content-Type: application/octet-stream" \
-              --data-binary "@$asset" \
-              "$UPLOAD_URL?name=$name" >/dev/null
-          done
-      - name: Verify draft release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ steps.release.outputs.release_id }}
-        run: |
-          release_id="$RELEASE_ID"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft)" = true
-          find release -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort > expected-assets.txt
-          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --jq '.[].name' | LC_ALL=C sort > actual-assets.txt
-          diff -u expected-assets.txt actual-assets.txt || {
-            echo "unexpected draft release assets" >&2
-            exit 1
-          }
+          set -euo pipefail
+          node --experimental-strip-types tools/release/candidate.ts create-draft release candidate/notes.md candidate/intent.json candidate/unsigned.json > candidate/signed-result.json
+          jq .candidate candidate/signed-result.json > candidate/signed.json
+          {
+            printf 'release_id=%s\n' "$(jq -r .release_id candidate/signed-result.json)"
+            printf 'candidate_sha256=%s\n' "$(jq -r .candidate_sha256 candidate/signed-result.json)"
+          } >> "$GITHUB_OUTPUT"
+          mkdir -p candidate/assets
+          cp -R release/. candidate/assets/
+          {
+            # shellcheck disable=SC2016
+            printf '### Authorized signed candidate\n\n```json\n'
+            cat candidate/signed-result.json
+            # shellcheck disable=SC2016
+            printf '\n```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: upload
+        with:
+          name: signed-release-candidate-${{ github.run_attempt }}
+          path: candidate
+          if-no-files-found: error
+          retention-days: 30

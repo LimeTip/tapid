@@ -1,6 +1,8 @@
 # Client release distribution
 
-Status: the GitHub and crates.io flow has historical verification through `v0.0.8`. The release-record changes below target the next release, expected `v0.0.11`; they are not evidence of a published release or deployed website routes.
+The ordinary release entrypoint and activation checklist are in [Automated releases](release-automation.md). [ADR 0007](adr/0007-one-candidate-one-release-approval.md) supersedes the separate dispatch and promotion approvals described by the historical manual procedure below. This document retains the asset contracts, verification details, and exceptional recovery procedures.
+
+Tapid 0.0.11 completed the first signed-record and generated-installer rollout. Ordinary subsequent releases require no website edit. Repository code alone does not establish that the automatic lane's App and environment configuration has been activated.
 
 ## Scope and sources of truth
 
@@ -8,12 +10,13 @@ This document is the operator runbook for releasing the Tapid command-line clien
 
 - `.github/workflows/release-publication.yml` for binary builds and draft GitHub releases;
 - `.github/workflows/release-public-smoke.yml` for public installer verification;
-- `.github/workflows/crates-publication.yml` for separate crates.io publication;
+- `.github/workflows/crates-publication.yml` for the automatic release coordinator and crates.io Trusted Publishing;
 - `tools/release/release.ts` for tag validation, checksums, and release-record generation;
 - `tools/release/publish.ts` for the dependency-ordered crates.io plan;
+- `docs/releases/intent.json` for the reviewed automatic release intent;
 - `docs/releases/<version>.md` for reviewed release notes.
 
-ADR 0004 records why Tapid uses this GitHub-native design. This runbook records how to operate and recover it.
+ADR 0004 records the GitHub-native foundation; ADR 0006 defines immutable signatures; ADR 0007 defines candidate approval and automatic promotion. This runbook records detailed verification and recovery contracts.
 The [`v0.0.8` operations record](releases/0.0.8-operations.md) preserves the first complete release's concrete evidence and failure lessons.
 
 ## Trust model
@@ -28,7 +31,7 @@ Released Tapid 0.0.10 first attempts signed discovery, then uses the canonical G
 
 ## First release-record rollout
 
-This is a one-time cutover, expected for 0.0.11. Subsequent releases generate the record in the ordinary draft workflow and need no website edit.
+This historical one-time cutover was completed for 0.0.11. Subsequent releases generate the record and installers in the release workflow and need no website edit. The steps below preserve the rollout contract for investigation or a future provider migration.
 
 1. Review the client, installers, publisher, website routes, and tests together. Prepare the website change, but do not deploy the new default installer redirects while the latest public release lacks `tapid-release-v1.tsv`.
 2. Build and review the first eleven-asset draft. Verify the record and signature against all six downloaded archives, including version, immutable URLs, sizes, and hashes. Keep existing public installation working during draft review.
@@ -50,22 +53,22 @@ Reconsider a coordinated runtime-crate release group at `0.1.0` only if release 
 
 ## Roles and approval boundaries
 
-The flow has separate review and promotion gates:
+The automatic lane uses these boundaries:
 
-1. A normal pull request reviews version, lockfile, release notes, and any changed supporting-crate versions.
-2. Merging does not publish anything.
-3. Creating the annotated tag is the immutable source-selection boundary.
-4. The binary workflow creates a draft but never publishes it.
-5. Publishing the reviewed draft is the public GitHub release boundary.
-6. Public installer smoke tests must pass after publication.
-7. crates.io publication is a separate manual dispatch and protected-environment approval.
-8. A successful workflow is not sufficient by itself. Public endpoints, bytes, installed versions, registry versions, and final repository state require independent read-back.
+1. A normal release PR reviews versions, dependency requirements, lockfiles, notes, and release intent.
+2. Merging starts candidate preparation on protected `main`; it does not immediately publish.
+3. The candidate summary binds the selected source commit, archive and installer bytes, notes, and exact crate plan. Required checks and package compatibility run before approval. The required `Release intent freshness` PR status and strict up-to-date protection prevent merging an intent analyzed from stale `main`.
+4. An independent `stable-release` reviewer authorizes the entire candidate, including later GitHub and crates.io publication. Self-review prevention remains enabled.
+5. The workflow signs, creates or safely resumes the draft, and verifies its exact assets before automatic promotion.
+6. Public installer and upgrade smoke must pass before automatic crates.io publication.
+7. The main-only `crates-io-release` environment retains its OIDC identity. Once the reviewed setup is active, it has no second reviewer requirement.
+8. Independent public and registry read-back determine completion.
 
-Do not combine GitHub binary publication and crates.io publication into one approval.
+This deliberately replaces the former separate publication approvals. Do not remove an environment reviewer until the reviewed automatic gate is live and its configuration is verified. See [ADR 0007](adr/0007-one-candidate-one-release-approval.md).
 
-## Standard release procedure
+## Historical manual procedure and recovery checks
 
-Use terminal-based `git` and `gh` operations. Keep credentials out of commands, logs, notes, and commits.
+The numbered procedure below describes the standalone workflows used for 0.0.11. It is a source of detailed verification requirements, not a set of current dispatch commands. Its separate dispatches, final draft publication approval, release-event smoke lookup, and crates.io approval apply to that legacy path, not the ordinary automatic lane. Workflow entrypoints have changed; do not copy the historical dispatch commands against current `main`. Follow [Automated releases](release-automation.md) for routine operation and recovery.
 
 ### 1. Prepare a reviewed release pull request
 
@@ -255,7 +258,7 @@ Immediately verify through an unauthenticated API request that:
 
 ### 7. Verify public installation
 
-Publication triggers `.github/workflows/release-public-smoke.yml` at the tagged commit. Require the resolver to succeed and all three platform jobs:
+For a manually published legacy release, publication triggers `.github/workflows/release-public-smoke.yml` at the tagged commit. The automatic coordinator calls public smoke explicitly after promotion and uses its exact-candidate result; it does not depend on a token-generated release event. Require the resolver to succeed and all three platform jobs:
 
 - `Unix installer (ubuntu-latest)`;
 - `Unix installer (macos-latest)`;
@@ -370,7 +373,7 @@ A release is complete only after verifying:
 
 ## Recovery procedures
 
-Recovery must preserve the original annotated tag and exact tagged commit.
+Recovery must preserve the original annotated tag and exact tagged commit. The procedures below describe evidence checks and the historical standalone workflow recovery. Use the coordinator recovery entrypoint in [Automated releases](release-automation.md#recover-a-failed-run) for new releases; input-free build and separate crates dispatch commands below belong to the former workflow revisions.
 
 ### Local annotated tag exists after a failed push
 
@@ -481,7 +484,7 @@ Published crate versions are immutable.
 3. Run `node --experimental-strip-types tools/release/publish.ts --json` again against the registry.
 4. Require the new plan to contain only the still-missing suffix of the dependency order.
 5. Respect crates.io rate-limit instructions and avoid rapid blind retries.
-6. Redispatch only after confirming the failure is safely resumable and obtaining the required environment approval.
+6. Resume only after confirming the failure is safely resumable. The automatic lane must retain the approved candidate and restrict publication to its independently confirmed remaining package versions; the standalone fallback retains any approval gates required by its active configuration.
 
 ## Evidence ledger
 
@@ -498,7 +501,7 @@ Record the following for every release in the release issue, pull request, or op
 - public smoke run ID, tagged commit, three job names, and conclusions;
 - crates.io dry-run plan;
 - Trusted Publisher verification result;
-- crates.io workflow run ID and independent approval state;
+- release coordinator run ID and independent candidate approval state;
 - published package/version set;
 - clean registry installation command and binary output;
 - final public endpoint and repository-state verification.

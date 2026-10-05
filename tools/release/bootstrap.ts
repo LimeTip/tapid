@@ -8,7 +8,9 @@ function replaceOnce(source: string, marker: string, value: string): string {
   return source.replace(marker, value);
 }
 
-export async function renderInstallers(directory: string, version: string, baseUrl: string): Promise<void> {
+export type InstallerTemplates = { 'install.sh': string; 'install.ps1': string };
+
+export async function renderInstallers(directory: string, version: string, baseUrl: string, templates?: InstallerTemplates): Promise<void> {
   // Reuse the record generator's exact target set, byte hashes, sizes and safe URL validation.
   const record = await releaseRecord(directory, version, baseUrl);
   const rows = record.trimEnd().split('\n').slice(1).map(line => line.split('\t'));
@@ -20,7 +22,7 @@ export async function renderInstallers(directory: string, version: string, baseU
   const shellPins = rows.map(([target, , , hash]) => `    ${target}) printf '%s\\n' '${hash}' ;;`).join('\n');
   const windowsPins = rows.map(([target, , , hash]) => `    '${target}' = '${hash}'`).join('\n');
   for (const name of ['install.sh', 'install.ps1']) {
-    let source = await readFile(new URL(`../../scripts/${name}`, import.meta.url), 'utf8');
+    let source = templates?.[name as keyof InstallerTemplates] ?? await readFile(new URL(`../../scripts/${name}`, import.meta.url), 'utf8');
     source = replaceOnce(source, '@TAPID_BOOTSTRAP_VERSION@', version);
     source = replaceOnce(source, '@TAPID_BOOTSTRAP_BASE_URL@', base);
     source = replaceOnce(source, '# @TAPID_BOOTSTRAP_PINS@', name.endsWith('.sh') ? shellPins : windowsPins);

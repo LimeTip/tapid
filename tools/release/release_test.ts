@@ -135,72 +135,45 @@ test("checksum generation streams archives sequentially", async () => {
   assert(!helper.includes("update(await readFile(path))"));
 });
 
-test("binary release follows the small draft release flow", async () => {
+test("binary release builds the exact source and gates one complete candidate", async () => {
   const workflow = await text(".github/workflows/release-publication.yml");
+  const coordinator = await text(".github/workflows/crates-publication.yml");
   for (const target of [
-    "aarch64-apple-darwin",
-    "aarch64-pc-windows-msvc",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "x86_64-pc-windows-msvc",
-    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin", "aarch64-pc-windows-msvc", "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu",
   ]) assert(workflow.includes(`target: ${target}`));
-  assert(workflow.includes("tags:"));
-  assert(workflow.includes('"v*.*.*"'));
+  assert(workflow.includes("workflow_call:"));
+  assert(!workflow.includes("\n  push:"));
   assert(!workflow.includes("softprops/action-gh-release"));
-  assert(workflow.includes('gh api --paginate "repos/$GITHUB_REPOSITORY/releases"'));
-  assert(workflow.includes('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"'));
-  const createRelease = workflow.indexOf('release_fields="$(gh api --method POST');
-  const boundedReleaseReadback = workflow.indexOf("for attempt in 1 2 3 4 5; do", createRelease);
-  const exactReleaseCount = workflow.indexOf(')" = 1 &&', boundedReleaseReadback);
-  const exactReleaseId = workflow.indexOf(')" = "$release_id"; then', exactReleaseCount);
-  assert(createRelease >= 0 && boundedReleaseReadback > createRelease);
-  assert(boundedReleaseReadback < exactReleaseCount && exactReleaseCount < exactReleaseId);
-  assert(workflow.includes('[ "$attempt" = 5 ] || sleep 2'));
-  assert(workflow.includes("release read-back did not converge"));
-  assert(workflow.includes('expected_upload_url="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets{?name,label}"'));
-  assert(workflow.includes('UPLOAD_URL: ${{ steps.release.outputs.upload_url }}'));
-  assert(workflow.includes('"$UPLOAD_URL?name=$name"'));
-  assert(workflow.includes('gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft'));
-  assert(workflow.includes("-F draft=true"));
-  assert(!workflow.includes('gh release upload "$GITHUB_REF_NAME"'));
+  assert(workflow.includes("ref: ${{ inputs.commit_sha }}"));
+  assert(workflow.includes('git checkout --detach "$TAG_COMMIT"'));
+  assert(workflow.includes('test "$(git rev-parse HEAD)" = "$TAG_COMMIT"'));
+  assert(workflow.includes('"staging/$BINARY" --version | grep -Fx "tapid $VERSION"'));
+  assert(workflow.includes("pattern: tapid-*"));
+  assert(workflow.includes("merge-multiple: true"));
+  assert(workflow.includes("needs: [prepare, build]"));
+  assert(workflow.includes("needs.build.result == 'success' || needs.build.result == 'skipped'"));
+  assert(workflow.includes("environment: stable-release"));
+  assert(workflow.includes("TAPID_RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_ED25519_PRIVATE_KEY }}"));
   assert(!workflow.includes("--clobber"));
-  const deriveTag = workflow.indexOf('RELEASE_TAG="v$(node --experimental-strip-types tools/release/release.ts current-version)"');
-  assert(workflow.includes("set -euo pipefail"));
-  const validateTagInput = workflow.indexOf('[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)');
-  const deleteCheckoutTag = workflow.indexOf('git tag -d "$RELEASE_TAG"');
-  const fetchAnnotatedTag = workflow.indexOf('refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG');
-  const validateAnnotatedTag = workflow.indexOf('git cat-file -t "refs/tags/$RELEASE_TAG"');
-  const fetchMain = workflow.indexOf("refs/heads/main:refs/remotes/origin/main");
-  const ancestry = workflow.indexOf("merge-base --is-ancestor");
-  const checkoutVerifiedTag = workflow.indexOf('git checkout --detach "$tag_commit"');
-  const checkTag = workflow.indexOf('version="$(node --experimental-strip-types tools/release/release.ts check-tag "$RELEASE_TAG")"');
-  assert(deriveTag >= 0 && deriveTag < validateTagInput);
-  assert(validateTagInput < deleteCheckoutTag);
-  assert(deleteCheckoutTag < fetchAnnotatedTag && fetchAnnotatedTag < validateAnnotatedTag);
-  assert(validateAnnotatedTag < fetchMain && fetchMain < ancestry);
-  assert(ancestry < checkoutVerifiedTag && checkoutVerifiedTag < checkTag);
-  assert(workflow.includes('tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"'));
-  assert(workflow.includes('version="$(node --experimental-strip-types tools/release/release.ts check-tag "$RELEASE_TAG")"'));
-  assert(!workflow.includes('ref: ${{ needs.prepare.outputs.tag_commit }}'));
-  assertEquals(workflow.match(/git checkout --detach "\$TAG_COMMIT"/g)?.length, 2);
-  assertEquals(workflow.match(/test "\$\(git rev-parse HEAD\)" = "\$TAG_COMMIT"/g)?.length, 2);
-  assert(workflow.includes("unexpected draft release assets"));
-  assert(workflow.includes("actions/download-artifact@v8"));
-  assert(workflow.includes("workflow_dispatch:"));
-  assert(workflow.includes("if: github.event_name == 'workflow_dispatch'"));
-  assert(workflow.includes("ref: main"));
-  assert(!workflow.includes("inputs:"));
-  assert(!workflow.includes("${{ inputs."));
-  assert(workflow.includes("group: release-publication"));
-  assert(!workflow.includes("release-manifest"));
-  assert(workflow.includes("node --experimental-strip-types tools/release/sign.ts sign release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig"));
   assert(!workflow.includes("gh release edit"));
-  const metadata = workflow.indexOf('tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG"');
-  assert(metadata > workflow.indexOf("tools/release/release.ts checksums release"));
-  assert(metadata < createRelease, "the complete metadata asset must exist before draft creation");
-  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig release/install.sh release/install.ps1; do"));
-  assert(workflow.includes("find release -maxdepth 1 -type f -exec basename {}"), "draft readback must include the metadata asset");
+  const checksums = workflow.indexOf("tools/release/release.ts checksums release");
+  const metadata = workflow.indexOf("tools/release/release.ts metadata release");
+  const bootstrap = workflow.indexOf("tools/release/bootstrap.ts release");
+  const approval = workflow.indexOf("environment: stable-release");
+  const unsigned = workflow.indexOf("tools/release/candidate.ts unsigned release");
+  const recheck = workflow.indexOf("tools/release/candidate.ts validate-unsigned release");
+  const sign = workflow.indexOf("tools/release/sign.ts sign release/");
+  const verify = workflow.indexOf("tools/release/sign.ts verify release/");
+  const retain = workflow.indexOf("name: Retain signed bytes before the first GitHub asset upload");
+  const create = workflow.indexOf("tools/release/candidate.ts create-draft release");
+  assert(checksums >= 0 && checksums < metadata && metadata < bootstrap && bootstrap < unsigned);
+  assert(unsigned < approval && approval < recheck && recheck < sign && sign < verify && verify < retain && retain < create);
+  assert(coordinator.includes("group: tapid-stable-release"));
+  assert(coordinator.includes("cancel-in-progress: false"));
+  assert(coordinator.includes("tools/release/candidate.ts select"));
+  assert(coordinator.includes("uses: ./.github/workflows/release-draft-verify.yml"));
+  assert(coordinator.includes("needs: [preflight, candidate, verify]"));
 });
 
 test("release runbook documents the workflow's eleven-asset contract", async () => {
@@ -227,16 +200,16 @@ test("release runbook documents the workflow's eleven-asset contract", async () 
   assert(runbook.includes("Use eleven assets for the new flow or seven for a historical tagged workflow."));
   assert(!runbook.includes("exact seven-asset set"));
   assert(!runbook.includes("Require exactly seven assets and no unexpected names"));
-  assert(workflow.includes("for asset in release/*.tar.gz release/SHA256SUMS release/tapid-release-v1.tsv release/tapid-release-v1.tsv.sig release/install.sh release/install.ps1; do"));
+  assert(workflow.includes("tools/release/candidate.ts create-draft release"));
 });
 
 test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM runner", async () => {
   const workflow = await text(".github/workflows/release-publication.yml");
   for (const action of [
-    "actions/checkout@v6",
-    "actions/setup-node@v7",
-    "actions/upload-artifact@v7",
-    "actions/download-artifact@v8",
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
+    "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
+    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8",
   ]) assert(workflow.includes(action));
   for (const legacyAction of [
     "actions/checkout@v4",
@@ -274,72 +247,63 @@ test("repository workflows avoid the deprecated Node.js 20 action majors", async
 
 test("crates publication actions use immutable commit references", async () => {
   const workflow = await text(".github/workflows/crates-publication.yml");
-  const actionLines = workflow.split(/\r?\n/).filter((line: string) => /^\s*uses:/.test(line));
+  const actionLines = workflow.split(/\r?\n/).filter((line: string) => /^\s*(?:-\s*)?uses:/.test(line));
   assert(actionLines.length > 0);
   for (const line of actionLines) {
-    assertMatch(line, /uses:\s+[^@\s]+@[a-f0-9]{40}(?:\s+#\s+v[^\s]+)?$/);
+    if (line.includes("uses: ./")) assertMatch(line, /uses:\s+\.\/\.github\/workflows\/[a-z-]+\.yml$/);
+    else assertMatch(line, /uses:\s+[^@\s]+@[a-f0-9]{40}(?:\s+#\s+[^\s]+)?$/);
   }
 });
 
-test("crates publication uses trusted publishing and native Cargo", async () => {
+test("crates publication preserves OIDC identity and requires same-run release evidence", async () => {
   const workflow = await text(".github/workflows/crates-publication.yml");
   assert(workflow.includes("workflow_dispatch:"));
-  assert(workflow.includes("tag:"));
+  assert(workflow.includes("branches: [main]"));
+  assert(workflow.includes("paths: [docs/releases/intent.json]"));
+  assert(!workflow.includes("workflow_run:"));
+  assert(!workflow.includes("pull_request_target:"));
   assert(!workflow.includes("types: [published]"));
   assert(workflow.includes("id-token: write"));
   assert(workflow.includes("environment: crates-io-release"));
   assert(workflow.includes("rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5"));
   assert(workflow.includes("cargo package --workspace --locked"));
-  assert(workflow.includes("node --experimental-strip-types tools/release/publish.ts"));
   assert(workflow.includes('check-tag "$TAG"'));
-  assertEquals(workflow.match(/node --experimental-strip-types "\$GITHUB_WORKSPACE\/tools\/release\/release\.ts" check-tag "\$TAG"/g)?.length, 2);
-  assert(!workflow.includes('check-tag "${{ inputs.tag }}"'));
-  const ancestry = workflow.indexOf('merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main');
-  const setupNode = workflow.indexOf("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
-  const repositoryCode = workflow.indexOf("tools/release/release.ts");
-  assert(ancestry >= 0 && ancestry < setupNode && ancestry < repositoryCode);
-  assert(workflow.includes("git cat-file -t \"refs/tags/$TAG\""));
-  assert(workflow.includes(".head_sha == env.TAG_COMMIT"));
-  assert(workflow.includes("isDraft,isPrerelease"));
-  assert(workflow.includes("release-public-smoke.yml"));
-  assert(workflow.includes('.display_title == ("Public installer smoke " + env.TAG)'));
-  assert(!workflow.includes(".head_branch == env.TAG"));
-  assert(workflow.includes('actions/runs/$run_id/jobs'));
-  assert(workflow.includes('test "$successful_jobs" -eq 3'));
-  assert(!workflow.includes("python"));
-  assert(!workflow.includes("CARGO_REGISTRY_TOKEN: ${{ secrets."));
+  assert(workflow.includes('git cat-file -t "refs/tags/$REQUESTED_TAG"'));
+  assert(workflow.includes('git merge-base --is-ancestor "$SOURCE_SHA" origin/main'));
   assert(workflow.includes("if: github.ref == 'refs/heads/main'"));
   assert(workflow.includes("ref: ${{ github.sha }}"));
-  const planStep = workflow.indexOf("Generate reviewable crates.io plan");
-  const packageGate = workflow.indexOf("Verify workspace package compatibility before credentials");
-  const protectedJob = workflow.indexOf("\n  publish:");
-  const authStep = workflow.indexOf("Authenticate to crates.io with OIDC");
-  const publishStep = workflow.indexOf("Publish missing crates one at a time");
-  const approvalRecheck = workflow.indexOf("Recheck public release and installer smoke after approval");
-  assert(planStep >= 0 && planStep < packageGate && packageGate < protectedJob);
-  assert(protectedJob < approvalRecheck && approvalRecheck < authStep && authStep < publishStep);
-  const approvalGate = workflow.slice(approvalRecheck, authStep);
-  assert(approvalGate.includes('gh release view "$TAG"'));
-  assert(approvalGate.includes("release-public-smoke.yml/runs?event=release"));
-  assert(approvalGate.includes('test "$successful_jobs" -eq 3'));
+  assert(workflow.includes("needs: [preflight, candidate, verify, promote, smoke]"));
+  assert(workflow.includes("uses: ./.github/workflows/release-public-smoke.yml"));
+  assert(workflow.includes("release_id: ${{ needs.candidate.outputs.release_id }}"));
+  assert(workflow.includes("commit_sha: ${{ needs.preflight.outputs.tag_commit }}"));
+  assert(!workflow.includes("release-public-smoke.yml/runs?event=release"));
+  assert(!workflow.includes(".display_title =="));
+  assert(!workflow.includes("CARGO_REGISTRY_TOKEN: ${{ secrets."));
+  const packageGate = workflow.indexOf("Verify reviewed crate plan and locked package compatibility");
+  const publishJob = workflow.indexOf("\n  publish:");
+  const candidateRecheck = workflow.indexOf("Recheck immutable public candidate after same-run smoke");
+  const sourceRecheck = workflow.indexOf("Recheck exact source and remaining approved crate suffix");
+  const auth = workflow.indexOf("Authenticate to crates.io with OIDC");
+  const publish = workflow.indexOf("Publish missing crates one at a time");
+  assert(packageGate >= 0 && packageGate < publishJob && publishJob < candidateRecheck);
+  assert(candidateRecheck < sourceRecheck && sourceRecheck < auth && auth < publish);
+  assert(workflow.slice(candidateRecheck,auth).includes("tools/release/candidate.ts publish"));
+  assert(workflow.slice(candidateRecheck,auth).includes("tools/release/automation.ts check-plan"));
+  assert(workflow.includes('test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$SOURCE_SHA"'));
   const publisher = await text("tools/release/publish.ts");
   assertEquals(publisher.match(/cwd: workspaceDir/g)?.length, 2);
-  assert(workflow.includes('cd "$TAG_SOURCE" && cargo package --workspace --locked'));
-  assert(workflow.includes('cd "$TAG_SOURCE" && cargo metadata --manifest-path "$TAG_SOURCE/tests/integration/Cargo.toml" --locked --format-version 1'));
-  assert(publisher.includes('"publish", "--no-verify", "--locked"'));
-  assert(publisher.includes("env: cargoMetadataEnv(process.env, cargoHome)"));
-  assert(publisher.includes("env: cargoPublishEnv(process.env, token, cargoHome)"));
-  assert(publisher.includes("CARGO_CHILD_ENV_KEYS"));
-  assert(publisher.includes("metadata.lockfiles = await findCargoLockfiles(workspaceDir)"));
-  assert(publisher.includes("const lockfileVerification = lockfiles"));
-  assert(publisher.includes("cleanInstallVerification"));
-  assert(publisher.includes("cargo install tapid --version ${tapidVersion}"));
+  for (const contract of [
+    '\"publish\", \"--no-verify\", \"--locked\"',
+    "env: cargoMetadataEnv(process.env, cargoHome)", "env: cargoPublishEnv(process.env, token, cargoHome)",
+    "CARGO_CHILD_ENV_KEYS", "metadata.lockfiles = await findCargoLockfiles(workspaceDir)",
+    "const lockfileVerification = lockfiles", "cleanInstallVerification",
+    "cargo install tapid --version ${tapidVersion}",
+  ]) assert(publisher.includes(contract));
   assert(!publisher.includes("verifyPackage"));
   assert(!publisher.includes('"package", "--locked", "--package"'));
   assert(workflow.includes("CARGO_HOME: ${{ runner.temp }}/package-verify-cargo-home"));
   assert(workflow.includes("--publish --json --expected-plan"));
   assert(workflow.includes("CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}"));
-
   assert(workflow.includes("CARGO_HOME: ${{ runner.temp }}/clean-cargo-home"));
   assert(workflow.includes("for attempt in 1 2 3 4 5 6; do"));
   assert(workflow.includes('cargo install tapid --version "$VERSION" --locked --root "$INSTALL_ROOT" && break'));
@@ -699,7 +663,10 @@ cp "$TAPID_TEST_FIXTURE/\${url##*/}" "$out"
 test("CI runs the TypeScript tool suite", async () => {
   const workflow = await text(".github/workflows/ci.yml");
   assert(workflow.includes("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"));
-  assert(workflow.includes("node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts"));
+  const suite = workflow.split(/\r?\n/).find(line => line.includes("run: node --experimental-strip-types --test"));
+  assert(suite);
+  assert(suite.includes("tools/check_architecture_test.ts"));
+  assert(suite.includes("tools/release/*_test.ts"), "CI must discover every release helper's tests");
 });
 
 

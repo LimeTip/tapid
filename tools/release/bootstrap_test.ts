@@ -43,7 +43,9 @@ test('publication and draft verification automate bootstrap pin generation and r
   const workflow = await readFile(new URL('../../.github/workflows/release-publication.yml', import.meta.url), 'utf8');
   const draft = await readFile(new URL('../../.github/workflows/release-draft-verify.yml', import.meta.url), 'utf8');
   strictEqual(workflow.indexOf('tools/release/bootstrap.ts release') < workflow.indexOf('name: Create draft GitHub release'), true);
-  match(workflow, /release\/install.sh release\/install.ps1; do/);
+  match(workflow, /tools\/release\/candidate.ts unsigned release/);
+  match(workflow, /tools\/release\/candidate.ts validate-unsigned release/);
+  match(workflow, /tools\/release\/candidate.ts create-draft release/);
   match(draft, /tools\/release\/bootstrap.ts/);
   match(draft, /cmp "\$generated\/install.sh"/);
   match(draft, /cmp "\$generated\/install.ps1"/);

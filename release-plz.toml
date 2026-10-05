@@ -1,0 +1,8 @@
+[workspace]
+# Preparation only. The existing coordinator owns all tags and publication.
+dependencies_update = false
+changelog_update = false
+git_tag_enable = false
+git_release_enable = false
+semver_check = true
+
