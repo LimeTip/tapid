@@ -265,8 +265,7 @@ jobs:
             shell: bash
           - os: macos-latest
             shell: bash
-          - os: windows-latest
-            shell: pwsh
+      # Native Windows execution is validated only on Windows 11 VM 126.
     defaults:
       run:
         shell: ${{ matrix.shell }}
@@ -286,8 +285,8 @@ jobs:
       - name: Create dynamic Node fixture project
         run: |
           node tests/fixtures/create_consumer_project.js
-      - name: Verify install and lifecycle suppression; reject unsupported containment (Linux/Windows)
-        if: runner.os != 'macOS'
+      - name: Verify install and lifecycle suppression; reject unsupported Linux containment
+        if: runner.os == 'Linux'
         run: node tests/fixtures/validate_consumer_project.js
       - name: Verify native Restricted child, forwarding and exit codes (macOS)
         if: runner.os == 'macOS'

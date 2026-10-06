@@ -248,6 +248,7 @@ fn receipt_value(outcome: &tapid_runner::ExecutionOutcome) -> serde_json::Value 
     })
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn forward_child_output(
     child_stdout: &[u8],
     child_stderr: &[u8],
@@ -260,8 +261,27 @@ fn forward_child_output(
     stderr.flush()
 }
 
+fn forward_child_output_for_cli(
+    child_stdout: &[u8],
+    child_stderr: &[u8],
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // The macOS backend streams child bytes while capturing them. Replaying
+        // the completed capture would duplicate every line.
+        let _ = (child_stdout, child_stderr, stdout, stderr);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        forward_child_output(child_stdout, child_stderr, stdout, stderr)
+    }
+}
+
 fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> ExitCode {
-    let output_error = forward_child_output(
+    let output_error = forward_child_output_for_cli(
         outcome.stdout(),
         outcome.stderr(),
         &mut io::stdout(),
