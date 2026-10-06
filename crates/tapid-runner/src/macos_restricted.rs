@@ -1851,6 +1851,85 @@ impl Drop for ReservedNode {
     }
 }
 
+// Relocation must not silently change the executable's library search authority.
+// External dylibs require a separately verified transitive closure, not a symlink
+// back to the installation or DYLD_* injection. Inspect the held source descriptor.
+fn validate_snapshot_dependencies(source: &mut fs::File) -> std::io::Result<()> {
+    let invalid = |message: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+    let mut magic = [0; 4];
+    source.read_exact(&mut magic)?;
+    if &magic[..2] == b"#!" {
+        source.seek(SeekFrom::Start(0))?;
+        return Ok(());
+    }
+    let header_size = match u32::from_le_bytes(magic) {
+        0xfeed_facf => 32,
+        0xfeed_face => 28,
+        _ => {
+            return Err(invalid(
+                "unsupported Mach-O runtime format; use a standalone thin Node distribution",
+            ));
+        }
+    };
+    let mut header = vec![0; header_size - 4];
+    source.read_exact(&mut header)?;
+    let word = |bytes: &[u8]| u32::from_le_bytes(bytes.try_into().unwrap());
+    let count = word(&header[12..16]) as usize;
+    let size = word(&header[16..20]) as usize;
+    if size > 1024 * 1024 || count > size / 8 {
+        return Err(invalid("invalid Mach-O load-command bounds"));
+    }
+    let mut commands = vec![0; size];
+    source.read_exact(&mut commands)?;
+    let mut offset = 0;
+    for _ in 0..count {
+        let prefix = commands
+            .get(offset..offset + 8)
+            .ok_or_else(|| invalid("truncated Mach-O load command"))?;
+        let kind = word(&prefix[..4]) & 0x7fff_ffff;
+        let length = word(&prefix[4..]) as usize;
+        if length < 8 || !length.is_multiple_of(4) {
+            return Err(invalid("invalid Mach-O load-command length"));
+        }
+        let command = commands
+            .get(offset..offset + length)
+            .ok_or_else(|| invalid("truncated Mach-O load command"))?;
+        // LC_LOAD_DYLIB, WEAK, REEXPORT, LAZY, UPWARD and LOAD_DYLINKER.
+        if matches!(kind, 0xc | 0x18 | 0x1f | 0x20 | 0x23 | 0xe) {
+            let minimum = if kind == 0xe { 12 } else { 24 };
+            if length < minimum {
+                return Err(invalid("invalid Mach-O dependency command"));
+            }
+            let start = word(&command[8..12]) as usize;
+            if start < minimum || start >= length {
+                return Err(invalid("invalid Mach-O dependency string offset"));
+            }
+            let name = &command[start..];
+            let end = name
+                .iter()
+                .position(|b| *b == 0)
+                .ok_or_else(|| invalid("unterminated Mach-O dependency name"))?;
+            let name = &name[..end];
+            let system = name.starts_with(b"/usr/lib/") || name.starts_with(b"/System/Library/");
+            if !system || name.split(|b| *b == b'/').any(|p| p == b".." || p == b".") {
+                return Err(invalid(
+                    "nonrelocatable Mach-O dependency; use a standalone Node distribution with only Apple system libraries",
+                ));
+            }
+        } else if kind == 0x27 {
+            return Err(invalid(
+                "Mach-O dyld environment is unsupported for runtime snapshots",
+            ));
+        }
+        offset += length;
+    }
+    if offset != size {
+        return Err(invalid("invalid Mach-O load-command total"));
+    }
+    source.seek(SeekFrom::Start(0))?;
+    Ok(())
+}
+
 fn copy_runtime_snapshot(
     source: &Path,
     target: &Path,
@@ -1861,6 +1940,7 @@ fn copy_runtime_snapshot(
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(source)?;
     let before = source_file.metadata()?;
+    validate_snapshot_dependencies(&mut source_file)?;
     let mut target_file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -2286,6 +2366,168 @@ mod tests {
     }
 
     #[test]
+    fn reserved_node_rejects_nonrelocatable_macho() {
+        let project = temp_project("macho-project");
+        let runtime_dir = temp_project("macho-runtime");
+        fs::create_dir(runtime_dir.join("bin")).unwrap();
+        fs::create_dir(runtime_dir.join("lib")).unwrap();
+        fs::write(
+            runtime_dir.join("library.c"),
+            "int fixture(void) { return 0; }",
+        )
+        .unwrap();
+        fs::write(
+            runtime_dir.join("main.c"),
+            "extern int fixture(void); int main(void) { return fixture(); }",
+        )
+        .unwrap();
+        let library = runtime_dir.join("lib/libfixture.dylib");
+        let runtime = runtime_dir.join("bin/node");
+        for args in [
+            vec![
+                OsString::from("-dynamiclib"),
+                runtime_dir.join("library.c").into_os_string(),
+                OsString::from("-Wl,-install_name,@rpath/libfixture.dylib"),
+                OsString::from("-o"),
+                library.clone().into_os_string(),
+            ],
+            vec![
+                runtime_dir.join("main.c").into_os_string(),
+                library.into_os_string(),
+                OsString::from("-Wl,-rpath,@loader_path/../lib"),
+                OsString::from("-o"),
+                runtime.clone().into_os_string(),
+            ],
+        ] {
+            let output = Command::new("/usr/bin/clang").args(args).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(Command::new(&runtime).status().unwrap().success());
+        let original = fs::read(&runtime).unwrap();
+        let trusted = super::super::TrustedNodeRuntime::checked(&runtime).unwrap();
+        let error = match ReservedNode::create(&trusted, &project) {
+            Ok(_) => panic!("accepted a runtime whose rpath breaks after relocation"),
+            Err(error) => error,
+        };
+        assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+        assert!(
+            error
+                .to_string()
+                .contains("nonrelocatable Mach-O dependency"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&runtime).unwrap(), original);
+        let request = ExecutionRequest::builder("/bin/sh")
+            .args(["-c", ": > should-not-run"])
+            .executable_search_path(runtime.parent().unwrap())
+            .trusted_node_runtime(&runtime)
+            .project_root(&project)
+            .policy(policy(false, true, Vec::new()))
+            .build()
+            .unwrap();
+        assert!(super::super::execute(&request).is_err());
+        assert!(!project.join("should-not-run").exists());
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(runtime_dir).unwrap();
+    }
+
+    #[test]
+    fn reserved_node_executes_standalone_macho() {
+        let project = temp_project("standalone-macho-project");
+        let runtime_dir = temp_project("standalone-macho-runtime");
+        let source = runtime_dir.join("main.c");
+        let runtime = runtime_dir.join("node");
+        fs::write(
+            &source,
+            "#include <stdio.h>\nint main(void) { puts(\"standalone\"); return 0; }",
+        )
+        .unwrap();
+        let output = Command::new("/usr/bin/clang")
+            .arg(&source)
+            .arg("-o")
+            .arg(&runtime)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let original = fs::read(&runtime).unwrap();
+        let request = ExecutionRequest::builder("/bin/sh")
+            .args(["-c", "exec node"])
+            .executable_search_path(&runtime_dir)
+            .trusted_node_runtime(&runtime)
+            .project_root(&project)
+            .policy(policy(false, false, Vec::new()))
+            .build()
+            .unwrap();
+        let outcome = super::super::execute(&request).unwrap();
+        assert_eq!(outcome.termination(), &Termination::Exited(0));
+        assert_eq!(outcome.stdout(), b"standalone\n");
+        assert_eq!(fs::read(&runtime).unwrap(), original);
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(runtime_dir).unwrap();
+    }
+
+    #[test]
+    fn snapshot_dependency_parser_fails_closed() {
+        let directory = temp_project("macho-parser");
+        let path = directory.join("image");
+        let mut header = vec![0; 32];
+        header[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+        for (kind, name) in [
+            (0xc_u32, "@rpath/libnode.dylib"),
+            (0x80000018, "@loader_path/libnode.dylib"),
+            (0x8000001f, "@executable_path/libnode.dylib"),
+            (0x20, "/opt/homebrew/lib/libnode.dylib"),
+            (0x80000023, "/usr/lib/../../project/evil.dylib"),
+            (0xe, "dyld"),
+        ] {
+            let length = (24 + name.len() + 1).next_multiple_of(8);
+            let mut image = header.clone();
+            image[16..20].copy_from_slice(&1_u32.to_le_bytes());
+            image[20..24].copy_from_slice(&(length as u32).to_le_bytes());
+            let mut command = vec![0; length];
+            command[..4].copy_from_slice(&kind.to_le_bytes());
+            command[4..8].copy_from_slice(&(length as u32).to_le_bytes());
+            command[8..12].copy_from_slice(&24_u32.to_le_bytes());
+            command[24..24 + name.len()].copy_from_slice(name.as_bytes());
+            image.extend(command);
+            fs::write(&path, image).unwrap();
+            let error =
+                validate_snapshot_dependencies(&mut fs::File::open(&path).unwrap()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("nonrelocatable Mach-O dependency"),
+                "{name}: {error}"
+            );
+        }
+        let mut oversized = header.clone();
+        oversized[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut truncated = header.clone();
+        truncated[16..20].copy_from_slice(&1_u32.to_le_bytes());
+        truncated[20..24].copy_from_slice(&8_u32.to_le_bytes());
+        let mut zero_length = truncated.clone();
+        zero_length.extend([0; 8]);
+        for image in [
+            vec![0xca, 0xfe, 0xba, 0xbe],
+            oversized,
+            truncated,
+            zero_length,
+        ] {
+            fs::write(&path, image).unwrap();
+            assert!(validate_snapshot_dependencies(&mut fs::File::open(&path).unwrap()).is_err());
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn reserved_node_executes_snapshot_after_source_rename() {
         let root = temp_project("node-source-rename");
         let (runtime_dir, runtime) = temp_node_runtime(
@@ -2396,16 +2638,9 @@ mod tests {
         };
         let project = temp_project("node-hardlink-project");
         let trusted = temp_project("node-hardlink-trusted");
-        let selected = Command::new("/usr/bin/which").arg("node").output().unwrap();
-        assert!(
-            selected.status.success(),
-            "real Node runtime is unavailable"
-        );
-        let source = PathBuf::from(OsString::from_vec(
-            selected.stdout[..selected.stdout.len() - 1].to_vec(),
-        ));
+        // This tests snapshot containment, not ambient Homebrew Node relocation.
         let runtime = trusted.join("node");
-        fs::copy(fs::canonicalize(source).unwrap(), &runtime).unwrap();
+        fs::write(&runtime, b"#!/bin/sh\nexec /usr/bin/ruby --disable-gems -e 'File.write(ARGV.fetch(0), \"verified\")' \"$@\"\n").unwrap();
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
         let original = fs::read(&runtime).unwrap();
         let script = r##"
@@ -2417,14 +2652,14 @@ mod tests {
             rescue SystemCallError => error
               File.write('mutation-denied', error.class.name)
             end
-            abort 'second node failed' unless system('node', '-e', "require('fs').writeFileSync('second-node', 'verified')")
+            abort 'second node failed' unless system('node', 'second-node')
             Process.fork do
               Process.setsid
               STDIN.reopen('/dev/null')
               STDOUT.reopen('descendant.stdout', 'w')
               STDERR.reopen('descendant.stderr', 'w')
               sleep 0.01 until File.exist?('receipt-returned')
-              system('node', '-e', "require('fs').writeFileSync('detached-node', 'verified')")
+              system('node', 'detached-node')
               exit! 0
             end
             File.write('descendant-ready', 'ready')
