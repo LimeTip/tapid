@@ -192,7 +192,7 @@ pub(crate) fn run_with_manifest(
 ) -> Result<InstallReport, OperationFailure> {
     run_with_manifest_target(
         project_dir,
-        &project_dir.join("package.json"),
+        Path::new("package.json"),
         manifest_override,
         package,
         store_root,

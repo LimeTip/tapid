@@ -49,6 +49,38 @@ fn run_with_isolated_path(cwd: &PathBuf, args: &[&str], path: &OsStr) -> std::pr
         .unwrap()
 }
 
+#[test]
+fn install_accepts_a_relative_project_directory() {
+    let cwd = temp_dir("relative-project-dir");
+    let project = cwd.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let manifest = r#"{"name":"relative-project","version":"1.0.0"}"#;
+    fs::write(project.join("package.json"), manifest).unwrap();
+    let store = cwd.join("store");
+
+    let output = run(
+        &cwd,
+        &[
+            "install",
+            "--project-dir",
+            "project",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(project.join("tapid.lock").is_file());
+    assert_eq!(
+        fs::read(project.join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    cleanup(cwd);
+}
+
 fn cleanup(path: PathBuf) {
     let _ = fs::remove_dir_all(path);
 }
