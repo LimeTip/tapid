@@ -446,3 +446,64 @@ fn fresh_self_upgrade_rejects_an_older_release_without_state() {
     );
     assert!(!install_dir.join(".tapid-release-state.json").exists());
 }
+
+#[test]
+fn signed_same_version_archive_replay_preserves_executable_and_state() {
+    let fixture = Fixture::new();
+    let first = fixture.upgrade(&[]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let before = fs::read(fixture.root.join("tapid")).unwrap();
+    let state = fs::read(fixture.root.join(".tapid-release-state.json")).unwrap();
+    fs::write(
+        fixture.root.join("release/tapid"),
+        b"different executable for same release",
+    )
+    .unwrap();
+    assert!(
+        Command::new("tar")
+            .env("COPYFILE_DISABLE", "1")
+            .arg("-czf")
+            .arg(fixture.root.join("artifact.tar.gz"))
+            .arg("-C")
+            .arg(fixture.root.join("release"))
+            .arg("tapid")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let bytes = fs::read(fixture.root.join("artifact.tar.gz")).unwrap();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let record = fs::read_to_string(fixture.root.join("release.tsv")).unwrap();
+    let mut lines = record.lines();
+    let mut changed = format!("{}\n", lines.next().unwrap());
+    for line in lines {
+        let fields: Vec<_> = line.split('\t').collect();
+        changed.push_str(&format!(
+            "{}\t{}\t{}\t{digest}\t{}\n",
+            fields[0],
+            fields[1],
+            bytes.len(),
+            fields[4]
+        ));
+    }
+    fs::write(fixture.root.join("release.tsv"), changed).unwrap();
+    fixture.resign_record();
+    for extra in [vec![], vec!["--dry-run"]] {
+        let rejected = fixture.upgrade(&extra);
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("same release version"),
+            "{}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert_eq!(fs::read(fixture.root.join("tapid")).unwrap(), before);
+        assert_eq!(
+            fs::read(fixture.root.join(".tapid-release-state.json")).unwrap(),
+            state
+        );
+    }
+}

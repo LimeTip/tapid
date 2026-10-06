@@ -215,8 +215,14 @@ else:
         bootstrap = directory / 'bootstrap'
         bootstrap.mkdir()
         bootstrap_provider = 'https://fixture.example/bootstrap/v1.0.0'
-        wrapper = ('#!/bin/sh\nexec ' + shlex.quote(str(binary)) + ' "$@" --keyring '
-                   + shlex.quote(str(keyring)) + '\n').encode()
+        wrapper = (
+            '#!/bin/sh\n'
+            'if [ "$1" = __verify-release-record ]; then\n'
+            '  exec ' + shlex.quote(str(binary)) + ' "$@" --keyring '
+            + shlex.quote(str(keyring)) + '\n'
+            'fi\n'
+            'exec ' + shlex.quote(str(binary)) + ' "$@"\n'
+        ).encode()
         bootstrap_mapping = {}
         for target in TARGETS:
             name = f'tapid-1.0.0-{target}.tar.gz'

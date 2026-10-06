@@ -28,6 +28,8 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     #[command(name = "__verify-release-record", hide = true)]
     VerifyReleaseRecord(release_verification::Args),
+    #[command(name = "__prepare-release-install", hide = true)]
+    PrepareReleaseInstall(release_verification::InstallArgs),
     /// Create a private package.json manifest.
     #[command(
         long_about = "Create a private package.json in an existing directory. Uses the directory name as the package name and sets version 0.1.0. Refuses to overwrite an existing package.json.",
@@ -116,6 +118,7 @@ pub(crate) enum Command {
 pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
     match command {
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
+        Some(Command::PrepareReleaseInstall(args)) => release_verification::prepare_install(args),
         None => {
             println!("Run 'tapid --help' for usage");
             ExitCode::SUCCESS

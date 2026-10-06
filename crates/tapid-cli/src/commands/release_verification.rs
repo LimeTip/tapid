@@ -22,3 +22,26 @@ pub(crate) fn run(args: Args) -> ExitCode {
         }
     }
 }
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct InstallArgs {
+    version: String,
+    minimum: String,
+    archive: PathBuf,
+    destination: PathBuf,
+}
+
+pub(crate) fn prepare_install(args: InstallArgs) -> ExitCode {
+    match crate::application::installer::prepare(
+        &args.version,
+        &args.minimum,
+        &args.archive,
+        &args.destination,
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("installer release policy rejected: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}

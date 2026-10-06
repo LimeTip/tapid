@@ -15,6 +15,7 @@ serde_json = "1"
 tapid-core = { version = "0.0.6", path = "../tapid-core" }
 
 [dev-dependencies]
+tapid-test-support = { path = "../tapid-test-support" }
 proptest = "1"
 
 [lib]

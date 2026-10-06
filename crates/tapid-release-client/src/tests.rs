@@ -243,3 +243,11 @@ fn release_state_accepts_stable_major_versions_and_rejects_downgrades() {
         assert!(ReleaseState::new(invalid, 1, "a".repeat(64)).is_err(), "{invalid}");
     }
 }
+
+#[test]
+fn release_state_binds_same_version_to_accepted_digest() {
+    let state = ReleaseState::new("1.2.3", 10, "a".repeat(64)).unwrap();
+    assert!(matches!(accept_release(&state, "1.2.3", 11, "b".repeat(64)), Err(Error::State(_))));
+    assert_eq!(accept_release(&state, "1.2.3", 11, "a".repeat(64)).unwrap().last_known_good, state.last_known_good);
+    assert_eq!(accept_release(&state, "1.2.4", 11, "b".repeat(64)).unwrap().release_floor, "1.2.4");
+}
