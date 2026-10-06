@@ -269,6 +269,7 @@ fn windows_appcontainer_timeout_terminates_the_managed_job() {
 
 #[test]
 fn windows_ctrl_c_cancels_execution_and_restores_project_dacl() {
+    use std::io::Read;
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -280,7 +281,9 @@ fn windows_ctrl_c_cancels_execution_and_restores_project_dacl() {
         return;
     }
 
-    let mut helper = Command::new(std::env::current_exe().unwrap())
+    let started = Instant::now();
+    let executable = std::env::current_exe().expect("current test executable path");
+    let mut helper = Command::new(&executable)
         .args([
             "--exact",
             "windows_ctrl_c_cancels_execution_and_restores_project_dacl",
@@ -293,71 +296,242 @@ fn windows_ctrl_c_cancels_execution_and_restores_project_dacl() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    // Drain both pipes while the helper runs: diagnostic output must not block its exit.
+    let mut stdout_pipe = helper.stdout.take().unwrap();
+    let mut stderr_pipe = helper.stderr.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout_pipe.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr_pipe.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let helper_pid = helper.id();
+    eprintln!(
+        "[windows-ctrl-c parent] spawned helper pid={helper_pid} executable={} flags=CREATE_NEW_CONSOLE elapsed={:?}",
+        executable.display(),
+        started.elapsed()
+    );
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if helper.try_wait().unwrap().is_some() {
-            let output = helper.wait_with_output().unwrap();
-            assert!(
-                output.status.success(),
-                "isolated Ctrl+C helper failed: {}{}",
+        match helper.try_wait() {
+            Ok(Some(_)) => {
+                let output = std::process::Output {
+                    status: helper.wait().unwrap(),
+                    stdout: stdout_reader.join().unwrap(),
+                    stderr: stderr_reader.join().unwrap(),
+                };
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!(
+                    "[windows-ctrl-c parent] helper exited after {:?}: status={}\nhelper stdout:\n{stdout}\nhelper stderr:\n{stderr}",
+                    started.elapsed(),
+                    output.status
+                );
+                assert!(
+                    output.status.success(),
+                    "isolated Ctrl+C helper failed: status={}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                    output.status
+                );
+                assert!(
+                    stdout.contains("CTRL_C_HELPER_SUCCESS"),
+                    "success marker missing; helper stdout:\n{stdout}\nhelper stderr:\n{stderr}"
+                );
+                break;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let kill = helper.kill();
+                let output = std::process::Output {
+                    status: helper.wait().unwrap(),
+                    stdout: stdout_reader.join().unwrap(),
+                    stderr: stderr_reader.join().unwrap(),
+                };
+                panic!(
+                    "cannot poll isolated Ctrl+C helper pid={helper_pid}: {error}; kill={kill:?}; status={}\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        if Instant::now() >= deadline {
+            let kill = helper.kill();
+            let output = std::process::Output {
+                status: helper.wait().unwrap(),
+                stdout: stdout_reader.join().unwrap(),
+                stderr: stderr_reader.join().unwrap(),
+            };
+            panic!(
+                "isolated Ctrl+C helper pid={helper_pid} did not finish before 30s deadline; kill={kill:?}; status={}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            let output = String::from_utf8_lossy(&output.stdout);
-            assert!(output.contains("CTRL_C_HELPER_SUCCESS"), "{output}");
-            break;
-        }
-        if Instant::now() >= deadline {
-            let _ = helper.kill();
-            let _ = helper.wait();
-            panic!("isolated Ctrl+C helper did not finish before the deadline");
         }
         std::thread::sleep(Duration::from_millis(25));
     }
 }
 
 fn windows_ctrl_c_helper() {
-    use std::sync::mpsc;
+    use std::sync::mpsc::{self, TryRecvError};
     use std::time::{Duration, Instant};
-    use windows_sys::Win32::System::Console::{CTRL_C_EVENT, GenerateConsoleCtrlEvent};
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::System::Console::{
+        CTRL_C_EVENT, GenerateConsoleCtrlEvent, GetConsoleProcessList, GetConsoleWindow,
+    };
 
+    let started = Instant::now();
+    let console_window = unsafe { GetConsoleWindow() } as usize;
+    let mut console_processes = [0_u32; 16];
+    let console_process_count = unsafe {
+        GetConsoleProcessList(
+            console_processes.as_mut_ptr(),
+            console_processes.len() as u32,
+        )
+    };
+    let copied_process_count = (console_process_count as usize).min(console_processes.len());
+    eprintln!(
+        "[windows-ctrl-c helper] start pid={} console_window={console_window:#x} console_process_count={console_process_count} console_pids={:?}",
+        std::process::id(),
+        &console_processes[..copied_process_count]
+    );
     let root = temporary_project("ctrl-c");
     let baseline_acl = project_dacl(&root);
+    eprintln!(
+        "[windows-ctrl-c helper] baseline captured after {:?}: root={} dacl={:?}",
+        started.elapsed(),
+        root.display(),
+        String::from_utf8_lossy(&baseline_acl)
+    );
     let request = command_request(
         &root,
         "for /L %i in (1,1,2147483647) do @rem",
         ExecutionLimits::new(Some(30), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
     );
     let (sender, receiver) = mpsc::channel();
-    let worker = std::thread::spawn(move || sender.send(execute(&request)).unwrap());
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while project_dacl(&root) == baseline_acl {
-        assert!(
-            Instant::now() < deadline,
-            "execution did not apply its project grant before Ctrl+C"
+    let worker = std::thread::spawn(move || {
+        eprintln!("[windows-ctrl-c worker] execute started");
+        let result = execute(&request);
+        eprintln!(
+            "[windows-ctrl-c worker] execute returned after {:?}: {:?}",
+            started.elapsed(),
+            result.as_ref().map(|outcome| outcome.termination())
         );
+        sender.send(result).unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut active_acl = project_dacl(&root);
+    while active_acl == baseline_acl {
+        match receiver.try_recv() {
+            Ok(result) => panic!(
+                "execution returned before its project grant became visible: {result:?}; root={}",
+                root.display()
+            ),
+            Err(TryRecvError::Disconnected) => panic!(
+                "execution worker disconnected before applying its project grant; finished={}; root={}",
+                worker.is_finished(),
+                root.display()
+            ),
+            Err(TryRecvError::Empty) => {}
+        }
+        if Instant::now() >= deadline {
+            let current_acl = project_dacl(&root);
+            panic!(
+                "execution did not apply its project grant before Ctrl+C; worker_finished={}; root={}; baseline_dacl={:?}; current_dacl={:?}",
+                worker.is_finished(),
+                root.display(),
+                String::from_utf8_lossy(&baseline_acl),
+                String::from_utf8_lossy(&current_acl)
+            );
+        }
         std::thread::sleep(Duration::from_millis(10));
+        active_acl = project_dacl(&root);
     }
 
+    eprintln!(
+        "[windows-ctrl-c helper] grant active after {:?}: root={} baseline_dacl={:?} active_dacl={:?}",
+        started.elapsed(),
+        root.display(),
+        String::from_utf8_lossy(&baseline_acl),
+        String::from_utf8_lossy(&active_acl)
+    );
     println!("DACL_ACTIVE");
     use std::io::Write;
     std::io::stdout().flush().unwrap();
     // SAFETY: this helper owns an isolated console; the event is sent only after the project DACL
     // shows that the execution is active and its cancellation handler should be installed.
-    assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
-    let outcome = receiver
-        .recv_timeout(Duration::from_secs(10))
-        .expect("execution did not finish after Ctrl+C")
-        .expect("graceful cancellation must return a checked outcome");
-    worker.join().unwrap();
+    let event_sent = unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) };
+    if event_sent == 0 {
+        let error = unsafe { GetLastError() };
+        panic!(
+            "GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) failed with Win32 error {error}; elapsed={:?}; console_window={console_window:#x}; console_pids={:?}",
+            started.elapsed(),
+            &console_processes[..copied_process_count]
+        );
+    }
+    eprintln!(
+        "[windows-ctrl-c helper] control event sent after {:?}; waiting up to 10s; console_pids={:?}",
+        started.elapsed(),
+        &console_processes[..copied_process_count]
+    );
+    let outcome = match receiver.recv_timeout(Duration::from_secs(10)) {
+        Ok(result) => result.unwrap_or_else(|error| {
+            panic!(
+                "execution returned an error after Ctrl+C after {:?}: {error:?}; worker_finished={}",
+                started.elapsed(),
+                worker.is_finished()
+            )
+        }),
+        Err(error) => {
+            let current_acl = project_dacl(&root);
+            panic!(
+                "execution did not finish after Ctrl+C within 10s: {error:?}; elapsed={:?}; worker_finished={}; dacl_restored={}; root={}; baseline_dacl={:?}; current_dacl={:?}; console_pids={:?}",
+                started.elapsed(),
+                worker.is_finished(),
+                current_acl == baseline_acl,
+                root.display(),
+                String::from_utf8_lossy(&baseline_acl),
+                String::from_utf8_lossy(&current_acl),
+                &console_processes[..copied_process_count]
+            );
+        }
+    };
+    eprintln!(
+        "[windows-ctrl-c helper] outcome after {:?}: termination={:?} cleanup={:?} confirmed={:?} evidence={:?} stdout_bytes={} stderr_bytes={}",
+        started.elapsed(),
+        outcome.termination(),
+        outcome.completion().cleanup_confidence(),
+        outcome.completion().confirmed(),
+        outcome.completion().evidence(),
+        outcome.stdout().len(),
+        outcome.stderr().len()
+    );
+    worker
+        .join()
+        .unwrap_or_else(|panic| panic!("execution worker panicked: {panic:?}"));
     assert_eq!(outcome.termination(), &Termination::Cancelled);
     assert_eq!(
         outcome.completion().cleanup_confidence(),
         CleanupConfidence::KernelOwnedComplete
     );
-    assert_eq!(project_dacl(&root), baseline_acl);
+    let restored_acl = project_dacl(&root);
+    assert_eq!(
+        restored_acl,
+        baseline_acl,
+        "cancellation must restore the exact project DACL; baseline={:?}; restored={:?}",
+        String::from_utf8_lossy(&baseline_acl),
+        String::from_utf8_lossy(&restored_acl)
+    );
+    eprintln!(
+        "[windows-ctrl-c helper] cleanup verified after {:?}: DACL restored exactly",
+        started.elapsed()
+    );
     fs::remove_dir_all(root).unwrap();
-    println!("CTRL_C_HELPER_SUCCESS");
+    println!("CTRL_C_HELPER_SUCCESS elapsed={:?}", started.elapsed());
 }
 
 #[test]
@@ -586,6 +760,146 @@ fn windows_node_runtime_can_be_launched_directly_when_test_runtime_is_configured
         String::from_utf8_lossy(outcome.stderr())
     );
     assert!(String::from_utf8_lossy(outcome.stdout()).starts_with('v'));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn windows_node_timeout_reaps_descendant_before_restoring_project_dacl() {
+    let Some(node) = std::env::var_os("TAPID_TEST_NODE").map(PathBuf::from) else {
+        eprintln!("skipping: TAPID_TEST_NODE is not set");
+        return;
+    };
+    let node = fs::canonicalize(node).unwrap();
+    let system32 =
+        fs::canonicalize(PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32"))
+            .unwrap();
+    let root = temporary_project("node-descendant-timeout");
+    let baseline_acl = project_dacl(&root);
+    let script = r#"const {spawn} = require('node:child_process'); const child = spawn(process.execPath, ['-e', 'console.log("NODE_DESCENDANT_ACTIVE"); setInterval(() => {}, 1000);'], {stdio: 'inherit'}); child.on('error', error => {console.error(error); process.exit(1);}); child.on('exit', (code, signal) => console.error(JSON.stringify({code, signal})));"#;
+    let request = ExecutionRequest::builder(node.as_os_str())
+        .args(["-e", script])
+        .executable_search_paths([node.parent().unwrap(), system32.as_path()])
+        .trusted_node_runtime(&node)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(3), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
+            true,
+            false,
+        ))
+        .build()
+        .unwrap();
+    let outcome = execute(&request).unwrap();
+    assert_eq!(
+        outcome.termination(),
+        &Termination::TimedOut,
+        "stderr={}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert_eq!(outcome.stdout(), b"NODE_DESCENDANT_ACTIVE\n");
+    assert_eq!(
+        outcome.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+    assert_eq!(project_dacl(&root), baseline_acl);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn windows_node_preserves_argv_environment_exit_and_readonly_boundaries() {
+    let Some(node) = std::env::var_os("TAPID_TEST_NODE").map(PathBuf::from) else {
+        eprintln!("skipping: TAPID_TEST_NODE is not set");
+        return;
+    };
+    let node = fs::canonicalize(node).unwrap();
+    let runtime_bin = node.parent().unwrap();
+    let system32 =
+        fs::canonicalize(PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32"))
+            .unwrap();
+    let root = temporary_project("node-contract");
+    let outside = root.with_extension("private.txt");
+    fs::write(&outside, "PRIVATE_MARKER").unwrap();
+    let forbidden_write = outside.with_extension("write.txt");
+    fs::write(root.join("allowed.txt"), "READ_GRANTED").unwrap();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(std::net::TcpStream::connect(address).unwrap());
+    drop(listener.accept().unwrap());
+    let script = root.join("probe.js");
+    fs::write(
+        &script,
+        r#"
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const net = require('node:net');
+assert.deepEqual(process.argv.slice(2, 6), ['space value', 'quote"value', 'tail\\', '']);
+assert.equal(process.env.TAPID_TEST_MARKER, 'allowed-value');
+assert.equal(process.env.TAPID_SECRET_NOT_ALLOWED, undefined);
+assert.equal(fs.readFileSync('allowed.txt', 'utf8'), 'READ_GRANTED');
+assert.throws(() => fs.readFileSync(process.argv[6]), error => ['EACCES', 'EPERM'].includes(error.code));
+assert.throws(() => fs.writeFileSync(process.argv[7], 'escape'), error => ['EACCES', 'EPERM'].includes(error.code));
+assert.throws(() => fs.writeFileSync('allowed.txt', 'overwrite'), error => ['EACCES', 'EPERM'].includes(error.code));
+assert.throws(() => fs.writeFileSync('new.txt', 'create'), error => ['EACCES', 'EPERM'].includes(error.code));
+const socket = net.connect({host: '127.0.0.1', port: Number(process.argv[8])});
+socket.on('connect', () => { console.error('NETWORK_ESCAPE'); process.exit(1); });
+socket.on('error', () => finish());
+socket.setTimeout(1000, () => finish());
+let finished = false;
+function finish() {
+  if (finished) return;
+  finished = true;
+  socket.destroy();
+  process.stdout.write('NODE_CONTRACT_OK');
+  process.stderr.write('NODE_STDERR_OK');
+  process.exitCode = 23;
+}
+"#,
+    )
+    .unwrap();
+    let baseline_acl = project_dacl(&root);
+    let request = ExecutionRequest::builder(node.as_os_str())
+        .args([
+            script.as_os_str().to_owned(),
+            "space value".into(),
+            "quote\"value".into(),
+            "tail\\".into(),
+            "".into(),
+            outside.as_os_str().to_owned(),
+            forbidden_write.as_os_str().to_owned(),
+            address.port().to_string().into(),
+        ])
+        .executable_search_paths([runtime_bin, system32.as_path()])
+        .trusted_node_runtime(&node)
+        .project_root(&root)
+        .env("TAPID_TEST_MARKER", "allowed-value")
+        .policy(managed_policy())
+        .build()
+        .unwrap();
+    let outcome = execute(&request).unwrap();
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(23),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(outcome.stdout()),
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert_eq!(outcome.stdout(), b"NODE_CONTRACT_OK");
+    assert_eq!(outcome.stderr(), b"NODE_STDERR_OK");
+    assert_eq!(
+        fs::read_to_string(root.join("allowed.txt")).unwrap(),
+        "READ_GRANTED"
+    );
+    assert!(!forbidden_write.exists());
+    assert!(!root.join("new.txt").exists());
+    listener.set_nonblocking(true).unwrap();
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert_eq!(
+        outcome.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+    assert_eq!(project_dacl(&root), baseline_acl);
+    fs::remove_file(outside).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
 
