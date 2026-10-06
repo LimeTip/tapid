@@ -185,11 +185,11 @@ pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
 }
 
 pub(crate) fn prune(args: ReadOnlyArgs) -> ExitCode {
-    let project_dir = match crate::application::lifecycle::resolve_workspace(
+    let selection = match crate::application::lifecycle::resolve_workspace(
         &args.common.project_dir,
         args.common.workspace.as_deref(),
     ) {
-        Ok((project_dir, _)) => project_dir,
+        Ok(selection) => selection,
         Err(error) => {
             crate::output::report_failure(&OperationFailure::unchanged(
                 &args.common.project_dir,
@@ -198,8 +198,10 @@ pub(crate) fn prune(args: ReadOnlyArgs) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match crate::application::install::run(
-        &project_dir,
+    match crate::application::install::run_with_manifest_target(
+        &selection.root_dir,
+        &selection.manifest_path,
+        None,
         None,
         args.common.store_dir.as_deref(),
         crate::application::install::InstallMode::Frozen,
@@ -225,15 +227,16 @@ fn mutate_and_install(
         &tapid_manifest::PackageManifest,
     ) -> Result<crate::application::lifecycle::LifecyclePlan, OperationalError>,
 ) -> Result<crate::application::install::InstallReport, OperationFailure> {
-    let (project_dir, manifest) = crate::application::lifecycle::resolve_workspace(
+    let selection = crate::application::lifecycle::resolve_workspace(
         &common.project_dir,
         common.workspace.as_deref(),
     )
     .map_err(|error| OperationFailure::unchanged(&common.project_dir, error))?;
-    let plan =
-        planner(&manifest).map_err(|error| OperationFailure::unchanged(&project_dir, error))?;
-    crate::application::install::run_with_manifest(
-        &project_dir,
+    let plan = planner(&selection.manifest)
+        .map_err(|error| OperationFailure::unchanged(&selection.root_dir, error))?;
+    crate::application::install::run_with_manifest_target(
+        &selection.root_dir,
+        &selection.manifest_path,
         Some(&plan.manifest),
         None,
         common.store_dir.as_deref(),

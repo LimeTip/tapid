@@ -1154,14 +1154,15 @@ fn write_store_journal(
                 format!("invalid lifecycle coordinator: {error}"),
             )
         })?;
-    if coordinator_record
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        != Some(1)
-        || coordinator_record
-            .get("state")
-            .and_then(serde_json::Value::as_str)
-            != Some("Prepared")
+    if !matches!(
+        coordinator_record
+            .get("version")
+            .and_then(serde_json::Value::as_u64),
+        Some(1 | 2)
+    ) || coordinator_record
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        != Some("Prepared")
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1310,8 +1311,10 @@ fn recover_store_journal(root: &Path) -> io::Result<()> {
                     format!("malformed lifecycle coordinator: {error}"),
                 )
             })?;
-        if decision.get("version").and_then(serde_json::Value::as_u64) != Some(1)
-            || decision.get("owner").and_then(serde_json::Value::as_str) != Some(owner)
+        if !matches!(
+            decision.get("version").and_then(serde_json::Value::as_u64),
+            Some(1 | 2)
+        ) || decision.get("owner").and_then(serde_json::Value::as_str) != Some(owner)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

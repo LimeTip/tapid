@@ -571,9 +571,7 @@ pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependenc
     ] {
         for (name, range) in map {
             if range.starts_with("workspace:") {
-                return Err(format!(
-                    "unsupported workspace dependency reference: {name}@{range}; workspace linking is not implemented"
-                ));
+                continue;
             }
             let (registry, package) = dep_parts(name)?;
             let requirement = range.parse::<Requirement>().map_err(|error| {

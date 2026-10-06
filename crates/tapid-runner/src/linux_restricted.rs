@@ -1001,7 +1001,7 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             (command, None)
         };
         command
-            .current_dir(self.request.project_root())
+            .current_dir(self.request.working_directory())
             .env_clear()
             .envs(&self.preflight.child_environment)
             .stdin(Stdio::null())

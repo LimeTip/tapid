@@ -1,8 +1,11 @@
 use super::outcome::{ErrorKind, OperationFailure, OperationOutcome, OperationalError, Warning};
 use serde::Deserialize;
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
-use tapid_lockfile::Lockfile;
+use tapid_lockfile::{Lockfile, LockfilePackageKey, LockfilePackageSource};
 use tapid_manifest::{DependencyKind, PackageManifest, Workspace};
 use tapid_registry_client::{HttpsTransport, JsrRegistry, NpmRegistry};
 use tapid_resolver::Requirement;
@@ -44,15 +47,6 @@ pub(crate) fn plan_add(
                 format!("add requires a requirement for '{}'", mutation.name),
             )
         })?;
-        if requirement.starts_with("workspace:") {
-            return Err(OperationalError::new(
-                ErrorKind::InvalidRequest,
-                format!(
-                    "unsupported workspace dependency reference: {}@{}",
-                    mutation.name, requirement
-                ),
-            ));
-        }
         next = next
             .with_dependency_kind(mutation.kind, &mutation.name, requirement)
             .map_err(|error| {
@@ -167,10 +161,16 @@ pub(crate) fn plan_update(
     })
 }
 
+pub(crate) struct WorkspaceSelection {
+    pub(crate) root_dir: PathBuf,
+    pub(crate) manifest_path: PathBuf,
+    pub(crate) manifest: PackageManifest,
+}
+
 pub(crate) fn resolve_workspace(
     project_dir: &Path,
     selector: Option<&str>,
-) -> Result<(std::path::PathBuf, PackageManifest), OperationalError> {
+) -> Result<WorkspaceSelection, OperationalError> {
     if selector.is_some_and(|value| value.starts_with("workspace:")) {
         return Err(OperationalError::new(
             ErrorKind::InvalidRequest,
@@ -187,35 +187,25 @@ pub(crate) fn resolve_workspace(
         .select(selector)
         .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?
         .clone();
-    for dependencies in [
-        manifest.dependencies(),
-        manifest.dev_dependencies(),
-        manifest.optional_dependencies(),
-        manifest.peer_dependencies(),
-    ] {
-        if let Some((name, requirement)) = dependencies
-            .iter()
-            .find(|(_, requirement)| requirement.starts_with("workspace:"))
-        {
-            return Err(OperationalError::new(
-                ErrorKind::InvalidRequest,
-                format!(
-                    "unsupported workspace dependency reference: {name}@{requirement}; workspace linking is not implemented"
-                ),
-            ));
-        }
-    }
     let manifest_path = workspace
         .select_path(selector)
         .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?
         .to_path_buf();
-    Ok((
-        manifest_path
-            .parent()
-            .ok_or("workspace manifest has no parent directory")?
-            .to_path_buf(),
+    let root_dir = workspace
+        .root_path()
+        .parent()
+        .ok_or_else(|| {
+            OperationalError::new(
+                ErrorKind::Project,
+                "workspace root manifest has no parent directory",
+            )
+        })?
+        .to_path_buf();
+    Ok(WorkspaceSelection {
+        root_dir,
+        manifest_path,
         manifest,
-    ))
+    })
 }
 
 pub(crate) fn format_outdated_entry(entry: &OutdatedEntry) -> String {
@@ -371,9 +361,10 @@ fn outdated_entries(
     registry_fixture: Option<&Path>,
     outcome: &mut OperationOutcome,
 ) -> Result<Vec<OutdatedEntry>, OperationalError> {
-    let (project_dir, mut manifest) = resolve_workspace(project_dir, workspace_selector)?;
-    outcome.project_dir = project_dir.clone();
-    let project_dir = project_dir.as_path();
+    let selection = resolve_workspace(project_dir, workspace_selector)?;
+    outcome.project_dir = selection.root_dir.clone();
+    let project_dir = selection.root_dir.as_path();
+    let mut manifest = selection.manifest;
     let registry_config = crate::registry::RegistryConfig::load(project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let recovery_lock = if crate::filesystem::lifecycle_journal::has_pending(project_dir)
@@ -385,12 +376,16 @@ fn outdated_entries(
     } else {
         None
     };
-    if let Some(lock) = &recovery_lock {
-        if lock.recovered {
-            outcome.warnings.push(Warning::PreviousTransactionRecovered);
-        }
-        manifest =
-            crate::commands::manifest::read_manifest_typed(&project_dir.join("package.json"))?;
+    if recovery_lock.is_some() {
+        let recovered_manifest = fs::read_to_string(&selection.manifest_path).map_err(|error| {
+            OperationalError::from_source(ErrorKind::Recovery, error)
+                .context("cannot read recovered package manifest")
+        })?;
+        manifest = PackageManifest::parse(&recovered_manifest).map_err(|error| {
+            OperationalError::new(ErrorKind::Manifest, error)
+                .context("invalid recovered package manifest")
+        })?;
+        outcome.warnings.push(Warning::PreviousTransactionRecovered);
     }
     let lock_path = project_dir.join("tapid.lock");
     let bytes = fs::read_to_string(&lock_path).map_err(|error| {
@@ -404,11 +399,61 @@ fn outdated_entries(
     let lock = Lockfile::from_json(&bytes).map_err(OperationalError::from)?;
     let locked = lock.packages_typed().map_err(OperationalError::from)?;
     let direct_dependencies = direct_dependencies(&manifest);
+    let local_workspace_versions = Workspace::discover(project_dir)?
+        .members()
+        .iter()
+        .map(|member| {
+            (
+                member.name().to_owned(),
+                member.manifest().version().clone(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     drop(recovery_lock);
     let mut transports = std::collections::BTreeMap::new();
     let allowed_origins = registry_config.configured_origins();
     let mut entries = Vec::new();
     for (identity, declared, kind) in direct_dependencies {
+        if let Some(local_version) = local_workspace_versions.get(&identity) {
+            let requirement = crate::online::workspace_requirement(&declared, local_version)?;
+            let compatible = requirement.matches(local_version);
+            let locked_version = lock
+                .workspace_packages()
+                .keys()
+                .filter_map(|key| key.parse::<LockfilePackageKey>().ok())
+                .filter(|key| {
+                    key.source
+                        .workspace()
+                        .is_some_and(|source| source.name() == identity)
+                })
+                .map(|key| key.version)
+                .max();
+            entries.push(OutdatedEntry {
+                identity,
+                kind: kind_name(kind).to_owned(),
+                declared: declared.clone(),
+                locked: locked_version.map(|version| version.to_string()),
+                newest_compatible: compatible.then(|| local_version.to_string()),
+                newest_available: Some(local_version.to_string()),
+                diagnostic: (!compatible).then(|| {
+                    OperationalError::new(
+                        ErrorKind::InvalidRequest,
+                        format!(
+                            "local workspace version {local_version} does not satisfy declared range {declared}"
+                        ),
+                    )
+                }),
+            });
+            continue;
+        }
+        if declared.starts_with("workspace:") {
+            return Err(OperationalError::new(
+                ErrorKind::InvalidRequest,
+                format!(
+                    "workspace dependency '{identity}@{declared}' has no matching local workspace member; refusing registry fallback"
+                ),
+            ));
+        }
         let (manifest_origin, local_name) = crate::online::dep_parts(&identity)?;
         let requirement = declared.parse::<Requirement>().ok();
         let package_name = requirement
@@ -427,9 +472,13 @@ fn outdated_entries(
         let locked_version = locked
             .iter()
             .filter(|(key, _)| {
-                key.registry == origin
-                    && key.name == package_name
-                    && bound_root.is_none_or(|target| key.to_string() == *target)
+                matches!(
+                    &key.source,
+                    LockfilePackageSource::Registry(registry)
+                        if registry == &origin
+                            && key.name == package_name
+                            && bound_root.is_none_or(|target| key.to_string() == *target)
+                )
             })
             .map(|(key, _)| key.version.clone())
             .max();
@@ -564,14 +613,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_workspace_protocol_as_a_registry_requirement() {
+    fn add_planner_preserves_workspace_protocol_for_workspace_preflight() {
         let mutation = DependencyMutation {
             name: "local-pkg".into(),
             requirement: Some("workspace:*".into()),
             kind: DependencyKind::Dependencies,
         };
-        let error = plan_add(&manifest(), &[mutation]).unwrap_err();
-        assert!(error.to_string().contains("workspace dependency reference"));
+        let plan = plan_add(&manifest(), &[mutation]).unwrap();
+        assert_eq!(plan.manifest.dependencies()["local-pkg"], "workspace:*");
     }
 
     #[test]

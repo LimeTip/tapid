@@ -2009,7 +2009,7 @@ fn prepare_launch(
     command.arg(&request.program);
     command
         .args(&request.arguments)
-        .current_dir(&preflight.policy.project_root)
+        .current_dir(request.working_directory())
         .env_clear()
         .envs(&preflight.child_environment)
         .stdin(Stdio::null())

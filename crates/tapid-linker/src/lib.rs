@@ -10,6 +10,7 @@
 mod layout;
 mod platform;
 mod shims;
+mod workspace;
 
 pub use layout::{
     ActivationStep, DependencyEdge, InstanceKey, LayoutInput, LinkKind, ManagedRoot,
@@ -18,6 +19,10 @@ pub use layout::{
     VerifiedTreeReference, plan_layout, plan_materialization, plan_named_layout,
 };
 pub use platform::{Capability, Platform, PlatformCapabilities};
-pub use shims::{ShimEntry, ShimPackage, ShimPlan, ShimStrategy, plan_shims};
+pub use shims::{
+    ShimEntry, ShimPackage, ShimPlan, ShimStrategy, WorkspaceShimPackage, plan_shims,
+    plan_shims_with_workspace_packages,
+};
+pub use workspace::{WorkspaceLink, WorkspaceLinkPlan, WorkspacePackage, plan_workspace_links};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

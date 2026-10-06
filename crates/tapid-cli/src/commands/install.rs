@@ -18,6 +18,9 @@ pub(crate) struct Args {
     /// Project directory containing package.json and tapid.lock.
     #[arg(long, default_value = ".")]
     pub(crate) project_dir: PathBuf,
+    /// Select a workspace member while installing the root workspace graph.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) workspace: Option<String>,
     /// Verified package store directory. Defaults to tapid/store in the platform cache directory.
     #[arg(long)]
     pub(crate) store_dir: Option<PathBuf>,
@@ -43,6 +46,29 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
 
 /// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
 pub(crate) fn run(args: Args) -> ExitCode {
+    let target_manifest_path = if let Some(name) = args.workspace.as_deref() {
+        let workspace = match tapid_manifest::Workspace::discover(&args.project_dir) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        match workspace.select_path(Some(name)) {
+            Ok(path) => path.to_path_buf(),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        PathBuf::from("package.json")
+    };
+    if args.allow_unverified_registry_artifacts && !args.offline && !args.frozen {
+        eprintln!(
+            "warning: npm artifacts without registry integrity are not authenticated against a registry-declared digest"
+        );
+    }
     let mode = if args.offline {
         crate::application::install::InstallMode::Offline
     } else if args.frozen {
@@ -50,15 +76,29 @@ pub(crate) fn run(args: Args) -> ExitCode {
     } else {
         crate::application::install::InstallMode::Online
     };
-    let result = crate::application::install::run(
-        &args.project_dir,
-        args.package.as_deref(),
-        args.store_dir.as_deref(),
-        mode,
-        args.registry_fixture.as_deref(),
-        args.allow_unverified_registry_artifacts,
-        |completed, total| eprintln!("Replay snapshot progress: {completed}/{total}"),
-    );
+    let result = if args.workspace.is_some() {
+        crate::application::install::run_with_manifest_target(
+            &args.project_dir,
+            &target_manifest_path,
+            None,
+            args.package.as_deref(),
+            args.store_dir.as_deref(),
+            mode,
+            args.registry_fixture.as_deref(),
+            args.allow_unverified_registry_artifacts,
+            |completed, total| eprintln!("Replay snapshot progress: {completed}/{total}"),
+        )
+    } else {
+        crate::application::install::run(
+            &args.project_dir,
+            args.package.as_deref(),
+            args.store_dir.as_deref(),
+            mode,
+            args.registry_fixture.as_deref(),
+            args.allow_unverified_registry_artifacts,
+            |completed, total| eprintln!("Replay snapshot progress: {completed}/{total}"),
+        )
+    };
     match result {
         Ok(report) => {
             crate::output::report_warnings(&report.outcome.warnings);
