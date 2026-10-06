@@ -1,6 +1,6 @@
 # ADR 0004: GitHub-native client releases
 
-Status: Accepted
+Status: Accepted. Manual promotion and separate crates.io dispatch/approval superseded by [ADR 0007](0007-one-candidate-one-release-approval.md).
 Date: 2026-09-03
 Supersedes: ADR 0001 for current client releases
 

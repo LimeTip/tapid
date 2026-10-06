@@ -14,11 +14,23 @@ on:
   schedule:
     - cron: '23 5 * * *'
 
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      release_id:
+        required: true
+        type: string
+      commit_sha:
+        required: true
+        type: string
+
 permissions:
   contents: read
 
 concurrency:
-  group: public-smoke-${{ github.event.release.tag_name || github.ref }}
+  group: public-smoke-${{ github.event.release.tag_name || inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -44,6 +56,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
           EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_RELEASE_ID: ${{ inputs.release_id }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.commit_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -54,6 +68,11 @@ jobs:
           stable="$(gh api "repos/LimeTip/tapid/releases/tags/$tag" --jq '(.draft == false) and (.prerelease == false)')"
           test "$stable" = true
           sha="$(gh api "repos/LimeTip/tapid/commits/$tag" --jq .sha)"
+          if test -n "$EXPECTED_RELEASE_ID"; then
+            [[ "$EXPECTED_RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+            test "$sha" = "$EXPECTED_SOURCE_SHA"
+            gh api "repos/LimeTip/tapid/releases/$EXPECTED_RELEASE_ID" | jq -e --arg tag "$tag" --argjson id "$EXPECTED_RELEASE_ID" '.id == $id and .tag_name == $tag and .draft == false and .prerelease == false and .immutable == true' >/dev/null
+          fi
           latest_sha="$(gh api "repos/LimeTip/tapid/commits/$latest_tag" --jq .sha)"
           [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
           [[ "$latest_sha" =~ ^[a-f0-9]{40}$ ]]
