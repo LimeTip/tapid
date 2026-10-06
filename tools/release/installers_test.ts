@@ -413,3 +413,49 @@ test("Both signed installers invoke the pinned bootstrap rollback policy before 
     ok(policy < source.lastIndexOf(replacement));
   }
 });
+
+test("PowerShell installer stops a rejected native policy before replacing destination or marker", async (context) => {
+  try { await run("pwsh", ["-NoProfile", "-Command", "$null"]); }
+  catch { context.skip("PowerShell is unavailable"); return; }
+  const directory = await mkdtemp(join(tmpdir(), "tapid-ps-policy-"));
+  try {
+    const source = await readFile(join(root, "scripts/install.ps1"), "utf8");
+    const start = source.indexOf("    if (-not $legacyRelease) {");
+    const end = source.indexOf("    try {\n        Configure-UserPath", start);
+    ok(start >= 0 && end > start);
+    const block = source.slice(start, end);
+    await writeFile(join(directory, "reject.ps1"), "exit 17\n");
+    await writeFile(join(directory, "test.ps1"), `$ErrorActionPreference = 'Stop'
+function Fail([string]$Message) { throw $Message }
+$InstallDir = $PSScriptRoot
+$destination = Join-Path $PSScriptRoot 'tapid.exe'
+$extracted = Join-Path $PSScriptRoot 'selected.exe'
+$staged = Join-Path $PSScriptRoot 'staged.exe'
+$stagedMarker = Join-Path $PSScriptRoot 'staged-marker'
+$marker = Join-Path $PSScriptRoot '.tapid-managed'
+$bootstrap = Join-Path $PSScriptRoot 'reject.ps1'
+$Version = '1.2.3'
+$BootstrapVersion = '1.0.0'
+$archivePath = Join-Path $PSScriptRoot 'release.tar.gz'
+$legacyRelease = $false
+[IO.File]::WriteAllText($destination, 'installed bytes')
+[IO.File]::WriteAllText($marker, 'original marker')
+[IO.File]::WriteAllText($extracted, 'replacement bytes')
+$rejected = $false
+try {
+${block}
+} catch {
+    if ($_.Exception.Message -notlike '*installer release policy rejected*') { throw }
+    $rejected = $true
+}
+if (-not $rejected) { throw 'native policy failure was accepted' }
+if ([IO.File]::ReadAllText($destination) -cne 'installed bytes') { throw 'destination changed' }
+if ([IO.File]::ReadAllText($marker) -cne 'original marker') { throw 'marker changed' }
+if (Test-Path $staged) { throw 'replacement was staged despite policy rejection' }
+$global:LASTEXITCODE = 0
+Write-Output 'Policy rejection preserved installation'
+`);
+    const result = await run("pwsh", ["-NoProfile", "-File", join(directory, "test.ps1")]);
+    match(result.stdout, /Policy rejection preserved installation/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

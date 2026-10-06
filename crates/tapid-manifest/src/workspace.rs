@@ -183,12 +183,17 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
                 for entry in entries {
                     let entry = entry
                         .map_err(|error| format!("cannot inspect workspace directory: {error}"))?;
-                    if entry
-                        .file_type()
-                        .map_err(|error| error.to_string())?
+                    let candidate = entry.path();
+                    if fs::metadata(&candidate)
+                        .map_err(|error| {
+                            format!(
+                                "cannot inspect workspace member {}: {error}",
+                                candidate.display()
+                            )
+                        })?
                         .is_dir()
                     {
-                        next.push(entry.path());
+                        next.push(contained_path(root, &candidate)?);
                     }
                 }
             }
@@ -283,5 +288,37 @@ mod containment_tests {
             workspace.root_path(),
             fs::canonicalize(project.path().join("root/package.json")).unwrap()
         );
+    }
+    #[test]
+    fn wildcard_members_follow_internal_symlinks_and_reject_external_symlinks() {
+        let project = TempProject::new("wildcard-member-symlink").unwrap();
+        let external = TempProject::new("wildcard-member-external").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        let member = project
+            .write(
+                "real/member/package.json",
+                br#"{"name":"member","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        fs::create_dir(project.path().join("packages")).unwrap();
+        let link = project.path().join("packages/member");
+        symlink("../real/member", &link).unwrap();
+        let workspace = Workspace::discover(project.path()).unwrap();
+        assert_eq!(
+            workspace.select_path(Some("member")).unwrap(),
+            fs::canonicalize(member).unwrap()
+        );
+        fs::remove_file(&link).unwrap();
+        external
+            .write("package.json", b"external content must not be parsed")
+            .unwrap();
+        symlink(external.path(), &link).unwrap();
+        let error = Workspace::discover(project.path()).unwrap_err();
+        assert!(error.contains("outside project"), "{error}");
     }
 }

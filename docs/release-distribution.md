@@ -525,7 +525,7 @@ Never:
 
 ## Residual risks
 
-- A compromised discovery route or release provider can replay a previously signed record but cannot change its bytes without the release key. A non-expiring signature does not prove latest-release freshness. Client rollback state limits normal downgrades; a fresh installer has no prior release floor. Repository, workflow, or signing-key compromise can still authorize malicious releases.
-- The installers do not enforce rollback protection beyond selecting a requested immutable release version.
+- A compromised discovery route or release provider can replay a previously signed record but cannot change its bytes without the release key. A non-expiring signature does not prove latest-release freshness. Signed installers enforce the bootstrap-pinned minimum version even for fresh installs, and existing installations additionally enforce installed-version and durable digest/version floors. Replaying an older HTTPS-delivered installer can also replay its older bootstrap floor; these local floors do not prove latest-release freshness. Repository, workflow, or signing-key compromise can still authorize malicious releases.
+- Historical checksum-only installers permit fresh installs or identical-byte reinstalls and cannot replace destinations with durable release state. Explicit development source installs remain separately selected operations.
 - Public smoke tests run after publication and can detect but cannot prevent a broken release from briefly being available.
 - macOS and Windows platform code signing are not part of this flow.

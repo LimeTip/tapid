@@ -308,14 +308,6 @@ fn seccomp_denies_process_memory_and_pidfds_even_for_self() {
     if pid == 0 {
         unsafe {
             let target = libc::getpid();
-            let fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
-            if fd < 0 {
-                libc::_exit(1);
-            }
-            let pidfd = libc::syscall(libc::SYS_pidfd_open, target, 0);
-            if pidfd < 0 {
-                libc::_exit(2);
-            }
             if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
                 || libc::prctl(
                     PR_SET_SECCOMP,
@@ -345,12 +337,23 @@ fn seccomp_denies_process_memory_and_pidfds_even_for_self() {
             {
                 libc::_exit(5);
             }
-            // An invalid flags value would return EINVAL without the filter,
-            // even where Yama independently blocks getfd with valid flags.
-            if libc::syscall(libc::SYS_pidfd_getfd, pidfd, fd, u32::MAX) != -1
+            // An invalid descriptor needs no pidfd support before filtering.
+            // Seccomp must return EPERM even when the kernel would return
+            // EBADF, EINVAL, or ENOSYS for the unfiltered syscall.
+            if libc::syscall(libc::SYS_pidfd_getfd, -1, -1, u32::MAX) != -1
                 || *libc::__errno_location() != libc::EPERM
             {
                 libc::_exit(6);
+            }
+            #[cfg(target_arch = "x86_64")]
+            for number in [539, 540, libc::SYS_pidfd_open, libc::SYS_pidfd_getfd] {
+                // x32 shares AUDIT_ARCH_X86_64 but has its own syscall numbers.
+                // Test rejection even on kernels that do not enable x32.
+                if libc::syscall(0x4000_0000 | number, -1, 0, 0, 0, 0, 0) != -1
+                    || *libc::__errno_location() != libc::EPERM
+                {
+                    libc::_exit(7);
+                }
             }
             libc::_exit(0);
         }
