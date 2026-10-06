@@ -3494,3 +3494,47 @@ fn injected_activation_failure_restores_marked_node_modules() {
     }));
     cleanup(dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn lifecycle_workspace_symlink_escape_preserves_external_project() {
+    use tapid_test_support::TempProject;
+    let root = TempProject::new("workspace-cli-escape").unwrap();
+    let external = TempProject::new("workspace-cli-external").unwrap();
+    root.write(
+        "package.json",
+        br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    let manifest = br#"{"name":"member","version":"1.0.0","dependencies":{"example":"1.0.0"}}"#;
+    external.write("member/package.json", manifest).unwrap();
+    external
+        .write("member/tapid.lock", b"external lockfile")
+        .unwrap();
+    std::os::unix::fs::symlink(external.path(), root.path().join("packages")).unwrap();
+    for args in [
+        vec!["add", "example", "--workspace", "member"],
+        vec!["remove", "example", "--workspace", "member"],
+        vec!["update", "--workspace", "member"],
+        vec!["prune", "--workspace", "member"],
+        vec!["outdated", "--workspace", "member"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .args(args)
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("outside project"), "{error}");
+        assert_eq!(
+            fs::read(external.path().join("member/package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(external.path().join("member/tapid.lock")).unwrap(),
+            b"external lockfile"
+        );
+        assert!(!external.path().join("member/node_modules").exists());
+    }
+}

@@ -297,3 +297,66 @@ fn managed_tree_stays_fail_closed_before_target_execution() {
     assert!(!marker.exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn seccomp_denies_process_memory_and_pidfds_even_for_self() {
+    // Self-targets need no Yama permission. This proves seccomp supplies the
+    // denial independently of host tracing policy.
+    let filter = seccomp_filter(true, true).unwrap();
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork failed: {}", io::Error::last_os_error());
+    if pid == 0 {
+        unsafe {
+            let target = libc::getpid();
+            let fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
+            if fd < 0 {
+                libc::_exit(1);
+            }
+            let pidfd = libc::syscall(libc::SYS_pidfd_open, target, 0);
+            if pidfd < 0 {
+                libc::_exit(2);
+            }
+            if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                || libc::prctl(
+                    PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER,
+                    &libc::sock_fprog {
+                        len: filter.len() as u16,
+                        filter: filter.as_ptr() as *mut libc::sock_filter,
+                    },
+                ) != 0
+            {
+                libc::_exit(3);
+            }
+            let mut byte = 42u8;
+            let iov = libc::iovec {
+                iov_base: (&mut byte as *mut u8).cast(),
+                iov_len: 1,
+            };
+            for syscall in [libc::SYS_process_vm_readv, libc::SYS_process_vm_writev] {
+                if libc::syscall(syscall, target, &iov, 1, &iov, 1, 0) != -1
+                    || *libc::__errno_location() != libc::EPERM
+                {
+                    libc::_exit(4);
+                }
+            }
+            if libc::syscall(libc::SYS_pidfd_open, target, 0) != -1
+                || *libc::__errno_location() != libc::EPERM
+            {
+                libc::_exit(5);
+            }
+            // An invalid flags value would return EINVAL without the filter,
+            // even where Yama independently blocks getfd with valid flags.
+            if libc::syscall(libc::SYS_pidfd_getfd, pidfd, fd, u32::MAX) != -1
+                || *libc::__errno_location() != libc::EPERM
+            {
+                libc::_exit(6);
+            }
+            libc::_exit(0);
+        }
+    }
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert!(libc::WIFEXITED(status));
+    assert_eq!(libc::WEXITSTATUS(status), 0);
+}

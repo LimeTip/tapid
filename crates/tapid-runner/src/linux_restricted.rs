@@ -243,6 +243,10 @@ fn seccomp_filter(
         let mut denied = vec![
             libc::SYS_bpf,
             libc::SYS_ptrace,
+            libc::SYS_process_vm_readv,
+            libc::SYS_process_vm_writev,
+            libc::SYS_pidfd_open,
+            libc::SYS_pidfd_getfd,
             libc::SYS_mount,
             libc::SYS_umount2,
             libc::SYS_open_tree,
