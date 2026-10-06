@@ -354,7 +354,8 @@ test("PR published-binary smoke is exact-head, read-only and separate from relea
   assert(!ci.includes("pull_request_target:"));
   assert(job.includes("if: github.event_name == 'pull_request'"));
   assert(job.includes("contents: read"));
-  assert(job.includes("os: [ubuntu-latest, macos-latest, windows-latest]"));
+  assert(job.includes("os: [ubuntu-latest, macos-latest]"));
+  assert(!job.includes("windows-latest"), "native Windows execution belongs on Windows 11 VM 126, not hosted Windows Server");
   assert(job.includes("ref: ${{ github.event.pull_request.head.sha }}"));
   assert(job.includes("persist-credentials: false"));
   assert(job.includes("EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}"));

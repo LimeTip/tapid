@@ -53,7 +53,8 @@ function validate(platform, failure, releaseTag = 'v0.0.10') {
       } };
       return require(name);
     },
-    process: { platform, argv: ['node', 'validator', '--binary', binary, '--release-tag', releaseTag],
+    Buffer,
+    process: { hrtime: process.hrtime, platform, argv: ['node', 'validator', '--binary', binary, '--release-tag', releaseTag],
       env: { TAPID_FIXTURE_PROJECT: '/fixture' }, stdout: { write() {} }, stderr: { write() {} } },
     console: { log() {} },
   };
