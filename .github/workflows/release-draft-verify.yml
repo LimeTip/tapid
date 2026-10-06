@@ -16,6 +16,21 @@ on:
         required: true
         type: string
 
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      release_id:
+        required: true
+        type: string
+      commit_sha:
+        required: true
+        type: string
+      allow_public:
+        default: false
+        type: boolean
+
 permissions:
   contents: read
 
@@ -31,6 +46,7 @@ env:
 
 jobs:
   resolve-and-verify:
+    if: github.ref == 'refs/heads/main'
     name: Resolve and verify exact draft assets
     runs-on: ubuntu-latest
     # GitHub requires push access to read unpublished releases and their assets.
@@ -38,8 +54,10 @@ jobs:
       contents: write
     steps:
       - name: Resolve exact draft and tag commit
+        id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
+          ALLOW_PUBLIC: ${{ inputs.allow_public || false }}
         shell: bash
         run: |
           set -euo pipefail
@@ -48,8 +66,8 @@ jobs:
           [[ "$COMMIT_SHA" =~ ^[a-f0-9]{40}$ ]]
           release_json="$RUNNER_TEMP/release.json"
           gh api "repos/$REPOSITORY/releases/$RELEASE_ID" > "$release_json"
-          jq -e --arg tag "$RELEASE_TAG" --argjson id "$RELEASE_ID" \
-            '.id == $id and .tag_name == $tag and .draft == true and .prerelease == false' \
+          jq -e --arg tag "$RELEASE_TAG" --argjson id "$RELEASE_ID" --argjson public "$ALLOW_PUBLIC" \
+            '.id == $id and .tag_name == $tag and .prerelease == false and (.draft == true or ($public and .draft == false and .immutable == true))' \
             "$release_json" >/dev/null || {
             echo "draft identity mismatch" >&2
             exit 1
@@ -73,6 +91,7 @@ jobs:
           test "$peeled" = "$COMMIT_SHA" || { echo "git tag cannot be moved" >&2; exit 1; }
           tagged_commit="$(gh api "repos/$REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
           test "$tagged_commit" = "$COMMIT_SHA" || { echo "tag commit mismatch" >&2; exit 1; }
+          printf 'tag_object=%s\n' "$tag_object" >> "$GITHUB_OUTPUT"
 
           VERSION="${RELEASE_TAG#v}"
           expected_assets_file="$RUNNER_TEMP/expected-assets"
@@ -128,8 +147,14 @@ jobs:
           printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.commit_sha }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Verify exact tagged source belongs to main
+        env:
+          TAG_OBJECT: ${{ steps.resolve.outputs.tag_object }}
+        shell: bash
+        run: bash tools/release/verify-source.sh "$RELEASE_TAG" "$COMMIT_SHA" "$TAG_OBJECT"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
@@ -140,7 +165,7 @@ jobs:
           generated="$RUNNER_TEMP/generated-installers"
           mkdir "$generated"
           cp "$RUNNER_TEMP/assets/"*.tar.gz "$generated/"
-          node --experimental-strip-types tools/release/bootstrap.ts "$generated" "$VERSION" "https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
+          node --experimental-strip-types tools/release/bootstrap.ts "$generated" "$VERSION" "https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG" "$COMMIT_SHA"
           cmp "$generated/install.sh" "$RUNNER_TEMP/assets/install.sh"
           cmp "$generated/install.ps1" "$RUNNER_TEMP/assets/install.ps1"
       - name: Publish exact verified assets for platform jobs
@@ -149,6 +174,7 @@ jobs:
           name: exact-draft-assets
           path: ${{ runner.temp }}/assets
           if-no-files-found: error
+          overwrite: true
           retention-days: 1
 
   install:
@@ -161,11 +187,20 @@ jobs:
           - runner: ubuntu-latest
             archive: x86_64-unknown-linux-gnu
             binary: tapid
-          - runner: macos-latest
+          - runner: ubuntu-24.04-arm
+            archive: aarch64-unknown-linux-gnu
+            binary: tapid
+          - runner: macos-15-intel
             archive: x86_64-apple-darwin
+            binary: tapid
+          - runner: macos-14
+            archive: aarch64-apple-darwin
             binary: tapid
           - runner: windows-latest
             archive: x86_64-pc-windows-msvc
+            binary: tapid.exe
+          - runner: windows-11-vs2026-arm
+            archive: aarch64-pc-windows-msvc
             binary: tapid.exe
     runs-on: ${{ matrix.runner }}
     steps:
@@ -191,7 +226,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid-install'
           New-Item -ItemType Directory -Force $installDir | Out-Null
-          tar -xzf (Join-Path $env:RUNNER_TEMP "assets/tapid-$($env:RELEASE_TAG.Substring(1))-x86_64-pc-windows-msvc.tar.gz") -C $installDir
+          tar -xzf (Join-Path $env:RUNNER_TEMP "assets/tapid-$($env:RELEASE_TAG.Substring(1))-${{ matrix.archive }}.tar.gz") -C $installDir
           $actual = & (Join-Path $installDir 'tapid.exe') --version
           if ($actual -ne "tapid $($env:RELEASE_TAG.Substring(1))") { throw "installed version mismatch" }
           & (Join-Path $installDir 'tapid.exe') __verify-release-record (Join-Path $env:RUNNER_TEMP 'assets/tapid-release-v1.tsv') (Join-Path $env:RUNNER_TEMP 'assets/tapid-release-v1.tsv.sig')

@@ -1,0 +1,2 @@
+# Keep the release source verifier executable by Bash on Windows runners.
+tools/release/verify-source.sh text eol=lf
