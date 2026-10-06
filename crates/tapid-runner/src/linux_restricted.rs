@@ -1350,7 +1350,7 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
         let captured = output_limit.map(|_| Arc::new(Mutex::new(CapturedOutput::default())));
         let output_exceeded = output_limit.map(|_| Arc::new(AtomicBool::new(false)));
         command
-            .current_dir(self.request.project_root())
+            .current_dir(self.request.working_directory())
             .env_clear()
             .envs(&self.preflight.child_environment)
             .stdin(Stdio::null())

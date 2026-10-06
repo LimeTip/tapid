@@ -12,6 +12,19 @@ pub struct ShimPackage {
     pub bin_dir: PathBuf,
 }
 
+/// A workspace package whose validated bin target is exposed through its staged local link.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceShimPackage {
+    /// Canonical package root beneath the project workspace root.
+    pub tree_root: PathBuf,
+    /// Manifest bytes parsed during planning.
+    pub package_json: String,
+    /// Staged `node_modules/<package>` path used as the shim's stable relative source.
+    pub link_root: PathBuf,
+    /// Managed `.bin` placement, normally the root `node_modules` directory.
+    pub bin_dir: PathBuf,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShimStrategy {
     UnixSymlink,
@@ -106,6 +119,115 @@ pub fn plan_shims(
         managed_root,
         entries,
     })
+}
+
+/// Plans registry shims and workspace shims together so command collisions are
+/// rejected before materialization. Workspace shim sources point through their
+/// staged package links, so relative targets remain valid after activation.
+pub fn plan_shims_with_workspace_packages(
+    managed_root: ManagedRoot,
+    packages: Vec<ShimPackage>,
+    workspace_root: &std::path::Path,
+    workspace_packages: Vec<WorkspaceShimPackage>,
+    platform: Platform,
+) -> Result<ShimPlan, PlanError> {
+    let mut plan = plan_shims(managed_root, packages, platform)?;
+    if !workspace_root.is_absolute()
+        || workspace_root
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(PlanError::PathOutsideManagedRoot(
+            workspace_root.to_path_buf(),
+        ));
+    }
+    let strategy = match platform {
+        Platform::Unix => ShimStrategy::UnixSymlink,
+        Platform::Windows => ShimStrategy::WindowsCmdAndPowerShell,
+        Platform::Other => return Err(PlanError::UnsupportedPlatform(platform)),
+    };
+    for package in workspace_packages {
+        if !package.tree_root.is_absolute()
+            || package
+                .tree_root
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+            || package.tree_root == workspace_root
+            || !package.tree_root.starts_with(workspace_root)
+        {
+            return Err(PlanError::PathOutsideManagedRoot(package.tree_root));
+        }
+        if !plan.managed_root.contains(&package.link_root)
+            || !plan.managed_root.contains(&package.bin_dir)
+        {
+            return Err(PlanError::PathOutsideManagedRoot(package.link_root));
+        }
+        let manifest =
+            tapid_manifest::PackageManifest::parse(&package.package_json).map_err(|error| {
+                PlanError::InvalidPackageMetadata(format!(
+                    "{}: {error}",
+                    package.tree_root.display()
+                ))
+            })?;
+        let Some(bin) = manifest.bin() else { continue };
+        for target in bin.targets() {
+            let validated_source = package.tree_root.join(&target.target);
+            if !validated_source.starts_with(&package.tree_root)
+                || validated_source
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+                || !validated_source.starts_with(workspace_root)
+            {
+                return Err(PlanError::PathOutsideManagedRoot(validated_source));
+            }
+            let metadata = match std::fs::symlink_metadata(&validated_source) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(PlanError::BinTargetMissing(validated_source.clone())),
+            };
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(PlanError::BinTargetNotRegular(validated_source));
+            }
+            let canonical_source = std::fs::canonicalize(&validated_source)
+                .map_err(|_| PlanError::BinTargetMissing(validated_source.clone()))?;
+            if !canonical_source.starts_with(&package.tree_root)
+                || !canonical_source.starts_with(workspace_root)
+            {
+                return Err(PlanError::PathOutsideManagedRoot(canonical_source));
+            }
+            #[cfg(unix)]
+            if platform == Platform::Unix {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    return Err(PlanError::InvalidPackageMetadata(format!(
+                        "workspace bin target must already be executable: {}",
+                        validated_source.display()
+                    )));
+                }
+            }
+            let source = package.link_root.join(&target.target);
+            let target_path = package.bin_dir.join(".bin").join(&target.command);
+            if !plan.managed_root.contains(&source) || !plan.managed_root.contains(&target_path) {
+                return Err(PlanError::PathOutsideManagedRoot(source));
+            }
+            if plan
+                .entries
+                .iter()
+                .any(|entry| shim_paths_collide(&entry.target, &target_path, strategy))
+            {
+                return Err(PlanError::ShimCollision(target_path));
+            }
+            plan.entries.push(ShimEntry {
+                command: target.command.clone(),
+                source,
+                target: target_path,
+                strategy,
+            });
+        }
+    }
+    plan.entries
+        .sort_by(|a, b| a.target.cmp(&b.target).then(a.source.cmp(&b.source)));
+    Ok(plan)
 }
 
 fn shim_paths_collide(

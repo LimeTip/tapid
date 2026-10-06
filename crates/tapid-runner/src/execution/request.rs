@@ -157,6 +157,7 @@ pub struct ExecutionRequest {
     pub(super) windows_verbatim_arguments: bool,
     pub(super) allow_process_memory_stats: bool,
     pub(super) project_root: PathBuf,
+    pub(super) working_directory: Option<PathBuf>,
     pub(super) policy: SandboxPolicy,
     pub(super) environment: BTreeMap<OsString, OsString>,
 }
@@ -171,6 +172,7 @@ impl ExecutionRequest {
             windows_verbatim_arguments: false,
             allow_process_memory_stats: false,
             project_root: PathBuf::from("."),
+            working_directory: None,
             policy: SandboxPolicy::default(),
             environment: BTreeMap::new(),
         }
@@ -210,6 +212,12 @@ impl ExecutionRequest {
     }
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+    /// Directory used as the child process working directory, confined beneath `project_root`.
+    pub fn working_directory(&self) -> &Path {
+        self.working_directory
+            .as_deref()
+            .unwrap_or(&self.project_root)
     }
     pub fn policy(&self) -> &SandboxPolicy {
         &self.policy
@@ -338,6 +346,28 @@ impl ExecutionRequest {
         if self.project_root.as_os_str().is_empty() {
             return Err(invalid_request("project root must not be empty"));
         }
+        if let Some(working_directory) = &self.working_directory {
+            validate_os_value(
+                "working directory",
+                working_directory.as_os_str(),
+                MAX_PROJECT_ROOT_UNITS,
+            )?;
+            if working_directory.as_os_str().is_empty() {
+                return Err(invalid_request("working directory must not be empty"));
+            }
+            let canonical_root = canonical_path(&self.project_root, "project root")?;
+            let canonical_working_directory =
+                canonical_path(working_directory, "working directory")?;
+            if canonical_root != self.project_root
+                || canonical_working_directory != *working_directory
+                || !canonical_working_directory.starts_with(&canonical_root)
+                || !canonical_working_directory.is_dir()
+            {
+                return Err(invalid_request(
+                    "working directory must be canonical, existing, and contained beneath project root",
+                ));
+            }
+        }
         let executable_search_path =
             validate_executable_search_paths(&self.executable_search_paths)?;
         self.validate_trusted_node_runtime()?;
@@ -406,6 +436,7 @@ pub struct ExecutionRequestBuilder {
     windows_verbatim_arguments: bool,
     allow_process_memory_stats: bool,
     project_root: PathBuf,
+    working_directory: Option<PathBuf>,
     policy: SandboxPolicy,
     environment: BTreeMap<OsString, OsString>,
 }
@@ -472,6 +503,12 @@ impl ExecutionRequestBuilder {
         self
     }
 
+    /// Sets the child process working directory, which must resolve inside `project_root`.
+    pub fn working_directory(mut self, working_directory: impl Into<PathBuf>) -> Self {
+        self.working_directory = Some(working_directory.into());
+        self
+    }
+
     pub fn policy(mut self, policy: SandboxPolicy) -> Self {
         self.policy = policy;
         self
@@ -499,6 +536,32 @@ impl ExecutionRequestBuilder {
     }
 
     pub fn build(self) -> Result<ExecutionRequest, ExecutionError> {
+        let working_directory = self
+            .working_directory
+            .as_ref()
+            .map(|working_directory| {
+                let project_root = fs::canonicalize(&self.project_root)
+                    .map_err(|error| path_error("project root", &self.project_root, error))?;
+                if !project_root.is_dir() {
+                    return Err(invalid_request(
+                        "project root must be an existing directory",
+                    ));
+                }
+                let working_path = if working_directory.is_absolute() {
+                    working_directory.clone()
+                } else {
+                    project_root.join(working_directory)
+                };
+                let working_directory = fs::canonicalize(&working_path)
+                    .map_err(|error| path_error("working directory", &working_path, error))?;
+                if !working_directory.is_dir() || !working_directory.starts_with(&project_root) {
+                    return Err(invalid_request(
+                        "working directory must be an existing directory beneath project root",
+                    ));
+                }
+                Ok(working_directory)
+            })
+            .transpose()?;
         let trusted_node_runtime = self
             .trusted_node_runtime
             .as_deref()
@@ -515,6 +578,7 @@ impl ExecutionRequestBuilder {
             windows_verbatim_arguments: self.windows_verbatim_arguments,
             allow_process_memory_stats: self.allow_process_memory_stats,
             project_root: self.project_root,
+            working_directory,
             policy: self.policy,
             environment: self.environment,
         };

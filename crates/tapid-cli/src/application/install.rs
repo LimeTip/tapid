@@ -190,6 +190,31 @@ pub(crate) fn run_with_manifest(
     allow_unverified_registry_artifacts: bool,
     report_replay_progress: impl FnMut(usize, usize),
 ) -> Result<InstallReport, OperationFailure> {
+    run_with_manifest_target(
+        project_dir,
+        Path::new("package.json"),
+        manifest_override,
+        package,
+        store_root,
+        mode,
+        registry_fixture,
+        allow_unverified_registry_artifacts,
+        report_replay_progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_manifest_target(
+    project_dir: &Path,
+    target_manifest_path: &Path,
+    manifest_override: Option<&PackageManifest>,
+    package: Option<&str>,
+    store_root: Option<&Path>,
+    mode: InstallMode,
+    registry_fixture: Option<&Path>,
+    allow_unverified_registry_artifacts: bool,
+    report_replay_progress: impl FnMut(usize, usize),
+) -> Result<InstallReport, OperationFailure> {
     let mut session = InstallSession::new(project_dir);
     if allow_unverified_registry_artifacts && matches!(mode, InstallMode::Online) {
         session
@@ -199,6 +224,7 @@ pub(crate) fn run_with_manifest(
     }
     match perform_install(
         &mut session,
+        target_manifest_path,
         manifest_override,
         package,
         store_root,
@@ -219,6 +245,7 @@ pub(crate) fn run_with_manifest(
 #[allow(clippy::too_many_arguments)]
 fn perform_install(
     session: &mut InstallSession,
+    target_manifest_path: &Path,
     manifest_override: Option<&PackageManifest>,
     package: Option<&str>,
     store_root: Option<&Path>,
@@ -263,15 +290,39 @@ fn perform_install(
         ));
     }
     session.outcome.project_dir = project_dir.clone();
-    let manifest_path = project_dir.join("package.json");
-    let lock_path = project_dir.join("tapid.lock");
-    let preflight_manifest = read_manifest(&manifest_path)?;
-    online::manifest_roots(&preflight_manifest)
+    let target_candidate = if target_manifest_path.is_absolute() {
+        target_manifest_path.to_path_buf()
+    } else {
+        project_dir.join(target_manifest_path)
+    };
+    let target_metadata = fs::symlink_metadata(&target_candidate).map_err(|error| {
+        OperationalError::from_source(ErrorKind::Manifest, error)
+            .context("cannot read manifest: cannot inspect target package.json")
+    })?;
+    if !target_metadata.file_type().is_file() {
+        return Err(OperationalError::new(
+            ErrorKind::Manifest,
+            "target package.json must be a regular, non-symlink file",
+        ));
+    }
+    let manifest_path = fs::canonicalize(&target_candidate).map_err(|error| {
+        OperationalError::from_source(ErrorKind::Manifest, error)
+            .context("cannot resolve target package.json")
+    })?;
+    if !manifest_path.starts_with(&project_dir) {
+        return Err(OperationalError::new(
+            ErrorKind::Manifest,
+            "target package.json must be contained beneath workspace root",
+        ));
+    }
+    let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
+    online::validate_manifest_roots(&project_dir, &preflight_manifest)
         .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
     if let Some(updated) = manifest_override {
-        online::manifest_roots(updated)
+        online::validate_manifest_roots(&project_dir, updated)
             .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
     }
+    let lock_path = project_dir.join("tapid.lock");
     if (offline || frozen) && lock_path.is_file() {
         read_lock(&lock_path)?;
     }
@@ -303,6 +354,7 @@ fn perform_install(
         session.journal = Some(
             crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
                 &project_dir,
+                &manifest_path,
                 activation_lock.owner_line(),
                 &original_manifest,
                 original_lock.as_deref(),
@@ -324,16 +376,6 @@ fn perform_install(
         current_manifest
     };
     if manifest_override.is_some() || package.is_some() {
-        let metadata = fs::symlink_metadata(&manifest_path).map_err(|error| {
-            OperationalError::from_source(ErrorKind::Manifest, error)
-                .context("cannot prepare package.json update")
-        })?;
-        if !metadata.file_type().is_file() {
-            return Err(OperationalError::new(
-                ErrorKind::Manifest,
-                "cannot prepare package.json update: package.json must be a regular file",
-            ));
-        }
         let bytes = manifest.to_json();
         if bytes.as_bytes() != original_manifest {
             session.outcome.changed_files.push(manifest_path.clone());
@@ -350,6 +392,12 @@ fn perform_install(
             activation_lock.owner_line(),
         )?;
     }
+    let root_manifest_path = project_dir.join("package.json");
+    let root_manifest = if manifest_path == root_manifest_path {
+        manifest.clone()
+    } else {
+        read_manifest(&root_manifest_path)?
+    };
     let store = Store::new(match store_root {
         Some(path) => path.to_owned(),
         None => {
@@ -359,18 +407,20 @@ fn perform_install(
     if !offline && !frozen {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-        let (lock, mut input, trees, store_transaction) = online::resolve_and_fetch(
-            &project_dir,
-            &manifest,
-            &store,
-            registry_fixture,
-            allow_unverified_registry_artifacts,
-            &registry_config,
-        )?;
+        let (lock, mut input, trees, store_transaction, workspace_links) =
+            online::resolve_and_fetch(
+                &project_dir,
+                &root_manifest,
+                &store,
+                registry_fixture,
+                allow_unverified_registry_artifacts,
+                &registry_config,
+            )?;
         if session.journal.is_none() {
             session.journal = Some(
                 crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
                     &project_dir,
+                    &manifest_path,
                     activation_lock.owner_line(),
                     &original_manifest,
                     original_lock.as_deref(),
@@ -413,7 +463,14 @@ fn perform_install(
             .outcome
             .changed_files
             .push(project_dir.join("node_modules"));
-        if let Err(error) = materialize_install(&project_dir, input, trees, activation_lock, true) {
+        if let Err(error) = materialize_install(
+            &project_dir,
+            input,
+            trees,
+            workspace_links,
+            activation_lock,
+            true,
+        ) {
             if crate::filesystem::atomic::rollback_lockfile(&lock_path, lock_backup.as_deref())
                 .is_ok()
             {
@@ -459,12 +516,42 @@ fn perform_install(
         ));
     }
     let lock = read_lock(&lock_path)?;
-    let current_manifest_digest = crate::filesystem::atomic::digest_bytes(&original_manifest);
+    let current_manifest_digest = fs::read(project_dir.join("package.json"))
+        .map(|bytes| crate::filesystem::atomic::digest_bytes(&bytes))
+        .map_err(|error| {
+            OperationalError::from_source(ErrorKind::Manifest, error)
+                .context("cannot read root manifest for lockfile replay")
+        })?;
     lock.validate_replay(&current_manifest_digest)
         .map_err(|error| {
             OperationalError::from(error)
                 .context(format!("invalid lockfile {}", lock_path.display()))
         })?;
+    let registry_config = crate::registry::RegistryConfig::load(&project_dir)
+        .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+    let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
+    let current_workspace = workspace
+        .locked
+        .iter()
+        .map(|package| (package.key(), package.manifest_digest().to_owned()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let locked_workspace = lock
+        .workspace_packages()
+        .iter()
+        .map(|(key, package)| (key.clone(), package.manifest_digest().to_owned()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if current_workspace != locked_workspace {
+        return Err(
+            "workspace membership or member manifest changed; regenerate tapid.lock with an online install"
+                .into(),
+        );
+    }
+    let workspace_registry_dependencies = online::resolved_workspace_registry_dependencies(
+        &root_manifest,
+        &workspace,
+        &registry_config,
+    )?;
+    validate_workspace_dependency_edges(&workspace, &workspace_registry_dependencies, &lock)?;
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")
     })?;
@@ -472,11 +559,9 @@ fn perform_install(
     journal
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-    let registry_config = crate::registry::RegistryConfig::load(&project_dir)
-        .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let (input, trees) = crate::application::replay::replay_input(
         &lock,
-        &manifest,
+        &root_manifest,
         &store,
         &registry_config,
         report_replay_progress,
@@ -486,7 +571,15 @@ fn perform_install(
         .outcome
         .changed_files
         .push(project_dir.join("node_modules"));
-    materialize_with_lock(&project_dir, input, trees, true, activation_lock, true)?;
+    materialize_with_lock(
+        &project_dir,
+        input,
+        trees,
+        workspace.links,
+        true,
+        activation_lock,
+        true,
+    )?;
     journal
         .mark_committed()
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
@@ -508,10 +601,111 @@ fn read_lock(path: &Path) -> Result<Lockfile, OperationalError> {
     })
 }
 
+fn validate_workspace_dependency_edges(
+    workspace: &online::WorkspaceMaterialization,
+    registry_dependencies: &[online::WorkspaceRegistryDependency],
+    lock: &Lockfile,
+) -> Result<(), String> {
+    for current in &workspace.locked {
+        let key = current.key();
+        let locked = lock
+            .workspace_packages()
+            .get(&key)
+            .ok_or_else(|| format!("lockfile is missing workspace package {key}"))?;
+        let mut expected_names = std::collections::BTreeSet::new();
+        for (name, target) in current.dependencies() {
+            expected_names.insert(name.clone());
+            if locked.dependencies().get(name) != Some(target) {
+                return Err(format!(
+                    "lockfile workspace dependency '{name}' for {key} does not match the current local workspace graph"
+                ));
+            }
+            let target_key = target
+                .parse::<tapid_lockfile::LockfilePackageKey>()
+                .map_err(|error| error.to_string())?;
+            if target_key.source.workspace().is_none()
+                || !lock.workspace_packages().contains_key(target)
+            {
+                return Err(format!(
+                    "lockfile workspace dependency '{name}' for {key} does not target a workspace package"
+                ));
+            }
+        }
+        for dependency in registry_dependencies
+            .iter()
+            .filter(|dependency| dependency.member_key == key)
+        {
+            let name = dependency.manifest_name.clone();
+            expected_names.insert(name.clone());
+            let target = locked.dependencies().get(&name).ok_or_else(|| {
+                format!(
+                    "lockfile omits workspace member dependency '{}' from {key}",
+                    dependency.manifest_name
+                )
+            })?;
+            let target_key = target
+                .parse::<tapid_lockfile::LockfilePackageKey>()
+                .map_err(|error| error.to_string())?;
+            if target_key.source.registry() != Some(&dependency.registry)
+                || target_key.name != dependency.package
+                || !dependency.requirement.matches(&target_key.version)
+                || !lock.packages().contains_key(target)
+            {
+                return Err(format!(
+                    "lockfile target for workspace member dependency '{}' does not satisfy its registry, name, and version requirement",
+                    dependency.manifest_name
+                ));
+            }
+        }
+        let actual_names = locked
+            .dependencies()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if actual_names != expected_names {
+            return Err(format!(
+                "lockfile workspace dependency edges for {key} do not match the current member manifest"
+            ));
+        }
+    }
+    for peer in &workspace.peer_dependencies {
+        let provider_found = match &peer.provider {
+            online::WorkspacePeerProvider::Workspace { key, version } => {
+                let target_key = key
+                    .parse::<tapid_lockfile::LockfilePackageKey>()
+                    .map_err(|error| error.to_string())?;
+                target_key.version == *version
+                    && lock.workspace_packages().contains_key(key)
+                    && workspace.locked.iter().any(|member| member.key() == *key)
+            }
+            online::WorkspacePeerProvider::Registry { registry, package } => {
+                lock.roots().iter().any(|key| {
+                    key.parse::<tapid_lockfile::LockfilePackageKey>()
+                        .ok()
+                        .is_some_and(|target| {
+                            target.source.registry() == Some(registry)
+                                && target.name == *package
+                                && peer.requirement.matches(&target.version)
+                                && lock.packages().contains_key(key)
+                        })
+                })
+            }
+        };
+        if !provider_found {
+            return Err(format!(
+                "lockfile has no provider satisfying workspace member peer dependency '{}' from {}",
+                peer.manifest_name, peer.member_key
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn materialize_install(
     project_dir: &Path,
     input: NamedLayoutInput,
     trees: BTreeMap<String, PathBuf>,
+    workspace_links: tapid_linker::WorkspaceLinkPlan,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
 ) -> Result<(), OperationalError> {
@@ -519,6 +713,7 @@ fn materialize_install(
         project_dir,
         input,
         trees,
+        workspace_links,
         false,
         activation_lock,
         preserve_previous,
@@ -529,6 +724,7 @@ fn materialize_with_lock(
     project_dir: &Path,
     input: NamedLayoutInput,
     trees: BTreeMap<String, PathBuf>,
+    workspace_links: tapid_linker::WorkspaceLinkPlan,
     replayed: bool,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
@@ -567,19 +763,27 @@ fn materialize_with_lock(
             return Err(OperationalError::new(ErrorKind::Materialization, error));
         }
     };
-    let result = crate::filesystem::tree::materialize_stage(
+    let result = crate::filesystem::tree::materialize_stage_with_workspace_links(
         &stage,
         &plan,
         &input.instances,
         &trees,
         replayed,
+        &workspace_links,
     )
     .and_then(|_| {
-        crate::filesystem::activation::activate_node_modules_with_lock(
+        crate::filesystem::activation::activate_node_modules_with_preflight(
             project_dir,
             &stage,
             activation_lock,
             preserve_previous,
+            || {
+                crate::filesystem::tree::validate_workspace_links(
+                    project_dir,
+                    &stage,
+                    &workspace_links,
+                )
+            },
         )
     });
     if replayed {

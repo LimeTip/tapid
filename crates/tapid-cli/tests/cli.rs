@@ -49,6 +49,38 @@ fn run_with_isolated_path(cwd: &PathBuf, args: &[&str], path: &OsStr) -> std::pr
         .unwrap()
 }
 
+#[test]
+fn install_accepts_a_relative_project_directory() {
+    let cwd = temp_dir("relative-project-dir");
+    let project = cwd.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let manifest = r#"{"name":"relative-project","version":"1.0.0"}"#;
+    fs::write(project.join("package.json"), manifest).unwrap();
+    let store = cwd.join("store");
+
+    let output = run(
+        &cwd,
+        &[
+            "install",
+            "--project-dir",
+            "project",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(project.join("tapid.lock").is_file());
+    assert_eq!(
+        fs::read(project.join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    cleanup(cwd);
+}
+
 fn cleanup(path: PathBuf) {
     let _ = fs::remove_dir_all(path);
 }
@@ -487,7 +519,8 @@ fn legacy_replay_rejects_same_local_name_from_different_registries() {
     );
     assert!(!replay.status.success());
     assert!(
-        String::from_utf8_lossy(&replay.stderr).contains("conflicting activation target"),
+        String::from_utf8_lossy(&replay.stderr)
+            .contains("conflicting package identities for local dependency '@actual/scoped'"),
         "{}",
         String::from_utf8_lossy(&replay.stderr)
     );
@@ -796,6 +829,58 @@ fn outdated_reports_versions_without_mutating_project_state() {
 }
 
 #[test]
+fn outdated_reports_local_workspace_versions_without_registry_lookup() {
+    let dir = temp_dir("outdated-workspace-local");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"local":"^1.0.0","local-star":"workspace:*"}}"#,
+    )
+    .unwrap();
+    for (directory, name, version) in [
+        ("local", "local", "1.2.0"),
+        ("local-star", "local-star", "2.0.0"),
+    ] {
+        fs::create_dir_all(dir.join("packages").join(directory)).unwrap();
+        fs::write(
+            dir.join("packages").join(directory).join("package.json"),
+            format!(r#"{{"name":"{name}","version":"{version}"}}"#),
+        )
+        .unwrap();
+    }
+    let store = dir.join("store");
+    let install = run(&dir, &["install", "--store-dir", store.to_str().unwrap()]);
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let lock_before = fs::read(dir.join("tapid.lock")).unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(&fixture, r#"{"packages":[]}"#).unwrap();
+
+    let outdated = run(
+        &dir,
+        &["outdated", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+
+    assert!(
+        outdated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&outdated.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&outdated.stdout);
+    assert!(stdout.contains(
+        "local [dependencies] declared=^1.0.0 locked=1.2.0 compatible=1.2.0 available=1.2.0"
+    ));
+    assert!(stdout.contains(
+        "local-star [dependencies] declared=workspace:* locked=2.0.0 compatible=2.0.0 available=2.0.0"
+    ));
+    assert!(!stdout.contains("registry metadata returned no versions"));
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_before);
+    cleanup(dir);
+}
+
+#[test]
 fn outdated_uses_configured_private_registry_identity() {
     use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
 
@@ -1010,6 +1095,76 @@ fn update_preserves_ranges_unless_latest_is_requested() {
 }
 
 #[test]
+fn selected_member_add_links_sibling_without_registry_fallback() {
+    let dir = temp_dir("workspace-member-local-add");
+    let root_manifest = r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#;
+    fs::write(dir.join("package.json"), root_manifest).unwrap();
+    fs::create_dir_all(dir.join("packages/web")).unwrap();
+    fs::create_dir_all(dir.join("packages/local")).unwrap();
+    let web_manifest = r#"{"name":"web","version":"1.0.0"}"#;
+    fs::write(dir.join("packages/web/package.json"), web_manifest).unwrap();
+    fs::write(
+        dir.join("packages/local/package.json"),
+        r#"{"name":"local","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    fs::write(
+        &fixture,
+        format!(r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"local","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#),
+    )
+    .unwrap();
+
+    let store = dir.join("store");
+    let output = run(
+        &dir,
+        &[
+            "add",
+            "local@1.0.0",
+            "--workspace",
+            "web",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        root_manifest.as_bytes()
+    );
+    let updated_web = fs::read_to_string(dir.join("packages/web/package.json")).unwrap();
+    assert!(updated_web.contains("local"), "{updated_web}");
+    assert!(dir.join("tapid.lock").is_file());
+    assert!(!dir.join("packages/web/tapid.lock").exists());
+    assert!(dir.join("node_modules/local/package.json").is_file());
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    assert!(
+        lock["workspacePackages"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|package| package["source"]["name"] == "local")
+    );
+    assert!(
+        lock["packages"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|key| !key.contains("local@"))
+    );
+    cleanup(dir);
+}
+
+#[test]
 fn lifecycle_workspace_selector_mutates_only_selected_member() {
     let dir = temp_dir("workspace-member-selection");
     let root_manifest = r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#;
@@ -1067,19 +1222,19 @@ fn lifecycle_workspace_selector_mutates_only_selected_member() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(dir.join("packages/web/tapid.lock").is_file());
-    assert!(!dir.join("tapid.lock").exists());
-    assert!(
-        dir.join("packages/web/node_modules/is-char/package.json")
-            .is_file()
-    );
+    assert!(dir.join("tapid.lock").is_file());
+    assert!(!dir.join("packages/web/tapid.lock").exists());
+    assert!(dir.join("node_modules/is-char/package.json").is_file());
     assert!(!dir.join("packages/worker/node_modules").exists());
+    assert!(!dir.join("packages/web/node_modules").exists());
 
-    let default_remove = run(
-        &dir.join("packages/web"),
+    let update = run(
+        &dir,
         &[
-            "remove",
+            "update",
             "is-char",
+            "--workspace",
+            "web",
             "--store-dir",
             store.to_str().unwrap(),
             "--registry-fixture",
@@ -1087,9 +1242,69 @@ fn lifecycle_workspace_selector_mutates_only_selected_member() {
         ],
     );
     assert!(
-        default_remove.status.success(),
+        update.status.success(),
         "{}",
-        String::from_utf8_lossy(&default_remove.stderr)
+        String::from_utf8_lossy(&update.stderr)
+    );
+    for mode in ["--offline", "--frozen"] {
+        if dir.join("node_modules").exists() {
+            fs::remove_dir_all(dir.join("node_modules")).unwrap();
+        }
+        let replay = run(
+            &dir,
+            &[
+                "install",
+                mode,
+                "--workspace",
+                "web",
+                "--store-dir",
+                store.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            replay.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert!(dir.join("node_modules/is-char/package.json").is_file());
+        assert!(!dir.join("packages/web/node_modules").exists());
+    }
+    let prune = run(
+        &dir,
+        &[
+            "prune",
+            "--workspace",
+            "web",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        prune.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prune.stderr)
+    );
+    assert!(dir.join("node_modules/is-char/package.json").is_file());
+    assert!(!dir.join("packages/worker/node_modules").exists());
+    assert!(!dir.join("packages/web/node_modules").exists());
+
+    let selected_remove = run(
+        &dir,
+        &[
+            "remove",
+            "is-char",
+            "--workspace",
+            "web",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        selected_remove.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected_remove.stderr)
     );
     let web_after_remove = fs::read_to_string(dir.join("packages/web/package.json")).unwrap();
     assert!(!web_after_remove.contains("is-char"));
@@ -1101,7 +1316,1218 @@ fn lifecycle_workspace_selector_mutates_only_selected_member() {
         fs::read(dir.join("packages/worker/package.json")).unwrap(),
         worker_manifest.as_bytes()
     );
-    assert!(!dir.join("packages/web/node_modules/is-char").exists());
+    assert!(!dir.join("node_modules/is-char").exists());
+    assert!(!dir.join("packages/web/node_modules").exists());
+    cleanup(dir);
+}
+
+#[test]
+fn root_install_links_ordinary_workspace_dependencies_without_registry_resolution() {
+    let dir = temp_dir("workspace-local-link");
+    let root_manifest = r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"@example/ui":"^1.0.0","local-star":"workspace:*","local-caret":"workspace:^","local-tilde":"workspace:~","is-char":"1.0.0"}}"#;
+    fs::write(dir.join("package.json"), root_manifest).unwrap();
+    for (directory, name) in [
+        ("ui", "@example/ui"),
+        ("star", "local-star"),
+        ("caret", "local-caret"),
+        ("tilde", "local-tilde"),
+    ] {
+        fs::create_dir_all(dir.join("packages").join(directory)).unwrap();
+        fs::write(
+            dir.join("packages").join(directory).join("package.json"),
+            format!(r#"{{"name":"{name}","version":"1.2.0"}}"#),
+        )
+        .unwrap();
+    }
+
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"is-char","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let store = dir.join("store");
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let frozen = run(
+        &dir,
+        &[
+            "install",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        frozen.status.success(),
+        "frozen workspace replay failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&frozen.stdout),
+        String::from_utf8_lossy(&frozen.stderr)
+    );
+    let offline = run(
+        &dir,
+        &[
+            "install",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        offline.status.success(),
+        "offline workspace replay failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&offline.stdout),
+        String::from_utf8_lossy(&offline.stderr)
+    );
+
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    assert_eq!(lock["lockfileVersion"], 7);
+    assert!(
+        lock["workspacePackages"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| { key.contains("workspace:packages/ui:@example/ui@1.2.0") })
+    );
+    assert_eq!(
+        lock["packages"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| key.contains("@example/ui"))
+            .count(),
+        0,
+        "workspace identity must never appear as a registry package"
+    );
+    let link = dir.join("node_modules/@example/ui");
+    assert!(link.join("package.json").is_file());
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    for name in ["local-star", "local-caret", "local-tilde"] {
+        let member_link = dir.join("node_modules").join(name);
+        assert!(member_link.join("package.json").is_file());
+        assert!(
+            fs::symlink_metadata(member_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    let original_lock = fs::read(dir.join("tapid.lock")).unwrap();
+    fs::write(
+        dir.join("packages/ui/package.json"),
+        r#"{"name":"@example/ui","version":"1.3.0"}"#,
+    )
+    .unwrap();
+    let changed_member = run(
+        &dir,
+        &[
+            "install",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !changed_member.status.success(),
+        "frozen replay must reject changed workspace identity"
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), original_lock);
+    assert!(link.join("package.json").is_file());
+    cleanup(dir);
+}
+
+#[test]
+fn workspace_member_private_registry_dependency_resolves_and_replays_offline() {
+    let dir = temp_dir("workspace-private-route");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"@example/ui":"workspace:*"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("packages/ui")).unwrap();
+    fs::write(
+        dir.join("packages/ui/package.json"),
+        r#"{"name":"@example/ui","version":"1.0.0","dependencies":{"@acme/private":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\n",
+    )
+    .unwrap();
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://packages.example","name":"@acme/private","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "online install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    let member = lock["workspacePackages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|package| package["dependencies"].get("@acme/private").is_some())
+        .expect("member dependency was not locked");
+    let target = member["dependencies"]["@acme/private"].as_str().unwrap();
+    assert!(target.starts_with("https://packages.example|@acme/private@1.0.0"));
+    assert!(!target.starts_with("https://registry.npmjs.org|"));
+
+    for mode in ["--frozen", "--offline"] {
+        let replay = run(
+            &dir,
+            &["install", mode, "--store-dir", store.to_str().unwrap()],
+        );
+        assert!(
+            replay.status.success(),
+            "{mode} replay failed: {}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+    }
+    cleanup(dir);
+}
+
+#[test]
+fn workspace_member_jsr_dependency_uses_stripped_local_name_and_replays() {
+    let dir = temp_dir("workspace-member-jsr-dependency");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    let member_dir = dir.join("packages/ui");
+    fs::create_dir_all(&member_dir).unwrap();
+    fs::write(
+        member_dir.join("package.json"),
+        r#"{"name":"@example/ui","version":"1.0.0","dependencies":{"jsr:@s/foo":"1.0.0"}}"#,
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        include_bytes!("fixtures/cross-registry-alias.json"),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "workspace member JSR dependency install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    let member = lock["workspacePackages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|package| package["source"]["name"] == "@example/ui")
+        .expect("workspace member missing from lockfile");
+    let target = member["dependencies"]["@s/foo"]
+        .as_str()
+        .expect("stripped JSR local name missing from member lock edges");
+    assert!(target.starts_with("https://jsr.io|@s/foo@1.0.0|"));
+    assert!(member["dependencies"].get("jsr:@s/foo").is_none());
+    assert!(dir.join("node_modules/@s/foo/package.json").is_file());
+
+    for mode in ["--frozen", "--offline"] {
+        let replay = run(
+            &dir,
+            &["install", mode, "--store-dir", store.to_str().unwrap()],
+        );
+        assert!(
+            replay.status.success(),
+            "{mode} replay failed: {}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert!(dir.join("node_modules/@s/foo/package.json").is_file());
+    }
+    cleanup(dir);
+}
+
+#[test]
+fn workspace_member_npm_alias_uses_private_scope_and_replays() {
+    let dir = temp_dir("workspace-member-private-alias");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"@example/ui":"workspace:*"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("packages/ui")).unwrap();
+    fs::write(
+        dir.join("packages/ui/package.json"),
+        r#"{"name":"@example/ui","version":"1.0.0","dependencies":{"private-alias":"npm:@acme/private@1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\n",
+    )
+    .unwrap();
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://packages.example","name":"@acme/private","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        &dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "online install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    let member = lock["workspacePackages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|package| package["source"]["name"] == "@example/ui")
+        .expect("workspace member was not locked");
+    let target = member["dependencies"]["private-alias"].as_str().unwrap();
+    assert!(target.starts_with("https://packages.example|@acme/private@1.0.0"));
+    assert_eq!(
+        member["dependencyAliases"]["private-alias"],
+        "@acme/private"
+    );
+    assert!(
+        dir.join("node_modules/private-alias/package.json")
+            .is_file()
+    );
+
+    for mode in ["--frozen", "--offline"] {
+        let replay = run(
+            &dir,
+            &["install", mode, "--store-dir", store.to_str().unwrap()],
+        );
+        assert!(
+            replay.status.success(),
+            "{mode} replay failed: {}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert!(
+            dir.join("node_modules/private-alias/package.json")
+                .is_file()
+        );
+    }
+    cleanup(dir);
+}
+
+#[test]
+fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
+    let dir = temp_dir("workspace-member-bin");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    let member = dir.join("packages/tool");
+    fs::create_dir_all(member.join("bin")).unwrap();
+    fs::write(
+        member.join("package.json"),
+        r#"{"name":"tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js"}}"#,
+    )
+    .unwrap();
+    let bin_source = member.join("bin/tool.js");
+    fs::write(
+        &bin_source,
+        "#!/usr/bin/env node\\nconsole.log('workspace tool');\\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bin_source, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(unix)]
+    let mode_before = fs::metadata(&bin_source).unwrap().permissions();
+
+    let install = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            dir.join("store").to_str().unwrap(),
+        ],
+    );
+
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let shim = dir.join("node_modules/.bin/workspace-tool");
+    #[cfg(unix)]
+    {
+        assert!(
+            fs::symlink_metadata(&shim)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::canonicalize(&shim).unwrap(),
+            fs::canonicalize(&bin_source).unwrap()
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&bin_source).unwrap().permissions().mode(),
+            mode_before.mode(),
+            "install must not change workspace source permissions"
+        );
+    }
+    #[cfg(windows)]
+    {
+        assert!(shim.with_extension("cmd").is_file());
+        assert!(shim.with_extension("ps1").is_file());
+    }
+    cleanup(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_bin_target_cannot_escape_member_through_symlinked_directory() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let dir = temp_dir("workspace-bin-symlink-escape");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    let member = dir.join("packages/tool");
+    fs::create_dir_all(&member).unwrap();
+    fs::write(
+        member.join("package.json"),
+        r#"{"name":"tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js"}}"#,
+    )
+    .unwrap();
+    let outside = dir.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let outside_bin = outside.join("tool.js");
+    fs::write(&outside_bin, "#!/usr/bin/env node\\n").unwrap();
+    fs::set_permissions(&outside_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    symlink("../../outside", member.join("bin")).unwrap();
+
+    let install = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            dir.join("store").to_str().unwrap(),
+        ],
+    );
+
+    assert!(!install.status.success());
+    let stderr = String::from_utf8_lossy(&install.stderr);
+    assert!(stderr.to_lowercase().contains("escape"), "{stderr}");
+    assert!(!dir.join("node_modules").exists());
+    assert!(!dir.join("tapid.lock").exists());
+    assert_eq!(fs::read(&outside_bin).unwrap(), b"#!/usr/bin/env node\\n");
+    cleanup(dir);
+}
+
+#[test]
+fn registry_and_workspace_bin_name_collisions_fail_before_project_activation() {
+    let dir = temp_dir("workspace-bin-collision");
+    let root_manifest = r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"registry-tool":"1.0.0"}}"#;
+    fs::write(dir.join("package.json"), root_manifest).unwrap();
+    let member = dir.join("packages/tool");
+    fs::create_dir_all(member.join("bin")).unwrap();
+    fs::write(
+        member.join("package.json"),
+        r#"{"name":"workspace-tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js"}}"#,
+    )
+    .unwrap();
+    let workspace_bin = member.join("bin/tool.js");
+    fs::write(&workspace_bin, "#!/usr/bin/env node\\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&workspace_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let artifact = "base64:H4sIAAAAAAAC/+3U0UrDMBTG8VzvKbp4ozDbpHQV5tPUGUpdlzOSbiJj727WyRDFOx2K/9/NSU4CuUi+bJrlqmldsTnV/CmKV9/MJHVVjTX5WI0ty/N47Ftbl1ZlRl3ANg5NSMer/2mvfbN2eqGDa7s4hJfbQaTXM71zIXbi04rNTW5S56FLs71+lrCK6bm4087FsV8ch+nt6MNhovCHvOW+eHeJ6ifyfzeff5l/U3/Kf1VW5P8SrqbFNobx+p3fZV4e3WQpPkrv8l7a6/O/kI1pv7kn3wAAAAAAAAAAAAAAAL/KKzpM+8QAKAAA";
+    let integrity = "sha512-hO6/Tzfzkn58mEikJ1krKMoh6fmhGtzU2wSPIUsSCNt0CCxy3/b3o3NeuhjbSM9QTSkcBS34A2tH0bRVflGcgQ==";
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"registry-tool","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let store = dir.join("store");
+
+    let install = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+
+    assert!(!install.status.success());
+    let stderr = String::from_utf8_lossy(&install.stderr);
+    assert!(stderr.to_lowercase().contains("collision"), "{stderr}");
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        root_manifest.as_bytes()
+    );
+    assert_eq!(fs::read(&workspace_bin).unwrap(), b"#!/usr/bin/env node\\n");
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    cleanup(dir);
+}
+
+#[test]
+fn root_workspace_activation_failure_restores_manifest_lock_and_managed_tree() {
+    let dir = temp_dir("workspace-activation-rollback");
+    let manifest = r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"local":"^1.0.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    fs::create_dir_all(dir.join("packages/local")).unwrap();
+    fs::write(
+        dir.join("packages/local/package.json"),
+        r#"{"name":"local","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.lock"), b"previous lock bytes\n").unwrap();
+    fs::create_dir(dir.join("node_modules")).unwrap();
+    fs::write(dir.join("node_modules/KEEP"), b"user data").unwrap();
+    fs::write(dir.join(".tapid-managed"), b"tapid-managed-v1\n").unwrap();
+
+    let output = run_with_env(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            dir.join("store").to_str().unwrap(),
+        ],
+        "TAPID_TEST_FAIL_ACTIVATION",
+        "1",
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("tapid.lock")).unwrap(),
+        b"previous lock bytes\n"
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/KEEP")).unwrap(),
+        b"user data"
+    );
+    assert_eq!(
+        fs::read(dir.join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1\n"
+    );
+    assert!(!dir.join("node_modules/local").exists());
+    cleanup(dir);
+}
+
+#[test]
+fn root_workspace_rejects_member_inside_node_modules_without_mutation() {
+    let dir = temp_dir("workspace-member-in-node-modules");
+    let manifest = r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["node_modules/local"],"dependencies":{"local":"workspace:*"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let member_dir = dir.join("node_modules/local");
+    fs::create_dir_all(&member_dir).unwrap();
+    let member_manifest = r#"{"name":"local","version":"1.0.0"}"#;
+    fs::write(member_dir.join("package.json"), member_manifest).unwrap();
+    fs::write(dir.join("tapid.lock"), b"previous lock bytes\n").unwrap();
+    fs::write(dir.join("node_modules/KEEP"), b"previous active tree").unwrap();
+    fs::write(dir.join(".tapid-managed"), b"tapid-managed-v1\n").unwrap();
+    let store = dir.join("store");
+
+    let output = run(&dir, &["install", "--store-dir", store.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("tapid.lock")).unwrap(),
+        b"previous lock bytes\n"
+    );
+    assert_eq!(
+        fs::read(member_dir.join("package.json")).unwrap(),
+        member_manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/KEEP")).unwrap(),
+        b"previous active tree"
+    );
+    assert_eq!(
+        fs::read(dir.join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1\n"
+    );
+    assert!(!store.exists());
+    cleanup(dir);
+}
+
+#[test]
+fn root_workspace_lifecycle_add_update_remove_prune_stays_local() {
+    let dir = temp_dir("workspace-root-lifecycle");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("packages/local")).unwrap();
+    fs::write(
+        dir.join("packages/local/package.json"),
+        r#"{"name":"local","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let add = run(
+        &dir,
+        &[
+            "add",
+            "local@workspace:*",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    assert!(
+        fs::symlink_metadata(dir.join("node_modules/local"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let update = run(
+        &dir,
+        &["update", "local", "--store-dir", store.to_str().unwrap()],
+    );
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    assert!(
+        fs::symlink_metadata(dir.join("node_modules/local"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let prune = run(&dir, &["prune", "--store-dir", store.to_str().unwrap()]);
+    assert!(
+        prune.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prune.stderr)
+    );
+    assert!(
+        fs::symlink_metadata(dir.join("node_modules/local"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let remove = run(
+        &dir,
+        &["remove", "local", "--store-dir", store.to_str().unwrap()],
+    );
+    assert!(
+        remove.status.success(),
+        "{}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("package.json")).unwrap()).unwrap();
+    assert!(manifest["dependencies"].get("local").is_none());
+    cleanup(dir);
+}
+
+#[test]
+fn root_workspace_direct_dependency_override_must_match_the_declared_range() {
+    let dir = temp_dir("workspace-direct-override");
+    let root_manifest = r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"local":"^1.0.0"},"overrides":{"local":"2.0.0"}}"#;
+    fs::write(dir.join("package.json"), root_manifest).unwrap();
+    fs::create_dir_all(dir.join("packages/local")).unwrap();
+    fs::write(
+        dir.join("packages/local/package.json"),
+        r#"{"name":"local","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.lock"), "prior lock\\n").unwrap();
+    fs::create_dir_all(dir.join("node_modules")).unwrap();
+    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
+    fs::write(dir.join("node_modules/KEEP"), "existing managed state").unwrap();
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            dir.join("store").to_str().unwrap(),
+        ],
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported direct dependency override for 'local'"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        root_manifest.as_bytes()
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), b"prior lock\\n");
+    assert_eq!(
+        fs::read(dir.join("node_modules/KEEP")).unwrap(),
+        b"existing managed state"
+    );
+    assert!(!dir.join(".tapid-activation.lock").exists());
+    cleanup(dir);
+}
+
+#[test]
+fn workspace_member_registry_dependencies_use_root_overrides_in_install_and_replay() {
+    let dir = temp_dir("workspace-member-root-override");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"overrides":{"is-char":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("packages/ui")).unwrap();
+    fs::write(
+        dir.join("packages/ui/package.json"),
+        r#"{"name":"ui","version":"1.0.0","dependencies":{"is-char":"^2.0.0"}}"#,
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"is-char","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let store = dir.join("store");
+
+    let install = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    let member = lock["workspacePackages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|package| package["source"]["name"] == "ui")
+        .unwrap();
+    assert!(
+        member["dependencies"]["is-char"]
+            .as_str()
+            .unwrap()
+            .contains("is-char@1.0.0")
+    );
+    for flag in ["--frozen", "--offline"] {
+        let replay = run(
+            &dir,
+            &["install", flag, "--store-dir", store.to_str().unwrap()],
+        );
+        assert!(
+            replay.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+    }
+    cleanup(dir);
+}
+
+#[test]
+fn selected_member_install_uses_root_lock_and_activates_the_workspace_graph() {
+    let dir = temp_dir("selected-workspace-install");
+    let root_manifest = r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["apps/*","packages/*"],"dependencies":{"is-char":"^1.0.0"}}"#;
+    fs::write(dir.join("package.json"), root_manifest).unwrap();
+    fs::create_dir_all(dir.join("apps/news")).unwrap();
+    fs::create_dir_all(dir.join("packages/ui")).unwrap();
+    fs::write(
+        dir.join("apps/news/package.json"),
+        r#"{"name":"news","version":"1.0.0","dependencies":{"@example/ui":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("packages/ui/package.json"),
+        r#"{"name":"@example/ui","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    let mut fixture_packages: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/aliased-root-cycle.json")).unwrap();
+    fixture_packages["packages"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "registry": "https://registry.npmjs.org",
+            "name": "is-char",
+            "version": "1.0.0",
+            "integrity": integrity,
+            "artifact": artifact,
+        }));
+    fs::write(&fixture, serde_json::to_vec(&fixture_packages).unwrap()).unwrap();
+    let store = dir.join("store");
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "a@1.0.0",
+            "--workspace",
+            "news",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let root_after = fs::read(dir.join("package.json")).unwrap();
+    assert_eq!(root_after, root_manifest.as_bytes());
+    let member_after: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("apps/news/package.json")).unwrap()).unwrap();
+    assert_eq!(member_after["dependencies"]["a"], "1.0.0");
+
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    assert!(
+        lock["workspacePackages"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|package| package["source"]["name"] == "@example/ui")
+    );
+    assert!(lock["rootBindings"]["is-char"].is_string());
+    assert!(lock["rootBindings"].get("a").is_none());
+    assert!(dir.join("node_modules/@example/ui/package.json").is_file());
+    assert!(dir.join("node_modules/is-char/package.json").is_file());
+    assert!(dir.join("node_modules/a/package.json").is_file());
+    assert!(!dir.join("apps/news/tapid.lock").exists());
+    assert!(!dir.join("apps/news/node_modules").exists());
+
+    let replay = run(
+        &dir,
+        &[
+            "install",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replay.status.success(),
+        "frozen root replay: {}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert!(dir.join("node_modules/is-char/package.json").is_file());
+    assert!(dir.join("node_modules/a/package.json").is_file());
+    cleanup(dir);
+}
+
+#[test]
+fn root_install_resolves_registry_dependencies_declared_by_workspace_members() {
+    let dir = temp_dir("workspace-member-registry-dependency-positive");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("packages/ui")).unwrap();
+    fs::write(
+        dir.join("packages/ui/package.json"),
+        r#"{"name":"ui","version":"1.0.0","dependencies":{"is-char":"^1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("packages/worker")).unwrap();
+    fs::write(
+        dir.join("packages/worker/package.json"),
+        r#"{"name":"worker","version":"1.0.0","dependencies":{"is-char":"^1.0.0"}}"#,
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    fs::write(
+        &fixture,
+        format!(
+            r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"is-char","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}","dependencies":{{"subdep":"^1.0.0"}}}},{{"registry":"https://registry.npmjs.org","name":"subdep","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    let workspace_packages = lock["workspacePackages"].as_object().unwrap();
+    assert_eq!(workspace_packages.len(), 2);
+    for name in ["ui", "worker"] {
+        let workspace_package = workspace_packages
+            .values()
+            .find(|package| package["source"]["name"] == name)
+            .unwrap();
+        assert!(
+            workspace_package["dependencies"]["is-char"]
+                .as_str()
+                .unwrap()
+                .contains("is-char@1.0.0")
+        );
+        assert!(
+            dir.join(format!("node_modules/{name}/package.json"))
+                .is_file()
+        );
+    }
+    assert!(dir.join("node_modules/is-char/package.json").is_file());
+    assert!(dir.join("node_modules/subdep/package.json").is_file());
+    for flag in ["--frozen", "--offline"] {
+        let replay = run(
+            &dir,
+            &["install", flag, "--store-dir", store.to_str().unwrap()],
+        );
+        assert!(
+            replay.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert!(
+            dir.join("node_modules/is-char/package.json").is_file(),
+            "{flag} replay dropped workspace member's registry dependency"
+        );
+    }
+    let lock_path = dir.join("tapid.lock");
+    let mut tampered_lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+    let workspace_package = tampered_lock["workspacePackages"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .find(|package| package["source"]["name"] == "ui")
+        .unwrap();
+    workspace_package["dependencies"]
+        .as_object_mut()
+        .unwrap()
+        .remove("is-char");
+    let tampered_bytes = serde_json::to_vec(&tampered_lock).unwrap();
+    fs::write(&lock_path, &tampered_bytes).unwrap();
+    let tampered_replay = run(
+        &dir,
+        &[
+            "install",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!tampered_replay.status.success());
+    assert_eq!(fs::read(&lock_path).unwrap(), tampered_bytes);
+    assert!(dir.join("node_modules/is-char/package.json").is_file());
+    cleanup(dir);
+}
+
+#[test]
+fn root_workspace_member_peer_uses_a_direct_root_provider() {
+    let dir = temp_dir("workspace-member-peer-provider");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"is-char":"^1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("packages/ui")).unwrap();
+    fs::write(
+        dir.join("packages/ui/package.json"),
+        r#"{"name":"ui","version":"1.0.0","peerDependencies":{"is-char":"^1.0.0","theme":"workspace:*"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("packages/theme")).unwrap();
+    fs::write(
+        dir.join("packages/theme/package.json"),
+        r#"{"name":"theme","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let fixture = dir.join("registry.json");
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    fs::write(
+        &fixture,
+        format!(r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"is-char","version":"1.0.0","integrity":"{integrity}","artifact":"{artifact}"}}]}}"#),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workspace_lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    let workspace_package = workspace_lock["workspacePackages"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|package| package["source"]["name"] == "ui")
+        .unwrap();
+    assert!(workspace_package.get("dependencies").is_none());
+    let replay = run(
+        &dir,
+        &[
+            "install",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert!(dir.join("node_modules/is-char/package.json").is_file());
+    assert!(dir.join("node_modules/theme/package.json").is_file());
+    cleanup(dir);
+}
+
+#[test]
+fn workspace_member_peer_dependencies_fail_before_project_mutation() {
+    let dir = temp_dir("workspace-member-registry-dependency");
+    let root_manifest =
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#;
+    fs::write(dir.join("package.json"), root_manifest).unwrap();
+    fs::create_dir_all(dir.join("packages/ui")).unwrap();
+    fs::write(
+        dir.join("packages/ui/package.json"),
+        r#"{"name":"ui","version":"1.0.0","peerDependencies":{"is-char":"^1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("tapid.lock"), "prior lock bytes\n").unwrap();
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            dir.join("store").to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("workspace member peer dependency 'is-char' has no direct root provider"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        root_manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("tapid.lock")).unwrap(),
+        b"prior lock bytes\n"
+    );
+    assert!(!dir.join("node_modules").exists());
+    cleanup(dir);
+}
+
+#[test]
+fn root_install_links_workspace_cycles_without_registry_resolution() {
+    let dir = temp_dir("workspace-cycle");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("packages/a")).unwrap();
+    fs::create_dir_all(dir.join("packages/b")).unwrap();
+    fs::write(
+        dir.join("packages/a/package.json"),
+        r#"{"name":"a","version":"1.0.0","dependencies":{"b":"^1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("packages/b/package.json"),
+        r#"{"name":"b","version":"1.0.0","dependencies":{"a":"^1.0.0"}}"#,
+    )
+    .unwrap();
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            dir.join("store").to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    let packages = lock["workspacePackages"].as_object().unwrap();
+    let first = packages
+        .iter()
+        .find(|(key, _)| key.contains("workspace:packages/a:a@1.0.0"))
+        .unwrap();
+    let second = packages
+        .iter()
+        .find(|(key, _)| key.contains("workspace:packages/b:b@1.0.0"))
+        .unwrap();
+    assert!(
+        first.1["dependencies"]["b"]
+            .as_str()
+            .unwrap()
+            .contains("workspace:packages/b:b@1.0.0")
+    );
+    assert!(
+        second.1["dependencies"]["a"]
+            .as_str()
+            .unwrap()
+            .contains("workspace:packages/a:a@1.0.0")
+    );
+    assert!(dir.join("node_modules/a/package.json").is_file());
+    assert!(dir.join("node_modules/b/package.json").is_file());
+    let replay = run(
+        &dir,
+        &[
+            "install",
+            "--frozen",
+            "--store-dir",
+            dir.join("store").to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
     cleanup(dir);
 }
 
@@ -1150,7 +2576,7 @@ fn workspace_protocol_add_fails_closed_before_registry_or_project_mutation() {
         &dir,
         &[
             "add",
-            "local@workspace:*",
+            "local@workspace:1.0.0",
             "--store-dir",
             store_dir.to_str().unwrap(),
             "--registry-fixture",
@@ -1161,7 +2587,10 @@ fn workspace_protocol_add_fails_closed_before_registry_or_project_mutation() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("workspace dependency reference"),
+        stderr.contains("unsupported workspace protocol 'workspace:1.0.0'")
+            && stderr.contains(
+                "supported compatibility forms are workspace:*, workspace:^, and workspace:~"
+            ),
         "{stderr}"
     );
     assert!(
@@ -1189,12 +2618,68 @@ fn workspace_protocol_add_fails_closed_before_registry_or_project_mutation() {
 }
 
 #[test]
+fn workspace_member_under_root_node_modules_is_rejected_before_mutation() {
+    let dir = temp_dir("workspace-node-modules-member");
+    let root_manifest = r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["node_modules/*"],"dependencies":{"local":"^1.0.0"}}"#;
+    fs::write(dir.join("package.json"), root_manifest).unwrap();
+    fs::create_dir_all(dir.join("node_modules/local")).unwrap();
+    fs::write(
+        dir.join("node_modules/local/package.json"),
+        r#"{"name":"local","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(dir.join("node_modules/local/KEEP"), "workspace source").unwrap();
+    fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
+    fs::write(dir.join("tapid.lock"), "prior lock bytes\\n").unwrap();
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--store-dir",
+            dir.join("store").to_str().unwrap(),
+        ],
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("workspace member may not be inside root node_modules"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        root_manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(dir.join("tapid.lock")).unwrap(),
+        b"prior lock bytes\\n"
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/local/package.json")).unwrap(),
+        br#"{"name":"local","version":"1.0.0"}"#
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/local/KEEP")).unwrap(),
+        b"workspace source"
+    );
+    assert!(
+        !fs::symlink_metadata(dir.join("node_modules/local"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!dir.join(".tapid-activation.lock").exists());
+    cleanup(dir);
+}
+
+#[test]
 fn install_rejects_unsupported_workspace_manifest_before_mutating_project_or_store() {
     use std::collections::BTreeSet;
     use tapid_store::Store;
 
     let dir = temp_dir("workspace-manifest-install-fail-closed");
-    let root_manifest = r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"local":"workspace:*"}}"#;
+    let root_manifest = r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"local":"workspace:1.0.0"}}"#;
     fs::write(dir.join("package.json"), root_manifest).unwrap();
     fs::create_dir_all(dir.join("packages/local")).unwrap();
     fs::write(
@@ -1236,8 +2721,10 @@ fn install_rejects_unsupported_workspace_manifest_before_mutating_project_or_sto
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unsupported workspace dependency reference: local@workspace:*")
-            && stderr.contains("workspace linking is not implemented"),
+        stderr.contains("unsupported workspace protocol 'workspace:1.0.0'")
+            && stderr.contains(
+                "supported compatibility forms are workspace:*, workspace:^, and workspace:~"
+            ),
         "{stderr}"
     );
     assert_eq!(
@@ -1265,6 +2752,108 @@ fn install_rejects_unsupported_workspace_manifest_before_mutating_project_or_sto
         store_entries_before
     );
     assert!(store.verified_tree_path(&prior_digest).is_ok());
+    cleanup(dir);
+}
+
+#[test]
+fn install_rejects_root_registry_identity_collision_before_mutation() {
+    let dir = temp_dir("root-registry-identity-collision");
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"@s/foo":"1.0.0","jsr:@s/foo":"1.0.0"}}"#;
+    fs::write(dir.join("package.json"), manifest).unwrap();
+    let previous_lock = b"previous lock bytes\\n";
+    fs::write(dir.join("tapid.lock"), previous_lock).unwrap();
+    let fixture = dir.join("registry.json");
+    fs::write(
+        &fixture,
+        include_bytes!("fixtures/cross-registry-alias.json"),
+    )
+    .unwrap();
+    let store = dir.join("store");
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("conflicting package identities for local dependency '@s/foo'"),
+        "unexpected error: {stderr}"
+    );
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), previous_lock);
+    assert!(!store.exists(), "rejected install left store state behind");
+    assert!(!dir.join("node_modules").exists());
+    cleanup(dir);
+}
+
+#[test]
+fn install_rejects_workspace_member_registry_identity_collision_before_mutation() {
+    let dir = temp_dir("workspace-member-root-identity-collision");
+    let root_manifest = r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"@actual/scoped":"1.2.0"}}"#;
+    let member_manifest = r#"{"name":"@example/ui","version":"1.0.0","dependencies":{"@actual/scoped":"npm:@acme/private@1.0.0"}}"#;
+    fs::write(dir.join("package.json"), root_manifest).unwrap();
+    let member_dir = dir.join("packages/ui");
+    fs::create_dir_all(&member_dir).unwrap();
+    fs::write(member_dir.join("package.json"), member_manifest).unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.example'\n",
+    )
+    .unwrap();
+    let mut fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+    fixture["packages"].as_array_mut().unwrap().push(serde_json::json!({
+        "registry": "https://packages.example",
+        "name": "@acme/private",
+        "version": "1.0.0",
+        "integrity": "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==",
+        "artifact": "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA"
+    }));
+    let fixture_path = dir.join("registry.json");
+    fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+    let previous_lock = b"previous lock bytes\\n";
+    fs::write(dir.join("tapid.lock"), previous_lock).unwrap();
+    let store = dir.join("store");
+
+    let output = run(
+        &dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("conflicting package identities for local dependency '@actual/scoped'"),
+        "unexpected error: {stderr}"
+    );
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        root_manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(member_dir.join("package.json")).unwrap(),
+        member_manifest.as_bytes()
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), previous_lock);
+    assert!(!store.exists(), "rejected install left store state behind");
+    assert!(!dir.join("node_modules").exists());
     cleanup(dir);
 }
 
@@ -2119,81 +3708,67 @@ fn write_prune_fixture(dir: &Path, manifest: &str, mismatch: bool) -> (PathBuf, 
 
 #[test]
 fn prune_preserves_workspace_member_peer_provider_and_removes_orphan() {
-    use tapid_core::{PackageName, PackageVersion, PeerContext, PlatformContext};
-    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+    use tapid_lockfile::{LockedPackage, Lockfile, RegistryIntegrityProvenance};
     use tapid_store::Store;
 
     let dir = temp_dir("prune-workspace-peer");
-    let root_manifest = r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#;
+    let root_manifest =
+        r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#;
     let member_manifest =
-        r#"{"name":"web","version":"1.0.0","dependencies":{"plugin":"1.0.0","react":"18.2.0"}}"#;
+        r#"{"name":"web","version":"1.0.0","peerDependencies":{"theme":"workspace:*"}}"#;
     fs::write(dir.join("package.json"), root_manifest).unwrap();
     let member = dir.join("packages/web");
     fs::create_dir_all(&member).unwrap();
     fs::write(member.join("package.json"), member_manifest).unwrap();
-    let store_dir = member.join("store");
+    fs::create_dir_all(dir.join("packages/theme")).unwrap();
+    fs::write(
+        dir.join("packages/theme/package.json"),
+        r#"{"name":"theme","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let store_dir = dir.join("store");
     let store = Store::new(&store_dir);
-    let make_tree = |name: &str| {
-        let source = member.join(format!("source-{name}"));
-        fs::create_dir_all(&source).unwrap();
-        fs::write(
-            source.join("package.json"),
-            format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
-        )
-        .unwrap();
-        let digest = tapid_archive::canonical_tree_digest(&source).unwrap();
-        let parsed = digest.parse::<tapid_core::ArtifactDigest>().unwrap();
-        store.activate_verified_tree(&parsed, &source).unwrap();
-        digest
-    };
-    let plugin_digest = make_tree("plugin");
-    let react_digest = make_tree("react");
-    let orphan_digest = make_tree("orphan");
-    let peer_context = PeerContext::default().with(
-        "react".parse::<PackageName>().unwrap(),
-        "18.2.0".parse::<PackageVersion>().unwrap(),
+    let install = run(
+        &dir,
+        &["install", "--store-dir", store_dir.to_str().unwrap()],
     );
-    let platform_context = PlatformContext::new(None, None, None).unwrap();
-    let integrity = format!("sha512-{}==", "A".repeat(86));
-    let plugin = LockedPackage::new_with_context_and_provenance(
-        "https://registry.npmjs.org",
-        "plugin",
-        "1.0.0",
-        &integrity,
-        &plugin_digest,
-        (&peer_context, &platform_context),
-        RegistryIntegrityProvenance::RegistryDeclared,
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let source = dir.join("source-orphan");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("package.json"),
+        r#"{"name":"orphan","version":"1.0.0"}"#,
     )
     .unwrap();
-    let react = LockedPackage::new_with_provenance(
-        "https://registry.npmjs.org",
-        "react",
-        "18.2.0",
-        &integrity,
-        &react_digest,
-        RegistryIntegrityProvenance::RegistryDeclared,
-    )
-    .unwrap();
+    let orphan_digest = tapid_archive::canonical_tree_digest(&source).unwrap();
+    let parsed_digest = orphan_digest.parse::<tapid_core::ArtifactDigest>().unwrap();
+    store
+        .activate_verified_tree(&parsed_digest, &source)
+        .unwrap();
+    let mut lock =
+        Lockfile::from_json(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
     let orphan = LockedPackage::new_with_provenance(
         "https://registry.npmjs.org",
         "orphan",
         "1.0.0",
-        &integrity,
+        &format!("sha512-{}==", "A".repeat(86)),
         &orphan_digest,
         RegistryIntegrityProvenance::RegistryDeclared,
     )
     .unwrap();
-    let plugin_key = plugin.key();
-    let react_key = react.key();
-    let mut lock = lock_for_manifest(member_manifest);
-    lock.insert_package(plugin).unwrap();
-    lock.insert_package(react).unwrap();
     lock.insert_package(orphan).unwrap();
-    lock.set_roots([plugin_key, react_key]).unwrap();
-    fs::write(member.join("tapid.lock"), lock.to_json().unwrap()).unwrap();
-    fs::create_dir_all(member.join("node_modules/old")).unwrap();
-    fs::write(member.join("node_modules/old/file"), "old").unwrap();
-    fs::write(member.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
+    fs::write(dir.join("tapid.lock"), lock.to_json().unwrap()).unwrap();
+    fs::create_dir_all(dir.join("node_modules/orphan")).unwrap();
+    fs::write(
+        dir.join("node_modules/orphan/package.json"),
+        r#"{"name":"orphan","version":"1.0.0"}"#,
+    )
+    .unwrap();
 
     let output = run(
         &dir,
@@ -2211,10 +3786,9 @@ fn prune_preserves_workspace_member_peer_provider_and_removes_orphan() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(member.join("node_modules/plugin/package.json").is_file());
-    assert!(member.join("node_modules/react/package.json").is_file());
-    assert!(!member.join("node_modules/orphan").exists());
-    assert!(!member.join("node_modules/old").exists());
+    assert!(dir.join("node_modules/theme/package.json").is_file());
+    assert!(!dir.join("node_modules/orphan").exists());
+    assert!(!member.join("node_modules").exists());
     assert_eq!(
         fs::read(dir.join("package.json")).unwrap(),
         root_manifest.as_bytes()
@@ -2371,6 +3945,63 @@ fn run_requires_checked_in_configuration_before_execution() {
         "error: required run configuration is missing: tapid.toml\n"
     );
     assert!(output.stdout.is_empty());
+    cleanup(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn run_executes_root_or_explicitly_selected_workspace_member_script() {
+    let dir = temp_dir("run-workspace-selection");
+    let member_dir = dir.join("packages/news");
+    fs::create_dir_all(&member_dir).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","workspaces":["packages/news"],"scripts":{"probe":"node script.js"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("script.js"),
+        "process.stdout.write('ROOT_SCRIPT')\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[run.defaults]\nassurance = \"restricted\"\nread = [\".\"]\nsubprocess = true\n\n[run.scripts.probe]\n",
+    )
+    .unwrap();
+    fs::write(
+        member_dir.join("package.json"),
+        r#"{"name":"news","version":"1.0.0","scripts":{"probe":"node script.js"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        member_dir.join("script.js"),
+        "process.stdout.write('MEMBER_SCRIPT')\n",
+    )
+    .unwrap();
+    let root_output = run(&dir, &["run", "probe"]);
+    let root_stderr = String::from_utf8_lossy(&root_output.stderr);
+    if !root_output.status.success()
+        && root_stderr.contains("sandbox execution failed (unsupported-containment)")
+    {
+        eprintln!("skipping: requested Restricted backend is unavailable: {root_stderr}");
+        cleanup(dir);
+        return;
+    }
+    assert!(root_output.status.success(), "{}", root_stderr);
+    let root_stdout = String::from_utf8_lossy(&root_output.stdout);
+    assert!(root_stdout.contains("ROOT_SCRIPT"), "{root_stdout}");
+    assert!(!root_stdout.contains("MEMBER_SCRIPT"), "{root_stdout}");
+
+    let member_output = run(&dir, &["run", "probe", "--workspace", "news"]);
+    assert!(
+        member_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&member_output.stderr)
+    );
+    let member_stdout = String::from_utf8_lossy(&member_output.stdout);
+    assert!(member_stdout.contains("MEMBER_SCRIPT"), "{member_stdout}");
+    assert!(!member_stdout.contains("ROOT_SCRIPT"), "{member_stdout}");
     cleanup(dir);
 }
 
@@ -2851,9 +4482,16 @@ fn run_rejects_a_missing_node_runtime_stably() {
 #[test]
 fn run_rejects_missing_script_stably_before_policy_loading() {
     let dir = temp_dir("run-missing-script");
+    let member_dir = dir.join("packages/news");
+    fs::create_dir_all(&member_dir).unwrap();
     fs::write(
         dir.join("package.json"),
-        r#"{"name":"demo","version":"1.0.0","scripts":{}}"#,
+        r#"{"name":"demo","version":"1.0.0","workspaces":["packages/news"],"scripts":{}}"#,
+    )
+    .unwrap();
+    fs::write(
+        member_dir.join("package.json"),
+        r#"{"name":"news","version":"1.0.0","scripts":{}}"#,
     )
     .unwrap();
     let missing = run(
@@ -2869,6 +4507,23 @@ fn run_rejects_missing_script_stably_before_policy_loading() {
     assert_eq!(
         String::from_utf8_lossy(&missing.stderr),
         "error: root package script is missing: missing\n"
+    );
+
+    let missing_member = run(
+        &dir,
+        &[
+            "run",
+            "missing",
+            "--workspace",
+            "news",
+            "--node-runtime",
+            env!("CARGO_BIN_EXE_tapid"),
+        ],
+    );
+    assert_eq!(missing_member.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&missing_member.stderr),
+        "error: workspace member 'news' package script is missing: missing\n"
     );
     cleanup(dir);
 }

@@ -17,6 +17,55 @@ fn required_policy() -> SandboxPolicy {
     .unwrap()
 }
 
+fn temporary_project(label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "tapid-execution-{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&path).unwrap();
+    fs::canonicalize(path).unwrap()
+}
+
+#[test]
+fn request_keeps_policy_root_while_selecting_contained_working_directory() {
+    let root = temporary_project("working-root");
+    let member = root.join("packages/news");
+    fs::create_dir_all(&member).unwrap();
+
+    let request = ExecutionRequest::builder("/usr/bin/ruby")
+        .project_root(&root)
+        .working_directory(&member)
+        .policy(required_policy())
+        .executable_search_path("/usr/bin")
+        .build()
+        .unwrap();
+
+    assert_eq!(request.project_root(), root);
+    assert_eq!(request.working_directory(), member);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn request_rejects_working_directory_outside_policy_root() {
+    let root = temporary_project("contained-root");
+    let outside = temporary_project("outside-root");
+
+    let result = ExecutionRequest::builder("/usr/bin/ruby")
+        .project_root(&root)
+        .working_directory(&outside)
+        .policy(required_policy())
+        .executable_search_path("/usr/bin")
+        .build();
+
+    assert!(result.is_err());
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+
 #[test]
 fn restricted_separates_authority_containment_from_managed_tree_ownership() {
     let restricted = SandboxPolicy::new_with_assurance(
