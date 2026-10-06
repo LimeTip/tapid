@@ -45,12 +45,13 @@ impl Workspace {
                 project_dir.display()
             ));
         }
-        let root_path = project_dir.join("package.json");
-        let root_metadata = fs::symlink_metadata(&root_path)
+        let root_manifest_path = project_dir.join("package.json");
+        let root_metadata = fs::symlink_metadata(&root_manifest_path)
             .map_err(|error| format!("cannot inspect workspace root manifest: {error}"))?;
         if !root_metadata.file_type().is_file() {
             return Err("workspace root package.json must be a regular file".to_owned());
         }
+        let root_path = contained_path(&project_dir, &root_manifest_path)?;
         let root_text = read_file(&root_path)?;
         let root = PackageManifest::parse(&root_text).map_err(|error| error.to_string())?;
         let document: Value = serde_json::from_str(&root_text)
@@ -60,6 +61,10 @@ impl Workspace {
         for pattern in patterns {
             paths.extend(expand_pattern(&project_dir, &pattern)?);
         }
+        paths = paths
+            .into_iter()
+            .map(|path| contained_path(&project_dir, &path))
+            .collect::<Result<Vec<_>, _>>()?;
         paths.sort();
         paths.dedup();
         let mut members = Vec::new();
@@ -171,6 +176,22 @@ impl Workspace {
     }
 }
 
+fn contained_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        format!(
+            "cannot canonicalize workspace path {}: {error}",
+            path.display()
+        )
+    })?;
+    if !canonical.starts_with(root) {
+        return Err(format!(
+            "workspace path is outside project: {}",
+            path.display()
+        ));
+    }
+    Ok(canonical)
+}
+
 fn read_file(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
 }
@@ -217,6 +238,7 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
         if name == "*" {
             let mut next = Vec::new();
             for path in paths {
+                let path = contained_path(root, &path)?;
                 let entries = fs::read_dir(&path).map_err(|error| {
                     format!(
                         "cannot read workspace directory {}: {error}",
@@ -229,25 +251,27 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
                     let file_type = entry
                         .file_type()
                         .map_err(|error| format!("cannot inspect workspace directory: {error}"))?;
-                    let entry_path = entry.path();
+                    let candidate = entry.path();
                     if file_type.is_symlink() {
-                        let target_metadata = fs::metadata(&entry_path).map_err(|error| {
+                        let target_metadata = fs::metadata(&candidate).map_err(|error| {
                             format!(
                                 "cannot inspect workspace symlink target {}: {error}",
-                                entry_path.display()
+                                candidate.display()
                             )
                         })?;
-                        if !target_metadata.is_file() {
+                        if target_metadata.is_file() {
+                            continue;
+                        }
+                        if !target_metadata.is_dir() {
                             return Err(format!(
-                                "workspace glob encountered a symlink, which is unsupported: {}",
-                                entry_path.display()
+                                "workspace glob encountered an unsupported symlink target: {}",
+                                candidate.display()
                             ));
                         }
+                    } else if !file_type.is_dir() {
                         continue;
                     }
-                    if file_type.is_dir() {
-                        next.push(entry_path);
-                    }
+                    next.push(contained_path(root, &candidate)?);
                 }
             }
             paths = next;
@@ -278,5 +302,100 @@ mod tests {
             let pattern = if components.is_empty() { "..".to_owned() } else { format!("{}/..", components.join("/")) };
             prop_assert!(expand_pattern(Path::new("/tmp/tapid-workspace"), &pattern).is_err());
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod containment_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use tapid_test_support::TempProject;
+
+    #[test]
+    fn workspace_rejects_symlink_escape_before_parsing_member() {
+        for pattern in ["packages/*", "packages/member"] {
+            let project = TempProject::new("workspace-symlink-root").unwrap();
+            let external = TempProject::new("workspace-symlink-external").unwrap();
+            project
+                .write(
+                    "package.json",
+                    format!(r#"{{"name":"root","version":"1.0.0","workspaces":["{pattern}"]}}"#)
+                        .as_bytes(),
+                )
+                .unwrap();
+            let manifest = external
+                .write(
+                    "member/package.json",
+                    b"external content must not be parsed",
+                )
+                .unwrap();
+            symlink(external.path(), project.path().join("packages")).unwrap();
+            let error = Workspace::discover(project.path()).unwrap_err();
+            assert!(error.contains("outside project"), "{error}");
+            assert_eq!(
+                fs::read(manifest).unwrap(),
+                b"external content must not be parsed"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_keeps_internal_symlinks_and_root_aliases_canonical() {
+        let project = TempProject::new("workspace-internal-symlink").unwrap();
+        project
+            .write(
+                "root/package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        let member = project
+            .write(
+                "root/real/member/package.json",
+                br#"{"name":"member","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        symlink("real", project.path().join("root/packages")).unwrap();
+        symlink("root", project.path().join("alias")).unwrap();
+        let workspace = Workspace::discover(&project.path().join("alias")).unwrap();
+        assert_eq!(
+            workspace.select_path(Some("member")).unwrap(),
+            fs::canonicalize(member).unwrap()
+        );
+        assert_eq!(
+            workspace.root_path(),
+            fs::canonicalize(project.path().join("root/package.json")).unwrap()
+        );
+    }
+    #[test]
+    fn wildcard_members_follow_internal_symlinks_and_reject_external_symlinks() {
+        let project = TempProject::new("wildcard-member-symlink").unwrap();
+        let external = TempProject::new("wildcard-member-external").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        let member = project
+            .write(
+                "real/member/package.json",
+                br#"{"name":"member","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        fs::create_dir(project.path().join("packages")).unwrap();
+        let link = project.path().join("packages/member");
+        symlink("../real/member", &link).unwrap();
+        let workspace = Workspace::discover(project.path()).unwrap();
+        assert_eq!(
+            workspace.select_path(Some("member")).unwrap(),
+            fs::canonicalize(member).unwrap()
+        );
+        fs::remove_file(&link).unwrap();
+        external
+            .write("package.json", b"external content must not be parsed")
+            .unwrap();
+        symlink(external.path(), &link).unwrap();
+        let error = Workspace::discover(project.path()).unwrap_err();
+        assert!(error.contains("outside project"), "{error}");
     }
 }

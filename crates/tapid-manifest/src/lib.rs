@@ -153,7 +153,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_workspace_glob_directory_symlinks() {
+    fn rejects_workspace_glob_directory_symlinks_that_escape_the_project() {
         use std::os::unix::fs::symlink;
 
         let root = unique_temp_dir("workspace-symlink");
@@ -173,7 +173,10 @@ mod tests {
         symlink(&outside, root.join("packages/escape")).unwrap();
 
         let error = Workspace::discover(&root).unwrap_err();
-        assert!(error.contains("symlink"), "unexpected error: {error}");
+        assert!(
+            error.contains("outside project"),
+            "unexpected error: {error}"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();

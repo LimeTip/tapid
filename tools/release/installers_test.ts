@@ -27,7 +27,9 @@ async function fixture() {
   await mkdir(payload);
   await mkdir(bin);
   await mkdir(install);
-  await writeFile(join(payload, "tapid"), "#!/bin/sh\nif [ \"$1\" = __verify-release-record ]; then exit \"${FIXTURE_SIGNATURE_STATUS:-0}\"; fi\nprintf 'tapid 1.2.3\\n'\n");
+  const fixtureHome = join(directory, "fixture-home");
+  await mkdir(fixtureHome);
+  await writeFile(join(payload, "tapid"), "#!/bin/sh\nif [ \"$1\" = __verify-release-record ]; then exit \"${FIXTURE_SIGNATURE_STATUS:-0}\"; fi\nif [ \"$1\" = __prepare-release-install ]; then exit \"${FIXTURE_INSTALL_POLICY_STATUS:-0}\"; fi\nprintf 'tapid 1.2.3\\n'\n");
   await chmod(join(payload, "tapid"), 0o755);
   await run("tar", ["-czf", join(directory, archive), "-C", payload, "tapid"]);
   const bytes = await readFile(join(directory, archive));
@@ -71,7 +73,7 @@ esac
   }
   await renderInstallers(bootstrapDir, version, "https://bootstrap.example/releases/v1.2.3");
   const installer = join(bootstrapDir, "install.sh");
-  const env: Record<string, string | undefined> = { ...processEnv, PATH: `${bin}:${processEnv.PATH}`, INSTALLER_FIXTURE: directory };
+  const env: Record<string, string | undefined> = { ...processEnv, HOME: fixtureHome, SHELL: "/bin/sh", PATH: `${bin}:${processEnv.PATH}`, INSTALLER_FIXTURE: directory };
   for (const name of ["TAPID_REPO", "TAPID_RELEASE_BASE_URL", "TAPID_RELEASE_DISCOVERY_URL", "TAPID_RELEASE_RECORD_URL"]) delete env[name];
   return { directory, install, bytes, hash, record, env, installer,
     installShell: (args: string[] = [], additions: Record<string, string> = {}) =>
@@ -389,4 +391,71 @@ test("Unix installer rejects a native signature failure before replacing an inst
       (error: any) => error.stderr.includes("release record signature verification failed"));
     equal((await readFile(join(f.install, "tapid"))).equals(before), true);
   } finally { await f.cleanup(); }
+});
+
+test("Unix installer requires native rollback policy before destination replacement", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  try {
+    await f.installShell();
+    const before = await readFile(join(f.install, "tapid"));
+    await rejects(() => f.installShell([], { FIXTURE_INSTALL_POLICY_STATUS: "1" }),
+      (error: any) => error.stderr.includes("release policy rejected"));
+    ok((await readFile(join(f.install, "tapid"))).equals(before));
+  } finally { await f.cleanup(); }
+});
+
+test("Both signed installers invoke the pinned bootstrap rollback policy before replacing bytes", async () => {
+  const sh = await readFile(join(root, "scripts/install.sh"), "utf8");
+  const ps = await readFile(join(root, "scripts/install.ps1"), "utf8");
+  for (const [source, replacement] of [[sh, 'mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"'], [ps, 'Move-Item -LiteralPath $staged -Destination $destination -Force']]) {
+    const policy = source.indexOf("__prepare-release-install");
+    ok(policy >= 0);
+    ok(policy < source.lastIndexOf(replacement));
+  }
+});
+
+test("PowerShell installer stops a rejected native policy before replacing destination or marker", async (context) => {
+  try { await run("pwsh", ["-NoProfile", "-Command", "$null"]); }
+  catch { context.skip("PowerShell is unavailable"); return; }
+  const directory = await mkdtemp(join(tmpdir(), "tapid-ps-policy-"));
+  try {
+    const source = await readFile(join(root, "scripts/install.ps1"), "utf8");
+    const start = source.indexOf("    if (-not $legacyRelease) {");
+    const end = source.indexOf("    try {\n        Configure-UserPath", start);
+    ok(start >= 0 && end > start);
+    const block = source.slice(start, end);
+    await writeFile(join(directory, "reject.ps1"), "exit 17\n");
+    await writeFile(join(directory, "test.ps1"), `$ErrorActionPreference = 'Stop'
+function Fail([string]$Message) { throw $Message }
+$InstallDir = $PSScriptRoot
+$destination = Join-Path $PSScriptRoot 'tapid.exe'
+$extracted = Join-Path $PSScriptRoot 'selected.exe'
+$staged = Join-Path $PSScriptRoot 'staged.exe'
+$stagedMarker = Join-Path $PSScriptRoot 'staged-marker'
+$marker = Join-Path $PSScriptRoot '.tapid-managed'
+$bootstrap = Join-Path $PSScriptRoot 'reject.ps1'
+$Version = '1.2.3'
+$BootstrapVersion = '1.0.0'
+$archivePath = Join-Path $PSScriptRoot 'release.tar.gz'
+$legacyRelease = $false
+[IO.File]::WriteAllText($destination, 'installed bytes')
+[IO.File]::WriteAllText($marker, 'original marker')
+[IO.File]::WriteAllText($extracted, 'replacement bytes')
+$rejected = $false
+try {
+${block}
+} catch {
+    if ($_.Exception.Message -notlike '*installer release policy rejected*') { throw }
+    $rejected = $true
+}
+if (-not $rejected) { throw 'native policy failure was accepted' }
+if ([IO.File]::ReadAllText($destination) -cne 'installed bytes') { throw 'destination changed' }
+if ([IO.File]::ReadAllText($marker) -cne 'original marker') { throw 'marker changed' }
+if (Test-Path $staged) { throw 'replacement was staged despite policy rejection' }
+$global:LASTEXITCODE = 0
+Write-Output 'Policy rejection preserved installation'
+`);
+    const result = await run("pwsh", ["-NoProfile", "-File", join(directory, "test.ps1")]);
+    match(result.stdout, /Policy rejection preserved installation/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

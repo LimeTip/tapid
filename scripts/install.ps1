@@ -311,6 +311,18 @@ try {
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
     if ($actual -ne $expected) { Fail "checksum verification failed for $archive" }
     $extracted = Expand-VerifiedArchive $archivePath $extractRoot
+    if (-not $legacyRelease) {
+        & $bootstrap __prepare-release-install $Version $BootstrapVersion $archivePath $destination
+        if ($LASTEXITCODE -ne 0) { Fail "installer release policy rejected" }
+    } else {
+        $statePath = Join-Path $InstallDir '.tapid-release-state.json'
+        if (Test-Path -LiteralPath $statePath) { Fail "legacy installer cannot replace release-managed state; use tapid upgrade" }
+        if (Test-Path -LiteralPath $destination) {
+            $installedDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
+            $selectedDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $extracted).Hash
+            if ($installedDigest -cne $selectedDigest) { Fail "legacy installer cannot replace an existing installation; use tapid upgrade" }
+        }
+    }
     Copy-Item -LiteralPath $extracted -Destination $staged -Force
     [IO.File]::WriteAllBytes($stagedMarker, [Text.Encoding]::ASCII.GetBytes("tapid-managed-v1`n"))
     Move-Item -LiteralPath $stagedMarker -Destination (Join-Path $InstallDir ".tapid-managed") -Force

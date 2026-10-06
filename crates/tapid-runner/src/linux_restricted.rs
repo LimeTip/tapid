@@ -240,9 +240,31 @@ fn seccomp_filter(
                 k: 0,
             },
         ];
+        // x32 uses the same audit architecture as x86_64 but different syscall
+        // numbers. Restricted supports the native ABI only; reject all x32
+        // calls before the native denylist, including process_vm's 539/540.
+        #[cfg(target_arch = "x86_64")]
+        filter.extend([
+            libc::sock_filter {
+                code: (libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 1,
+                k: 0x4000_0000,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_RET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ERRNO | libc::EPERM as u32,
+            },
+        ]);
         let mut denied = vec![
             libc::SYS_bpf,
             libc::SYS_ptrace,
+            libc::SYS_process_vm_readv,
+            libc::SYS_process_vm_writev,
+            libc::SYS_pidfd_open,
+            libc::SYS_pidfd_getfd,
             libc::SYS_mount,
             libc::SYS_umount2,
             libc::SYS_open_tree,
