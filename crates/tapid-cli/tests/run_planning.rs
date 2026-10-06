@@ -457,6 +457,8 @@ fn local_bin_wins_over_runtime_tools_but_node_stays_verified() {
 #[test]
 fn cli_receipt_reports_assurance_authority_and_completion_without_duplicate_output() {
     let (project, runtime) = project();
+    // This output-contract fixture must still provide an executable runtime snapshot.
+    fs::write(&runtime, b"#!/bin/sh\nexit 0\n").unwrap();
     fs::write(project.join("package.json"), r#"{"name":"receipt-test","version":"1.0.0","scripts":{"dev":"printf unique-child-output; printf unique-child-error >&2"}}"#).unwrap();
     fs::write(
         project.join("tapid.toml"),
