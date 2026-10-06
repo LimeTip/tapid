@@ -1,3 +1,4 @@
+use super::outcome::{ErrorKind, OperationalError};
 use crate::context;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 use tapid_core::{ArtifactDigest, PackageInstanceId};
@@ -53,7 +54,7 @@ pub(crate) fn replay_input(
     store: &Store,
     registry_config: &crate::registry::RegistryConfig,
     mut report_progress: impl FnMut(usize, usize),
-) -> Result<(NamedLayoutInput, BTreeMap<String, PathBuf>), String> {
+) -> Result<(NamedLayoutInput, BTreeMap<String, PathBuf>), OperationalError> {
     let mut instances = Vec::new();
     let mut keys = BTreeMap::new();
     let mut trees = BTreeMap::new();
@@ -61,15 +62,16 @@ pub(crate) fn replay_input(
         paths: Vec::new(),
         keep: false,
     };
-    let typed_packages = lock.packages_typed().map_err(|e| e.to_string())?;
+    let typed_packages = lock.packages_typed().map_err(OperationalError::from)?;
     let typed_keys = typed_packages
         .iter()
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
-    let root_keys = replay_root_keys_with_config(lock, manifest, &typed_keys, registry_config)?;
-    store
-        .cleanup_stale_replay_snapshots()
-        .map_err(|error| format!("cannot recover stale replay snapshots: {error}"))?;
+    let root_keys = replay_root_keys_with_config(lock, manifest, &typed_keys, registry_config)
+        .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+    store.cleanup_stale_replay_snapshots().map_err(|error| {
+        OperationalError::from(error).context("cannot recover stale replay snapshots")
+    })?;
     let package_total = typed_packages.len();
     for (index, (key, package)) in typed_packages.iter().enumerate() {
         let completed = index + 1;
@@ -84,10 +86,14 @@ pub(crate) fn replay_input(
             || store.verified_tree_snapshot(&digest),
             &mut report_progress,
         )
-        .map_err(|e| format!("package {encoded} tree unavailable: {e}"))?;
+        .map_err(|e| {
+            OperationalError::from(e).context(format!("package {encoded} tree unavailable"))
+        })?;
         snapshots.paths.push(tree.clone());
-        let peer = context::parse_peer(&key.peer_context)?;
-        let platform = context::parse_platform(&key.platform_context)?;
+        let peer = context::parse_peer(&key.peer_context)
+            .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e))?;
+        let platform = context::parse_platform(&key.platform_context)
+            .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e))?;
         let id =
             PackageInstanceId::new(key.registry.clone(), key.name.clone(), key.version.clone());
         let instance = PackageInstance {

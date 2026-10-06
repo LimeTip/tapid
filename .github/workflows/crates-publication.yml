@@ -1,11 +1,16 @@
-name: Publish tapid to crates.io
+# Keep this filename: crates.io Trusted Publishers bind to the caller workflow.
+name: Release Tapid
+run-name: Release Tapid ${{ inputs.release_tag || github.sha }}
 
 on:
+  push:
+    branches: [main]
+    paths: [docs/releases/intent.json]
   workflow_dispatch:
     inputs:
-      tag:
-        description: Annotated release tag to publish, for example v0.1.0
-        required: true
+      release_tag:
+        description: Recovery tag; empty prepares the intent at this main commit
+        required: false
         type: string
 
 permissions:
@@ -13,127 +18,187 @@ permissions:
   contents: read
 
 concurrency:
-  group: crates-io-publication
+  group: tapid-stable-release
   cancel-in-progress: false
 
 jobs:
   preflight:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 100
     outputs:
-      tag_commit: ${{ steps.tag.outputs.commit }}
-      version: ${{ steps.version.outputs.version }}
-      plan_b64: ${{ steps.plan.outputs.plan_b64 }}
-      package_count: ${{ steps.plan.outputs.package_count }}
+      tag_commit: ${{ steps.source.outputs.commit }}
+      release_tag: ${{ steps.source.outputs.tag }}
+      version: ${{ steps.source.outputs.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Resolve reviewed release tag
-        id: tag
-        shell: bash
-        env:
-          TAG: ${{ inputs.tag }}
-          WORKFLOW_REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-          test "$WORKFLOW_REF" = refs/heads/main || {
-            echo "dispatch this trusted workflow from main" >&2
-            exit 1
-          }
-          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
-            echo "tag must be a stable vX.Y.Z release" >&2
-            exit 1
-          }
-          git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
-          test "$(git cat-file -t "refs/tags/$TAG")" = tag || {
-            echo "release tag must be annotated" >&2
-            exit 1
-          }
-          TAG_COMMIT="$(git rev-parse "refs/tags/$TAG^{commit}")"
-          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main || {
-            echo "release tag commit must belong to main" >&2
-            exit 1
-          }
-          printf 'commit=%s\n' "$TAG_COMMIT" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: 1.99.0
-      - name: Check tag version using trusted release tooling
-        id: version
-        shell: bash
-        env:
-          TAG: ${{ inputs.tag }}
-          TAG_COMMIT: ${{ steps.tag.outputs.commit }}
-        run: |
-          set -euo pipefail
-          TAG_SOURCE="$RUNNER_TEMP/tapid-release-source"
-          git worktree add --detach "$TAG_SOURCE" "$TAG_COMMIT"
-          VERSION="$(cd "$TAG_SOURCE" && node --experimental-strip-types "$GITHUB_WORKSPACE/tools/release/release.ts" check-tag "$TAG")"
-          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Verify public GitHub release and installer smoke
-        shell: bash
+      - name: Verify one-time release policy setup
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-          TAG_COMMIT: ${{ steps.tag.outputs.commit }}
+        run: node --experimental-strip-types tools/release/policy.ts check
+      - name: Resolve reviewed main source and release intent
+        id: source
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          release="$(gh release view "$TAG" --json isDraft,isPrerelease,tagName --jq 'select(.tagName == env.TAG and (.isDraft | not) and (.isPrerelease | not)) | .tagName')"
-          test "$release" = "$TAG" || {
-            echo "the matching public non-prerelease GitHub release is required" >&2
+          SOURCE_SHA="$GITHUB_SHA"
+          if test -n "$REQUESTED_TAG"; then
+            [[ "$REQUESTED_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+            git fetch --no-tags origin "refs/tags/$REQUESTED_TAG:refs/tags/$REQUESTED_TAG"
+            test "$(git cat-file -t "refs/tags/$REQUESTED_TAG")" = tag
+            SOURCE_SHA="$(git rev-parse "refs/tags/$REQUESTED_TAG^{commit}")"
+          fi
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          git worktree add --detach "$RUNNER_TEMP/tapid-release-source" "$SOURCE_SHA"
+          INTENT="$RUNNER_TEMP/tapid-release-source/docs/releases/intent.json"
+          # Strict schema validation runs before any release mutation.
+          node --experimental-strip-types --input-type=module - "$INTENT" <<'JS'
+          import { readFile } from 'node:fs/promises';
+          import { validateReleaseIntent } from './tools/release/candidate.ts';
+          validateReleaseIntent(JSON.parse(await readFile(process.argv[2], 'utf8')));
+          JS
+          PREPARED_FROM="$(jq -r .prepared_from "$INTENT")"
+          test "$(git rev-parse "$SOURCE_SHA^1")" = "$PREPARED_FROM" || {
+            echo "main changed after preparation; close the release PR and prepare a fresh one" >&2
             exit 1
           }
-          run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-public-smoke.yml/runs?event=release&status=success&per_page=100" \
-            --jq '[.workflow_runs[] | select(.display_title == ("Public installer smoke " + env.TAG) and .head_sha == env.TAG_COMMIT)] | first | .id // empty')"
-          [[ "$run_id" =~ ^[0-9]+$ ]] || {
-            echo "a successful public installer smoke run for $TAG is required" >&2
+          VERSION="$(jq -r .version "$INTENT")"
+          TAG="v$VERSION"
+          test -z "$REQUESTED_TAG" || test "$TAG" = "$REQUESTED_TAG"
+          SOURCE_VERSION="$(cd "$RUNNER_TEMP/tapid-release-source" && node --experimental-strip-types "$GITHUB_WORKSPACE/tools/release/release.ts" current-version)"
+          test "$SOURCE_VERSION" = "$VERSION" || {
+            echo "source package version $SOURCE_VERSION does not match release intent $VERSION" >&2
             exit 1
           }
-          successful_jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
-            --jq '[.jobs[] | select((.name == "Unix installer (ubuntu-latest)" or .name == "Unix installer (macos-latest)" or .name == "Windows installer") and .conclusion == "success")] | length')"
-          test "$successful_jobs" -eq 3 || {
-            echo "all public installer smoke jobs must succeed for $TAG" >&2
-            exit 1
-          }
-      - name: Generate reviewable crates.io plan
-        id: plan
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG_SOURCE="$RUNNER_TEMP/tapid-release-source"
-          PLAN_FILE="$RUNNER_TEMP/crates-publication-plan.json"
-          node --experimental-strip-types tools/release/publish.ts --workspace "$TAG_SOURCE" --json > "$PLAN_FILE"
-          PLAN_B64="$(base64 -w0 < "$PLAN_FILE")"
-          PACKAGE_COUNT="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).packages.length)))' < "$PLAN_FILE")"
-          printf 'plan_b64=%s\n' "$PLAN_B64" >> "$GITHUB_OUTPUT"
-          printf 'package_count=%s\n' "$PACKAGE_COUNT" >> "$GITHUB_OUTPUT"
-          {
-            printf '### Crates.io publication plan\n\n'
-            printf 'The plan was generated without publication credentials. The protected publication job will refuse to proceed if the registry state or exact plan changes.\n\n'
-            printf '```json\n'
-            cat "$PLAN_FILE"
-            printf '```\n'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Verify workspace package compatibility before credentials
-        shell: bash
+          test -s "$RUNNER_TEMP/tapid-release-source/$(jq -r .notes "$INTENT")"
+          printf 'commit=%s\ntag=%s\nversion=%s\n' "$SOURCE_SHA" "$TAG" "$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Wait for successful CI on exact main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.commit }}
+        run: node --experimental-strip-types tools/release/automation.ts wait-ci "$SOURCE_SHA"
+      - name: Verify reviewed crate plan and locked package compatibility
         env:
           CARGO_HOME: ${{ runner.temp }}/package-verify-cargo-home
         run: |
           set -euo pipefail
           TAG_SOURCE="$RUNNER_TEMP/tapid-release-source"
+          node --experimental-strip-types tools/release/publish.ts --workspace "$TAG_SOURCE" --json > "$RUNNER_TEMP/plan.json"
+          cargo metadata --manifest-path "$TAG_SOURCE/Cargo.toml" --locked --format-version 1 --no-deps > "$RUNNER_TEMP/metadata.json"
+          node --experimental-strip-types tools/release/automation.ts check-plan "$TAG_SOURCE/docs/releases/intent.json" "$RUNNER_TEMP/plan.json" "$RUNNER_TEMP/metadata.json"
           (cd "$TAG_SOURCE" && cargo package --workspace --locked)
-          (cd "$TAG_SOURCE" && cargo metadata --manifest-path "$TAG_SOURCE/tests/integration/Cargo.toml" --locked --format-version 1 >/dev/null)
+          cargo metadata --manifest-path "$TAG_SOURCE/tests/integration/Cargo.toml" --locked --format-version 1 >/dev/null
+          {
+            # shellcheck disable=SC2016
+            printf '### Package preflight passed\n\n```json\n'
+            cat "$RUNNER_TEMP/plan.json"
+            # shellcheck disable=SC2016
+            printf '\n```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  select:
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.select.outputs.release_id }}
+      tag_object: ${{ steps.select.outputs.tag_object }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - id: select
+        name: Create or reuse exact annotated release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.tag_commit }}
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types tools/release/candidate.ts select "$TAG" "$SOURCE_SHA" > "$RUNNER_TEMP/selection.json"
+          printf 'release_id=%s\n' "$(jq -r '.release_id // empty' "$RUNNER_TEMP/selection.json")" >> "$GITHUB_OUTPUT"
+          printf 'tag_object=%s\n' "$(jq -r .tag_object "$RUNNER_TEMP/selection.json")" >> "$GITHUB_OUTPUT"
+
+  candidate:
+    needs: [preflight, select]
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release-publication.yml
+    with:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      commit_sha: ${{ needs.preflight.outputs.tag_commit }}
+      release_id: ${{ needs.select.outputs.release_id }}
+      tag_object: ${{ needs.select.outputs.tag_object }}
+    secrets: inherit
+
+  verify:
+    needs: [preflight, candidate]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-draft-verify.yml
+    with:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      release_id: ${{ needs.candidate.outputs.release_id }}
+      commit_sha: ${{ needs.preflight.outputs.tag_commit }}
+      allow_public: true
+
+  promote:
+    needs: [preflight, candidate, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.candidate.outputs.artifact_id }}
+          path: candidate
+          merge-multiple: true
+      - name: Publish only the authorized verified candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_FINGERPRINT: ${{ needs.candidate.outputs.candidate_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(jq -r .candidate_sha256 candidate/signed-result.json)" = "$EXPECTED_FINGERPRINT"
+          node --experimental-strip-types tools/release/candidate.ts publish candidate/signed-result.json candidate/notes.md candidate/intent.json
+
+  smoke:
+    needs: [preflight, candidate, promote]
+    uses: ./.github/workflows/release-public-smoke.yml
+    with:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      release_id: ${{ needs.candidate.outputs.release_id }}
+      commit_sha: ${{ needs.preflight.outputs.tag_commit }}
 
   publish:
-    if: github.ref == 'refs/heads/main'
-    needs: preflight
+    needs: [preflight, candidate, verify, promote, smoke]
     runs-on: ubuntu-latest
     environment: crates-io-release
     permissions:
@@ -151,79 +216,43 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: 1.99.0
-      - name: Rebuild exact tagged source and compare reviewed plan
-        id: recheck
-        shell: bash
-        env:
-          TAG: ${{ inputs.tag }}
-          EXPECTED_TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
-          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
-          EXPECTED_PLAN_B64: ${{ needs.preflight.outputs.plan_b64 }}
-        run: |
-          set -euo pipefail
-          test "${GITHUB_REF}" = refs/heads/main || {
-            echo "trusted publication automation must run from main" >&2
-            exit 1
-          }
-          git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
-          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
-          TAG_COMMIT="$(git rev-parse "refs/tags/$TAG^{commit}")"
-          test "$TAG_COMMIT" = "$EXPECTED_TAG_COMMIT" || {
-            echo "release tag changed after preflight" >&2
-            exit 1
-          }
-          git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main || {
-            echo "release tag commit must belong to main" >&2
-            exit 1
-          }
-          TAG_SOURCE="$RUNNER_TEMP/tapid-release-source"
-          git worktree add --detach "$TAG_SOURCE" "$TAG_COMMIT"
-          VERSION="$(cd "$TAG_SOURCE" && node --experimental-strip-types "$GITHUB_WORKSPACE/tools/release/release.ts" check-tag "$TAG")"
-          test "$VERSION" = "$EXPECTED_VERSION" || {
-            echo "release version changed after preflight" >&2
-            exit 1
-          }
-          EXPECTED_PLAN="$RUNNER_TEMP/expected-crates-publication-plan.json"
-          printf '%s' "$EXPECTED_PLAN_B64" | base64 --decode > "$EXPECTED_PLAN"
-          ACTUAL_PLAN="$RUNNER_TEMP/current-crates-publication-plan.json"
-          node --experimental-strip-types tools/release/publish.ts --workspace "$TAG_SOURCE" --json > "$ACTUAL_PLAN"
-          if ! cmp -s "$EXPECTED_PLAN" "$ACTUAL_PLAN"; then
-            echo "crates.io state or publication plan changed after preflight" >&2
-            diff -u "$EXPECTED_PLAN" "$ACTUAL_PLAN" || true
-            exit 1
-          fi
-          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Recheck public release and installer smoke after approval
-        shell: bash
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.candidate.outputs.artifact_id }}
+          path: candidate
+          merge-multiple: true
+      - name: Recheck immutable public candidate after same-run smoke
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-          TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
+          EXPECTED_FINGERPRINT: ${{ needs.candidate.outputs.candidate_sha256 }}
         run: |
           set -euo pipefail
-          release="$(gh release view "$TAG" --json isDraft,isPrerelease,tagName --jq 'select(.tagName == env.TAG and (.isDraft | not) and (.isPrerelease | not)) | .tagName')"
-          test "$release" = "$TAG" || {
-            echo "the matching public non-prerelease GitHub release is required after approval" >&2
-            exit 1
-          }
-          run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-public-smoke.yml/runs?event=release&status=success&per_page=100" \
-            --jq '[.workflow_runs[] | select(.display_title == ("Public installer smoke " + env.TAG) and .head_sha == env.TAG_COMMIT)] | first | .id // empty')"
-          [[ "$run_id" =~ ^[0-9]+$ ]] || {
-            echo "a successful public installer smoke run for $TAG is required after approval" >&2
-            exit 1
-          }
-          successful_jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
-            --jq '[.jobs[] | select((.name == "Unix installer (ubuntu-latest)" or .name == "Unix installer (macos-latest)" or .name == "Windows installer") and .conclusion == "success")] | length')"
-          test "$successful_jobs" -eq 3 || {
-            echo "all public installer smoke jobs must still be successful for $TAG" >&2
-            exit 1
-          }
+          test "$(jq -r .candidate_sha256 candidate/signed-result.json)" = "$EXPECTED_FINGERPRINT"
+          node --experimental-strip-types tools/release/candidate.ts publish candidate/signed-result.json candidate/notes.md candidate/intent.json
+      - name: Recheck exact source and remaining approved crate suffix
+        id: recheck
+        env:
+          SOURCE_SHA: ${{ needs.preflight.outputs.tag_commit }}
+          TAG: ${{ needs.preflight.outputs.release_tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$SOURCE_SHA"
+          TAG_SOURCE="$RUNNER_TEMP/tapid-release-source"
+          git worktree add --detach "$TAG_SOURCE" "$SOURCE_SHA"
+          cmp candidate/intent.json "$TAG_SOURCE/docs/releases/intent.json"
+          EXPECTED_PLAN="$RUNNER_TEMP/expected-crates-publication-plan.json"
+          node --experimental-strip-types tools/release/publish.ts --workspace "$TAG_SOURCE" --json > "$EXPECTED_PLAN"
+          cargo metadata --manifest-path "$TAG_SOURCE/Cargo.toml" --locked --format-version 1 --no-deps > "$RUNNER_TEMP/metadata.json"
+          node --experimental-strip-types tools/release/automation.ts check-plan candidate/intent.json "$EXPECTED_PLAN" "$RUNNER_TEMP/metadata.json"
+          printf 'version=%s\npackage_count=%s\n' "$VERSION" "$(jq '.packages | length' "$EXPECTED_PLAN")" >> "$GITHUB_OUTPUT"
       - name: Authenticate to crates.io with OIDC
-        if: needs.preflight.outputs.package_count != '0'
+        if: steps.recheck.outputs.package_count != '0'
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
       - name: Publish missing crates one at a time
-        if: needs.preflight.outputs.package_count != '0'
+        if: steps.recheck.outputs.package_count != '0'
         run: node --experimental-strip-types tools/release/publish.ts --workspace "$RUNNER_TEMP/tapid-release-source" --publish --json --expected-plan "$RUNNER_TEMP/expected-crates-publication-plan.json"
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
@@ -245,3 +274,23 @@ jobs:
             echo "clean Cargo install returned unexpected version: $ACTUAL" >&2
             exit 1
           }
+
+      - name: Record final release read-back
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.release_tag }}
+          RELEASE_ID: ${{ needs.candidate.outputs.release_id }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.tag_commit }}
+          FINGERPRINT: ${{ needs.candidate.outputs.candidate_sha256 }}
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types tools/release/publish.ts --workspace "$RUNNER_TEMP/tapid-release-source" --json > "$RUNNER_TEMP/final-plan.json"
+          test "$(jq '.packages | length' "$RUNNER_TEMP/final-plan.json")" = 0
+          test "$(jq '.blockers | length' "$RUNNER_TEMP/final-plan.json")" = 0
+          # shellcheck disable=SC2016
+          # shellcheck disable=SC2016
+          printf '### Release complete\n\n[GitHub release](https://github.com/%s/releases/tag/%s)\n\nSource: `%s`\n\nRelease ID: `%s`\n\nCandidate: `%s`\n\nNative verification and public smoke passed in this run. All approved crate versions are public; a clean Cargo install returned the expected version.\n' "$GITHUB_REPOSITORY" "$TAG" "$SOURCE_SHA" "$RELEASE_ID" "$FINGERPRINT" >> "$GITHUB_STEP_SUMMARY"
+          {
+            printf '\n[Verification run and retained evidence](https://github.com/%s/actions/runs/%s)\n\nConfirmed versions:\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            jq -r '.packages[] | "- " + .name + " " + .version' candidate/intent.json
+          } >> "$GITHUB_STEP_SUMMARY"

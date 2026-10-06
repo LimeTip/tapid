@@ -295,6 +295,16 @@ actual_size="$(wc -c < "$tmp_dir/$archive" | tr -d '[:space:]')"
 actual="$(sha256_file "$tmp_dir/$archive")"
 [ "$actual" = "$expected" ] || fail "checksum verification failed for $archive"
 extract_binary "$tmp_dir/$archive" "$tmp_dir/extracted"
+if [ "$LEGACY_RELEASE" -eq 0 ]; then
+  "$tmp_dir/bootstrap/tapid" __prepare-release-install "$VERSION" "$BOOTSTRAP_VERSION" "$tmp_dir/$archive" "$INSTALL_DIR/tapid" || fail "installer release policy rejected"
+else
+  # Historical binaries have no native policy helper. Never let this path
+  # bypass durable rollback state or replace an existing installation.
+  [ ! -e "$INSTALL_DIR/.tapid-release-state.json" ] && [ ! -L "$INSTALL_DIR/.tapid-release-state.json" ] || fail "legacy installer cannot replace release-managed state; use tapid upgrade"
+  if [ -e "$INSTALL_DIR/tapid" ]; then
+    cmp -s "$INSTALL_DIR/tapid" "$tmp_dir/extracted/tapid" || fail "legacy installer cannot replace an existing installation; use tapid upgrade"
+  fi
+fi
 
 STAGED_BINARY="$(mktemp "$INSTALL_DIR/.tapid.tmp.XXXXXX")"
 STAGED_MARKER="$(mktemp "$INSTALL_DIR/.tapid-marker.tmp.XXXXXX")"

@@ -373,3 +373,69 @@ fn managed_tree_stays_fail_closed_before_target_execution() {
     assert!(!marker.exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn seccomp_denies_process_memory_and_pidfds_even_for_self() {
+    // Self-targets need no Yama permission. This proves seccomp supplies the
+    // denial independently of host tracing policy.
+    let filter = seccomp_filter(true, true).unwrap();
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork failed: {}", io::Error::last_os_error());
+    if pid == 0 {
+        unsafe {
+            let target = libc::getpid();
+            if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                || libc::prctl(
+                    PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER,
+                    &libc::sock_fprog {
+                        len: filter.len() as u16,
+                        filter: filter.as_ptr() as *mut libc::sock_filter,
+                    },
+                ) != 0
+            {
+                libc::_exit(3);
+            }
+            let mut byte = 42u8;
+            let iov = libc::iovec {
+                iov_base: (&mut byte as *mut u8).cast(),
+                iov_len: 1,
+            };
+            for syscall in [libc::SYS_process_vm_readv, libc::SYS_process_vm_writev] {
+                if libc::syscall(syscall, target, &iov, 1, &iov, 1, 0) != -1
+                    || *libc::__errno_location() != libc::EPERM
+                {
+                    libc::_exit(4);
+                }
+            }
+            if libc::syscall(libc::SYS_pidfd_open, target, 0) != -1
+                || *libc::__errno_location() != libc::EPERM
+            {
+                libc::_exit(5);
+            }
+            // An invalid descriptor needs no pidfd support before filtering.
+            // Seccomp must return EPERM even when the kernel would return
+            // EBADF, EINVAL, or ENOSYS for the unfiltered syscall.
+            if libc::syscall(libc::SYS_pidfd_getfd, -1, -1, u32::MAX) != -1
+                || *libc::__errno_location() != libc::EPERM
+            {
+                libc::_exit(6);
+            }
+            #[cfg(target_arch = "x86_64")]
+            for number in [539, 540, libc::SYS_pidfd_open, libc::SYS_pidfd_getfd] {
+                // x32 shares AUDIT_ARCH_X86_64 but has its own syscall numbers.
+                // Test rejection even on kernels that do not enable x32.
+                if libc::syscall(0x4000_0000 | number, -1, 0, 0, 0, 0, 0) != -1
+                    || *libc::__errno_location() != libc::EPERM
+                {
+                    libc::_exit(7);
+                }
+            }
+            libc::_exit(0);
+        }
+    }
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert!(libc::WIFEXITED(status));
+    assert_eq!(libc::WEXITSTATUS(status), 0);
+}

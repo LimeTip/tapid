@@ -110,7 +110,7 @@ mod tests {
         let workspace = Workspace::discover(&root).unwrap();
         assert_eq!(
             workspace.members()[0].path(),
-            root.join("apps/web/package.json")
+            std::fs::canonicalize(root.join("apps/web/package.json")).unwrap()
         );
         assert!(workspace.select(Some("missing")).is_err());
         std::fs::remove_dir_all(root).unwrap();
