@@ -24,6 +24,8 @@ gh workflow run release-prepare.yml --repo LimeTip/tapid --ref main
 
 For an explicit version, add `-f version=X.Y.Z`. The version analysis may block a default patch and report a required larger bump. Review that result rather than overriding it blindly.
 
+Preparation preserves existing nonempty release notes for the selected version, generates notes when absent, and always regenerates the release intent and package plan.
+
 The generated PR contains the product version, only changed supporting-crate versions and affected dependency requirements, regenerated lockfiles, release notes, and `docs/releases/intent.json`, with schema `tapid-release-intent-v1`, consumed by the coordinator. Its required `prepared_from` SHA records the `main` commit analyzed during preparation. The release merge commit must have that SHA as its first parent. If another PR advances `main`, close the old release PR and prepare again so the version analysis includes those changes. Review the version table and notes, then merge after the required checks pass. Automated preparation is a proposal; it does not decide whether a change deserves a breaking release or whether generated notes describe it correctly.
 
 Rerunning preparation preserves the open `release/prepare` PR and reports its link, including any maintainer edits. It does not regenerate that PR or publish anything. Edit it directly before merge. To deliberately replace it, close the existing PR before preparing again.

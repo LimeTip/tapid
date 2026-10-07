@@ -141,7 +141,7 @@ test("tooling-only preparation uses maintained version tool and creates both fin
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("already-bumped preparation retains analysis, baseline ancestry, and reviewed intent", async () => {
+test("already-bumped preparation preserves reviewed notes and refreshes the release intent", async () => {
   const directory = await mkdtemp(join(tmpdir(), "tapid-prepare-bumped-"));
   const commands: string[] = [];
   let version = "0.0.12";
@@ -162,16 +162,33 @@ test("already-bumped preparation retains analysis, baseline ancestry, and review
   try {
     await writeFile(join(directory, "Cargo.toml"), "fixture");
     await writeFile(join(directory, "Cargo.lock"), "fixture");
+    await mkdir(join(directory, "docs/releases"), { recursive: true });
+    const reviewedNotes = "# Tapid 0.0.12 release notes\n\nHandwritten release highlights.\n";
+    await writeFile(join(directory, "docs/releases/0.0.12.md"), reviewedNotes);
+    await writeFile(join(directory, "docs/releases/intent.json"), "stale intent");
+    await writeFile(join(directory, "release-preparation.json"), "stale preparation");
     await prepareRelease("", "v0.0.11", options);
     const intent = JSON.parse(await readFile(join(directory, "docs/releases/intent.json"), "utf8"));
     strictEqual(intent.version, "0.0.12");
     strictEqual(intent.baseline, "v0.0.11");
     strictEqual(intent.prepared_from, "d".repeat(40));
     deepStrictEqual(intent.packages, [{ name: "tapid", version: "0.0.12" }]);
+    strictEqual(await readFile(join(directory, intent.notes), "utf8"), reviewedNotes);
+    const preparation = JSON.parse(await readFile(join(directory, "release-preparation.json"), "utf8"));
+    strictEqual(preparation.notes, intent.notes);
+    deepStrictEqual(preparation.packages, intent.packages);
     strictEqual(commands.includes("release-plz update"), true);
     strictEqual(commands.includes("git merge-base --is-ancestor refs/tags/v0.0.11^{commit} HEAD"), true);
     await rm(join(directory, intent.notes));
     await rm(join(directory, "docs/releases/intent.json"));
+    await writeFile(join(directory, intent.notes), " \n");
+    await rejects(prepareRelease("", "v0.0.11", options), /nonempty regular file/);
+    strictEqual(await readFile(join(directory, intent.notes), "utf8"), " \n");
+    await rejects(readFile(join(directory, "docs/releases/intent.json")), /ENOENT/);
+    await rm(join(directory, intent.notes));
+    await mkdir(join(directory, intent.notes));
+    await rejects(prepareRelease("", "v0.0.11", options), /nonempty regular file/);
+    await rm(join(directory, intent.notes), { recursive: true });
     commands.length = 0;
     ancestryValid = false;
     await rejects(prepareRelease("", "v0.0.11", options), /not an ancestor/);

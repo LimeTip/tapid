@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -107,7 +107,15 @@ export async function prepareRelease(requested: string, baseline: string, option
   if (!history.length) throw new Error("no commits since the baseline release");
   const files = preparationFiles(version, baseline, preparedFrom, plan.packages, history);
   await mkdir(join(directory, dirname(files.notesPath)), { recursive: true });
-  await writeFile(join(directory, files.notesPath), files.notes, { flag: "wx" });
+  const notesPath = join(directory, files.notesPath);
+  try {
+    await writeFile(notesPath, files.notes, { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (!(await lstat(notesPath)).isFile() || !(await readFile(notesPath, "utf8")).trim()) {
+      throw new Error(`existing release notes must be a nonempty regular file: ${files.notesPath}`);
+    }
+  }
   await writeFile(join(directory, "docs/releases/intent.json"), files.intent);
   await writeFile(join(directory, "release-preparation.json"), `${JSON.stringify({ version, baseline, packages: plan.packages, notes: files.notesPath }, null, 2)}\n`);
   console.log(`Prepared Tapid ${version}: ${plan.packages.length} package versions`);
