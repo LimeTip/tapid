@@ -66,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -265,7 +265,9 @@ jobs:
             shell: bash
           - os: macos-latest
             shell: bash
-      # Native Windows execution is validated only on Windows 11 VM 126.
+          - os: windows-latest
+            shell: pwsh
+      # Hosted Windows CI complements native Windows 11 acceptance on VM 126.
     defaults:
       run:
         shell: ${{ matrix.shell }}
@@ -288,6 +290,10 @@ jobs:
       - name: Verify install and lifecycle suppression; reject unsupported Linux containment
         if: runner.os == 'Linux'
         run: node tests/fixtures/validate_consumer_project.js
+      - name: Verify native read-only child, forwarding and exit codes (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: node tests/fixtures/validate_consumer_project.js
       - name: Verify native Restricted child, forwarding and exit codes (macOS)
         if: runner.os == 'macOS'
         run: node tests/fixtures/validate_consumer_project.js
@@ -304,7 +310,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     env:
       RELEASE_TAG: v0.0.10
       RELEASE_SOURCE_SHA: 3d5f97c91f08b64a5ace26c2004081d57b88fee2
