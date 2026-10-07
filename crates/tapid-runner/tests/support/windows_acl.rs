@@ -5,7 +5,7 @@ pub fn read_acl(path: &std::path::Path) -> (u16, Vec<u8>) {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
-    use windows_sys::Win32::Security::{GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION};
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl};
     let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut dacl = std::ptr::null_mut();
     let mut descriptor = std::ptr::null_mut();
@@ -44,7 +44,7 @@ pub fn initialize_inheritance(root: &std::path::Path) {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Foundation::LocalFree;
         use windows_sys::Win32::Security::Authorization::{
-            GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
+            GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
         };
         use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
         let wide: Vec<_> = root.as_os_str().encode_wide().chain(Some(0)).collect();

@@ -8,8 +8,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tapid_runner::{
-    execute, AssuranceLevel, CleanupConfidence, ExecutionErrorCategory, ExecutionLimits,
-    ExecutionRequest, FilesystemPolicy, SandboxMode, SandboxPolicy, Termination,
+    AssuranceLevel, CleanupConfidence, ExecutionErrorCategory, ExecutionLimits, ExecutionRequest,
+    FilesystemPolicy, SandboxMode, SandboxPolicy, Termination, execute,
 };
 
 #[path = "support/windows_acl.rs"]
@@ -413,7 +413,7 @@ fn windows_ctrl_c_helper() {
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::Console::{
-        GenerateConsoleCtrlEvent, GetConsoleProcessList, GetConsoleWindow, CTRL_C_EVENT,
+        CTRL_C_EVENT, GenerateConsoleCtrlEvent, GetConsoleProcessList, GetConsoleWindow,
     };
 
     let started = Instant::now();
