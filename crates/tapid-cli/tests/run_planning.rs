@@ -42,6 +42,31 @@ fn project() -> (PathBuf, PathBuf) {
     (path, runtime)
 }
 
+fn expected_search_directories(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+        let mut buffer = vec![0u16; 32_768];
+        // SAFETY: the buffer is writable and its capacity fits the API's u32 size.
+        let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        assert!(length > 0 && (length as usize) < buffer.len());
+        let system = fs::canonicalize(PathBuf::from(OsString::from_wide(
+            &buffer[..length as usize],
+        )))
+        .unwrap();
+        let mut paths = paths;
+        if !paths.contains(&system) {
+            paths.push(system);
+        }
+        paths
+    }
+    #[cfg(not(windows))]
+    {
+        paths
+    }
+}
+
 #[test]
 fn prepared_request_uses_npm_shell_exact_arguments_and_controlled_search_directories() {
     let (project, runtime) = project();
@@ -94,10 +119,10 @@ fn prepared_request_uses_npm_shell_exact_arguments_and_controlled_search_directo
     #[cfg(not(target_os = "macos"))]
     assert_eq!(
         prepared.executable_search_directories(),
-        [
+        expected_search_directories(vec![
             fs::canonicalize(runtime.parent().unwrap()).unwrap(),
             fs::canonicalize(project.join("node_modules/.bin")).unwrap(),
-        ]
+        ])
     );
     #[cfg(target_os = "macos")]
     {
@@ -158,7 +183,7 @@ fn dependency_free_project_without_managed_bin_is_accepted() {
 
     assert_eq!(
         prepared.executable_search_directories(),
-        [fs::canonicalize(runtime.parent().unwrap()).unwrap()]
+        expected_search_directories(vec![fs::canonicalize(runtime.parent().unwrap()).unwrap()])
     );
     fs::remove_dir_all(project).unwrap();
 }
