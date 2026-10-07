@@ -229,10 +229,10 @@ impl<'a> WindowsExecutionLifecycle<'a> {
         }
         self.child.take();
         self.job.take(); // The tree is confirmed empty before the final kernel-owned handle closes.
-        if let Some(capture) = self.capture.take() {
-            if let Err(error) = capture.finish() {
-                cleanup_error.get_or_insert(error);
-            }
+        if let Some(capture) = self.capture.take()
+            && let Err(error) = capture.finish()
+        {
+            cleanup_error.get_or_insert(error);
         }
         if let Some(grants) = self.grants.as_mut() {
             match grants.restore() {
