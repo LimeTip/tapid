@@ -6,7 +6,8 @@ use super::*;
 pub(super) trait ExecutionLifecycle {
     /// Create the native process and drive it through completion.
     fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError>;
-    fn cleanup(&mut self) -> CompletionEvidence;
+    /// Report checked cleanup evidence, or no evidence if no process was created.
+    fn cleanup(&mut self) -> Result<Option<CompletionEvidence>, ExecutionError>;
 }
 
 /// A preparation failure raised before an owned attempt can create a process.
@@ -19,9 +20,8 @@ impl From<ExecutionError> for PreparationError {
 }
 
 /// Owns the lifecycle before native process creation. Explicit finish validates every returned
-/// disposition and cleans up every execution error. Drop can only attempt fallback cleanup:
-/// because it cannot report validation errors, invalid evidence panics instead of being represented
-/// as a checked disposition.
+/// disposition and checks cleanup after every execution error. Drop makes a best-effort cleanup
+/// attempt because it cannot report a cleanup failure to the caller.
 pub(super) struct OwnedExecutionAttempt<'a> {
     preflight: &'a ValidatedPreflight,
     lifecycle: Box<dyn ExecutionLifecycle + 'a>,
@@ -55,12 +55,22 @@ impl<'a> OwnedExecutionAttempt<'a> {
     }
 
     fn checked_fallback(&mut self, error: ExecutionError) -> ExecutionError {
-        // Prevent a validation panic from causing a second cleanup attempt during unwinding.
+        // Prevent a panic during cleanup validation from causing a second cleanup attempt while
+        // unwinding this explicit finish path.
         self.finished = true;
-        let completion = self.lifecycle.cleanup();
-        validate_completion_for_preflight(&completion, self.preflight)
-            .expect("post-spawn fallback cleanup did not satisfy the checked contract");
-        error.with_completion(completion)
+        match self.lifecycle.cleanup() {
+            Ok(None) => error,
+            Ok(Some(completion)) => {
+                if let Err(cleanup_error) =
+                    validate_completion_for_preflight(&completion, self.preflight)
+                {
+                    cleanup_failed(error, cleanup_error)
+                } else {
+                    error.with_completion(completion)
+                }
+            }
+            Err(cleanup_error) => cleanup_failed(error, cleanup_error),
+        }
     }
 }
 
@@ -69,11 +79,21 @@ impl Drop for OwnedExecutionAttempt<'_> {
         if self.finished {
             return;
         }
-        let completion = self.lifecycle.cleanup();
-        validate_completion_for_preflight(&completion, self.preflight)
-            .expect("dropped post-spawn attempt did not satisfy the checked cleanup contract");
+        // Drop cannot report cleanup errors to the caller. Explicit finish handles and returns
+        // them; this fallback must not panic or forge completion evidence.
+        let _ = self.lifecycle.cleanup();
         self.finished = true;
     }
+}
+
+fn cleanup_failed(error: ExecutionError, cleanup_error: ExecutionError) -> ExecutionError {
+    ExecutionError::new(
+        error.category,
+        format!(
+            "{}; cleanup could not be confirmed: {}",
+            error.message, cleanup_error.message
+        ),
+    )
 }
 
 pub(super) fn validate_completion_for_preflight(

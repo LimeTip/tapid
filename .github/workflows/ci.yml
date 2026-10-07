@@ -20,16 +20,27 @@ jobs:
   news-site-consumer:
     name: News-site Tapid scripts (Ubuntu 24.04)
     runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:24.04
+      options: --cap-add SYS_ADMIN --security-opt seccomp=unconfined
     env:
       NEXT_TELEMETRY_DISABLED: '1'
-      TMPDIR: ${{ github.workspace }}/examples/news-site-consumer/.tmp
+      # Keep bootstrap actions working before checkout creates project-local paths.
+      TMPDIR: /tmp
     steps:
+      - name: Install container dependencies
+        run: |
+          mkdir -p "$TMPDIR"
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git libssl-dev pkg-config python3 tar xz-utils
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
       - name: Build Tapid CLI
         run: cargo build --locked --bin tapid
       - name: Install Node.js 22
@@ -77,14 +88,16 @@ jobs:
           if-no-files-found: warn
       - name: Build and test via Tapid
         run: |
-          sudo -n -- env PATH="$PATH" TMPDIR="$TMPDIR" NEXT_TELEMETRY_DISABLED=1 \
+          # Node/libuv reads the current process's resident memory from /proc/self/statm.
+          # Opt in explicitly; the runner exposes only its private read-only procfs view.
+          env PATH="$PATH" TMPDIR="$TMPDIR" NEXT_TELEMETRY_DISABLED=1 \
             target/debug/tapid run build --allow-process-memory-stats --project-dir examples/news-site-consumer
-          target/debug/tapid run test --project-dir examples/news-site-consumer
+          target/debug/tapid run test --allow-process-memory-stats --project-dir examples/news-site-consumer
       - name: Start via Tapid and assert acceptance marker
         shell: bash
         run: |
           set -euo pipefail
-          target/debug/tapid run start --project-dir examples/news-site-consumer > "$RUNNER_TEMP/news-site-consumer.log" 2>&1 &
+          target/debug/tapid run start --allow-process-memory-stats --project-dir examples/news-site-consumer > "$RUNNER_TEMP/news-site-consumer.log" 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
           for _ in {1..30}; do
@@ -112,6 +125,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: 1.99.0
           components: rustfmt, clippy
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -131,7 +145,23 @@ jobs:
       - name: Verify native Windows shim materialization collision guard
         if: runner.os == 'Windows'
         run: cargo test -p tapid --lib --locked native_windows_shim_materialization_rejects_collisions_before_writes
+      - name: Run tests in namespace-capable Ubuntu container
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          node_bin="$(dirname "$(command -v node)")"
+          docker run --rm --platform linux/amd64 \
+            --cap-add SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TOOL_CACHE:$RUNNER_TOOL_CACHE:ro" \
+            -e "RUSTFLAGS=$RUSTFLAGS" \
+            -e "PATH=$node_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            -w /work \
+            ubuntu:24.04 \
+            /work/scripts/ci/run-linux-namespace-checks.sh test
       - name: Run tests
+        if: runner.os != 'Linux'
         run: cargo test --workspace --all-features --locked
       - name: Install Python for development and documentation tests
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -201,14 +231,33 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
+      - name: Install Node.js for runner tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Install cargo-nextest
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
           tool: cargo-nextest
-      - name: Run tests with nextest
-        run: cargo nextest run --workspace --all-features --locked
+      - name: Run tests with nextest in namespace-capable Ubuntu container
+        shell: bash
+        run: |
+          node_bin="$(dirname "$(command -v node)")"
+          docker run --rm --platform linux/amd64 \
+            --cap-add SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$HOME/.cargo/bin/cargo-nextest:/usr/local/bin/cargo-nextest:ro" \
+            -v "$RUNNER_TOOL_CACHE:$RUNNER_TOOL_CACHE:ro" \
+            -e "RUSTFLAGS=$RUSTFLAGS" \
+            -e "PATH=$node_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            -w /work \
+            ubuntu:24.04 \
+            /work/scripts/ci/run-linux-namespace-checks.sh nextest
 
   coverage:
     name: Coverage (Ubuntu)
@@ -220,14 +269,33 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
+      - name: Install Node.js for runner tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
           tool: cargo-llvm-cov
-      - name: Generate LCOV coverage report
-        run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+      - name: Generate LCOV coverage report in namespace-capable Ubuntu container
+        shell: bash
+        run: |
+          node_bin="$(dirname "$(command -v node)")"
+          docker run --rm --platform linux/amd64 \
+            --cap-add SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$HOME/.cargo/bin/cargo-llvm-cov:/usr/local/bin/cargo-llvm-cov:ro" \
+            -v "$RUNNER_TOOL_CACHE:$RUNNER_TOOL_CACHE:ro" \
+            -e "RUSTFLAGS=$RUSTFLAGS" \
+            -e "PATH=$node_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            -w /work \
+            ubuntu:24.04 \
+            /work/scripts/ci/run-linux-namespace-checks.sh coverage
       - name: Upload LCOV coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -257,6 +325,7 @@ jobs:
       - name: Install Rust toolchain and release target
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: 1.99.0
           targets: ${{ matrix.target }}
       - name: Build release target
         shell: bash
@@ -298,6 +367,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
       - name: Install Node.js fixture runtime
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -444,6 +515,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Install cargo-deny
@@ -470,6 +543,8 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
       - name: Build native verifier
         run: cargo build --locked --bin tapid
       - name: Install and reject archive fixtures
@@ -612,6 +687,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.99.0
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Validate workspace metadata

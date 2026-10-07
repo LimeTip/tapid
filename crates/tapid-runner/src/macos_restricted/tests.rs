@@ -687,6 +687,7 @@ fn real_pipe_protocol_failures_have_no_receipt_and_reap_the_helper() {
             process_group: None,
             cleanup_attempted: false,
             cleanup_observed: false,
+            process_started: false,
         };
         let start = Instant::now();
         let result = lifecycle.execute();
@@ -702,8 +703,11 @@ fn real_pipe_protocol_failures_have_no_receipt_and_reap_the_helper() {
             "{fault} was unbounded"
         );
         if fault != "valid" {
+            let completion = cleanup
+                .expect("fallback cleanup should succeed")
+                .expect("a started child should yield completion evidence");
             assert_eq!(
-                cleanup.cleanup_confidence(),
+                completion.cleanup_confidence(),
                 CleanupConfidence::BestEffortObserved
             );
         }
@@ -881,13 +885,14 @@ fn prepared_launch_revalidates_identities_and_cleans_failed_attempts() {
                     process_group: None,
                     cleanup_attempted: false,
                     cleanup_observed: false,
+                    process_started: false,
                 }),
             )
             .finish();
             let error = result.expect_err("failed launch issued receipt");
             assert!(
-                error.completion().is_some(),
-                "owned attempt did not clean up"
+                error.completion().is_none(),
+                "pre-spawn failure fabricated completion evidence"
             );
         }
         assert!(!root.join("marker").exists());
@@ -1006,6 +1011,7 @@ fn malformed_native_profile_fails_before_target_marker() {
             process_group: None,
             cleanup_attempted: false,
             cleanup_observed: false,
+            process_started: false,
         }),
     )
     .finish();
@@ -1070,9 +1076,10 @@ fn death_after_profile_application_without_exec_never_issues_a_receipt() {
         process_group: None,
         cleanup_attempted: false,
         cleanup_observed: false,
+        process_started: false,
     };
     let result = lifecycle.execute();
-    lifecycle.cleanup();
+    lifecycle.cleanup().unwrap();
     assert!(result.is_err(), "death before exec produced a receipt");
     assert_eq!(
         result.unwrap_err().category(),
@@ -1447,6 +1454,7 @@ fn group_signal_is_never_attempted_after_leader_is_reaped() {
         process_group: Some(i32::MAX),
         cleanup_attempted: false,
         cleanup_observed: false,
+        process_started: false,
     };
     lifecycle.kill_group();
     assert!(!lifecycle.cleanup_attempted);

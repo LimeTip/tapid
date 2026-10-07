@@ -124,6 +124,7 @@ impl ExecutionBackend for PlatformBackend {
                 process_group: None,
                 cleanup_attempted: false,
                 cleanup_observed: false,
+                process_started: false,
             }),
         ))
     }
@@ -1175,6 +1176,7 @@ struct MacosLifecycle<'a> {
     process_group: Option<i32>,
     cleanup_attempted: bool,
     cleanup_observed: bool,
+    process_started: bool,
 }
 
 impl ExecutionLifecycle for MacosLifecycle<'_> {
@@ -1194,6 +1196,7 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
         let pid = child.id();
         self.process_group = i32::try_from(pid).ok();
         self.child = Some(child);
+        self.process_started = true;
         confirmation.confirm(
             pid,
             self.request
@@ -1347,7 +1350,10 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
         )?))
     }
 
-    fn cleanup(&mut self) -> CompletionEvidence {
+    fn cleanup(&mut self) -> Result<Option<CompletionEvidence>, ExecutionError> {
+        if !self.process_started {
+            return Ok(None);
+        }
         self.kill_group();
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
@@ -1364,7 +1370,7 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
                 CleanupConfidence::NotGuaranteed
             },
         )
-        .expect("Restricted completion has no required tree dimensions")
+        .map(Some)
     }
 }
 

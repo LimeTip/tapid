@@ -46,8 +46,57 @@ fn restricted(_root: &std::path::Path, write: Vec<String>, network: bool) -> San
     .unwrap()
 }
 
+fn fails_closed_for_unavailable_kernel_enforcement(request: &ExecutionRequest) -> bool {
+    let support = containment_support(request);
+    if support.is_supported() {
+        return false;
+    }
+    if std::env::var_os("TAPID_REQUIRE_KERNEL_ENFORCEMENT_TESTS").is_some() {
+        panic!(
+            "required test lane lacks positive Linux kernel enforcement: {:?}",
+            support.unsupported_reason()
+        );
+    }
+    assert!(
+        matches!(
+            support.unsupported_reason(),
+            Some(
+                "Landlock ABI 3 or newer is unavailable"
+                    | "kernel cannot install the required seccomp filter"
+            )
+        ),
+        "unexpected unsupported reason: {:?}",
+        support.unsupported_reason()
+    );
+    let error =
+        execute(request).expect_err("unsupported kernel enforcement must fail before spawn");
+    assert_eq!(
+        error.category(),
+        ExecutionErrorCategory::UnsupportedContainment
+    );
+    true
+}
+
+#[test]
+fn linux_evidence_limitations_fit_backend_metadata_bound() {
+    for limitation in LIMITATIONS {
+        assert!(
+            limitation.len() <= super::super::MAX_BACKEND_IDENTITY_BYTES,
+            "Linux evidence limitation is {} bytes; maximum is {}: {limitation}",
+            limitation.len(),
+            super::super::MAX_BACKEND_IDENTITY_BYTES,
+        );
+    }
+}
+
 #[test]
 fn network_denial_preserves_unix_ipc_but_blocks_inet_socket_creation() {
+    let root = root();
+    let request = request(&root, "exit 0", restricted(&root, vec![], true));
+    if fails_closed_for_unavailable_kernel_enforcement(&request) {
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
     let filter = seccomp_filter(false, true).unwrap();
     let pid = unsafe { libc::fork() };
     assert!(pid >= 0, "fork failed: {}", io::Error::last_os_error());
@@ -118,21 +167,31 @@ fn network_denial_preserves_unix_ipc_but_blocks_inet_socket_creation() {
 #[test]
 fn root_namespace_launch_does_not_create_an_unprivileged_user_namespace() {
     assert_eq!(
-        unshare_namespace_arguments(true),
+        unshare_namespace_arguments(false),
         [
             "--mount",
             "--pid",
             "--fork",
             "--kill-child",
-            "--mount-proc",
             "--propagation",
-            "private",
+            "unchanged",
             "--",
         ]
     );
     assert_eq!(
-        &unshare_namespace_arguments(false)[..2],
+        &unshare_namespace_arguments(true)[..2],
         &["--user", "--map-root-user"]
+    );
+}
+
+#[test]
+fn private_proc_namespace_does_not_delegate_mounting_to_unshare() {
+    let arguments = unshare_namespace_arguments(false);
+    assert!(!arguments.contains(&"--mount-proc"));
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["--propagation", "unchanged"])
     );
 }
 
@@ -146,6 +205,10 @@ fn default_policy_keeps_current_process_memory_stats_denied() {
         .policy(restricted(&root, vec![], false))
         .build()
         .unwrap();
+    if fails_closed_for_unavailable_kernel_enforcement(&req) {
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
     let outcome = execute(&req).unwrap();
     assert_eq!(outcome.termination(), &Termination::Exited(1));
     assert!(!outcome.process_memory_stats_hint());
@@ -224,6 +287,10 @@ fn runner_streams_and_detects_libuv_process_memory_stats_denial() {
         "printf '%s\\n' '[Error: EACCES: permission denied, uv_resident_set_memory]' >&2; exit 9",
         restricted(&root, vec![], false),
     );
+    if fails_closed_for_unavailable_kernel_enforcement(&req) {
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
     let outcome = execute(&req).unwrap();
     assert_eq!(outcome.termination(), &Termination::Exited(9));
     assert!(outcome.process_memory_stats_hint());
@@ -238,6 +305,10 @@ fn restricted_backend_runs_real_child_and_issues_receipt() {
         "printf allowed > marker",
         restricted(&root, vec![".".into()], false),
     );
+    if fails_closed_for_unavailable_kernel_enforcement(&req) {
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
     let outcome = execute(&req).unwrap();
     assert_eq!(outcome.termination(), &Termination::Exited(0));
     assert_eq!(fs::read(root.join("marker")).unwrap(), b"allowed");
@@ -274,6 +345,11 @@ fn restricted_backend_denies_write_outside_policy() {
     let outside = root.with_extension("outside");
     let command = format!("printf denied > '{}'", outside.display());
     let req = request(&root, &command, restricted(&root, vec![], false));
+    if fails_closed_for_unavailable_kernel_enforcement(&req) {
+        assert!(!outside.exists());
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
     let outcome = execute(&req).unwrap();
     assert_ne!(outcome.termination(), &Termination::Exited(0));
     assert!(!outside.exists());

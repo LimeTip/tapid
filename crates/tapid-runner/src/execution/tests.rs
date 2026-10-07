@@ -692,7 +692,7 @@ fn disabled_mode_makes_zero_prepare_attempts() {
 }
 
 #[test]
-fn process_creation_error_cannot_escape_owned_cleanup() {
+fn process_creation_error_before_child_start_has_no_completion_evidence() {
     struct Backend {
         process_creations: std::rc::Rc<std::cell::Cell<usize>>,
         cleanup_checks: std::rc::Rc<std::cell::Cell<usize>>,
@@ -700,19 +700,18 @@ fn process_creation_error_cannot_escape_owned_cleanup() {
     struct Lifecycle {
         process_creations: std::rc::Rc<std::cell::Cell<usize>>,
         cleanup_checks: std::rc::Rc<std::cell::Cell<usize>>,
-        cleanup_completion: CompletionEvidence,
     }
     impl ExecutionLifecycle for Lifecycle {
         fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError> {
             self.process_creations.set(self.process_creations.get() + 1);
             Err(ExecutionError::new(
                 ExecutionErrorCategory::Spawn,
-                "native process creation failed after creating a child",
+                "native process creation failed before creating a child",
             ))
         }
-        fn cleanup(&mut self) -> CompletionEvidence {
+        fn cleanup(&mut self) -> Result<Option<CompletionEvidence>, ExecutionError> {
             self.cleanup_checks.set(self.cleanup_checks.get() + 1);
-            self.cleanup_completion.clone()
+            Ok(None)
         }
     }
     impl ExecutionBackend for Backend {
@@ -730,7 +729,6 @@ fn process_creation_error_cannot_escape_owned_cleanup() {
                 Box::new(Lifecycle {
                     process_creations: self.process_creations.clone(),
                     cleanup_checks: self.cleanup_checks.clone(),
-                    cleanup_completion: completion_for(preflight),
                 }),
             ))
         }
@@ -754,12 +752,14 @@ fn process_creation_error_cannot_escape_owned_cleanup() {
     assert_eq!(error.category(), ExecutionErrorCategory::Spawn);
     assert_eq!(process_creations.get(), 1);
     assert_eq!(cleanup_checks.get(), 1);
+    assert!(error.completion().is_none());
 }
 
 #[test]
 fn post_spawn_failure_returns_only_after_checked_cleanup() {
     struct Backend {
         cleanup_checks: std::rc::Rc<std::cell::Cell<usize>>,
+        cleanup_succeeds: bool,
     }
     struct Lifecycle {
         cleanup_completion: Option<CompletionEvidence>,
@@ -772,9 +772,14 @@ fn post_spawn_failure_returns_only_after_checked_cleanup() {
                 "wait failed",
             ))
         }
-        fn cleanup(&mut self) -> CompletionEvidence {
+        fn cleanup(&mut self) -> Result<Option<CompletionEvidence>, ExecutionError> {
             self.cleanup_checks.set(self.cleanup_checks.get() + 1);
-            self.cleanup_completion.take().unwrap()
+            self.cleanup_completion.take().map(Some).ok_or_else(|| {
+                ExecutionError::new(
+                    ExecutionErrorCategory::Internal,
+                    "test cleanup could not be confirmed",
+                )
+            })
         }
     }
     impl ExecutionBackend for Backend {
@@ -800,7 +805,7 @@ fn post_spawn_failure_returns_only_after_checked_cleanup() {
             Ok(OwnedExecutionAttempt::new(
                 preflight,
                 Box::new(Lifecycle {
-                    cleanup_completion: Some(cleanup_completion),
+                    cleanup_completion: self.cleanup_succeeds.then_some(cleanup_completion),
                     cleanup_checks: self.cleanup_checks.clone(),
                 }),
             ))
@@ -816,6 +821,7 @@ fn post_spawn_failure_returns_only_after_checked_cleanup() {
         &request,
         &Backend {
             cleanup_checks: cleanup_checks.clone(),
+            cleanup_succeeds: true,
         },
     )
     .unwrap_err();
@@ -826,6 +832,23 @@ fn post_spawn_failure_returns_only_after_checked_cleanup() {
         error.completion().unwrap().cleanup_confidence(),
         CleanupConfidence::KernelOwnedComplete
     );
+
+    let cleanup_error = execute_with_backend(
+        &request,
+        &Backend {
+            cleanup_checks: cleanup_checks.clone(),
+            cleanup_succeeds: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(cleanup_error.category(), ExecutionErrorCategory::Spawn);
+    assert!(cleanup_error.completion().is_none());
+    assert!(
+        cleanup_error
+            .to_string()
+            .contains("cleanup could not be confirmed")
+    );
+    assert_eq!(cleanup_checks.get(), 2);
 }
 
 #[test]
@@ -972,8 +995,8 @@ impl ExecutionLifecycle for FinishedLifecycle {
         self.result.take().expect("test lifecycle finishes once")
     }
 
-    fn cleanup(&mut self) -> CompletionEvidence {
-        self.cleanup.clone()
+    fn cleanup(&mut self) -> Result<Option<CompletionEvidence>, ExecutionError> {
+        Ok(Some(self.cleanup.clone()))
     }
 }
 

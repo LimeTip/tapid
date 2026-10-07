@@ -4113,19 +4113,37 @@ fn run_prints_libuv_process_memory_opt_in_hint_once() {
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(19), "{stderr}");
-    assert_eq!(stderr.matches("RUN_MARKER").count(), 1, "{stderr}");
-    assert_eq!(
-        stderr
-            .matches("retry with --allow-process-memory-stats")
-            .count(),
-        1,
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("aliases: --allow-memory-read, --allow-procfs"),
-        "{stderr}"
-    );
+    if stderr.contains("Landlock ABI 3 or newer is unavailable")
+        || stderr.contains("kernel cannot install the required seccomp filter")
+    {
+        // Some permitted container kernels lack Landlock or seccomp-filter support.
+        // In that case the runner must reject before starting the script rather than claim
+        // containment or emit a runtime-derived memory-stats hint.
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("unsupported-containment"), "{stderr}");
+        assert_eq!(stderr.matches("RUN_MARKER").count(), 0, "{stderr}");
+        assert_eq!(
+            stderr
+                .matches("retry with --allow-process-memory-stats")
+                .count(),
+            0,
+            "{stderr}"
+        );
+    } else {
+        assert_eq!(output.status.code(), Some(19), "{stderr}");
+        assert_eq!(stderr.matches("RUN_MARKER").count(), 1, "{stderr}");
+        assert_eq!(
+            stderr
+                .matches("retry with --allow-process-memory-stats")
+                .count(),
+            1,
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("aliases: --allow-memory-read, --allow-procfs"),
+            "{stderr}"
+        );
+    }
     cleanup(dir);
 }
 
@@ -4245,7 +4263,11 @@ fn run_without_runtime_flag_discovers_node_then_reaches_sandbox_preflight() {
         r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
     )
     .unwrap();
-    fs::write(dir.join("tapid.toml"), "[run.scripts.dev]\n").unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[run.scripts.dev]\nmax_memory_bytes = 1\n",
+    )
+    .unwrap();
     let runtime_dir = dir.join("host-runtime");
     fs::create_dir(&runtime_dir).unwrap();
     let runtime = runtime_dir.join(if cfg!(windows) { "node.exe" } else { "node" });
@@ -4287,7 +4309,11 @@ fn run_preserves_non_utf8_forwarded_argument_through_cli_boundary() {
         r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"exit 0"}}"#,
     )
     .unwrap();
-    fs::write(dir.join("tapid.toml"), "[run.scripts.dev]\n").unwrap();
+    fs::write(
+        dir.join("tapid.toml"),
+        "[run.scripts.dev]\nmax_memory_bytes = 1\n",
+    )
+    .unwrap();
     let runtime = dir.join("node");
     fs::copy(env!("CARGO_BIN_EXE_tapid"), &runtime).unwrap();
     let bad = std::ffi::OsString::from_vec(b"bad-\xff-arg".to_vec());
@@ -4407,7 +4433,7 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
     .unwrap();
     fs::write(
         dir.join("tapid.toml"),
-        "[run.scripts.dev]\nenvironment = [\"SECRET_TOKEN\"]\n",
+        "[run.scripts.dev]\nenvironment = [\"SECRET_TOKEN\"]\nmax_memory_bytes = 1\n",
     )
     .unwrap();
     let secret = "tapid-super-secret-value";
@@ -4427,6 +4453,7 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
         ])
         .current_dir(&dir)
         .env("SECRET_TOKEN", secret)
+        .env_remove("TAPID_CGROUP_ROOT")
         .output()
         .unwrap();
 
