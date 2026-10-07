@@ -76,7 +76,6 @@ pub struct WindowsPathAcl {
     restored: bool,
     changed: bool,
     appcontainer_sid: Box<[u32]>,
-    parent_grants: Vec<WindowsPathAcl>,
 }
 
 impl WindowsPathAcl {
@@ -105,102 +104,18 @@ impl WindowsPathAcl {
         kind: FilesystemGrantKind,
         allow_execute: bool,
     ) -> Result<Self, ExecutionError> {
-        let mut parent_grants = Vec::new();
         let _transaction = lock_acl_mutations()?;
-        let system_root = std::env::var_os("SystemRoot")
-            .ok_or_else(|| unsupported_acl("resolve SystemRoot before parent ACL changes", 2))?;
-        let system_root = std::fs::canonicalize(system_root).map_err(|error| {
-            unsupported_acl(
-                "canonicalize SystemRoot before parent ACL changes",
-                error.raw_os_error().unwrap_or(1) as u32,
-            )
-        })?;
-        let mut parent = path.parent().map(std::path::Path::to_path_buf);
-        while let Some(directory) = parent {
-            // The volume root is not user-writable. Native AppContainer probes also show that
-            // declared descendants remain accessible without parent ACEs, so never modify shared
-            // SystemRoot DACLs such as the default SystemTemp directory.
-            if directory.parent().is_none() {
-                break;
-            }
-            let canonical_directory = std::fs::canonicalize(&directory).map_err(|error| {
-                unsupported_acl(
-                    "canonicalize parent directory before ACL changes",
-                    error.raw_os_error().unwrap_or(1) as u32,
-                )
-            })?;
-            if canonical_directory.starts_with(&system_root)
-                || !Self::parent_dacl_is_writable(&directory)?
-            {
-                break;
-            }
-            trace_windows_stage("acl: parent traversal grant start");
-            parent_grants.push(Self::grant_parent_traversal_unlocked(&directory, sid)?);
-            trace_windows_stage("acl: parent traversal grant complete");
-            parent = directory
-                .parent()
-                .filter(|ancestor| *ancestor != directory)
-                .map(std::path::Path::to_path_buf);
-        }
+        // Existing AppContainer traversal semantics suffice for declared targets; inaccessible
+        // targets remain denied. Do not add implicit ancestor traversal ACEs: SetSecurityInfo
+        // reapplies all existing inheritable ACEs throughout the descendant tree even when our
+        // new ACE is non-inheriting. On shared runtime/project ancestors this can traverse the
+        // entire runner workspace on grant and cleanup. Restrict every DACL mutation to the
+        // explicitly declared target instead.
+        // https://learn.microsoft.com/en-us/windows/win32/secauthz/automatic-propagation-of-inheritable-aces
         trace_windows_stage("acl: target grant start");
-        let mut grant = Self::grant_inner(path, sid, access, kind, false, allow_execute)?;
+        let grant = Self::grant_inner(path, sid, access, kind, allow_execute)?;
         trace_windows_stage("acl: target grant complete");
-        grant.parent_grants = parent_grants;
         Ok(grant)
-    }
-
-    fn parent_dacl_is_writable(path: &std::path::Path) -> Result<bool, ExecutionError> {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-        use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
-        };
-
-        let wide = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        // SAFETY: wide is NUL-terminated, and backup semantics permits opening a directory.
-        let handle = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                READ_CONTROL | WRITE_DAC,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
-                0,
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(5) {
-                return Ok(false);
-            }
-            return Err(unsupported_acl(
-                "probe parent directory DACL writability",
-                error.raw_os_error().unwrap_or(1) as u32,
-            ));
-        }
-        // SAFETY: handle was returned successfully by CreateFileW.
-        unsafe { CloseHandle(handle) };
-        Ok(true)
-    }
-
-    fn grant_parent_traversal_unlocked(
-        path: &std::path::Path,
-        sid: windows_sys::Win32::Foundation::PSID,
-    ) -> Result<Self, ExecutionError> {
-        Self::grant_inner(
-            path,
-            sid,
-            FilesystemAccess::ReadMetadata,
-            FilesystemGrantKind::ExactDirectory,
-            true,
-            false,
-        )
     }
 
     fn grant_inner(
@@ -208,7 +123,6 @@ impl WindowsPathAcl {
         sid: windows_sys::Win32::Foundation::PSID,
         access: FilesystemAccess,
         kind: FilesystemGrantKind,
-        directory_traversal_only: bool,
         allow_execute: bool,
     ) -> Result<Self, ExecutionError> {
         use std::os::windows::ffi::OsStrExt;
@@ -253,9 +167,7 @@ impl WindowsPathAcl {
             }
             FilesystemGrantKind::CharacterDevice => false,
         };
-        if !kind_matches
-            || (directory_traversal_only && kind != FilesystemGrantKind::ExactDirectory)
-        {
+        if !kind_matches {
             return Err(unsupported_acl(
                 "filesystem grant target kind is unsupported or changed",
                 87,
@@ -352,29 +264,24 @@ impl WindowsPathAcl {
                 restored: false,
                 changed: false,
                 appcontainer_sid,
-                parent_grants: Vec::new(),
             });
         }
 
-        let root_permissions = if directory_traversal_only {
-            FILE_EXECUTE | FILE_READ_ATTRIBUTES
-        } else {
-            match access {
-                FilesystemAccess::ReadData => {
-                    if is_directory {
-                        FILE_LIST_DIRECTORY
-                    } else {
-                        FILE_READ_DATA
-                    }
+        let root_permissions = match access {
+            FilesystemAccess::ReadData => {
+                if is_directory {
+                    FILE_LIST_DIRECTORY
+                } else {
+                    FILE_READ_DATA
                 }
-                FilesystemAccess::ReadMetadata => FILE_READ_ATTRIBUTES | FILE_READ_EA,
-                FilesystemAccess::Read => FILE_GENERIC_READ,
-                FilesystemAccess::Write if is_directory && subtree => {
-                    FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA
-                }
-                FilesystemAccess::Write if is_directory => FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA,
-                FilesystemAccess::Write => FILE_GENERIC_WRITE,
             }
+            FilesystemAccess::ReadMetadata => FILE_READ_ATTRIBUTES | FILE_READ_EA,
+            FilesystemAccess::Read => FILE_GENERIC_READ,
+            FilesystemAccess::Write if is_directory && subtree => {
+                FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA
+            }
+            FilesystemAccess::Write if is_directory => FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA,
+            FilesystemAccess::Write => FILE_GENERIC_WRITE,
         };
         let root_permissions = if allow_execute {
             root_permissions | FILE_EXECUTE
@@ -409,7 +316,7 @@ impl WindowsPathAcl {
         } else {
             entries.push(make_entry(root_permissions, inheritance));
         }
-        if is_directory && !directory_traversal_only && !allow_execute {
+        if is_directory && !allow_execute {
             // AppContainer tokens may not have SeChangeNotifyPrivilege. Grant traversal on the
             // granted directory itself and descendant directories, without granting execute on
             // descendant files.
@@ -479,7 +386,6 @@ impl WindowsPathAcl {
             restored: false,
             changed: true,
             appcontainer_sid,
-            parent_grants: Vec::new(),
         })
     }
 
@@ -615,13 +521,6 @@ impl WindowsPathAcl {
                 }
             }
         }
-        for parent_grant in self.parent_grants.iter_mut().rev() {
-            if let Err(error) = parent_grant.restore_unlocked()
-                && restore_error.is_none()
-            {
-                restore_error = Some(error);
-            }
-        }
         if let Some(error) = restore_error {
             return Err(error);
         }
@@ -728,6 +627,98 @@ mod tests {
     use super::lock_acl_mutations;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn declared_grant_leaves_ancestor_and_sibling_dacls_unchanged() {
+        let root = std::env::temp_dir().join(format!(
+            "tapid-no-ancestor-acl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = root.join("project");
+        let sibling = root.join("unrelated");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        let child = target.join("existing.txt");
+        std::fs::write(&child, b"declared data").unwrap();
+        let read_acl = |path: &std::path::Path| {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Foundation::LocalFree;
+            use windows_sys::Win32::Security::Authorization::{
+                GetNamedSecurityInfoW, SE_FILE_OBJECT,
+            };
+            use windows_sys::Win32::Security::{
+                DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl,
+            };
+            let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let mut dacl = std::ptr::null_mut();
+            let mut descriptor = std::ptr::null_mut();
+            // SAFETY: path is NUL-terminated and all output pointers are writable.
+            let status = unsafe {
+                GetNamedSecurityInfoW(
+                    wide.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut dacl,
+                    std::ptr::null_mut(),
+                    &mut descriptor,
+                )
+            };
+            assert_eq!(status, 0, "query exact DACL");
+            assert!(!dacl.is_null(), "fixture must have a real DACL");
+            let mut control = 0;
+            let mut revision = 0;
+            // SAFETY: GetNamedSecurityInfoW owns a valid descriptor and ACL until LocalFree.
+            let (control_status, bytes) = unsafe {
+                let control_status =
+                    GetSecurityDescriptorControl(descriptor, &mut control, &mut revision);
+                let bytes = std::slice::from_raw_parts(dacl.cast::<u8>(), (*dacl).AclSize as usize)
+                    .to_vec();
+                LocalFree(descriptor);
+                (control_status, bytes)
+            };
+            assert_ne!(control_status, 0, "query DACL control bits");
+            (control, bytes)
+        };
+        let paths = [&root, &sibling, &target, &child];
+        let before: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        let mut container = crate::execution::windows_job::WindowsAppContainer::create().unwrap();
+        let started = Instant::now();
+        let mut grant = super::WindowsPathAcl::grant(
+            &target,
+            container.sid(),
+            crate::execution::FilesystemAccess::Read,
+            crate::execution::FilesystemGrantKind::DirectorySubtree,
+        )
+        .unwrap();
+        let preparation = started.elapsed();
+        let active_root = read_acl(&root);
+        let active_sibling = read_acl(&sibling);
+        let started = Instant::now();
+        grant.restore().unwrap();
+        let cleanup = started.elapsed();
+        let after: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        container.cleanup().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        eprintln!("declared grant preparation={preparation:?} cleanup={cleanup:?}");
+        assert_eq!(
+            active_root, before[0],
+            "ancestor DACL must never be rewritten"
+        );
+        assert_eq!(
+            active_sibling, before[1],
+            "sibling DACL must never be rewritten"
+        );
+        assert_eq!(
+            after, before,
+            "cleanup must restore exact target and descendant ACLs"
+        );
+    }
 
     #[test]
     fn project_grant_does_not_modify_systemtemp_ancestor() {
