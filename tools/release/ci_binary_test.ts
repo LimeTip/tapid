@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { prepare, verify } from './ci_binary.ts';
@@ -11,7 +11,8 @@ const receipts: Record<string, string> = { git: sha, cargo: 'cargo 1.90.0 (840b8
 const consumerContext = { env, readCommand: async (command: string) => receipts[command] };
 const context = { ...consumerContext, env: { ...env, CARGO_INCREMENTAL: '0' } };
 async function fixture(run: (root: string) => Promise<void>) {
-  const root = await mkdtemp(join(tmpdir(), 'tapid-ci-binary-'));
+  // Resolve platform temp aliases before the verifier's strict ancestor checks.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tapid-ci-binary-')));
   try {
     await mkdir(join(root, 'crates/tapid-cli'), { recursive: true });
     await writeFile(join(root, 'crates/tapid-cli/Cargo.toml'), '[package]\nname = "tapid"\nversion = "1.2.3"\n');
