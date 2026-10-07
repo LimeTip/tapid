@@ -8,7 +8,7 @@ Make the existing `tapid run <SCRIPT> -- <ARGS...>` workflow usable on Windows f
 
 - Windows 11 Pro x64, validated on the Proxmox Windows 11 VM.
 - Node.js 22, matching the Windows target in issue #157 and the checked-in `examples/news-site-consumer` workload.
-- No Windows Server 2025 validation or support claim. Other Windows editions/builds remain unsupported until independently validated.
+- GitHub-hosted `windows-latest` validation is enabled with explicit user approval. These Windows Server checks complement, but do not replace, native Windows 11 acceptance; they do not establish support for every Windows edition/build.
 
 ## End-to-end acceptance
 
@@ -31,7 +31,7 @@ This scope covers explicit root project scripts only. It does not enable depende
 
 ## Current status
 
-Windows `tapid run` is **not supported yet**. The existing read-only prototype and compile checks do not satisfy this scope.
+The complete Windows scope above is **not supported yet**. The source branch now implements read-only AppContainer execution and graceful Ctrl+C cancellation, validated separately from the remaining issue #157 acceptance. Write and network-enabled policies still fail closed. Historical baseline results below describe the earlier release, not the current source branch.
 
 A baseline red run was recorded on Windows 11 Pro x64 build 26300 in Proxmox VM 126 with Node `v22.6.0`. The release `tapid.exe` was built from upstream commit `fc9fa6233e03c0fe9c183e516201d737e4b70280` (SHA-256 `397380dba2c7c7691171c16667c415b0e984ce851a9bfa0fb304f09b51df1cdb`). Running `tapid run test` against the checked-in #150 fixture files failed with exit code 1 before spawning Node:
 
