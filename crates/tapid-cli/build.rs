@@ -1,5 +1,6 @@
 use std::{env, fs, path::PathBuf};
 
+/// Copies the workspace or packaged license into the build output for embedding.
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     // Cargo copies the inherited license-file into the standalone package root.

@@ -9,6 +9,7 @@ use std::{
 };
 use tapid_lockfile::Lockfile;
 
+/// Verifies exact license output with an empty environment and invalid project files.
 #[test]
 fn license_prints_complete_apache_text_without_accessing_a_project() {
     let project = tapid_test_support::TempProject::new("license").unwrap();
