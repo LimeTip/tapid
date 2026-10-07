@@ -1,5 +1,6 @@
 #![cfg(windows)]
 use super::*;
+use crate::execution::platform_backend::trace_windows_stage;
 use std::sync::{Mutex, MutexGuard};
 
 // Windows exposes no compare-and-swap DACL update; serialize Tapid's ACL transactions within this process.
@@ -133,13 +134,17 @@ impl WindowsPathAcl {
             {
                 break;
             }
+            trace_windows_stage("acl: parent traversal grant start");
             parent_grants.push(Self::grant_parent_traversal_unlocked(&directory, sid)?);
+            trace_windows_stage("acl: parent traversal grant complete");
             parent = directory
                 .parent()
                 .filter(|ancestor| *ancestor != directory)
                 .map(std::path::Path::to_path_buf);
         }
+        trace_windows_stage("acl: target grant start");
         let mut grant = Self::grant_inner(path, sid, access, kind, false, allow_execute)?;
+        trace_windows_stage("acl: target grant complete");
         grant.parent_grants = parent_grants;
         Ok(grant)
     }
@@ -566,6 +571,7 @@ impl WindowsPathAcl {
                             UNPROTECTED_DACL_SECURITY_INFORMATION
                         };
                         // SAFETY: updated_dacl is valid and the current inheritance mode is kept.
+                        trace_windows_stage("acl: DACL restoration start");
                         let restored = unsafe {
                             SetSecurityInfo(
                                 self.handle,
@@ -577,6 +583,7 @@ impl WindowsPathAcl {
                                 null_mut(),
                             )
                         };
+                        trace_windows_stage("acl: DACL restoration complete");
                         if restored != 0 {
                             restore_error = Some(unsupported_acl(
                                 "restore filesystem DACL without Tapid ACE",

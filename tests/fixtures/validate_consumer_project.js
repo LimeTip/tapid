@@ -42,7 +42,12 @@ function invoke(args, fixtureEnvironment = '1', label = JSON.stringify(args)) {
   })}\n`);
   const result = spawnSync(binary, args, {
     encoding: 'utf8',
-    env: { ...process.env, TAPID_FIXTURE: fixtureEnvironment },
+    env: {
+      ...process.env,
+      TAPID_FIXTURE: fixtureEnvironment,
+      // Host-only, opt-in stage names/timings locate native CI hangs without logging secrets.
+      ...(nativeWindows ? { TAPID_WINDOWS_STAGE_TRACE: '1' } : {}),
+    },
     timeout: 60_000,
     maxBuffer: 4 * 1024 * 1024,
     shell: false,

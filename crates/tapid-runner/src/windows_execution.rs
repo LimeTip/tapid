@@ -24,6 +24,18 @@ use std::time::Duration;
 const INTERNAL_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+// Opt-in host-side diagnostics only: never log arguments, environment values, or child output.
+pub(super) fn trace_windows_stage(stage: &str) {
+    if std::env::var_os("TAPID_WINDOWS_STAGE_TRACE").as_deref() == Some(OsStr::new("1")) {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let elapsed = START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis();
+        eprintln!("[tapid-windows-stage] {elapsed}ms {stage}");
+    }
+}
+
 fn add_node_appcontainer_options(environment: &mut std::collections::BTreeMap<OsString, OsString>) {
     const REQUIRED: [&str; 2] = ["--preserve-symlinks", "--preserve-symlinks-main"];
     let existing_key = environment
@@ -144,13 +156,17 @@ impl<'a> WindowsExecutionLifecycle<'a> {
     }
 
     fn prepare(&mut self) -> Result<(), PreparationError> {
+        trace_windows_stage("prepare: cancellation");
         self.cancellation = Some(WindowsCancellation::install_and_activate()?);
+        trace_windows_stage("prepare: AppContainer");
         self.appcontainer = Some(WindowsAppContainer::create()?);
         let appcontainer = self.appcontainer.as_ref().expect("AppContainer prepared");
+        trace_windows_stage("prepare: filesystem grants");
         self.grants = Some(WindowsFilesystemGrants::apply(
             appcontainer.sid(),
             &self.preflight.bindings.receipt().grants,
         )?);
+        trace_windows_stage("prepare: Job Object");
         self.job = Some(WindowsJob::new(
             &self.preflight.policy.limits,
             !self.request.policy().subprocess(),
@@ -176,6 +192,7 @@ impl<'a> WindowsExecutionLifecycle<'a> {
         let environment = windows_environment_block_units(&child_environment)?;
         let working_directory = process_working_directory(&self.preflight.policy.project_root)?;
         let mut pipes = WindowsStdioPipes::new()?;
+        trace_windows_stage("prepare: suspended child");
         self.child = Some(WindowsSuspendedChild::create_with_stdio(
             appcontainer,
             &application,
@@ -286,14 +303,18 @@ impl ExecutionLifecycle for WindowsExecutionLifecycle<'_> {
             .cancellation
             .as_ref()
             .expect("prepared cancellation scope");
+        trace_windows_stage("execute: resume and wait");
         let termination = child.resume_and_wait_for_status(
             job,
             timeout_ms,
             output_limit_exceeded,
             Some(cancellation),
         )?;
+        trace_windows_stage("execute: tree exited, drain output");
         let (stdout, stderr) = self.capture.take().expect("prepared capture").finish()?;
+        trace_windows_stage("execute: cleanup");
         let completion = self.cleanup_resources();
+        trace_windows_stage("execute: complete");
         if let Some(error) = self.cleanup_error.clone() {
             return Err(error.with_completion(completion));
         }
