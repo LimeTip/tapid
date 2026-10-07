@@ -211,43 +211,12 @@ jobs:
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
           tool: cargo-nextest
-      - name: Install Node.js 22 for same-SHA comparison
+      - name: Install Node.js 22 for required CLI assertions
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Record Stage 5 source and tool identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p stage5-evidence
-          jq -n --arg checkout_sha "$(git rev-parse HEAD)" --arg event_sha "$GITHUB_SHA" \
-            --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
-            --arg job "$GITHUB_JOB" --arg runner_os "$RUNNER_OS" --arg runner_arch "$RUNNER_ARCH" \
-            '{checkout_sha:$checkout_sha,event_sha:$event_sha,run_id:$run_id,run_attempt:$run_attempt,job:$job,runner_os:$runner_os,runner_arch:$runner_arch,evidence_class:"experiment-not-release-evidence"}' > stage5-evidence/identity.json
-          { rustc -Vv; cargo --version; node --version; } > stage5-evidence/tool-versions.txt
-      - name: Discover standalone nextest identities
-        run: |
-          cargo nextest --version >> stage5-evidence/tool-versions.txt
-          cargo nextest list --help > stage5-evidence/nextest-list-help.txt
-          cargo nextest run --help > stage5-evidence/nextest-run-help.txt
-          cargo nextest list --workspace --all-features --locked --message-format json > stage5-evidence/discovered.json
       - name: Run tests with nextest
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo nextest run --workspace --all-features --locked 2>&1 | tee stage5-evidence/executed.log
-      - name: Retain Stage 5 nextest evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: stage5-nextest-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            stage5-evidence/
-            target/nextest/default/stage5-junit.xml
-            target/llvm-cov-target/nextest/default/stage5-junit.xml
-          if-no-files-found: error
-          retention-days: 14
-          overwrite: false
+        run: cargo nextest run --workspace --all-features --locked
 
   coverage:
     name: Coverage (Ubuntu)
@@ -267,70 +236,12 @@ jobs:
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
           tool: cargo-llvm-cov
-      - name: Install Node.js 22 for same-SHA comparison
+      - name: Install Node.js 22 for required CLI assertions
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Record Stage 5 source and tool identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p stage5-evidence
-          jq -n --arg checkout_sha "$(git rev-parse HEAD)" --arg event_sha "$GITHUB_SHA" \
-            --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
-            --arg job "$GITHUB_JOB" --arg runner_os "$RUNNER_OS" --arg runner_arch "$RUNNER_ARCH" \
-            '{checkout_sha:$checkout_sha,event_sha:$event_sha,run_id:$run_id,run_attempt:$run_attempt,job:$job,runner_os:$runner_os,runner_arch:$runner_arch,evidence_class:"experiment-not-release-evidence"}' > stage5-evidence/identity.json
-          { rustc -Vv; cargo --version; node --version; } > stage5-evidence/tool-versions.txt
-      - name: Discover standalone coverage identities (stable libtest text)
-        run: |
-          cargo llvm-cov --version >> stage5-evidence/tool-versions.txt
-          cargo llvm-cov --help > stage5-evidence/llvm-cov-help.txt
-          cargo llvm-cov --workspace --all-features --locked --no-report -- --list > stage5-evidence/discovered-libtest.txt 2>&1
       - name: Generate LCOV coverage report
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info 2>&1 | tee stage5-evidence/executed-libtest.log
-      - name: Retain repository profile-write evidence
-        if: always()
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, shutil
-          from pathlib import Path
-          root = Path.cwd()
-          evidence = root / 'stage5-evidence'
-          evidence.mkdir(exist_ok=True)
-          profiles = []
-          for path in list(root.rglob('*.profraw')):
-              relative = path.relative_to(root)
-              if relative.parts[0] == 'stage5-evidence':
-                  continue
-              data = path.read_bytes()
-              stray = relative.parts[0] != 'target'
-              profiles.append({'path': str(relative), 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(), 'outside_target': stray})
-              if stray:
-                  destination = evidence / 'stray-profiles' / relative
-                  destination.parent.mkdir(parents=True, exist_ok=True)
-                  shutil.copyfile(path, destination)
-          (evidence / 'profile-writes.json').write_text(json.dumps({'scope': 'files surviving in checkout after execution; deleted temporary files are not observed', 'profiles': profiles}, indent=2) + '\n')
-          PY
-      - name: Export standalone source and function coverage
-        run: |
-          cargo llvm-cov report --json --output-path stage5-evidence/coverage.json
-          cp lcov.info stage5-evidence/lcov.info
-      - name: Retain Stage 5 coverage evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: stage5-coverage-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            stage5-evidence/
-            target/nextest/default/stage5-junit.xml
-            target/llvm-cov-target/nextest/default/stage5-junit.xml
-          if-no-files-found: error
-          retention-days: 14
-          overwrite: false
+        run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
       - name: Upload LCOV coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -338,106 +249,6 @@ jobs:
           path: lcov.info
           if-no-files-found: error
           retention-days: 30
-
-  # Temporary parallel experiment. Originals remain authoritative; no release consumer uses this job.
-  nextest-coverage-pilot:
-    name: Experimental nextest + coverage (Ubuntu; not release evidence)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 45
-    env:
-      TAPID_REQUIRE_NODE_ASSERTIONS: '1'
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - name: Install Rust toolchain and matching LLVM tools
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          components: llvm-tools-preview
-      - name: Cache experimental instrumented Rust build artifacts
-        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-        with:
-          shared-key: stage5-nextest-coverage-pilot
-      - name: Install nextest and coverage tools
-        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
-        with:
-          tool: cargo-nextest,cargo-llvm-cov
-      - name: Install Node.js 22 for same-SHA comparison
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22
-      - name: Record Stage 5 source and tool identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p stage5-evidence
-          jq -n --arg checkout_sha "$(git rev-parse HEAD)" --arg event_sha "$GITHUB_SHA" \
-            --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
-            --arg job "$GITHUB_JOB" --arg runner_os "$RUNNER_OS" --arg runner_arch "$RUNNER_ARCH" \
-            '{checkout_sha:$checkout_sha,event_sha:$event_sha,run_id:$run_id,run_attempt:$run_attempt,job:$job,runner_os:$runner_os,runner_arch:$runner_arch,evidence_class:"experiment-not-release-evidence"}' > stage5-evidence/identity.json
-          { rustc -Vv; cargo --version; node --version; } > stage5-evidence/tool-versions.txt
-      - name: Discover instrumented candidate identities
-        shell: bash
-        run: |
-          set -euo pipefail
-          { cargo nextest --version; cargo llvm-cov --version; } >> stage5-evidence/tool-versions.txt
-          cargo nextest list --help > stage5-evidence/nextest-list-help.txt
-          cargo nextest run --help > stage5-evidence/nextest-run-help.txt
-          cargo llvm-cov nextest --help > stage5-evidence/llvm-cov-nextest-help.txt
-          cargo llvm-cov report --help > stage5-evidence/llvm-cov-report-help.txt
-          # Documented show-env interface; same target directory as llvm-cov's normal runner.
-          (
-            export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/llvm-cov-target"
-            eval "$(cargo llvm-cov show-env --sh)"
-            cargo nextest list --workspace --all-features --locked --message-format json > stage5-evidence/discovered.json
-          )
-      - name: Run experimental combined nextest and LCOV
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo llvm-cov nextest --workspace --all-features --locked --no-fail-fast --lcov --output-path lcov.info 2>&1 | tee stage5-evidence/executed.log
-      - name: Retain repository profile-write evidence
-        if: always()
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, shutil
-          from pathlib import Path
-          root = Path.cwd()
-          evidence = root / 'stage5-evidence'
-          evidence.mkdir(exist_ok=True)
-          profiles = []
-          for path in list(root.rglob('*.profraw')):
-              relative = path.relative_to(root)
-              if relative.parts[0] == 'stage5-evidence':
-                  continue
-              data = path.read_bytes()
-              stray = relative.parts[0] != 'target'
-              profiles.append({'path': str(relative), 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(), 'outside_target': stray})
-              if stray:
-                  destination = evidence / 'stray-profiles' / relative
-                  destination.parent.mkdir(parents=True, exist_ok=True)
-                  shutil.copyfile(path, destination)
-          (evidence / 'profile-writes.json').write_text(json.dumps({'scope': 'files surviving in checkout after execution; deleted temporary files are not observed', 'profiles': profiles}, indent=2) + '\n')
-          PY
-      - name: Export candidate source and function coverage
-        run: |
-          cargo llvm-cov report --json --output-path stage5-evidence/coverage.json
-          cp lcov.info stage5-evidence/lcov.info
-      - name: Retain Stage 5 candidate evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: stage5-candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            stage5-evidence/
-            target/nextest/default/stage5-junit.xml
-            target/llvm-cov-target/nextest/default/stage5-junit.xml
-          if-no-files-found: error
-          retention-days: 14
-          overwrite: false
 
   release-platform-build:
     name: Release target (${{ matrix.target }})

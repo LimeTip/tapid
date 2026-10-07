@@ -22,6 +22,61 @@ const step = (section: string, name: string) => {
   return matches[0];
 };
 
+const assertStandaloneTestOwners = (ci: string) => {
+  assert.doesNotMatch(ci, /nextest-coverage-pilot|stage5-|cargo llvm-cov nextest|cargo nextest list|cargo llvm-cov report|cargo llvm-cov show-env|--no-report|-- --list|\.profraw|tee /);
+  for (const [id, name, command, tool] of [
+    ['nextest', 'Run tests with nextest', 'cargo nextest run --workspace --all-features --locked', 'cargo-nextest'],
+    ['coverage', 'Generate LCOV coverage report', 'cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info', 'cargo-llvm-cov'],
+  ] as const) {
+    const owner = job(ci, id);
+    assert.match(owner, /runs-on: ubuntu-latest/);
+    assert.match(owner, /TAPID_REQUIRE_NODE_ASSERTIONS: '1'/);
+    assert.doesNotMatch(owner, /\n    (?:if|needs|continue-on-error):|\n        (?:if|continue-on-error):|--exclude|--skip|--ignored|\|\| true/);
+    assert.equal(step(owner, name).trimEnd(), `      - name: ${name}\n        run: ${command}`);
+    assert.match(owner, new RegExp(`tool: ${tool}\\n`));
+    const node = step(owner, 'Install Node.js 22 for required CLI assertions');
+    assert.match(node, /uses: actions\/setup-node@[a-f0-9]{40} # v7\n        with:\n          node-version: 22\n/);
+    assert(owner.indexOf(node) < owner.indexOf(step(owner, name)));
+  }
+  assert.match(step(job(ci, 'coverage'), 'Upload LCOV coverage report'), /name: lcov-coverage\n          path: lcov.info\n          if-no-files-found: error\n          retention-days: 30/);
+  assertSourceOnlyOwners(ci);
+};
+
+test('standalone nextest and Cargo coverage remain mandatory without comparison builds', async () => {
+  assertStandaloneTestOwners(await workflow('ci'));
+  for (const name of await readdir(new URL('../../.github/workflows/', import.meta.url))) {
+    if (name.endsWith('.yml')) assert.doesNotMatch(await workflow(name.slice(0, -4)), /nextest-coverage-pilot|stage5-|cargo llvm-cov nextest/);
+  }
+  await assert.rejects(source('.config/nextest.toml'), { code: 'ENOENT' });
+  await assert.rejects(source('tools/release/nextest_coverage_pilot_test.ts'), { code: 'ENOENT' });
+});
+
+test('standalone contracts reject missing gates, assertion bypass and comparison work', async () => {
+  const ci = await workflow('ci');
+  assertStandaloneTestOwners(ci);
+  for (const id of ['nextest', 'coverage']) {
+    const owner = job(ci, id);
+    const node = step(owner, 'Install Node.js 22 for required CLI assertions');
+    for (const replacement of [
+      '', owner.replace('    steps:', '    if: false\n    steps:'),
+      owner.replace('    steps:', '    continue-on-error: true\n    steps:'),
+      owner.replace("TAPID_REQUIRE_NODE_ASSERTIONS: '1'", "TAPID_REQUIRE_NODE_ASSERTIONS: '0'"),
+      owner.replace(node, ''), owner.replace('node-version: 22', 'node-version: 20'),
+      owner.replace('        run: cargo', '        if: false\n        run: cargo'),
+      owner.replace('--all-features', '--exclude tapid'),
+      owner.replace('    steps:', '    steps:\n      - name: Discover comparison tests\n        run: cargo nextest list --workspace --all-features --locked\n'),
+    ]) assert.throws(() => assertStandaloneTestOwners(ci.replace(owner, replacement)), undefined, id);
+  }
+  for (const broken of [
+    ci + '\n  nextest-coverage-pilot:\n    runs-on: ubuntu-latest\n',
+    ci.replace('cargo llvm-cov --workspace', 'cargo llvm-cov nextest --workspace'),
+    ci.replace('name: lcov-coverage', 'name: comparison-coverage'),
+    ci.replace('retention-days: 30\n\n  release-platform-build:', 'retention-days: 14\n\n  release-platform-build:'),
+    ci.replace('cargo nextest run --workspace', 'cargo nextest run --workspace --no-fail-fast'),
+    ci.replace('    steps:', '    steps:\n      - name: Export comparison\n        run: cargo llvm-cov report --json\n'),
+  ]) assert.throws(() => assertStandaloneTestOwners(broken));
+});
+
 const assertSourceOnlyOwners = (ci: string) => {
   assert.match(ci, /push:\n    branches: \[main\]\n  pull_request:\n/);
   const native = job(ci, 'test');
