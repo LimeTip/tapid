@@ -122,11 +122,13 @@ jobs:
         with:
           node-version: 22
       - name: Verify pinned node-semver compatibility oracle
+        if: matrix.os == 'ubuntu-latest'
         working-directory: tests/node-semver-oracle
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm test --offline
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
