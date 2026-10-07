@@ -23,10 +23,11 @@ function newer(version: string, baseline: string): boolean {
   return index >= 0 && left[index] > right[index];
 }
 
-export function nextProductVersion(current: string, requested: string): string {
-  const [major, minor, patch] = stable(current);
-  const version = requested || `${major}.${minor}.${patch + 1n}`;
-  if (!newer(version, current)) throw new Error("product version must be newer than the baseline");
+export function nextProductVersion(current: string, requested: string, baseline: string = current): string {
+  const [major, minor, patch] = stable(baseline);
+  if (newer(baseline, current)) throw new Error("main product version must not be older than the public release baseline");
+  const version = requested || (newer(current, baseline) ? current : `${major}.${minor}.${patch + 1n}`);
+  if (!newer(version, baseline) || newer(current, version)) throw new Error("product version must be newer than the public baseline and not older than main");
   return version;
 }
 
@@ -71,12 +72,14 @@ export async function prepareRelease(requested: string, baseline: string, option
   const metadata = async () => JSON.parse(await run("cargo", ["metadata", "--no-deps", "--format-version", "1", "--locked"])) as CargoMetadata;
   const before = await metadata();
   const current = before.packages.find((pkg) => pkg.name === "tapid")?.version;
-  if (!current || baseline !== `v${current}`) throw new Error("main product version must match the latest public release baseline");
+  if (!current) throw new Error("workspace metadata must contain the tapid product version");
+  const previous = baseline.replace(/^v/, "");
+  releaseVersion(baseline, previous);
+  const version = nextProductVersion(current, requested, previous);
   if (await run("git", ["status", "--porcelain"])) throw new Error("preparation requires a clean checkout");
   const preparedFrom = await run("git", ["rev-parse", "HEAD"]);
   if (await run("git", ["cat-file", "-t", `refs/tags/${baseline}`]) !== "tag") throw new Error("baseline must be an annotated tag");
   await run("git", ["merge-base", "--is-ancestor", `refs/tags/${baseline}^{commit}`, "HEAD"]);
-  const version = nextProductVersion(current, requested);
   await run("release-plz", ["update"]);
   const proposed = (await metadata()).packages.find((pkg) => pkg.name === "tapid")?.version;
   if (!proposed || newer(proposed, version)) throw new Error(`version analysis requires ${proposed}; prepare again with that explicit product version`);
