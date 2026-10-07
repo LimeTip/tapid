@@ -16,22 +16,22 @@ fn child_output_is_forwarded_to_its_matching_stream_without_text_conversion() {
 }
 
 #[test]
-fn cli_does_not_replay_output_already_streamed_by_macos_backend() {
+fn cli_does_not_replay_output_already_streamed_by_native_backend() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     forward_child_output_for_cli(b"child-out", b"child-err", &mut stdout, &mut stderr).unwrap();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         assert!(
             stdout.is_empty(),
-            "macOS runner already streams child stdout"
+            "native runner already streams child stdout"
         );
         assert!(
             stderr.is_empty(),
-            "macOS runner already streams child stderr"
+            "native runner already streams child stderr"
         );
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         assert_eq!(stdout, b"child-out");
         assert_eq!(stderr, b"child-err");
