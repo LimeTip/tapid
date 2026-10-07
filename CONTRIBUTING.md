@@ -35,4 +35,6 @@ Run Cargo through `python3 scripts/dev.py` to reuse build artifacts across this 
 
 ## License and security
 
-Tapid source code is licensed under the MIT License. For security vulnerabilities, do not open a public issue; follow `SECURITY.md`.
+The Tapid CLI and its supporting crates in this repository use the [Apache License, Version 2.0](LICENSE). Unless you explicitly state otherwise, your contributions to this repository are provided under the same license, as described in section 5. You retain copyright ownership of your contributions.
+
+For security vulnerabilities, do not open a public issue; follow `SECURITY.md`.

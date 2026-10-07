@@ -5,6 +5,7 @@ description = "Deterministic lockfile models and serialization for Tapid"
 version = "0.0.10"
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true

@@ -5,6 +5,7 @@ description = "Policy-aware package execution foundations for Tapid"
 version = "0.0.5"
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true

@@ -24,7 +24,8 @@ members = [
 [workspace.package]
 version = "0.0.2"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
+license-file = "LICENSE"
 repository = "https://github.com/LimeTip/tapid"
 rust-version = "1.88"
 authors = ["LimeTip"]

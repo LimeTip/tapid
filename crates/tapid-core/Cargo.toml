@@ -5,6 +5,7 @@ description = "Core domain types and deterministic validation for the Tapid pack
 version = "0.0.6"
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 

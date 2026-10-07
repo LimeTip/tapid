@@ -1,0 +1,17 @@
+use std::{io, io::Write, process::ExitCode};
+
+const LICENSE: &str = include_str!(concat!(env!("OUT_DIR"), "/LICENSE"));
+
+pub(crate) fn run() -> ExitCode {
+    let mut stdout = io::stdout().lock();
+    let result = stdout
+        .write_all(b"Copyright 2026 LimeTip AB.\n\n")
+        .and_then(|()| stdout.write_all(LICENSE.as_bytes()));
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: cannot print license: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
