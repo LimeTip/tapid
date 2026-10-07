@@ -1,0 +1,5 @@
+# Temporary Stage 5 evidence only: no test selection or scheduling overrides.
+[profile.default.junit]
+path = "stage5-junit.xml"
+store-success-output = true
+store-failure-output = true

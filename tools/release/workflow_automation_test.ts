@@ -304,7 +304,7 @@ test('Windows handoff contract rejects ownership, stale-attempt, bypass and fixt
     ci.replace(producer, producer.replace("if: runner.os != 'macOS'", 'if: false')),
     ci.replace(producer, producer.replace("if: runner.os == 'macOS'", 'if: false')),
     ci.replace(producer, producer.replace('run: node tests/fixtures/validate_consumer_project.js', 'run: echo skipped')),
-    ci.replace('overwrite: false', 'overwrite: true'),
+    ci.replace(upload, upload.replace('overwrite: false', 'overwrite: true')),
     ci.replace(verifier, verifier.replace('$actual = & target/debug/tapid.exe --version', '$actual = & tapid --version')),
     ci.replace('if ($actual -cne "tapid $expected")', 'if ($false)'),
   ];
