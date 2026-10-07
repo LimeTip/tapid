@@ -222,8 +222,6 @@ Longer-term work includes broader npm compatibility, native package and registry
 
 The Tapid CLI and its supporting crates in this repository are developed by LimeTip AB and licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the complete text.
 
-The copyright notice at the top of LICENSE applies to Tapid. The appendix is part of the standard Apache license text; its placeholders illustrate how to write a source-file notice.
-
 Copyright 2026 LimeTip AB.
 
 Run `tapid license` to print the complete license and copyright attribution embedded in the executable. This command works offline and does not require a project.
