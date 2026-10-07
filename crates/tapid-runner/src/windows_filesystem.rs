@@ -686,7 +686,80 @@ mod tests {
             (control, bytes)
         };
         let paths = [&root, &sibling, &target, &child];
+        let initial: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        // Fresh directories can use the legacy inheritance model on hosted Windows: their
+        // ACEs are inherited but SE_DACL_AUTO_INHERITED is unset. SetSecurityInfo converts
+        // descendants to the current model, even when cleanup restores identical ACE bytes.
+        // Establish that model on ONLY this disposable fixture before taking the baseline;
+        // never normalize a shared host ancestor or mask control bits in the comparisons.
+        // https://learn.microsoft.com/en-us/windows/win32/secauthz/automatic-propagation-of-inheritable-aces
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Foundation::LocalFree;
+            use windows_sys::Win32::Security::Authorization::{
+                GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+            };
+            use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+            let wide: Vec<_> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+            let mut dacl = std::ptr::null_mut();
+            let mut descriptor = std::ptr::null_mut();
+            // SAFETY: root is a newly created fixture; the output pointers are writable.
+            let queried = unsafe {
+                GetNamedSecurityInfoW(
+                    wide.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut dacl,
+                    std::ptr::null_mut(),
+                    &mut descriptor,
+                )
+            };
+            assert_eq!(queried, 0, "query fixture inheritance DACL");
+            assert!(!dacl.is_null(), "fixture must have a real DACL");
+            // SAFETY: reapply the existing DACL without changing its ACEs or protection;
+            // Windows propagates its current inheritance model within this fixture only.
+            let applied = unsafe {
+                let applied = SetNamedSecurityInfoW(
+                    wide.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    dacl,
+                    std::ptr::null_mut(),
+                );
+                LocalFree(descriptor);
+                applied
+            };
+            assert_eq!(applied, 0, "initialize fixture inheritance model");
+        }
         let before: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        for (normalized, original) in before.iter().zip(&initial) {
+            assert_eq!(
+                normalized.1, original.1,
+                "fixture setup must preserve ACE bytes"
+            );
+            assert!(
+                normalized.0 == original.0
+                    || normalized.0
+                        == original.0 | windows_sys::Win32::Security::SE_DACL_AUTO_INHERITED,
+                "fixture setup may only set the auto-inherited bit, not change protection"
+            );
+        }
+        for (control, _) in &before[1..] {
+            assert_ne!(
+                control & windows_sys::Win32::Security::SE_DACL_AUTO_INHERITED,
+                0,
+                "fixture descendants must use the current inheritance model"
+            );
+            assert_eq!(
+                control & windows_sys::Win32::Security::SE_DACL_PROTECTED,
+                0,
+                "fixture descendants must remain unprotected"
+            );
+        }
         let mut container = crate::execution::windows_job::WindowsAppContainer::create().unwrap();
         let started = Instant::now();
         let mut grant = super::WindowsPathAcl::grant(
