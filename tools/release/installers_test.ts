@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { arch, env as processEnv, platform } from "node:process";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { renderInstallers } from "./bootstrap.ts";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -26,7 +27,9 @@ async function fixture() {
   await mkdir(payload);
   await mkdir(bin);
   await mkdir(install);
-  await writeFile(join(payload, "tapid"), "#!/bin/sh\nprintf 'tapid 1.2.3\\n'\n");
+  const fixtureHome = join(directory, "fixture-home");
+  await mkdir(fixtureHome);
+  await writeFile(join(payload, "tapid"), "#!/bin/sh\nif [ \"$1\" = __verify-release-record ]; then exit \"${FIXTURE_SIGNATURE_STATUS:-0}\"; fi\nif [ \"$1\" = __prepare-release-install ]; then exit \"${FIXTURE_INSTALL_POLICY_STATUS:-0}\"; fi\nprintf 'tapid 1.2.3\\n'\n");
   await chmod(join(payload, "tapid"), 0o755);
   await run("tar", ["-czf", join(directory, archive), "-C", payload, "tapid"]);
   const bytes = await readFile(join(directory, archive));
@@ -52,24 +55,34 @@ printf '%s\\n' "$url" >> "$INSTALLER_FIXTURE/requests"
 case "$url" in
   *.tsv.sig) cp "$INSTALLER_FIXTURE/release.tsv.sig" "$out" ;;
   *.tsv) cp "$INSTALLER_FIXTURE/record.tsv" "$out" ;;
-  *.py) cp "$INSTALLER_FIXTURE/verify-release-record.py" "$out" ;;
   *) cp "$INSTALLER_FIXTURE/$(basename "$url")" "$out" ;;
 esac
 `);
   await chmod(join(bin, "curl"), 0o755);
-  await writeFile(join(bin, "python3"), "#!/bin/sh\nexit 0\n");
-  await chmod(join(bin, "python3"), 0o755);
-  await writeFile(join(directory, "verify-release-record.py"), await readFile(join(root, "scripts/verify-release-record.py")));
-  const env: Record<string, string | undefined> = { ...processEnv, PATH: `${bin}:${processEnv.PATH}`, INSTALLER_FIXTURE: directory };
+  // Every runtime command fails if the installer tries to invoke one.
+  for (const name of ["python3", "python", "node", "bun", "deno", "cargo"]) {
+    await writeFile(join(bin, name), "#!/bin/sh\necho unexpected-runtime >&2\nexit 99\n");
+    await chmod(join(bin, name), 0o755);
+  }
+  const bootstrapDir = join(directory, "bootstrap-assets");
+  await mkdir(bootstrapDir);
+  for (const bootstrapTarget of ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "x86_64-pc-windows-msvc"]) {
+    const name = `tapid-${version}-${bootstrapTarget}.tar.gz`;
+    await writeFile(join(bootstrapDir, name), bytes);
+    await writeFile(join(directory, name), bytes);
+  }
+  await renderInstallers(bootstrapDir, version, "https://bootstrap.example/releases/v1.2.3");
+  const installer = join(bootstrapDir, "install.sh");
+  const env: Record<string, string | undefined> = { ...processEnv, HOME: fixtureHome, SHELL: "/bin/sh", PATH: `${bin}:${processEnv.PATH}`, INSTALLER_FIXTURE: directory };
   for (const name of ["TAPID_REPO", "TAPID_RELEASE_BASE_URL", "TAPID_RELEASE_DISCOVERY_URL", "TAPID_RELEASE_RECORD_URL"]) delete env[name];
-  return { directory, install, bytes, hash, record, env,
+  return { directory, install, bytes, hash, record, env, installer,
     installShell: (args: string[] = [], additions: Record<string, string> = {}) =>
-      run("/bin/sh", [join(root, "scripts/install.sh"), "--install-dir", install, ...args], { env: { ...env, ...additions } }),
+      run("/bin/sh", [installer, "--install-dir", install, ...args], { env: { ...env, ...additions } }),
     defaultInstallShell: (home: string, additions: Record<string, string> = {}) =>
-      run("/bin/sh", [join(root, "scripts/install.sh")], { env: { ...env, HOME: home, SHELL: "/bin/zsh", ...additions } }),
+      run("/bin/sh", [installer], { env: { ...env, HOME: home, SHELL: "/bin/zsh", ...additions } }),
     requests: async () => (await readFile(join(directory, "requests"), "utf8"))
       .split("\n")
-      .filter((request: string) => request && !request.endsWith(".sig") && !request.endsWith(".py"))
+      .filter((request: string) => request && !request.endsWith(".sig") && !request.startsWith("https://bootstrap.example/"))
       .join("\n") + "\n",
     cleanup: () => rm(directory, { recursive: true, force: true }),
   };
@@ -87,18 +100,23 @@ test("Unix installer follows owned discovery and provider-neutral artifact URLs"
   } finally { await f.cleanup(); }
 });
 
-test("Unix single-file installer downloads its pinned verifier", { skip: platform === "win32" }, async () => {
+test("Unix single-file installer authenticates its native bootstrap before execution", { skip: platform === "win32" }, async () => {
   const f = await fixture();
   const singleFileDir = join(f.directory, "single-file");
   const installer = join(singleFileDir, "install.sh");
   try {
     await mkdir(singleFileDir);
-    await writeFile(installer, await readFile(join(root, "scripts/install.sh")));
+    await writeFile(installer, await readFile(f.installer));
     await run("/bin/sh", [installer, "--install-dir", f.install], { env: f.env });
     const requests = await readFile(join(f.directory, "requests"), "utf8");
-    ok(requests.includes("raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py"));
-    await writeFile(join(f.directory, "verify-release-record.py"), "tampered verifier\n");
-    await rejects(() => run("/bin/sh", [installer, "--install-dir", f.install], { env: f.env }));
+    ok(requests.includes(`https://bootstrap.example/releases/v1.2.3/${archive}`));
+    const before = await readFile(join(f.install, "tapid"));
+    await writeFile(join(f.directory, "payload", "tapid"), '#!/bin/sh\ntouch "$INSTALLER_FIXTURE/executed-untrusted"\n');
+    await run("tar", ["-czf", join(f.directory, archive), "-C", join(f.directory, "payload"), "tapid"]);
+    await rejects(() => run("/bin/sh", [installer, "--install-dir", f.install], { env: f.env }),
+      (error: any) => error.stderr.includes("bootstrap archive checksum mismatch"));
+    await rejects(() => readFile(join(f.directory, "executed-untrusted")), { code: "ENOENT" });
+    equal((await readFile(join(f.install, "tapid"))).equals(before), true);
   } finally { await f.cleanup(); }
 });
 
@@ -213,7 +231,7 @@ test("PowerShell uninstaller preserves a foreign binary and removes a marked bin
     await mkdir(home);
     await mkdir(pathInstall, { recursive: true });
     await writeFile(profile, "export PATH=\"$HOME/bin:$PATH\"\n");
-    const installShell = () => run("/bin/sh", [join(root, "scripts/install.sh"), "--install-dir", pathInstall], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
+    const installShell = () => run("/bin/sh", [f.installer, "--install-dir", pathInstall], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
     await installShell();
     const first = await readFile(profile, "utf8");
     equal(first, "export PATH=\"$HOME/bin:$PATH\"\n# tapid-path-managed-v1\nexport PATH=\"$HOME/.local/bin:$PATH\"\n# end tapid-path-managed-v1\n");
@@ -237,7 +255,7 @@ test("Unix PATH management refuses symlinked and foreign startup files", { skip:
   try {
     await mkdir(home);
     await mkdir(pathInstall, { recursive: true });
-    const installShell = () => run("/bin/sh", [join(root, "scripts/install.sh"), "--install-dir", pathInstall], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
+    const installShell = () => run("/bin/sh", [f.installer, "--install-dir", pathInstall], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
     await writeFile(join(f.directory, "foreign-profile"), "export PATH=\"$PATH\"\n");
     await symlink(join(f.directory, "foreign-profile"), profile);
     await rejects(installShell);
@@ -360,5 +378,84 @@ Write-Output "Validated $($cases.Count) cases"
 `);
     const result = await run("pwsh", ["-NoProfile", "-File", join(directory, "test.ps1")]);
     match(result.stdout, /Validated \d+ cases/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test("Unix installer rejects a native signature failure before replacing an installation", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  try {
+    await f.installShell();
+    const before = await readFile(join(f.install, "tapid"));
+    await rejects(() => f.installShell([], { FIXTURE_SIGNATURE_STATUS: "1" }),
+      (error: any) => error.stderr.includes("release record signature verification failed"));
+    equal((await readFile(join(f.install, "tapid"))).equals(before), true);
+  } finally { await f.cleanup(); }
+});
+
+test("Unix installer requires native rollback policy before destination replacement", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  try {
+    await f.installShell();
+    const before = await readFile(join(f.install, "tapid"));
+    await rejects(() => f.installShell([], { FIXTURE_INSTALL_POLICY_STATUS: "1" }),
+      (error: any) => error.stderr.includes("release policy rejected"));
+    ok((await readFile(join(f.install, "tapid"))).equals(before));
+  } finally { await f.cleanup(); }
+});
+
+test("Both signed installers invoke the pinned bootstrap rollback policy before replacing bytes", async () => {
+  const sh = await readFile(join(root, "scripts/install.sh"), "utf8");
+  const ps = await readFile(join(root, "scripts/install.ps1"), "utf8");
+  for (const [source, replacement] of [[sh, 'mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"'], [ps, 'Move-Item -LiteralPath $staged -Destination $destination -Force']]) {
+    const policy = source.indexOf("__prepare-release-install");
+    ok(policy >= 0);
+    ok(policy < source.lastIndexOf(replacement));
+  }
+});
+
+test("PowerShell installer stops a rejected native policy before replacing destination or marker", async (context) => {
+  try { await run("pwsh", ["-NoProfile", "-Command", "$null"]); }
+  catch { context.skip("PowerShell is unavailable"); return; }
+  const directory = await mkdtemp(join(tmpdir(), "tapid-ps-policy-"));
+  try {
+    const source = await readFile(join(root, "scripts/install.ps1"), "utf8");
+    const start = source.indexOf("    if (-not $legacyRelease) {");
+    const end = source.indexOf("    try {\n        Configure-UserPath", start);
+    ok(start >= 0 && end > start);
+    const block = source.slice(start, end);
+    await writeFile(join(directory, "reject.ps1"), "exit 17\n");
+    await writeFile(join(directory, "test.ps1"), `$ErrorActionPreference = 'Stop'
+function Fail([string]$Message) { throw $Message }
+$InstallDir = $PSScriptRoot
+$destination = Join-Path $PSScriptRoot 'tapid.exe'
+$extracted = Join-Path $PSScriptRoot 'selected.exe'
+$staged = Join-Path $PSScriptRoot 'staged.exe'
+$stagedMarker = Join-Path $PSScriptRoot 'staged-marker'
+$marker = Join-Path $PSScriptRoot '.tapid-managed'
+$bootstrap = Join-Path $PSScriptRoot 'reject.ps1'
+$Version = '1.2.3'
+$BootstrapVersion = '1.0.0'
+$archivePath = Join-Path $PSScriptRoot 'release.tar.gz'
+$legacyRelease = $false
+[IO.File]::WriteAllText($destination, 'installed bytes')
+[IO.File]::WriteAllText($marker, 'original marker')
+[IO.File]::WriteAllText($extracted, 'replacement bytes')
+$rejected = $false
+try {
+${block}
+} catch {
+    if ($_.Exception.Message -notlike '*installer release policy rejected*') { throw }
+    $rejected = $true
+}
+if (-not $rejected) { throw 'native policy failure was accepted' }
+if ([IO.File]::ReadAllText($destination) -cne 'installed bytes') { throw 'destination changed' }
+if ([IO.File]::ReadAllText($marker) -cne 'original marker') { throw 'marker changed' }
+if (Test-Path $staged) { throw 'replacement was staged despite policy rejection' }
+$global:LASTEXITCODE = 0
+Write-Output 'Policy rejection preserved installation'
+`);
+    const result = await run("pwsh", ["-NoProfile", "-File", join(directory, "test.ps1")]);
+    match(result.stdout, /Policy rejection preserved installation/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

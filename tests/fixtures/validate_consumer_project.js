@@ -16,16 +16,14 @@ const binary = args.length ? path.resolve(args[1]) :
 // Expected capabilities, not verified-release evidence. Like the documentation
 // contracts, published tags require review; never infer capability from an error.
 // Source validation (no tag) always requires the current native contract.
-const releaseContracts = new Map([
-  ['v0.0.9', 'legacy-uncontained'],
-  ['v0.0.10', 'native-restricted'],
-]);
+const { loadConsumerContracts } = require('./consumer_contract.js');
+const { current, releases } = loadConsumerContracts();
 const releaseTag = args[3];
-assert.ok(!releaseTag || releaseContracts.has(releaseTag), 'unreviewed root-script release');
-const legacy = releaseTag && releaseContracts.get(releaseTag) === 'legacy-uncontained';
-// Reviewed published tags retain their historical unsupported Windows contract.
-const nativeWindows = process.platform === 'win32' && !releaseTag;
-const nativeSupported = process.platform === 'darwin' || nativeWindows;
+assert.ok(!releaseTag || releases.has(releaseTag), 'unreviewed root-script release');
+const contract = releaseTag ? releases.get(releaseTag) : current;
+const legacy = contract.legacy;
+const nativeRestricted = contract.nativePlatforms.includes(process.platform);
+const nativeWindows = nativeRestricted && process.platform === 'win32' && !releaseTag;
 const lifecycleMarker = path.join(project, 'LIFECYCLE_SHOULD_NOT_RUN');
 const startMarker = 'TAPID_FIXTURE_STARTED=';
 assert.ok(['darwin', 'linux', 'win32'].includes(process.platform), 'unsupported validation host');
@@ -110,7 +108,7 @@ for (const test of cases) {
   );
   const output = result.stdout + result.stderr;
   const receipts = result.stderr.split(/\r?\n/).filter(line => line.startsWith('{')).map(line => JSON.parse(line));
-  if (!legacy && !nativeSupported) {
+  if (!legacy && !nativeRestricted) {
     assert.equal(result.status, 1, 'unsupported native containment must fail closed');
     assert.match(result.stderr, /unsupported-containment/);
     assert.match(result.stderr, /no process was started and no enforcement receipt was issued/);
@@ -130,9 +128,12 @@ for (const test of cases) {
     const receipt = receipts[0];
     assert.equal(receipt.schema_version, 1);
     assert.equal(receipt.assurance, 'Restricted');
-    assert.equal(receipt.backend.name, nativeWindows
+    const expectedBackend = process.platform === 'win32'
       ? 'tapid-runner/windows-appcontainer-job'
-      : 'tapid-runner/macos-seatbelt-restricted-experimental');
+      : process.platform === 'linux'
+      ? 'tapid-runner/linux-landlock-seccomp-restricted'
+      : 'tapid-runner/macos-seatbelt-restricted-experimental';
+    assert.equal(receipt.backend.name, expectedBackend);
     for (const dimension of ['filesystem_read', 'filesystem_write', 'network', 'environment_sanitization']) {
       assert.equal(receipt.enforced[dimension], true, `${dimension} must be natively enforced`);
     }
@@ -142,6 +143,10 @@ for (const test of cases) {
 }
 console.log(legacy
   ? `${releaseTag}: legacy uncontained forwarding, environment, exit codes and lifecycle suppression passed; no containment claim.`
-  : nativeSupported
-  ? `${nativeWindows ? 'Windows' : 'macOS'} native Restricted: install, lifecycle suppression, child marker, exact forwarding, environment and exit codes passed.`
+  : nativeRestricted && process.platform === 'win32'
+  ? 'Windows native Restricted: install, lifecycle suppression, child marker, exact forwarding, environment and exit codes passed.'
+  : nativeRestricted && process.platform === 'linux'
+  ? 'Linux native Restricted: install, lifecycle suppression, child marker, exact forwarding, environment and exit codes passed.'
+  : nativeRestricted && process.platform === 'darwin'
+  ? 'macOS native Restricted: install, lifecycle suppression, child marker, exact forwarding, environment and exit codes passed.'
   : `${process.platform}: install, lifecycle suppression, unsupported containment, no target marker and no receipt passed.`);

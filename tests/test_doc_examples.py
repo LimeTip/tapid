@@ -248,7 +248,10 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn('cargo build', workflow)
         for script in ('install.sh', 'install.ps1'):
             self.assertIn('https://tapid.dev/' + script, workflow)
-            self.assertIn('scripts/' + script, workflow)
+            self.assertIn('https://github.com/LimeTip/tapid/releases/download/', workflow)
+            extension = script.rsplit('.', 1)[1]
+            self.assertIn('selected_installer_' + extension, workflow)
+            self.assertIn('latest_installer_' + extension, workflow)
         self.assertIn('Check previous-version upgrade and repeat upgrade through the public service', workflow)
         self.assertIn('is already up to date', workflow)
 

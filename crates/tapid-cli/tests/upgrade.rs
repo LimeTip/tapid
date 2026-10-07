@@ -7,12 +7,23 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 use tapid_signatures::{TrustEnvelope, digest as envelope_digest};
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
-fn validity_window() -> (String, String) {
-    let now = OffsetDateTime::now_utc();
-    (
-        (now - Duration::hours(1)).format(&Rfc3339).unwrap(),
-        (now + Duration::hours(24)).format(&Rfc3339).unwrap(),
-    )
+fn immutable_creation_time() -> String {
+    (OffsetDateTime::now_utc() - Duration::days(3650))
+        .format(&Rfc3339)
+        .unwrap()
+}
+
+fn run_executable_with_retry(command: &mut Command) -> std::process::Output {
+    for attempt in 0..5 {
+        match command.output() {
+            Ok(output) => return output,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 4 => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => panic!("failed to execute test binary: {error}"),
+        }
+    }
+    unreachable!("the retry loop always returns or panics");
 }
 
 struct Fixture {
@@ -79,14 +90,13 @@ impl Fixture {
         )
         .unwrap();
         let record_bytes = fs::read(root.join("release.tsv")).unwrap();
-        let (created_at, expires_at) = validity_window();
+        let created_at = immutable_creation_time();
         let sidecar = TrustEnvelope::unsigned(
             "tapid-release-v1",
             envelope_digest(&record_bytes).unwrap(),
             serde_json::json!({
-                "schema": "tapid-release-v1-signature",
+                "schema": "tapid-release-v1-immutable-signature",
                 "created_at": created_at,
-                "expires_at": expires_at,
             }),
         )
         .sign("test-release-key", &secret)
@@ -131,14 +141,13 @@ esac
 
     fn resign_record(&self) {
         let record = fs::read(self.root.join("release.tsv")).unwrap();
-        let (created_at, expires_at) = validity_window();
+        let created_at = immutable_creation_time();
         let sidecar = TrustEnvelope::unsigned(
             "tapid-release-v1",
             envelope_digest(&record).unwrap(),
             serde_json::json!({
-                "schema": "tapid-release-v1-signature",
+                "schema": "tapid-release-v1-immutable-signature",
                 "created_at": created_at,
-                "expires_at": expires_at,
             }),
         )
         .sign("test-release-key", &[7_u8; 32])
@@ -421,19 +430,80 @@ fn fresh_self_upgrade_rejects_an_older_release_without_state() {
     )
     .unwrap();
     fixture.resign_record();
-    let output = Command::new(&executable)
-        .arg("upgrade")
-        .env_remove("TAPID_RELEASE_RECORD_URL")
-        .env_remove("TAPID_STABLE_ENDPOINTS")
-        .env_remove("TAPID_RELEASE_KEYRING")
-        .env("PATH", fixture.root.join("bin"))
-        .env("FIXTURE", &fixture.root)
-        .env("TAPID_RELEASE_KEYRING", fixture.root.join("keyring.json"))
-        .output()
-        .unwrap();
+    let output = run_executable_with_retry(
+        Command::new(&executable)
+            .arg("upgrade")
+            .env_remove("TAPID_RELEASE_RECORD_URL")
+            .env_remove("TAPID_STABLE_ENDPOINTS")
+            .env_remove("TAPID_RELEASE_KEYRING")
+            .env("PATH", fixture.root.join("bin"))
+            .env("FIXTURE", &fixture.root)
+            .env("TAPID_RELEASE_KEYRING", fixture.root.join("keyring.json")),
+    );
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("refusing to downgrade running Tapid")
     );
     assert!(!install_dir.join(".tapid-release-state.json").exists());
+}
+
+#[test]
+fn signed_same_version_archive_replay_preserves_executable_and_state() {
+    let fixture = Fixture::new();
+    let first = fixture.upgrade(&[]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let before = fs::read(fixture.root.join("tapid")).unwrap();
+    let state = fs::read(fixture.root.join(".tapid-release-state.json")).unwrap();
+    fs::write(
+        fixture.root.join("release/tapid"),
+        b"different executable for same release",
+    )
+    .unwrap();
+    assert!(
+        Command::new("tar")
+            .env("COPYFILE_DISABLE", "1")
+            .arg("-czf")
+            .arg(fixture.root.join("artifact.tar.gz"))
+            .arg("-C")
+            .arg(fixture.root.join("release"))
+            .arg("tapid")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let bytes = fs::read(fixture.root.join("artifact.tar.gz")).unwrap();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let record = fs::read_to_string(fixture.root.join("release.tsv")).unwrap();
+    let mut lines = record.lines();
+    let mut changed = format!("{}\n", lines.next().unwrap());
+    for line in lines {
+        let fields: Vec<_> = line.split('\t').collect();
+        changed.push_str(&format!(
+            "{}\t{}\t{}\t{digest}\t{}\n",
+            fields[0],
+            fields[1],
+            bytes.len(),
+            fields[4]
+        ));
+    }
+    fs::write(fixture.root.join("release.tsv"), changed).unwrap();
+    fixture.resign_record();
+    for extra in [vec![], vec!["--dry-run"]] {
+        let rejected = fixture.upgrade(&extra);
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("same release version"),
+            "{}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert_eq!(fs::read(fixture.root.join("tapid")).unwrap(), before);
+        assert_eq!(
+            fs::read(fixture.root.join(".tapid-release-state.json")).unwrap(),
+            state
+        );
+    }
 }

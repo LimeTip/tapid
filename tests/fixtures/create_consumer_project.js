@@ -42,11 +42,11 @@ const lockfile = JSON.stringify(
 const fixtureScript = [
   // A stdout marker proves Node ran without granting any filesystem writes.
   "console.log('TAPID_FIXTURE_STARTED=' + JSON.stringify(process.argv.slice(2)));",
-  "if (process.argv.length !== 4) process.exit(44);",
-  "if (process.argv[2] !== 'forwarded') process.exit(41);",
-  "if (process.env.TAPID_FIXTURE !== '1') process.exit(42);",
-  "if (require('fs').existsSync('LIFECYCLE_SHOULD_NOT_RUN')) process.exit(43);",
-  'process.exit(Number(process.argv[3] || 0));',
+  "if (process.argv.length !== 4) process.exitCode = 44;",
+  "else if (process.argv[2] !== 'forwarded') process.exitCode = 41;",
+  "else if (process.env.TAPID_FIXTURE !== '1') process.exitCode = 42;",
+  "else if (require('fs').existsSync('LIFECYCLE_SHOULD_NOT_RUN')) process.exitCode = 43;",
+  'else process.exitCode = Number(process.argv[3] || 0);',
   '',
 ].join('\n');
 

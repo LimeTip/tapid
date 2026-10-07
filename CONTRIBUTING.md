@@ -4,7 +4,7 @@ Thank you for contributing to Tapid. Keep changes focused, testable, and explici
 
 ## Before contributing
 
-Please read `README.md`, `SECURITY.md`, and the relevant issue or discussion. For a substantial change, open an issue or discussion first with the problem, proposed solution, affected product phase, and verification plan.
+Start with [AGENTS.md](AGENTS.md), the owning crate's README, and the relevant issue or discussion. Read `README.md` for product behavior and `SECURITY.md` when the task concerns security. For a substantial change, describe the problem, proposed solution, affected product phase, and verification plan in the issue, discussion, or requested work before implementation.
 
 ## Pull requests
 
@@ -27,23 +27,11 @@ Integration tests must use `tapid-test-support` temporary projects and homes. Do
 
 ## Local verification
 
-Run the narrowest relevant test first, then the full checks that are available in your environment:
+Every visible CLI command and nested subcommand needs a help description. Add a doc comment or `#[command(about = "...")]` to its Clap definition. The CLI documentation workflow discovers commands automatically and reports any missing or blank descriptions. Hidden commands are excluded. Run the same check locally with `python3 scripts/dev.py test -p tapid --lib --locked commands::documentation::`.
 
-```text
-cargo test -p tapid-test-support
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
-cargo metadata --no-deps --format-version 1 --locked
-cargo package --workspace --locked
-cargo deny check
-cargo nextest run --workspace --all-features --locked
-cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
-cargo mutants --package tapid-manifest --timeout 60
-cargo audit
-```
+Use [the testing workflow](docs/testing.md) as the single source for local verification commands. Start with the focused test for the changed behavior, run the affected crate checks before handoff, and use the full local lane for cross-cutting changes. CI retains its cross-platform, security, coverage, compatibility, and packaging gates.
 
-`cargo nextest` is the faster test runner used by the dedicated Ubuntu CI gate; the canonical `cargo test` command remains required for cross-platform coverage. `cargo llvm-cov` writes an LCOV report to `lcov.info`, matching the CI artifact. `cargo-deny` and `cargo-audit` are CI security gates. `cargo-mutants` is a periodic test-strength check for focused crates, not a per-PR gate. Install these tools with their upstream installers or skip only when documenting why the local tool is unavailable; do not weaken the CI jobs.
+Run Cargo through `python3 scripts/dev.py` to reuse build artifacts across this repository's worktrees. Python 3, Git, Rust with rustfmt and Clippy, and Node.js 22.6.0 or later are the development prerequisites. Optional CI tools do not need to be installed for an ordinary local change.
 
 ## License and security
 

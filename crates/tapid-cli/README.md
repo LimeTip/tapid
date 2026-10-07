@@ -38,6 +38,8 @@ tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
 
+`tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
+
 ## Upgrade Tapid
 
 Starting with 0.0.10, `tapid upgrade` discovers and installs the latest stable release. `tapid upgrade --dry-run` inspects the selected release without replacing the binary. Older clients can be upgraded by rerunning the public installer.
@@ -56,7 +58,34 @@ tapid install --offline --frozen --project-dir ./example
 tapid install --registry-fixture ./fixture.json --project-dir ./example
 ```
 
-The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 6 locks, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
+The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 7 locks, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
+
+## Install and lifecycle outcomes
+
+`install`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
+
+Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result remains unchanged for its own operation and warns if it first recovered an interrupted transaction.
+
+A nonzero exit after commit does not mean the dependency change failed. Tapid reports that the change committed and warns against repeating the operation. Cleanup failures preserve the durable commit decision. If rollback cannot finish, Tapid reports recovery required and retains its journal for the next recovery attempt. Contention errors advise waiting for the competing operation. Diagnostic messages are limited to 4 KiB each, and HTTP URL user information, query values, and fragments are redacted. These results are internal application types; a JSON command protocol is separate work.
+
+## Private npm registry routing (development feature)
+
+Registry routing is configured in the project-root `tapid.toml`. With no `[registries]` entries, plain npm package names continue to resolve from `https://registry.npmjs.org`. A matching scope overrides `default`; otherwise `default` applies, then the public npm registry is the fallback. `npm:` aliases use the same scope routing. `jsr:` packages retain their JSR identity and are not routed through npm settings.
+
+```toml
+[registries.default]
+url = "https://npm-mirror.example"
+
+[registries."@acme"]
+url = "https://packages.acme.example"
+token-env = "TAPID_ACME_NPM_TOKEN"
+```
+
+`url` must be a canonical HTTPS origin without a path, query, fragment, or embedded user information. `token-env` is the name of an environment variable, never the credential value. Tapid reads that variable only when resolving packages routed to that entry. Scope configuration takes precedence over the default entry, including its credential source; a scope without `token-env` does not inherit the default entry's token. If a selected private route requires a missing or empty token, installation fails closed without falling back to another registry. Without `token-env`, the selected origin is used without bearer authentication. Credentials are attached only to requests for the exact configured origin, and redirects to another origin are rejected.
+
+The only supported credential provider is an environment variable selected by `token-env`. For local use, populate it through an operating-system secret manager or a protected shell environment; in CI, map the corresponding CI secret into the install job's environment. Do not put literal tokens in configuration, command arguments, scripts, or logs. Tapid does not implicitly read `.npmrc`, npm configuration variables, or home-directory credentials. Registry selection order is: exact package scope, then `[registries.default]`, then the public npm registry. Credential selection follows only the chosen entry and has no implicit cross-entry fallback. This initial feature does not implement credential helper or file providers.
+
+Do not put tokens in `package.json`, `tapid.toml`, command-line arguments, or `tapid.lock`. Offline/frozen replay uses the registry identities already pinned in the lockfile and does not require credentials or contact a registry. Registry credentials are excluded from root-script environments even if a run policy tries to allowlist the corresponding variable. Private-registry support is under development and is not a production-support claim.
 
 ## Legacy registry identities
 
@@ -92,7 +121,23 @@ tapid run dev --node-runtime /absolute/path/to/node -- --hostname 127.0.0.1 --po
 
 Values after the first `--` are forwarded in order to the selected script; the separator is not forwarded and those values are not parsed as Tapid options. Missing scripts fail with exit code `1`. Clap parsing errors use exit code `2`.
 
-The command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. In the configuration schema, `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution: requested filesystem/network authority, explicit environment/PATH and descriptor hygiene, and descendant propagation must be established before spawn. Restricted provides no cleanup guarantee, although a backend may report best-effort cleanup it actually attempted or observed. Omitting `assurance` preserves the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. The schema and experimental macOS Restricted backend are implemented; unsupported required dimensions fail before the shell starts.
+## Experimental root-script containment
+
+`tapid run` still invokes Node.js; Tapid is not a JavaScript runtime. A script profile with `assurance = "restricted"` asks the platform backend to apply filesystem and network restrictions before the script starts and propagate those restrictions to child processes. For example:
+
+```toml
+[run.scripts.test]
+assurance = "restricted"
+read = ["."]
+write = ["build"]
+network = false
+```
+
+Paths are project-relative. Grant only the access the script needs: `network = false` denies network socket creation/traffic, while `network = true` allows unrestricted networking. The backend also constructs a limited child environment and closes unrelated inherited descriptors.
+
+Restricted is an authority boundary, **not** full process-tree management or a promise that arbitrary script code is safe. Tapid does not guarantee cleanup or termination of detached descendants. Configured timeout, output, process-count, and memory limits are unsupported. A requested restriction the backend cannot enforce causes the run to fail before the target starts; Tapid does not silently run it without containment. Linux Restricted uses Landlock and seccomp and requires kernel support; it has targeted Ubuntu 24.04.5 x86_64 validation. macOS Restricted is experimental and uses deprecated/private Seatbelt APIs.
+
+The command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution. Omitting `assurance` retains the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before the shell starts.
 
 The command constructs a minimal environment rather than preserving inherited variables: `PATH` is reserved and cannot be allowlisted, while other declared names are retrieved individually from the caller only when present. Windows environment-name matching is case-insensitive and case-equivalent allowlist duplicates are rejected. The current `network` field is boolean: `true` grants unrestricted networking. `--hostname`, `--port`, and other forwarded application arguments do not constrain authority; declared listen/connect scopes remain future work.
 
@@ -112,12 +157,14 @@ Install derives executable shims from verified package `bin` metadata. Unix uses
 
 - Dependency lifecycle scripts are disabled during every install path.
 - Root scripts run only after the explicit `tapid run` command.
-- Root-script execution is wired to fail-closed preflight. macOS 26 has an experimental Restricted backend using deprecated/private native Seatbelt APIs; ManagedTree, resource-limit profiles, and Linux/Windows native backends remain unavailable.
-- Full npm CLI/package-specifier compatibility is not implemented: tags, aliases, git/file/workspace specs, peer semantics, workspaces, and complete optional-dependency and lockfile behavior remain out of scope. Range satisfaction is differential-tested against pinned node-semver 7.8.5 for the documented grammar in `crates/tapid-resolver/README.md`.
-- `add`, `remove`, `update`, `prune`, script approval, private-registry authentication, and package publishing are outside this slice.
+- Root-script execution is wired to fail-closed preflight. macOS 26 has an experimental Restricted backend using deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock/seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. ManagedTree, configured resource-limit profiles, Windows native containment, and the broader Linux Restricted probe matrix remain unsupported or pending.
+- Full npm CLI/package-specifier compatibility is not implemented: tags and git/file dependencies remain unsupported, while nested/ancestor peer lookup, automatic peer placement, and complete optional-dependency and lockfile semantics remain incomplete. Tapid supports the documented bounded npm-style workspace subset; see the [compatibility matrix](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#compatibility-matrix). Range satisfaction is differential-tested against pinned node-semver 7.8.5 for the documented grammar in `crates/tapid-resolver/README.md`.
+- `add`, `remove`, `update`, `outdated`, and `prune` are implemented (see [Commands](#commands)); script approval and package publishing are outside this slice. Private-registry authentication is available as a development feature, not a production-support claim.
 - JSR installation remains fail-closed unless metadata provides both an HTTPS npm tarball URL and a valid SHA-512 SRI value. Live JSR integrity behavior is unsupported and unverified.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform does not prove behavior on another.
 
 The macOS runner requires the binary's early private-launcher initializer. `sandbox-exec` launches that same executable under a parameter-bound profile. A fixed-size nonce/version READY/GO protocol, kqueue NOTE_EXEC, and CLOEXEC status EOF establish launch; target exit codes and stderr never do. Receipt `executable_resolution` reports exact Unix byte arrays for PATH and its ordered entries, `caller_path_inherited = false`, the distinct byte-verified private Node snapshot identity and validation timing, and cleanup observation. This reserves bare `node` and env-shebang resolution, not explicit paths to project executables.
 
 For retained bindings, `executable_resolution.reserved_node.cleanup_observed` is `false`, and `limitations` explicitly describes retention. This field reports removal of the private snapshot, independently of best-effort process-group cleanup in `completion`. Retained directories and snapshots consume temporary storage until OS cleanup or host removal after every descendant exits. Tapid does not schedule deletion or reuse them. OS or host removal while descendants survive ends reserved-node protection. Host writes or races after final validation remain outside Restricted containment; retention provides no ManagedTree ownership or cleanup guarantee.
+
+Npm aliases are supported in manifest dependencies and package arguments such as `tapid add 'h3-v2@npm:h3@2.0.1-rc.20'`. Scoped targets and supported semver ranges retain their actual registry identity and local import names during install and frozen/offline replay. See [alias behavior and limits](../../docs/compatibility.md#npm-aliases).

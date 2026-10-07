@@ -30,6 +30,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_preserves_simple_overrides_when_updating_dependencies() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"example-app","version":"1.2.3","overrides":{"postcss":"8.5.28"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.overrides()["postcss"], "8.5.28");
+        let updated = manifest.with_dependency("next", "15.5.27").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&updated.to_json()).unwrap();
+        assert_eq!(value["overrides"]["postcss"], "8.5.28");
+    }
+
+    #[test]
+    fn preserves_version_qualified_override_selectors_from_package_manifests() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"typescript","version":"5.9.3","overrides":{"typescript@*":"$typescript"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.overrides()["typescript@*"], "$typescript");
+        let value: serde_json::Value = serde_json::from_str(&manifest.to_json()).unwrap();
+        assert_eq!(value["overrides"]["typescript@*"], "$typescript");
+    }
+
+    #[test]
     fn discovers_workspace_members_in_deterministic_order() {
         let root = unique_temp_dir("workspace-array");
         std::fs::create_dir_all(root.join("packages/zeta")).unwrap();
@@ -68,6 +93,122 @@ mod tests {
     }
 
     #[test]
+    fn discovers_single_string_workspace_pattern() {
+        let root = unique_temp_dir("workspace-string");
+        std::fs::create_dir_all(root.join("packages/web")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":"packages/*"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/web/package.json"),
+            r#"{"name":"web","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let workspace = Workspace::discover(&root).unwrap();
+        assert_eq!(
+            workspace
+                .members()
+                .iter()
+                .map(WorkspaceMember::name)
+                .collect::<Vec<_>>(),
+            ["web"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignores_file_symlink_entries_during_workspace_glob_expansion() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("workspace-file-symlink");
+        std::fs::create_dir_all(root.join("packages/web")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/web/package.json"),
+            r#"{"name":"web","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("notes.txt"), "not a workspace directory").unwrap();
+        symlink(root.join("notes.txt"), root.join("packages/notes-link")).unwrap();
+
+        let workspace = Workspace::discover(&root).unwrap();
+        assert_eq!(
+            workspace
+                .members()
+                .iter()
+                .map(WorkspaceMember::name)
+                .collect::<Vec<_>>(),
+            ["web"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_workspace_glob_directory_symlinks_that_escape_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("workspace-symlink");
+        let outside = unique_temp_dir("workspace-symlink-outside");
+        std::fs::create_dir_all(root.join("packages")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            outside.join("package.json"),
+            r#"{"name":"outside","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        symlink(&outside, root.join("packages/escape")).unwrap();
+
+        let error = Workspace::discover(&root).unwrap_err();
+        assert!(
+            error.contains("outside project"),
+            "unexpected error: {error}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn rejects_duplicate_package_names_across_distinct_workspace_members() {
+        let root = unique_temp_dir("workspace-duplicate-name");
+        for member in ["packages/first", "packages/second"] {
+            std::fs::create_dir_all(root.join(member)).unwrap();
+            std::fs::write(
+                root.join(member).join("package.json"),
+                r#"{"name":"shared","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+
+        let error = Workspace::discover(&root).unwrap_err();
+        assert!(
+            error.contains("duplicate workspace package name"),
+            "{error}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn discovers_object_workspace_packages_and_rejects_unknown_selection() {
         let root = unique_temp_dir("workspace-object");
         std::fs::create_dir_all(root.join("apps/web")).unwrap();
@@ -85,9 +226,36 @@ mod tests {
         let workspace = Workspace::discover(&root).unwrap();
         assert_eq!(
             workspace.members()[0].path(),
-            root.join("apps/web/package.json")
+            std::fs::canonicalize(root.join("apps/web/package.json")).unwrap()
         );
         assert!(workspace.select(Some("missing")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_object_workspace_packages_from_single_string() {
+        let root = unique_temp_dir("workspace-object-string");
+        std::fs::create_dir_all(root.join("apps/web")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":{"packages":"apps/*"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("apps/web/package.json"),
+            r#"{"name":"web","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let workspace = Workspace::discover(&root).unwrap();
+        assert_eq!(
+            workspace
+                .members()
+                .iter()
+                .map(WorkspaceMember::name)
+                .collect::<Vec<_>>(),
+            ["web"]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

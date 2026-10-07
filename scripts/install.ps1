@@ -11,8 +11,28 @@ $MAX_RECORD_BYTES = 256KB
 $MAX_CHECKSUM_BYTES = 1MB
 $MAX_ARCHIVE_BYTES = 512MB
 $MAX_BINARY_BYTES = 536870912
-$VerifierUrl = 'https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py'
-$VerifierSha256 = '4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d'
+# Release CI fills these values from the exact built archives before publication.
+$BootstrapVersion = '@TAPID_BOOTSTRAP_VERSION@'
+$BootstrapBaseUrl = '@TAPID_BOOTSTRAP_BASE_URL@'
+$BootstrapPins = @{
+# @TAPID_BOOTSTRAP_PINS@
+}
+function Expand-VerifiedArchive([string]$archivePath, [string]$extractRoot) {
+    New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+    $members = @(& tar.exe -tzf $archivePath)
+    if ($LASTEXITCODE -ne 0 -or $members.Count -ne 1 -or $members[0] -ne "tapid.exe") { Fail "release archive must contain exactly one member named tapid.exe" }
+    $details = @(& tar.exe -tvzf $archivePath)
+    if ($LASTEXITCODE -ne 0 -or $details.Count -ne 1 -or $details[0] -notmatch '^-[^\r\n]*\stapid\.exe$') { Fail "release archive tapid.exe member must be a regular file" }
+    if ($details[0] -notmatch '^-[^\s]+\s+\d+\s+\S+\s+\S+\s+(\d+)\s+.*\stapid\.exe\z') { Fail "cannot determine release binary uncompressed size" }
+    if ([long]$Matches[1] -gt $MAX_BINARY_BYTES) { Fail "release binary exceeds the size limit" }
+    & tar.exe -xzf $archivePath -C $extractRoot tapid.exe
+    if ($LASTEXITCODE -ne 0) { Fail "cannot extract tapid.exe" }
+    $extracted = Join-Path $extractRoot "tapid.exe"
+    Test-RegularDestination $extracted
+    if ((Get-Item -LiteralPath $extracted).Length -gt $MAX_BINARY_BYTES) { Fail "release binary exceeds the size limit" }
+    return $extracted
+}
+
 function Fail([string]$Message) { throw "tapid installer: $Message" }
 
 function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
@@ -267,13 +287,14 @@ try {
         $signaturePath = Join-Path $tempRoot 'release.tsv.sig'
         Save-BoundedHttpsFile "$recordUrl.sig" $signaturePath $MAX_RECORD_BYTES
         if ((Get-Item -LiteralPath $signaturePath).Length -eq 0) { Fail "release record signature is empty" }
-        $python = Get-Command python.exe -ErrorAction SilentlyContinue
-        if (-not $python) { $python = Get-Command python3.exe -ErrorAction SilentlyContinue }
-        if (-not $python) { Fail "python is required to verify the release record signature" }
-        $verifier = Join-Path $tempRoot 'verify-release-record.py'
-        Save-BoundedHttpsFile $VerifierUrl $verifier 262144
-        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifier).Hash.ToLowerInvariant() -cne $VerifierSha256) { Fail "release record verifier checksum mismatch" }
-        & $python.Source $verifier $recordPath $signaturePath
+        $bootstrapHash = $BootstrapPins[$target]
+        if (-not $bootstrapHash) { Fail "installer bootstrap pins are missing; use a published release installer" }
+        $bootstrapArchive = "tapid-$BootstrapVersion-$target.tar.gz"
+        $bootstrapPath = Join-Path $tempRoot 'bootstrap.tar.gz'
+        Save-BoundedHttpsFile "$BootstrapBaseUrl/$bootstrapArchive" $bootstrapPath $MAX_ARCHIVE_BYTES
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $bootstrapPath).Hash.ToLowerInvariant() -cne $bootstrapHash) { Fail "bootstrap archive checksum mismatch" }
+        $bootstrap = Expand-VerifiedArchive $bootstrapPath (Join-Path $tempRoot 'bootstrap')
+        & $bootstrap __verify-release-record $recordPath $signaturePath
         if ($LASTEXITCODE -ne 0) { Fail "release record signature verification failed" }
         $record = Read-ReleaseRecord $recordPath $Version $target
         $Version = $record.Version
@@ -289,17 +310,19 @@ try {
     if ($null -ne $expectedSize -and $actualSize -ne $expectedSize) { Fail "release archive size does not match release record" }
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
     if ($actual -ne $expected) { Fail "checksum verification failed for $archive" }
-    $members = @(& tar.exe -tzf $archivePath)
-    if ($LASTEXITCODE -ne 0 -or $members.Count -ne 1 -or $members[0] -ne "tapid.exe") { Fail "release archive must contain exactly one member named tapid.exe" }
-    $details = @(& tar.exe -tvzf $archivePath)
-    if ($LASTEXITCODE -ne 0 -or $details.Count -ne 1 -or $details[0] -notmatch '^-[^\r\n]*\stapid\.exe$') { Fail "release archive tapid.exe member must be a regular file" }
-    if ($details[0] -notmatch '^-[^\s]+\s+\d+\s+\S+\s+\S+\s+(\d+)\s+.*\stapid\.exe\z') { Fail "cannot determine release binary uncompressed size" }
-    if ([long]$Matches[1] -gt $MAX_BINARY_BYTES) { Fail "release binary exceeds the size limit" }
-    & tar.exe -xzf $archivePath -C $extractRoot tapid.exe
-    if ($LASTEXITCODE -ne 0) { Fail "cannot extract tapid.exe" }
-    $extracted = Join-Path $extractRoot "tapid.exe"
-    Test-RegularDestination $extracted
-    if ((Get-Item -LiteralPath $extracted).Length -gt $MAX_BINARY_BYTES) { Fail "release binary exceeds the size limit" }
+    $extracted = Expand-VerifiedArchive $archivePath $extractRoot
+    if (-not $legacyRelease) {
+        & $bootstrap __prepare-release-install $Version $BootstrapVersion $archivePath $destination
+        if ($LASTEXITCODE -ne 0) { Fail "installer release policy rejected" }
+    } else {
+        $statePath = Join-Path $InstallDir '.tapid-release-state.json'
+        if (Test-Path -LiteralPath $statePath) { Fail "legacy installer cannot replace release-managed state; use tapid upgrade" }
+        if (Test-Path -LiteralPath $destination) {
+            $installedDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
+            $selectedDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $extracted).Hash
+            if ($installedDigest -cne $selectedDigest) { Fail "legacy installer cannot replace an existing installation; use tapid upgrade" }
+        }
+    }
     Copy-Item -LiteralPath $extracted -Destination $staged -Force
     [IO.File]::WriteAllBytes($stagedMarker, [Text.Encoding]::ASCII.GetBytes("tapid-managed-v1`n"))
     Move-Item -LiteralPath $stagedMarker -Destination (Join-Path $InstallDir ".tapid-managed") -Force

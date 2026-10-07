@@ -3,13 +3,12 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use tapid_release_client::Error;
 use tapid_signatures::{KeyRing, TrustEnvelope, digest};
-use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub(super) const DEFAULT_URL: &str = "https://tapid.dev/releases/v1/latest.tsv";
 pub(super) const MAX_BYTES: usize = 256 * 1024;
 pub(super) const SIGNATURE_SUBJECT: &str = "tapid-release-v1";
-pub(super) const SIGNATURE_SCHEMA: &str = "tapid-release-v1-signature";
-const MAX_SIGNATURE_VALIDITY: Duration = Duration::days(30);
+pub(super) const SIGNATURE_SCHEMA: &str = "tapid-release-v1-immutable-signature";
 
 #[derive(Debug)]
 pub(super) struct ReleaseRecord {
@@ -148,18 +147,14 @@ pub(super) fn verify_signature(
         .get("created_at")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::InvalidManifest("missing release signature created_at".into()))?;
-    let expires = claims
-        .get("expires_at")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::InvalidManifest("missing release signature expires_at".into()))?;
+    if claims.len() != 2 {
+        return Err(Error::InvalidManifest(
+            "invalid immutable release signature claims".into(),
+        ));
+    }
     let now = parse_signature_time(now)?;
     let created = parse_signature_time(created)?;
-    let expires = parse_signature_time(expires)?;
-    if created > now
-        || expires <= now
-        || expires <= created
-        || expires - created > MAX_SIGNATURE_VALIDITY
-    {
+    if created > now {
         return Err(Error::StaleMetadata);
     }
     envelope
@@ -225,7 +220,7 @@ mod tests {
         }
     }
 
-    fn signed_sidecar(record: &[u8], created_at: &str, expires_at: &str) -> (Vec<u8>, KeyRing) {
+    fn signed_sidecar(record: &[u8], created_at: &str) -> (Vec<u8>, KeyRing) {
         let secret = [7_u8; 32];
         let signing_key = SigningKey::from_bytes(&secret);
         let mut keyring = KeyRing::new();
@@ -242,7 +237,6 @@ mod tests {
             json!({
                 "schema": SIGNATURE_SCHEMA,
                 "created_at": created_at,
-                "expires_at": expires_at,
             }),
         )
         .sign("test-release-key", &secret)
@@ -253,11 +247,7 @@ mod tests {
     #[test]
     fn verifies_record_bound_sidecar_and_rejects_tampering() {
         let record = record("https://example.test/file");
-        let (sidecar, keyring) = signed_sidecar(
-            record.as_bytes(),
-            "2026-09-26T00:00:00Z",
-            "2026-09-27T00:00:00Z",
-        );
+        let (sidecar, keyring) = signed_sidecar(record.as_bytes(), "2026-09-26T00:00:00Z");
         assert!(
             verify_signature(
                 record.as_bytes(),
@@ -279,13 +269,24 @@ mod tests {
     }
 
     #[test]
-    fn rejects_expired_record_sidecar() {
+    fn old_immutable_record_sidecar_remains_valid() {
         let record = record("https://example.test/file");
-        let (sidecar, keyring) = signed_sidecar(
-            record.as_bytes(),
-            "2026-09-24T00:00:00Z",
-            "2026-09-25T00:00:00Z",
-        );
+        let (sidecar, keyring) = signed_sidecar(record.as_bytes(), "2026-09-24T00:00:00Z");
+        assert!(matches!(
+            verify_signature(
+                record.as_bytes(),
+                &sidecar,
+                &keyring,
+                "2036-09-26T00:00:00Z"
+            ),
+            Ok(())
+        ));
+    }
+
+    #[test]
+    fn rejects_future_record_sidecar() {
+        let record = record("https://example.test/file");
+        let (sidecar, keyring) = signed_sidecar(record.as_bytes(), "2036-09-26T00:00:00Z");
         assert!(matches!(
             verify_signature(
                 record.as_bytes(),
@@ -294,6 +295,60 @@ mod tests {
                 "2026-09-26T00:00:00Z"
             ),
             Err(Error::StaleMetadata)
+        ));
+    }
+
+    #[test]
+    fn rejects_time_limited_schema_and_expiry_claims() {
+        let record = record("https://example.test/file");
+        let (sidecar, keyring) = signed_sidecar(record.as_bytes(), "2026-09-24T00:00:00Z");
+        let envelope: TrustEnvelope = serde_json::from_slice(&sidecar).unwrap();
+        for claims in [
+            json!({"schema": "tapid-release-v1-signature", "created_at": "2026-09-24T00:00:00Z", "expires_at": "2026-09-25T00:00:00Z"}),
+            json!({"schema": SIGNATURE_SCHEMA, "created_at": "2026-09-24T00:00:00Z", "expires_at": "2026-09-25T00:00:00Z"}),
+        ] {
+            let sidecar = TrustEnvelope::unsigned(
+                SIGNATURE_SUBJECT,
+                envelope.artifact_digest.clone(),
+                claims,
+            )
+            .sign("test-release-key", &[7; 32])
+            .unwrap();
+            assert!(matches!(
+                verify_signature(
+                    record.as_bytes(),
+                    &serde_json::to_vec(&sidecar).unwrap(),
+                    &keyring,
+                    "2036-09-26T00:00:00Z"
+                ),
+                Err(Error::InvalidManifest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_keys_and_modified_creation_time() {
+        let record = record("https://example.test/file");
+        let (sidecar, keyring) = signed_sidecar(record.as_bytes(), "2026-09-24T00:00:00Z");
+        assert!(matches!(
+            verify_signature(
+                record.as_bytes(),
+                &sidecar,
+                &KeyRing::new(),
+                "2036-09-26T00:00:00Z"
+            ),
+            Err(Error::Signature(_))
+        ));
+        let mut envelope: TrustEnvelope = serde_json::from_slice(&sidecar).unwrap();
+        envelope.claims["created_at"] = json!("2026-09-23T00:00:00Z");
+        assert!(matches!(
+            verify_signature(
+                record.as_bytes(),
+                &serde_json::to_vec(&envelope).unwrap(),
+                &keyring,
+                "2036-09-26T00:00:00Z"
+            ),
+            Err(Error::Signature(_))
         ));
     }
 }

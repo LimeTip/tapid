@@ -10,6 +10,7 @@ pub enum LockfileError {
     InvalidSha512(String),
     InvalidWorkspaceSource(String),
     UnsupportedVersion(u32),
+    AliasMetadataInLegacySchema(u32),
     RegenerationRequired(u32),
     DuplicatePackage(String),
     PackageKeyMismatch(String),
@@ -22,6 +23,7 @@ pub enum LockfileError {
     },
     DanglingRoot(String),
     MissingRoots,
+    WorkspaceIdentityRequiresCurrentVersion,
     MissingRegistryIntegrityProvenance(String),
     UnverifiedRegistryArtifact(String),
     NonCanonicalRoots,
@@ -52,6 +54,10 @@ impl fmt::Display for LockfileError {
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported lockfile version: {version}")
             }
+            Self::AliasMetadataInLegacySchema(version) => write!(
+                f,
+                "lockfile version {version} cannot contain npm alias bindings; alias metadata requires schema 7"
+            ),
             Self::RegenerationRequired(version) => write!(
                 f,
                 "lockfile version {version} lacks required integrity provenance; regenerate it online"
@@ -75,6 +81,10 @@ impl fmt::Display for LockfileError {
             }
             Self::DanglingRoot(root) => write!(f, "lockfile has dangling root package {root}"),
             Self::MissingRoots => write!(f, "current lockfile schema requires exact root packages"),
+            Self::WorkspaceIdentityRequiresCurrentVersion => write!(
+                f,
+                "workspace package identities require the current lockfile schema"
+            ),
             Self::MissingRegistryIntegrityProvenance(package) => write!(
                 f,
                 "current lockfile schema requires registry integrity provenance for {package}"

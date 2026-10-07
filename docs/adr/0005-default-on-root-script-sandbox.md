@@ -105,7 +105,7 @@ No platform or assurance level is described as supported until positive and nega
 - Process execution remains behind the focused `tapid-runner` capability. The CLI owns parsing, file discovery, interaction, and rendering.
 - Dependency lifecycle scripts remain disabled by default and are not made eligible by a root-script profile. Root scripts run only through explicit selection.
 - Perfect containment is not claimed. Each backend and receipt reports only the dimensions and scopes it actually enforces.
-- At the current exact HEAD, experimental native macOS 26 Restricted execution exists. A Windows 11 runner prototype is present, but read-only CLI behavior remains unverified and writes/network are explicitly rejected. No Windows assurance level is claimed. ManagedTree is not claimed as a supported platform assurance level; Linux native containment remains unavailable, and `--no-sandbox` does not exist.
+- Experimental native macOS Restricted execution, a Linux Landlock/seccomp Restricted backend, and read-only Windows AppContainer/Job Object execution are implemented. Linux has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted validation; Windows read-only Node execution and graceful Ctrl+C have native Windows 11 and hosted validation on the pre-integration branch. Exact merged-revision acceptance remains required. Windows writes and network-enabled policies fail closed. The broader platform probe matrix and complete Windows support scope remain pending; `--no-sandbox` does not exist.
 
 ## Rejected alternatives
 

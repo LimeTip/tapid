@@ -38,6 +38,7 @@ pub enum RunPreparationError {
     #[cfg_attr(not(windows), allow(dead_code))]
     WindowsSystemDirectoryUnavailable,
     DuplicateEnvironmentName(String),
+    RegistryCredentialEnvironment,
     ReservedPath,
     #[cfg_attr(not(windows), allow(dead_code))]
     InvalidWindowsArgument,
@@ -67,6 +68,9 @@ impl fmt::Display for RunPreparationError {
                 f,
                 "run policy contains case-equivalent environment names: {name}"
             ),
+            Self::RegistryCredentialEnvironment => {
+                f.write_str("registry credential environment variables cannot be passed to scripts")
+            }
             Self::ReservedPath => {
                 f.write_str("run policy cannot allowlist reserved environment variable PATH")
             }
@@ -84,11 +88,33 @@ pub struct HostExecutionEnvironment<'a> {
     pub node_runtime: Option<&'a Path>,
     pub path: Option<&'a OsStr>,
     pub allowlisted: &'a BTreeMap<String, OsString>,
+    pub allow_process_memory_stats: bool,
 }
 
 /// Constructs the exact request accepted by `tapid-runner` without consulting ambient `PATH`.
 pub fn prepare_execution_request(
     project_dir: &Path,
+    script_name: &str,
+    config: &RunConfig,
+    script: &str,
+    arguments: &[OsString],
+    host: HostExecutionEnvironment<'_>,
+) -> Result<PreparedExecution, RunPreparationError> {
+    prepare_execution_request_with_working_directory(
+        project_dir,
+        project_dir,
+        script_name,
+        config,
+        script,
+        arguments,
+        host,
+    )
+}
+
+/// Constructs a request using workspace-root policy and a separately contained package cwd.
+pub fn prepare_execution_request_with_working_directory(
+    project_dir: &Path,
+    working_directory: &Path,
     script_name: &str,
     config: &RunConfig,
     script: &str,
@@ -186,7 +212,9 @@ pub fn prepare_execution_request(
         .windows_verbatim_arguments(cfg!(windows))
         .executable_search_paths(search_directories.iter().cloned())
         .trusted_node_runtime(&node_runtime)
+        .allow_process_memory_stats(host.allow_process_memory_stats)
         .project_root(project_dir)
+        .working_directory(working_directory)
         .policy(policy)
         .envs(environment)
         .build()
@@ -288,10 +316,22 @@ pub fn validate_allowlisted_environment_names(
     Ok(())
 }
 
-pub fn read_allowlisted_environment(
+pub fn read_allowlisted_environment_with_denied(
     names: &[String],
+    denied_names: &[String],
 ) -> Result<BTreeMap<String, OsString>, RunPreparationError> {
     validate_allowlisted_environment_names(names, cfg!(windows))?;
+    if names.iter().any(|name| {
+        denied_names.iter().any(|denied| {
+            if cfg!(windows) {
+                name.eq_ignore_ascii_case(denied)
+            } else {
+                name == denied
+            }
+        })
+    }) {
+        return Err(RunPreparationError::RegistryCredentialEnvironment);
+    }
     let mut environment = BTreeMap::new();
     for name in names {
         if let Some(value) = std::env::var_os(name) {

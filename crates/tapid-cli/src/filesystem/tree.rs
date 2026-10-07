@@ -3,7 +3,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
 };
-use tapid_linker::{LayoutInput, ManagedRoot};
+use tapid_linker::{ManagedRoot, PackageInstance};
 
 #[cfg(test)]
 thread_local! {
@@ -34,12 +34,31 @@ fn report_materialization_completion(total: usize, report: impl FnOnce(usize, us
     }
 }
 
+#[cfg(test)]
 pub(crate) fn materialize_stage(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
-    input: &LayoutInput,
+    instances: &[PackageInstance],
     trees: &BTreeMap<String, PathBuf>,
     sources_are_verified_snapshots: bool,
+) -> Result<(), String> {
+    materialize_stage_with_workspace_links(
+        stage,
+        plan,
+        instances,
+        trees,
+        sources_are_verified_snapshots,
+        &tapid_linker::WorkspaceLinkPlan::default(),
+    )
+}
+
+pub(crate) fn materialize_stage_with_workspace_links(
+    stage: &Path,
+    plan: &tapid_linker::MaterializationPlan,
+    instances: &[PackageInstance],
+    trees: &BTreeMap<String, PathBuf>,
+    sources_are_verified_snapshots: bool,
+    workspace_links: &tapid_linker::WorkspaceLinkPlan,
 ) -> Result<(), String> {
     fs::create_dir_all(stage.join("node_modules")).map_err(|e| e.to_string())?;
     let mut by_source = BTreeMap::new();
@@ -49,8 +68,7 @@ pub(crate) fn materialize_stage(
             .values()
             .find(|path| **path == entry.source)
             .ok_or_else(|| "tree replay mapping lost".to_owned())?;
-        let expected = input
-            .instances
+        let expected = instances
             .iter()
             .find(|instance| instance.tree.root == *tree)
             .map(|instance| instance.tree.digest.as_str())
@@ -93,11 +111,251 @@ pub(crate) fn materialize_stage(
             ));
         }
     }
-    materialize_package_shims(stage, plan)?;
+    materialize_package_shims(stage, plan, workspace_links)?;
+    materialize_workspace_links(stage, workspace_links)?;
     report_materialization_completion(materialization_total, |completed, total| {
         eprintln!("Materialization progress: {completed}/{total}");
     });
     Ok(())
+}
+
+fn materialize_workspace_links(
+    stage: &Path,
+    links: &tapid_linker::WorkspaceLinkPlan,
+) -> Result<(), String> {
+    let project_root = stage
+        .parent()
+        .ok_or_else(|| "workspace staging directory is not project-local".to_owned())?;
+    let project_root = fs::canonicalize(project_root)
+        .map_err(|error| format!("cannot resolve workspace project root: {error}"))?;
+    for link in &links.links {
+        let target = stage
+            .join("node_modules")
+            .join(link.name.as_str().split('/').collect::<PathBuf>());
+        if !target.starts_with(stage) {
+            return Err(format!(
+                "workspace link target escapes stage: {}",
+                target.display()
+            ));
+        }
+        let source = fs::canonicalize(&link.source).map_err(|error| {
+            format!(
+                "cannot resolve workspace source {}: {error}",
+                link.source.display()
+            )
+        })?;
+        if !source.starts_with(&project_root)
+            || source == project_root
+            || !source.join("package.json").is_file()
+        {
+            return Err(format!(
+                "workspace source is not a contained package directory: {}",
+                source.display()
+            ));
+        }
+        let parent = target
+            .parent()
+            .ok_or("workspace link target has no parent")?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        let final_parent = project_root
+            .join("node_modules")
+            .join(link.name.as_str().split('/').collect::<PathBuf>())
+            .parent()
+            .ok_or("workspace link target has no parent")?
+            .to_path_buf();
+        #[cfg(unix)]
+        let relative_source = relative_path(&final_parent, &source);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&relative_source, &target)
+            .map_err(|error| format!("cannot create workspace link: {error}"))?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&source, &target)
+            .map_err(|error| format!("cannot create workspace link: {error}"))?;
+        #[cfg(not(any(unix, windows)))]
+        return Err("workspace package links are unsupported on this platform".to_owned());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_workspace_links(
+    project_root: &Path,
+    stage: &Path,
+    links: &tapid_linker::WorkspaceLinkPlan,
+) -> Result<(), String> {
+    let project_root = fs::canonicalize(project_root)
+        .map_err(|error| format!("cannot resolve workspace project root: {error}"))?;
+    #[cfg(unix)]
+    let stage_root = fs::canonicalize(stage)
+        .map_err(|error| format!("cannot resolve workspace staging root: {error}"))?;
+    let mut workspace_roots = Vec::with_capacity(links.links.len());
+    for link in &links.links {
+        let source = fs::canonicalize(&link.source).map_err(|error| {
+            format!(
+                "cannot revalidate workspace source {}: {error}",
+                link.source.display()
+            )
+        })?;
+        if source == project_root || !source.starts_with(&project_root) {
+            return Err(format!(
+                "workspace source escaped the project before activation: {}",
+                source.display()
+            ));
+        }
+        let manifest = source.join("package.json");
+        let metadata = fs::symlink_metadata(&manifest)
+            .map_err(|error| format!("cannot inspect workspace manifest: {error}"))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(format!(
+                "workspace manifest changed before activation: {}",
+                manifest.display()
+            ));
+        }
+        let target = stage
+            .join("node_modules")
+            .join(link.name.as_str().split('/').collect::<PathBuf>());
+        if !target.starts_with(stage) {
+            return Err(format!(
+                "workspace link target escapes staging: {}",
+                target.display()
+            ));
+        }
+        let target_meta = fs::symlink_metadata(&target)
+            .map_err(|error| format!("cannot inspect staged workspace link: {error}"))?;
+        if !target_meta.file_type().is_symlink() {
+            return Err(format!(
+                "staged workspace link was replaced before activation: {}",
+                target.display()
+            ));
+        }
+        let raw_target = fs::read_link(&target)
+            .map_err(|error| format!("cannot read staged workspace link: {error}"))?;
+        #[cfg(unix)]
+        let final_parent = project_root
+            .join("node_modules")
+            .join(link.name.as_str().split('/').collect::<PathBuf>())
+            .parent()
+            .ok_or("workspace link target has no parent")?
+            .to_path_buf();
+        #[cfg(unix)]
+        let resolves_to_source = raw_target == relative_path(&final_parent, &source);
+        #[cfg(windows)]
+        let resolves_to_source =
+            fs::canonicalize(&raw_target).is_ok_and(|resolved_target| resolved_target == source);
+        #[cfg(not(any(unix, windows)))]
+        let resolves_to_source = false;
+        if !resolves_to_source {
+            return Err(format!(
+                "workspace link target changed before activation: {}",
+                target.display()
+            ));
+        }
+        workspace_roots.push(source);
+    }
+
+    #[cfg(unix)]
+    {
+        let bin_dir = stage.join("node_modules/.bin");
+        if let Ok(entries) = fs::read_dir(&bin_dir) {
+            for entry in entries {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+                if metadata.file_type().is_symlink() {
+                    let raw_target = fs::read_link(&path).map_err(|error| {
+                        format!(
+                            "cannot inspect staged executable shim {}: {error}",
+                            path.display()
+                        )
+                    })?;
+                    let staged_bin_dir = stage_root.join("node_modules/.bin");
+                    let staged_target = normalize_absolute_path(&staged_bin_dir.join(raw_target))?;
+                    let workspace_target =
+                        links
+                            .links
+                            .iter()
+                            .zip(&workspace_roots)
+                            .find_map(|(link, source)| {
+                                let package_root = stage_root
+                                    .join("node_modules")
+                                    .join(link.name.as_str().split('/').collect::<PathBuf>());
+                                staged_target
+                                    .strip_prefix(&package_root)
+                                    .ok()
+                                    .map(|suffix| (source, suffix.to_path_buf()))
+                            });
+                    if let Some((source, suffix)) = workspace_target {
+                        let source_target = source.join(suffix);
+                        let source_target_meta =
+                            fs::symlink_metadata(&source_target).map_err(|error| {
+                                format!(
+                                    "cannot inspect workspace executable target {}: {error}",
+                                    source_target.display()
+                                )
+                            })?;
+                        let resolved = fs::canonicalize(&source_target).map_err(|error| {
+                            format!(
+                                "cannot resolve workspace executable target {}: {error}",
+                                source_target.display()
+                            )
+                        })?;
+                        if !source_target_meta.is_file()
+                            || source_target_meta.file_type().is_symlink()
+                            || !resolved.starts_with(source)
+                        {
+                            return Err(format!(
+                                "workspace executable shim escapes its member: {}",
+                                path.display()
+                            ));
+                        }
+                    } else if staged_target.starts_with(&stage_root) {
+                        let resolved = fs::canonicalize(&staged_target).map_err(|error| {
+                            format!(
+                                "cannot resolve staged executable shim {}: {error}",
+                                path.display()
+                            )
+                        })?;
+                        if !resolved.starts_with(&stage_root) {
+                            return Err(format!(
+                                "staged executable shim escapes package roots: {}",
+                                path.display()
+                            ));
+                        }
+                    } else {
+                        return Err(format!(
+                            "staged executable shim escapes package roots: {}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn normalize_absolute_path(path: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+
+    if !path.is_absolute() {
+        return Err("workspace shim target is not absolute after joining".to_owned());
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err("workspace shim target escapes its filesystem root".to_owned());
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
 }
 
 fn package_root_for_shims(package_dir: &Path) -> PathBuf {
@@ -134,6 +392,7 @@ pub(crate) fn powershell_shim_contents(parent: &Path, source: &Path) -> String {
 fn materialize_package_shims(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
+    workspace_links: &tapid_linker::WorkspaceLinkPlan,
 ) -> Result<(), String> {
     let managed = ManagedRoot::new(stage.join("node_modules")).map_err(|e| e.to_string())?;
     let mut packages = Vec::new();
@@ -146,18 +405,67 @@ fn materialize_package_shims(
         let package_root = package_root_for_shims(&package_dir);
         let package_json = fs::read_to_string(package_root.join("package.json"))
             .map_err(|e| format!("cannot read installed package manifest: {e}"))?;
+        let parent = package_dir
+            .parent()
+            .ok_or_else(|| "installed package has no node_modules parent".to_owned())?;
+        let bin_dir = if parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('@'))
+        {
+            parent
+                .parent()
+                .ok_or_else(|| "scoped package has no node_modules parent".to_owned())?
+        } else {
+            parent
+        };
         packages.push(tapid_linker::ShimPackage {
             tree_root: package_root,
             package_json,
-            bin_dir: package_dir
-                .parent()
-                .ok_or_else(|| "installed package has no node_modules parent".to_owned())?
-                .to_path_buf(),
+            bin_dir: bin_dir.to_path_buf(),
         });
     }
-    let shims = tapid_linker::plan_shims(
+    let project_root = stage
+        .parent()
+        .ok_or_else(|| "workspace staging directory is not project-local".to_owned())?;
+    let project_root = fs::canonicalize(project_root)
+        .map_err(|error| format!("cannot resolve workspace project root: {error}"))?;
+    let mut workspace_packages = Vec::new();
+    let mut workspace_link_roots = Vec::new();
+    for link in &workspace_links.links {
+        let source = fs::canonicalize(&link.source).map_err(|error| {
+            format!(
+                "cannot resolve workspace source {}: {error}",
+                link.source.display()
+            )
+        })?;
+        if !source.starts_with(&project_root)
+            || source == project_root
+            || !source.join("package.json").is_file()
+        {
+            return Err(format!(
+                "workspace source is not a contained package directory: {}",
+                source.display()
+            ));
+        }
+        let package_json = fs::read_to_string(source.join("package.json"))
+            .map_err(|error| format!("cannot read workspace package manifest: {error}"))?;
+        let link_root = stage
+            .join("node_modules")
+            .join(link.name.as_str().split('/').collect::<PathBuf>());
+        workspace_link_roots.push(link_root.clone());
+        workspace_packages.push(tapid_linker::WorkspaceShimPackage {
+            tree_root: source,
+            package_json,
+            link_root,
+            bin_dir: stage.join("node_modules"),
+        });
+    }
+    let shims = tapid_linker::plan_shims_with_workspace_packages(
         managed,
         packages,
+        &project_root,
+        workspace_packages,
         crate::application::replay::current_platform(),
     )
     .map_err(|e| e.to_string())?;
@@ -171,7 +479,12 @@ fn materialize_package_shims(
             tapid_linker::ShimStrategy::UnixSymlink => {
                 #[cfg(unix)]
                 {
-                    make_unix_bin_executable(&entry.source)?;
+                    let workspace_source = workspace_link_roots
+                        .iter()
+                        .any(|root| entry.source.starts_with(root));
+                    if !workspace_source {
+                        make_unix_bin_executable(&entry.source)?;
+                    }
                     std::os::unix::fs::symlink(relative_path(parent, &entry.source), &entry.target)
                         .map_err(|e| format!("cannot materialize package bin shim: {e}"))?;
                 }
@@ -505,6 +818,53 @@ fn clone_regular_file(_source: &Path, _target: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
+#[cfg(all(test, unix))]
+mod workspace_link_security_tests {
+    use super::validate_workspace_links;
+    use std::{fs, os::unix::fs::symlink};
+    use tapid_linker::{WorkspaceLink, WorkspaceLinkPlan};
+
+    #[test]
+    fn rejects_workspace_link_retargeted_outside_project_before_activation() {
+        let root = std::env::temp_dir().join(format!(
+            "tapid-workspace-link-check-{}-{}",
+            std::process::id(),
+            crate::filesystem::atomic::unique_nonce()
+        ));
+        let project = root.join("project");
+        let member = project.join("packages/member");
+        let outside = root.join("outside");
+        let stage = project.join(".tapid-stage");
+        fs::create_dir_all(&member).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(stage.join("node_modules")).unwrap();
+        fs::write(
+            member.join("package.json"),
+            br#"{"name":"member","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            outside.join("package.json"),
+            br#"{"name":"outside","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        symlink(&outside, stage.join("node_modules/member")).unwrap();
+        let links = WorkspaceLinkPlan {
+            links: vec![WorkspaceLink {
+                name: "member".parse().unwrap(),
+                version: "1.0.0".parse().unwrap(),
+                source: member,
+                target: project.join("node_modules/member"),
+            }],
+        };
+
+        let error = validate_workspace_links(&project, &stage, &links).unwrap_err();
+
+        assert!(error.contains("workspace link target changed"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 #[cfg(test)]
 mod copy_tests {
     #[cfg(unix)]
@@ -792,7 +1152,7 @@ mod copy_tests {
         materialize_stage(
             &stage,
             &plan,
-            &input,
+            &input.instances,
             &BTreeMap::from([("example".to_owned(), source)]),
             false,
         )
@@ -880,7 +1240,7 @@ mod copy_tests {
             let result = materialize_stage(
                 &stage,
                 &plan,
-                &input,
+                &input.instances,
                 &BTreeMap::from([("example".to_owned(), source)]),
                 false,
             );
@@ -975,7 +1335,7 @@ mod copy_tests {
         materialize_stage(
             &stage,
             &plan,
-            &input,
+            &input.instances,
             &BTreeMap::from([("example".to_owned(), source)]),
             false,
         )

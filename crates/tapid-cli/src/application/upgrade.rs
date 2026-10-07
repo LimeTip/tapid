@@ -485,7 +485,11 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn write_cached_artifact(destination: &Path, digest: &str, bytes: &[u8]) -> Result<(), String> {
+pub(super) fn write_cached_artifact(
+    destination: &Path,
+    digest: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
     let path = cached_artifact_path(destination, digest);
     if let Ok(metadata) = fs::symlink_metadata(&path) {
         if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {

@@ -10,17 +10,23 @@ use std::{
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
-    /// Root package script name.
+    /// Script name from package.json. Requires a matching [run.scripts.<name>] profile in tapid.toml.
     pub(crate) script: String,
     /// Project directory containing package.json.
     #[arg(long, default_value = ".")]
     pub(crate) project_dir: PathBuf,
+    /// Select a workspace member by package name while retaining root policy and containment.
+    #[arg(long)]
+    pub(crate) workspace: Option<String>,
     /// Exact Node executable; otherwise the first valid Node on the host PATH is used.
     #[arg(long)]
     pub(crate) node_runtime: Option<PathBuf>,
     /// Emit the versioned receipt as one JSON line on stderr after child output.
     #[arg(long)]
     pub(crate) receipt_json: bool,
+    /// Allow process-memory statistics in Linux Restricted mode by creating a private PID/mount namespace with read-only procfs.
+    #[arg(long, visible_aliases = ["allow-procfs", "allow-memory-read"])]
+    pub(crate) allow_process_memory_stats: bool,
     /// Arguments forwarded after `--` to the script.
     #[arg(last = true)]
     pub(crate) arguments: Vec<OsString>,
@@ -56,15 +62,51 @@ pub(crate) fn run(args: Args) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let manifest = match super::manifest::read_manifest(&project_dir.join("package.json")) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("error: {error}");
+    let (manifest, working_directory) = if let Some(workspace_name) = args.workspace.as_deref() {
+        let workspace = match tapid_manifest::Workspace::discover(&project_dir) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let manifest = match workspace.select(Some(workspace_name)) {
+            Ok(manifest) => manifest.clone(),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let member_manifest = match workspace.select_path(Some(workspace_name)) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let Some(working_directory) = member_manifest.parent() else {
+            eprintln!("error: workspace member manifest has no parent");
             return ExitCode::from(1);
-        }
+        };
+        (manifest, working_directory.to_owned())
+    } else {
+        let manifest = match super::manifest::read_manifest(&project_dir.join("package.json")) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        (manifest, project_dir.clone())
     };
     let Some(script) = manifest.scripts().get(&args.script).cloned() else {
-        eprintln!("error: root package script is missing: {}", args.script);
+        match args.workspace.as_deref() {
+            Some(workspace_name) => eprintln!(
+                "error: workspace member '{workspace_name}' package script is missing: {}",
+                args.script
+            ),
+            None => eprintln!("error: root package script is missing: {}", args.script),
+        }
         return ExitCode::from(1);
     };
     let config_path = project_dir.join("tapid.toml");
@@ -100,11 +142,30 @@ pub(crate) fn run(args: Args) -> ExitCode {
         );
         return ExitCode::from(1);
     }
-    let ambient_environment = match crate::run::read_allowlisted_environment(
+    let registry_config = match crate::registry::RegistryConfig::parse_toml_bytes(&config_bytes) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let registry_credential_names = registry_config.credential_environment_names();
+    if registry_config.allowlist_contains_registry_credentials(
         config
             .exact_profile(&args.script)
             .expect("exact profile was checked")
             .environment(),
+        cfg!(windows),
+    ) {
+        eprintln!("error: registry credential environment variables cannot be passed to scripts");
+        return ExitCode::from(1);
+    }
+    let ambient_environment = match crate::run::read_allowlisted_environment_with_denied(
+        config
+            .exact_profile(&args.script)
+            .expect("exact profile was checked")
+            .environment(),
+        &registry_credential_names,
     ) {
         Ok(environment) => environment,
         Err(error) => {
@@ -117,18 +178,37 @@ pub(crate) fn run(args: Args) -> ExitCode {
         .is_none()
         .then(|| env::var_os("PATH"))
         .flatten();
-    let prepared = match crate::run::prepare_execution_request(
-        &project_dir,
-        &args.script,
-        &config,
-        &script,
-        &args.arguments,
-        crate::run::HostExecutionEnvironment {
-            node_runtime: args.node_runtime.as_deref(),
-            path: host_path.as_deref(),
-            allowlisted: &ambient_environment,
-        },
-    ) {
+    let prepared_result = if args.workspace.is_some() {
+        crate::run::prepare_execution_request_with_working_directory(
+            &project_dir,
+            &working_directory,
+            &args.script,
+            &config,
+            &script,
+            &args.arguments,
+            crate::run::HostExecutionEnvironment {
+                node_runtime: args.node_runtime.as_deref(),
+                path: host_path.as_deref(),
+                allowlisted: &ambient_environment,
+                allow_process_memory_stats: args.allow_process_memory_stats,
+            },
+        )
+    } else {
+        crate::run::prepare_execution_request(
+            &project_dir,
+            &args.script,
+            &config,
+            &script,
+            &args.arguments,
+            crate::run::HostExecutionEnvironment {
+                node_runtime: args.node_runtime.as_deref(),
+                path: host_path.as_deref(),
+                allowlisted: &ambient_environment,
+                allow_process_memory_stats: args.allow_process_memory_stats,
+            },
+        )
+    };
+    let prepared = match prepared_result {
         Ok(prepared) => prepared,
         Err(error) => {
             eprintln!("error: {error}");
@@ -153,17 +233,28 @@ pub(crate) fn run(args: Args) -> ExitCode {
     }
 }
 
-enum ConfigReadError {
+pub(crate) enum ConfigReadError {
     CapacityExceeded,
     Io(io::Error),
 }
 
 fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigReadError> {
+    read_bounded_config_file(path, tapid_runner::MAX_CONFIG_BYTES)
+}
+
+pub(crate) fn read_bounded_config_file(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ConfigReadError> {
+    let max_bytes = u64::try_from(max_bytes).map_err(|_| ConfigReadError::CapacityExceeded)?;
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or(ConfigReadError::CapacityExceeded)?;
     let metadata = fs::symlink_metadata(path).map_err(ConfigReadError::Io)?;
     if !metadata.file_type().is_file() {
         return Err(ConfigReadError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "run configuration is not a regular file",
+            "configuration is not a regular file",
         )));
     }
     let mut options = fs::OpenOptions::new();
@@ -180,17 +271,17 @@ fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigReadError> {
     if !metadata.is_file() {
         return Err(ConfigReadError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "run configuration is not a regular file",
+            "configuration is not a regular file",
         )));
     }
-    if metadata.len() > tapid_runner::MAX_CONFIG_BYTES as u64 {
+    if metadata.len() > max_bytes {
         return Err(ConfigReadError::CapacityExceeded);
     }
     let mut bytes = Vec::new();
-    file.take(tapid_runner::MAX_CONFIG_BYTES as u64 + 1)
+    file.take(read_limit)
         .read_to_end(&mut bytes)
         .map_err(ConfigReadError::Io)?;
-    if bytes.len() > tapid_runner::MAX_CONFIG_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(ConfigReadError::CapacityExceeded);
     }
     Ok(bytes)
@@ -248,7 +339,7 @@ fn receipt_value(outcome: &tapid_runner::ExecutionOutcome) -> serde_json::Value 
     })
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(any(not(any(target_os = "macos", target_os = "linux")), test))]
 fn forward_child_output(
     child_stdout: &[u8],
     child_stderr: &[u8],
@@ -269,14 +360,22 @@ fn forward_child_output_for_cli(
 ) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        // The macOS backend streams child bytes while capturing them. Replaying
-        // the completed capture would duplicate every line.
+        // The macOS backend streams bytes while capturing them; replay would duplicate output.
         let _ = (child_stdout, child_stderr, stdout, stderr);
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        forward_child_output(child_stdout, child_stderr, stdout, stderr)
+        #[cfg(target_os = "linux")]
+        {
+            // The Linux backend also streams bytes while capturing them.
+            let _ = (child_stdout, child_stderr, stdout, stderr);
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            forward_child_output(child_stdout, child_stderr, stdout, stderr)
+        }
     }
 }
 
@@ -300,6 +399,11 @@ fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> Ex
     if let Some(error) = output_error {
         eprintln!("error: failed to forward root package script output: {error}");
         return ExitCode::from(1);
+    }
+    if outcome.process_memory_stats_hint() {
+        eprintln!(
+            "hint: this script appears to need process memory statistics blocked by the sandbox; if you trust it, retry with --allow-process-memory-stats (aliases: --allow-memory-read, --allow-procfs)"
+        );
     }
     match outcome.termination() {
         tapid_runner::Termination::TimedOut => {

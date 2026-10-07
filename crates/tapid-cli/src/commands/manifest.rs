@@ -1,3 +1,4 @@
+use crate::application::outcome::{ErrorKind, OperationalError};
 use clap::{Args as ClapArgs, Subcommand};
 use std::{fs::File, io::Read, path::PathBuf, process::ExitCode};
 use tapid_manifest::PackageManifest;
@@ -12,7 +13,14 @@ pub(crate) struct Args {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    Validate { path: Option<PathBuf> },
+    /// Check a package.json manifest for valid JSON and supported field values.
+    #[command(
+        long_about = "Check a package.json manifest for valid JSON and supported field values.\n\nPrint the package name and version on success. Report an error and exit with code 1 if the file cannot be read or the manifest is invalid."
+    )]
+    Validate {
+        /// Manifest file to validate, defaults to package.json in the current directory.
+        path: Option<PathBuf>,
+    },
 }
 
 pub(crate) fn run(args: Args) -> ExitCode {
@@ -34,18 +42,33 @@ pub(crate) fn run(args: Args) -> ExitCode {
 }
 
 pub(crate) fn read_manifest(path: &std::path::Path) -> Result<PackageManifest, String> {
-    let file = File::open(path)
-        .map_err(|source| format!("cannot read manifest {}: {source}", path.display()))?;
+    read_manifest_typed(path).map_err(|error| error.to_string())
+}
+
+pub(crate) fn read_manifest_typed(
+    path: &std::path::Path,
+) -> Result<PackageManifest, OperationalError> {
+    let file = File::open(path).map_err(|source| {
+        OperationalError::from_source(ErrorKind::Manifest, source)
+            .context(format!("cannot read manifest {}", path.display()))
+    })?;
     let mut input = Vec::with_capacity(MAX_MANIFEST_BYTES + 1);
     file.take((MAX_MANIFEST_BYTES + 1) as u64)
         .read_to_end(&mut input)
-        .map_err(|source| format!("cannot read manifest {}: {source}", path.display()))?;
+        .map_err(|source| {
+            OperationalError::from_source(ErrorKind::Manifest, source)
+                .context(format!("cannot read manifest {}", path.display()))
+        })?;
     if input.len() > MAX_MANIFEST_BYTES {
-        return Err(format!(
-            "manifest exceeds maximum size of {MAX_MANIFEST_BYTES} bytes"
+        return Err(OperationalError::new(
+            ErrorKind::Manifest,
+            format!("manifest exceeds maximum size of {MAX_MANIFEST_BYTES} bytes"),
         ));
     }
-    let input = String::from_utf8(input)
-        .map_err(|source| format!("cannot read manifest {}: {source}", path.display()))?;
-    PackageManifest::parse(&input).map_err(|error| error.to_string())
+    let input = String::from_utf8(input).map_err(|source| {
+        OperationalError::from_source(ErrorKind::Manifest, source)
+            .context(format!("cannot read manifest {}", path.display()))
+    })?;
+    PackageManifest::parse(&input)
+        .map_err(|error| OperationalError::from_source(ErrorKind::Manifest, error))
 }

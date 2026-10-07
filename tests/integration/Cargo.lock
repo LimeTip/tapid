@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-core"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "base64 0.22.1",
  "semver",
@@ -1219,15 +1219,16 @@ dependencies = [
 
 [[package]]
 name = "tapid-linker"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
+ "sha2",
  "tapid-core",
  "tapid-manifest",
 ]
 
 [[package]]
 name = "tapid-lockfile"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -1237,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-manifest"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -1254,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-publish"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "sha2",
  "tapid-core",
@@ -1262,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-registry-client"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "httpdate",
  "reqwest",
@@ -1274,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-resolver"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "semver",
  "tapid-core",
@@ -1283,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-runner"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "libc",
  "serde",

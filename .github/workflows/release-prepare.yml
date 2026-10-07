@@ -1,0 +1,182 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Product version, leave empty for next patch
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-preparation
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      existing_url: ${{ steps.existing.outputs.url }}
+      version: ${{ steps.prepared.outputs.version }}
+      artifact_id: ${{ steps.patch.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Preserve existing release PR
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing_url="$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&head=${GITHUB_REPOSITORY_OWNER}:release/prepare" --jq '.[0].html_url // empty')"
+          printf 'url=%s\n' "$existing_url" >> "$GITHUB_OUTPUT"
+          if test -n "$existing_url"; then
+            printf 'Existing release PR preserved: %s\n' "$existing_url" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: steps.existing.outputs.url == ''
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        if: steps.existing.outputs.url == ''
+      - name: Install pinned version analysis tool
+        if: steps.existing.outputs.url == ''
+        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2
+        with:
+          tool: release-plz@0.3.169,cargo-semver-checks@0.51.0
+          checksum: true
+          fallback: none
+      - name: Resolve public baseline
+        if: steps.existing.outputs.url == ''
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          [[ "$baseline" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          printf 'tag=%s\n' "$baseline" >> "$GITHUB_OUTPUT"
+      - name: Prepare complete release tree
+        if: steps.existing.outputs.url == ''
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          BASELINE_TAG: ${{ steps.baseline.outputs.tag }}
+        run: node --experimental-strip-types tools/release/prepare.ts prepare "$REQUESTED_VERSION" "$BASELINE_TAG"
+      - name: Verify preparation and packaged workspace
+        if: steps.existing.outputs.url == ''
+        run: |
+          node --experimental-strip-types --test tools/release/prepare_test.ts tools/release/publish_test.ts
+          cargo package --workspace --locked --allow-dirty
+          git diff --check
+      - name: Read prepared version
+        if: steps.existing.outputs.url == ''
+        id: prepared
+        run: |
+          node --input-type=module -e 'import {readFileSync, appendFileSync} from "node:fs"; const plan=JSON.parse(readFileSync("release-preparation.json", "utf8")); appendFileSync(process.env.GITHUB_OUTPUT, "version=" + plan.version + "\n");'
+          rm release-preparation.json
+      - name: Retain complete preparation patch
+        if: steps.existing.outputs.url == ''
+        env:
+          VERSION: ${{ steps.prepared.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-preparation"
+          git add -- Cargo.toml Cargo.lock 'crates/*/Cargo.toml' tests/integration/Cargo.lock docs/releases/intent.json "docs/releases/$VERSION.md"
+          git diff --exit-code
+          git diff --cached --binary > "$RUNNER_TEMP/release-preparation/release.patch"
+          test -s "$RUNNER_TEMP/release-preparation/release.patch"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: steps.existing.outputs.url == ''
+        id: patch
+        with:
+          name: release-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-preparation/release.patch
+          if-no-files-found: error
+
+  write-pr:
+    needs: prepare
+    if: github.ref == 'refs/heads/main' && needs.prepare.outputs.existing_url == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
+          path: ${{ runner.temp }}/release-preparation
+      - name: Apply only reviewed preparation files
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git apply --index "$RUNNER_TEMP/release-preparation/release.patch"
+          while IFS= read -r path; do
+            case "$path" in
+              Cargo.toml|Cargo.lock|crates/*/Cargo.toml|tests/integration/Cargo.lock|docs/releases/intent.json|"docs/releases/$VERSION.md") ;;
+              *) echo "Unexpected preparation path: $path" >&2; exit 1 ;;
+            esac
+            git ls-files --stage -- "$path" | awk '$1 != "100644" { exit 1 }'
+          done < <(git diff --cached --name-only)
+          git diff --cached --check
+      - name: Preserve an intervening release PR
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          existing_url="$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&head=${GITHUB_REPOSITORY_OWNER}:release/prepare" --jq '.[0].html_url // empty')"
+          printf 'url=%s\n' "$existing_url" >> "$GITHUB_OUTPUT"
+          if test -n "$existing_url"; then
+            printf 'Existing release PR preserved: %s\n' "$existing_url" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Mint preparation App token
+        if: steps.existing.outputs.url == ''
+        id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: tapid
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Open complete release PR
+        if: steps.existing.outputs.url == ''
+        id: pr
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          token: ${{ steps.app.outputs.token }}
+          branch: release/prepare
+          base: main
+          title: Prepare Tapid ${{ needs.prepare.outputs.version }}
+          commit-message: Prepare Tapid ${{ needs.prepare.outputs.version }}
+          body: |
+            Prepares independent crate versions, both lockfiles, reviewed release notes, and the release intent.
+
+            Review the version table and notes. Merging this PR starts Release Tapid from the exact merged source. Publication remains blocked until the independent release authorization.
+
+            Ordinary preparation reruns preserve this PR and any maintainer edits. To replace it, close this PR deliberately before preparing again.
+      - name: Report release PR
+        if: steps.existing.outputs.url == ''
+        env:
+          RELEASE_PR: ${{ steps.pr.outputs.pull-request-url }}
+        run: |
+          printf 'Review the release PR: %s\n' "$RELEASE_PR" >> "$GITHUB_STEP_SUMMARY"
