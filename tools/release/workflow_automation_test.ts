@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { createHash } from 'node:crypto';
 import { strict as assert } from 'node:assert';
 import { readFile, readdir, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -238,5 +239,77 @@ test('native and public smoke verification can be called with exact release iden
     assert.match(yaml, /workflow_call:/);
     assert.match(yaml, /release_id:/);
     assert.match(yaml, /commit_sha:/);
+  }
+});
+const handoffName = 'ci-cli-${{ github.run_id }}-${{ github.run_attempt }}-windows-latest-Windows-X64-default-debug';
+function assertWindowsHandoff(ci: string) {
+  assertSourceOnlyOwners(ci);
+  const producer = job(ci, 'platform-consumer-validation');
+  const verifier = job(ci, 'windows-installer-contract');
+  assert.match(verifier, /name: Windows installer contract\n    runs-on: windows-latest\n    needs: \[platform-consumer-validation\]\n    if: \$\{\{ always\(\) && !cancelled\(\) \}\}\n    steps:/);
+  assert.match(producer, /name: Consumer validation \(\$\{\{ matrix.os \}\}\)/);
+  assert.match(producer, /fail-fast: false/);
+  assert.match(step(producer, 'Build Tapid binary'), /run: cargo build --bin tapid --locked\n/);
+  for (const [name, condition] of [
+    ['Verify install and lifecycle suppression; reject unsupported containment (Linux/Windows)', "runner.os != 'macOS'"],
+    ['Verify native Restricted child, forwarding and exit codes (macOS)', "runner.os == 'macOS'"],
+  ]) assert.equal(step(producer, name), `      - name: ${name}\n        if: ${condition}\n        run: node tests/fixtures/validate_consumer_project.js\n`);
+  const prepare = step(producer, 'Prepare same-run Windows CLI handoff');
+  const upload = step(producer, 'Retain same-run Windows CLI');
+  for (const s of [prepare, upload]) assert.match(s, /if: runner.os == 'Windows'\n/);
+  assert.match(prepare, /run: node --experimental-strip-types tools\/release\/ci_binary.ts prepare --directory "\$env:RUNNER_TEMP\/tapid-ci-cli" --binary target\/debug\/tapid.exe\n/);
+  assert(producer.indexOf(prepare) > producer.indexOf(step(producer, 'Verify native Restricted child, forwarding and exit codes (macOS)')));
+  assert(producer.indexOf(upload) > producer.indexOf(prepare));
+  assert.match(upload, /uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7/);
+  for (const text of [`name: ${handoffName}\n`, 'path: ${{ runner.temp }}/tapid-ci-cli/\n', 'if-no-files-found: error\n', 'retention-days: 1\n', 'compression-level: 0\n', 'overwrite: false\n']) assert(upload.includes(text));
+  const download = step(verifier, 'Download same-attempt Windows CLI');
+  assert.match(download, /uses: actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8/);
+  for (const text of [`name: ${handoffName}\n`, 'path: ${{ runner.temp }}/tapid-ci-cli-download\n', 'digest-mismatch: error\n']) assert(download.includes(text));
+  const verify = step(verifier, 'Verify same-run native verifier');
+  assert.match(verify, /shell: pwsh/);
+  assert(verify.includes('node --experimental-strip-types tools/release/ci_binary.ts verify --directory "$env:RUNNER_TEMP/tapid-ci-cli-download" --destination target/debug/tapid.exe\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'));
+  assert(verify.includes('$actual = & target/debug/tapid.exe --version\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'));
+  assert(verify.includes('if ($actual -cne "tapid $expected") { throw "Unexpected native version: $actual" }'));
+  assert(verifier.indexOf(download) < verifier.indexOf(verify));
+  assert(verifier.indexOf(verify) < verifier.indexOf('      - name: Install and reject archive fixtures'));
+  for (const s of [producer, verifier]) assert.doesNotMatch(s, /continue-on-error:|: write|github-token:|run-id:|repository:|pattern:|merge-multiple:|\|\| true|if: (?:false|always\(\)|success\(\))/);
+  assert.doesNotMatch(verifier, /cargo build|rust-toolchain@|rust-cache@/);
+  assert.doesNotMatch(download + verify, /\n        if:/);
+  const fixture = verifier.slice(verifier.indexOf('      - name: Install and reject archive fixtures'));
+  // Stage 3 fixture snapshot: no installer/security assertion or cleanup changes permitted.
+  assert.equal(createHash('sha256').update(fixture).digest('hex'), 'ab1cd26c75fe0313e34482f1982369469e0a8f4920158b3c93515e1a521b9348');
+}
+
+test('Windows-only consumer handoff retains real verifier and same-attempt fail-closed ownership', async () => {
+  assertWindowsHandoff(await workflow('ci'));
+});
+test('Windows handoff contract rejects ownership, stale-attempt, bypass and fixture mutations', async () => {
+  const ci = await workflow('ci'); assertWindowsHandoff(ci);
+  const producer = job(ci, 'platform-consumer-validation'); const verifier = job(ci, 'windows-installer-contract');
+  const upload = step(producer, 'Retain same-run Windows CLI');
+  const mutations = [
+    ci.replace(verifier, ''), ci.replace(verifier, verifier.replace('    steps:', '    continue-on-error: true\n    steps:')),
+    ci.replace('always() && !cancelled()', "needs.platform-consumer-validation.result == 'success'"),
+    ci.replace('always() && !cancelled()', 'always()'),
+    ci.replace('    needs: [platform-consumer-validation]\n', ''),
+    ci.replace(verifier, verifier.replace('    steps:', '    if: false\n    steps:')),
+    ci.replace('digest-mismatch: error', 'digest-mismatch: warn'),
+    ci.replaceAll('${{ github.run_attempt }}-', ''),
+    ci.replace(verifier, verifier.replace(`name: ${handoffName}`, 'pattern: ci-cli-*')),
+    ci.replace(verifier, verifier.replace('digest-mismatch: error', 'digest-mismatch: error\n          github-token: ${{ github.token }}')),
+    ci.replace(verifier, verifier.replace('digest-mismatch: error', 'digest-mismatch: error\n          run-id: 123')),
+    ci.replace(verifier, verifier.replace(step(verifier, 'Verify same-run native verifier'), '')),
+    ci.replace(producer, producer.replace(upload, '').replace('      - name: Build Tapid binary', upload + '      - name: Build Tapid binary')),
+    ci.replace(upload, upload.replace("runner.os == 'Windows'", 'always()')),
+    ci.replace(producer, producer.replace("if: runner.os != 'macOS'", 'if: false')),
+    ci.replace(producer, producer.replace("if: runner.os == 'macOS'", 'if: false')),
+    ci.replace(producer, producer.replace('run: node tests/fixtures/validate_consumer_project.js', 'run: echo skipped')),
+    ci.replace('overwrite: false', 'overwrite: true'),
+    ci.replace(verifier, verifier.replace('$actual = & target/debug/tapid.exe --version', '$actual = & tapid --version')),
+    ci.replace('if ($actual -cne "tapid $expected")', 'if ($false)'),
+  ];
+  for (const broken of mutations) assert.throws(() => assertWindowsHandoff(broken));
+  for (const text of ['exactly one member named tapid.exe', 'release record signature verification failed', 'bootstrap archive checksum mismatch', "SetEnvironmentVariable('Path', $originalUserPath, 'User')"]) {
+    assert.throws(() => assertWindowsHandoff(ci.replace(verifier, verifier.replace(text, 'disabled'))));
   }
 });

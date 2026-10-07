@@ -315,6 +315,26 @@ jobs:
       - name: Verify native Restricted child, forwarding and exit codes (macOS)
         if: runner.os == 'macOS'
         run: node tests/fixtures/validate_consumer_project.js
+      - name: Prepare same-run Windows CLI handoff
+        if: runner.os == 'Windows'
+        run: node --experimental-strip-types tools/release/ci_binary.ts prepare --directory "$env:RUNNER_TEMP/tapid-ci-cli" --binary target/debug/tapid.exe
+      - name: Retain same-run Windows CLI
+        if: runner.os == 'Windows'
+        id: windows-cli
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-cli-${{ github.run_id }}-${{ github.run_attempt }}-windows-latest-Windows-X64-default-debug
+          path: ${{ runner.temp }}/tapid-ci-cli/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+      - name: Record Windows handoff artifact identity
+        if: runner.os == 'Windows'
+        env:
+          ARTIFACT_ID: ${{ steps.windows-cli.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.windows-cli.outputs.artifact-digest }}
+        run: Write-Host "Windows CLI artifact $env:ARTIFACT_ID digest $env:ARTIFACT_DIGEST"
 
   pr-published-binary-smoke:
     # Exact PR runner + immutable published binary: pre-merge regression evidence only.
@@ -464,6 +484,8 @@ jobs:
   windows-installer-contract:
     name: Windows installer contract
     runs-on: windows-latest
+    needs: [platform-consumer-validation]
+    if: ${{ always() && !cancelled() }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -471,9 +493,24 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - name: Build native verifier
-        run: cargo build --locked --bin tapid
+      # Failed-only reruns deliberately cannot reuse an earlier attempt's CLI.
+      # Rerun the producer and verifier together, or the full workflow.
+      - name: Download same-attempt Windows CLI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-cli-${{ github.run_id }}-${{ github.run_attempt }}-windows-latest-Windows-X64-default-debug
+          path: ${{ runner.temp }}/tapid-ci-cli-download
+          digest-mismatch: error
+      - name: Verify same-run native verifier
+        shell: pwsh
+        run: |
+          node --experimental-strip-types tools/release/ci_binary.ts verify --directory "$env:RUNNER_TEMP/tapid-ci-cli-download" --destination target/debug/tapid.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $expected = [regex]::Match((Get-Content -Raw crates/tapid-cli/Cargo.toml), '(?m)^version = "([^"]+)"\r?$').Groups[1].Value
+          if (-not $expected) { throw 'Missing CLI manifest version' }
+          $actual = & target/debug/tapid.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($actual -cne "tapid $expected") { throw "Unexpected native version: $actual" }
       - name: Install and reject archive fixtures
         shell: pwsh
         run: |
