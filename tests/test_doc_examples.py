@@ -13,14 +13,22 @@ SPEC = importlib.util.spec_from_file_location('doc_examples', ROOT / 'scripts/ch
 
 
 class RunnerTests(unittest.TestCase):
-    def test_public_installer_workflow_cannot_access_or_push_private_website(self):
-        workflow = (ROOT / '.github/workflows/website-installer-sync.yml').read_text()
+    def test_public_installer_checks_in_main_ci_cannot_access_or_push_private_website(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        start = workflow.index('\n  release-contract:')
+        end = workflow.index('\n  security:', start)
+        workflow = workflow[start:end]
+        self.assertFalse((ROOT / '.github/workflows/website-installer-sync.yml').exists())
         self.assertNotIn('repository: LimeTip/tapid-web', workflow)
         self.assertNotIn('TAPID_WEB_SYNC_TOKEN', workflow)
         self.assertNotIn('git push', workflow)
         self.assertNotIn('sync-website:', workflow)
+        self.assertNotIn('continue-on-error:', workflow)
         self.assertIn('sh -n scripts/install.sh', workflow)
-        self.assertIn('PowerShell syntax', workflow)
+        self.assertIn('sh scripts/install.sh --help', workflow)
+        self.assertIn('[System.Management.Automation.PSParser]::Tokenize(', workflow)
+        self.assertIn('[ref]$errors', workflow)
+        self.assertIn('exit 1', workflow)
 
     def load(self):
         self.assertTrue(Path(SPEC.origin).is_file(), 'missing executable example runner')

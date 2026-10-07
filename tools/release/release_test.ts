@@ -7,7 +7,7 @@ import {
 } from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { arch, platform } from "node:process";
@@ -223,12 +223,10 @@ test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM ru
 });
 
 test("repository workflows avoid the deprecated Node.js 20 action majors", async () => {
-  for (const path of [
-    ".github/workflows/ci.yml",
-    ".github/workflows/crates-publication.yml",
-    ".github/workflows/release-publication.yml",
-    ".github/workflows/website-installer-sync.yml",
-  ]) {
+  const workflows = await readdir(join(root, ".github/workflows"));
+  assert(workflows.includes("ci.yml"));
+  for (const name of workflows.filter((name: string) => name.endsWith(".yml"))) {
+    const path = `.github/workflows/${name}`;
     const workflow = await text(path);
     for (const legacyAction of [
       "actions/checkout@v4",
