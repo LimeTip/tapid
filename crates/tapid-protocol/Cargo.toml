@@ -2,9 +2,10 @@
 name = "tapid-protocol"
 readme = "README.md"
 description = "Shared protocol types for the Tapid package ecosystem"
-version = "0.0.4"
+version = "0.0.5"
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -14,4 +15,4 @@ path = "src/lib.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-tapid-core = { version = "0.0.6", path = "../tapid-core" }
+tapid-core = { version = "0.0.7", path = "../tapid-core" }
