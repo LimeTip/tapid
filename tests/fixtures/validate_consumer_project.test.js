@@ -24,10 +24,12 @@ function validate(platform, failure, releaseTag = 'v0.0.10') {
       };
       if (name === 'node:child_process') return { spawnSync(executable, args, options) {
         assert.equal(executable, binary, 'must execute the supplied published binary');
+        assert.equal(options.timeout, 60_000, 'every invocation must remain bounded');
+        assert.equal(options.shell, false, 'must execute the binary without a shell');
         calls.push(args);
         const result = { status: 0, signal: null, stdout: '', stderr: '' };
         if (args[0] === 'install') return result;
-        if (platform !== 'darwin' && releaseTag !== 'v0.0.9') {
+        if (platform !== 'darwin' && !(platform === 'win32' && !releaseTag) && releaseTag !== 'v0.0.9') {
           result.status = failure === 'success' ? 0 : 1;
           result.stderr = failure === 'unrelated' ? 'unrelated failure' :
             'sandbox execution failed (unsupported-containment): no process was started and no enforcement receipt was issued';
@@ -40,12 +42,26 @@ function validate(platform, failure, releaseTag = 'v0.0.10') {
           options.env.TAPID_FIXTURE !== '1' ? 42 : Number(forwarded[1]);
         result.stdout = 'TAPID_FIXTURE_STARTED=' + JSON.stringify(forwarded) + '\n';
         result.stderr = JSON.stringify({ schema_version: 1, assurance: 'Restricted',
-          backend: { name: 'tapid-runner/macos-seatbelt-restricted-experimental' },
+          backend: { name: platform === 'win32' ? 'tapid-runner/windows-appcontainer-job' :
+            'tapid-runner/macos-seatbelt-restricted-experimental' },
           enforced: { filesystem_read: true, filesystem_write: true, network: true, environment_sanitization: true },
           termination: `Exited(${result.status})`, configured_limits: { timeout_seconds: null } });
         if (releaseTag === 'v0.0.9') {
           assert.equal(args.includes('--receipt-json'), false, 'legacy CLI has no receipt option');
           result.stderr = '';
+        }
+        if (failure === 'backend' || failure === 'assurance' || failure === 'enforcement') {
+          const receipt = JSON.parse(result.stderr);
+          if (failure === 'backend') receipt.backend.name = 'tapid-runner/macos-seatbelt-restricted-experimental';
+          if (failure === 'assurance') receipt.assurance = 'Uncontained';
+          if (failure === 'enforcement') receipt.enforced.filesystem_write = false;
+          result.stderr = JSON.stringify(receipt);
+        }
+        if (failure === 'missing-receipt') result.stderr = '';
+        if (failure === 'unsupported') {
+          result.status = 1;
+          result.stdout = '';
+          result.stderr = 'unsupported-containment: no process was started and no enforcement receipt was issued';
         }
         if (failure === 'argv') result.stdout = 'TAPID_FIXTURE_STARTED=[]\n';
         if (failure === 'exit') result.status = 0;
@@ -54,7 +70,8 @@ function validate(platform, failure, releaseTag = 'v0.0.10') {
       return require(name);
     },
     Buffer,
-    process: { hrtime: process.hrtime, platform, argv: ['node', 'validator', '--binary', binary, '--release-tag', releaseTag],
+    process: { hrtime: process.hrtime, platform, argv: ['node', 'validator', '--binary', binary,
+      ...(releaseTag ? ['--release-tag', releaseTag] : [])],
       env: { TAPID_FIXTURE_PROJECT: '/fixture' }, stdout: { write() {} }, stderr: { write() {} } },
     console: { log() {} },
   };
@@ -80,6 +97,16 @@ for (const platform of ['linux', 'win32']) {
 for (const failure of ['argv', 'exit']) {
   test(`darwin: rejects incorrect ${failure}`, () => assert.throws(() => validate('darwin', failure)));
 }
+test('win32: source without a release tag requires native Restricted execution', () => {
+  assert.equal(validate('win32', undefined, null).length, 7);
+});
+
+for (const failure of ['argv', 'exit', 'backend', 'assurance', 'enforcement', 'missing-receipt', 'unsupported']) {
+  test(`win32: source rejects incorrect ${failure}`, () => {
+    assert.throws(() => validate('win32', failure, null));
+  });
+}
+
 test('unknown published releases require an explicit reviewed contract', () => {
   assert.throws(() => validate('linux', undefined, 'v9.9.9'), /unreviewed root-script release/);
 });
