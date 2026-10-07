@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tapid-archive)](https://crates.io/crates/tapid-archive)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-archive)](https://crates.io/crates/tapid-archive)
 [![Docs.rs](https://docs.rs/tapid-archive/badge.svg)](https://docs.rs/tapid-archive)
-[![License](https://img.shields.io/crates/l/tapid-archive)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 `tapid-archive` validates archive entry metadata before extraction. Names using either slash style are checked. Traversal, absolute, drive, and UNC paths are rejected. Entry count, path length, compressed size, extracted size, and path limits are explicit. Duplicate and case-colliding names, links, device nodes, and other special files are rejected. Tar and tar.gz archives are extracted into a fresh staging directory.

@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tapid-runner)](https://crates.io/crates/tapid-runner)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-runner)](https://crates.io/crates/tapid-runner)
 [![Docs.rs](https://docs.rs/tapid-runner/badge.svg)](https://docs.rs/tapid-runner)
-[![License](https://img.shields.io/crates/l/tapid-runner)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Policy-aware package execution foundations for Tapid. Existing approval APIs bind an exact artifact digest to the SHA-256 hash of a normalized script.

@@ -5,6 +5,7 @@ description = "Test fixtures and support utilities for Tapid"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
