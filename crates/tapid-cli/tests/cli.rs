@@ -9,6 +9,41 @@ use std::{
 };
 use tapid_lockfile::Lockfile;
 
+/// Verifies exact license output with no application environment and invalid project files.
+#[test]
+fn license_prints_complete_apache_text_without_accessing_a_project() {
+    let project = tapid_test_support::TempProject::new("license").unwrap();
+    project.write("package.json", b"invalid manifest").unwrap();
+    project
+        .write("tapid.toml", b"invalid configuration")
+        .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+    command
+        .arg("license")
+        .current_dir(project.path())
+        .env_clear();
+    // Keep coverage instrumentation from writing a profile into the project.
+    if let Some(profile_file) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile_file);
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    assert!(output.stderr.is_empty());
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let packaged_license = manifest_dir.join("LICENSE");
+    let license_path = if packaged_license.is_file() {
+        packaged_license
+    } else {
+        manifest_dir.join("../../LICENSE")
+    };
+    let expected = format!(
+        "Copyright 2026 LimeTip AB.\n\n{}",
+        fs::read_to_string(license_path).unwrap()
+    );
+    assert_eq!(output.stdout, expected.as_bytes());
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 2);
+}
+
 fn temp_dir(label: &str) -> PathBuf {
     static NEXT_TEMP_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = SystemTime::now()

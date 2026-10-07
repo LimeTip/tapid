@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tapid)](https://crates.io/crates/tapid)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid)](https://crates.io/crates/tapid)
 [![Docs.rs](https://docs.rs/tapid/badge.svg)](https://docs.rs/tapid)
-[![License](https://img.shields.io/crates/l/tapid)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Tapid is a security-focused JavaScript and TypeScript **package manager**, written in Rust. It resolves dependencies, checks downloaded bytes against registry-declared integrity metadata by default, stores verified content, and materializes a reproducible `node_modules` tree from `tapid.lock`. Tapid is not a JavaScript runtime: today its primary compatibility target is the Node.js/npm ecosystem, and projects use their own runtime to execute code. Tapid's package format and install workflow are designed around that ecosystem; using Deno or Bun is a future compatibility goal, not a guarantee of current support. The current implementation covers a small, explicit npm-compatible subset. Development releases are available from GitHub Releases; production support is not yet available. See the [production adoption gate](docs/production-adoption.md) for the evidence required before any release or platform can be called production-supported.
@@ -220,4 +220,8 @@ Longer-term work includes broader npm compatibility, native package and registry
 
 ## License
 
-Tapid is developed by LimeTip Company and is licensed under the MIT License. See `LICENSE` for the complete text.
+The Tapid CLI and its supporting crates in this repository are developed by LimeTip AB and licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the complete text.
+
+Copyright 2026 LimeTip AB.
+
+Run `tapid license` to print the complete license and copyright attribution embedded in the executable. This command works offline and does not require a project.

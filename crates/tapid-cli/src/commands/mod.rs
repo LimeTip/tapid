@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 pub(crate) mod init;
 pub(crate) mod install;
+mod license;
 pub(crate) mod lifecycle;
 pub(crate) mod lock;
 pub(crate) mod manifest;
@@ -26,6 +27,8 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Print the Apache-2.0 license and copyright attribution.
+    License,
     #[command(name = "__verify-release-record", hide = true)]
     VerifyReleaseRecord(release_verification::Args),
     #[command(name = "__prepare-release-install", hide = true)]
@@ -117,6 +120,7 @@ pub(crate) enum Command {
 /// Routes a parsed command to its handler, or prints usage guidance when no command is given.
 pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
     match command {
+        Some(Command::License) => license::run(),
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
         Some(Command::PrepareReleaseInstall(args)) => release_verification::prepare_install(args),
         None => {

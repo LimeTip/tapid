@@ -2,9 +2,10 @@
 name = "tapid-signatures"
 readme = "README.md"
 description = "Signing and verification foundations for Tapid"
-version = "0.0.3"
+version = "0.0.4"
 edition.workspace = true
 license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
