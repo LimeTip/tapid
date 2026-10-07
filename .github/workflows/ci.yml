@@ -198,6 +198,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (Test-Path -LiteralPath $binary) { throw 'Tapid was not uninstalled' }
           Write-Host 'Windows developer install and uninstall passed.'
+      # TEMPORARY Stage 6 proof: remove these three steps after native evidence review.
+      # Runs only after normal native assertions; private target cannot affect handoff.
+      - name: Test temporary cache freshness helper
+        run: python -m unittest discover -s tests -p test_ci_freshness_pilot.py -v
+      - name: Prove temporary same-version changed-source freshness
+        timeout-minutes: 25
+        env:
+          TAPID_FRESHNESS_EVIDENCE: ${{ runner.temp }}/tapid-freshness-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python scripts/ci-freshness-pilot.py --evidence "${{ env.TAPID_FRESHNESS_EVIDENCE }}"
+      - name: Retain temporary freshness receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: temporary-freshness-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tapid-freshness-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 7
 
   nextest:
     name: Nextest (Ubuntu)
