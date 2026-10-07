@@ -1,5 +1,7 @@
 import { deepStrictEqual, match, rejects, strictEqual, throws } from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -65,6 +67,34 @@ test("preparation workflow is main-only, uses App only after checks, and never p
   match(workflow, /pulls\?state=open&base=main&head=.*:release\/prepare/);
   match(workflow, /name: Open complete release PR\n\s+if: steps\.existing\.outputs\.url == ''/);
   match(workflow, /name: Prepare complete release tree\n\s+if: steps\.existing\.outputs\.url == ''/);
+});
+
+test("preparation packages uncommitted version bumps and still verifies compilation", async () => {
+  const exec = promisify(execFile);
+  const workflow = await readFile(new URL("../../.github/workflows/release-prepare.yml", import.meta.url), "utf8");
+  const args = workflow.match(/^\s+cargo (package[^\n]+)$/m)![1].trim().split(/\s+/);
+  const cargo = (await exec("rustup", ["which", "cargo"])).stdout.trim();
+  const rustc = (await exec("rustup", ["which", "rustc"])).stdout.trim();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "tapid-prepare-package-")));
+  const env = { PATH: process.env.PATH, HOME: join(directory, "home"), CARGO_HOME: join(directory, "cargo-home"), RUSTC: rustc, GIT_CONFIG_NOSYSTEM: "1" };
+  const run = (command: string, arguments_: string[]) => exec(command, arguments_, { cwd: directory, env });
+  const manifest = (version: string) => `[package]\nname = "tapid-preparation-fixture"\nversion = "${version}"\nedition = "2021"\n[workspace]\n`;
+  try {
+    await mkdir(join(directory, "src"));
+    await mkdir(env.HOME);
+    await writeFile(join(directory, "Cargo.toml"), manifest("0.0.1"));
+    await writeFile(join(directory, "src/lib.rs"), "pub fn version() -> u8 { 1 }\n");
+    await run(cargo, ["generate-lockfile", "--offline"]);
+    await run("git", ["init"]);
+    await run("git", ["add", "."]);
+    await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "initial fixture"]);
+    await writeFile(join(directory, "Cargo.toml"), manifest("0.0.2"));
+    await run(cargo, ["generate-lockfile", "--offline"]);
+    await run(cargo, [...args, "--offline"]);
+    strictEqual((await readFile(join(directory, "target/package/tapid-preparation-fixture-0.0.2.crate"))).length > 0, true);
+    await writeFile(join(directory, "src/lib.rs"), "invalid Rust syntax\n");
+    await rejects(run(cargo, [...args, "--offline"]), /could not compile|failed to verify/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("tooling-only preparation uses maintained version tool and creates both final files", async () => {
