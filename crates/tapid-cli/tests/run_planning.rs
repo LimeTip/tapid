@@ -300,6 +300,45 @@ fn arbitrary_executable_filename_is_not_accepted_as_node() {
     fs::remove_dir_all(project).unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_script_payload_protects_forwarded_quotes_from_cmd_strip() {
+    let (project, runtime) = project();
+    let config = RunConfig::parse_toml("[run.scripts.test]\n").unwrap();
+    for script in ["node fixture.js", "\"node\" \"fixture.js\""] {
+        let prepared = run::prepare_execution_request(
+            &project,
+            "test",
+            &config,
+            script,
+            &[
+                "spaces 'quotes' $HOME ; literal".into(),
+                "0".into(),
+                "".into(),
+            ],
+            run::HostExecutionEnvironment {
+                node_runtime: Some(&runtime),
+                path: None,
+                allowlisted: &BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared.request().program(), "cmd.exe");
+        assert_eq!(
+            prepared.request().arguments(),
+            [
+                OsString::from("/D"),
+                OsString::from("/S"),
+                OsString::from("/C"),
+                OsString::from(format!(
+                    "\"{script} ^\"spaces^ 'quotes'^ $HOME^ ;^ literal^\" 0 \"\"\""
+                )),
+            ]
+        );
+    }
+    fs::remove_dir_all(project).unwrap();
+}
+
 #[test]
 fn windows_cmd_arguments_match_promise_spawn_escaping() {
     let cases = [

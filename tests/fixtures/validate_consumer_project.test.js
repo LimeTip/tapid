@@ -81,10 +81,10 @@ function validate(platform, failure, releaseTag = 'v0.0.10') {
 
 for (const platform of ['linux', 'win32', 'darwin']) {
   test(`${platform}: preserves reviewed legacy forwarding without claiming containment`, () => {
-    assert.equal(validate(platform, undefined, 'v0.0.9').length, 7);
+    assert.equal(validate(platform, undefined, 'v0.0.9').length, 9);
   });
   test(`${platform}: validates the supplied published binary for all fixture cases`, () => {
-    assert.equal(validate(platform).length, 7);
+    assert.equal(validate(platform).length, 9);
   });
 }
 for (const platform of ['linux', 'win32']) {
@@ -98,7 +98,7 @@ for (const failure of ['argv', 'exit']) {
   test(`darwin: rejects incorrect ${failure}`, () => assert.throws(() => validate('darwin', failure)));
 }
 test('win32: source without a release tag requires native Restricted execution', () => {
-  assert.equal(validate('win32', undefined, null).length, 7);
+  assert.equal(validate('win32', undefined, null).length, 9);
 });
 
 for (const failure of ['argv', 'exit', 'backend', 'assurance', 'enforcement', 'missing-receipt', 'unsupported']) {

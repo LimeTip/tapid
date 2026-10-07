@@ -97,7 +97,10 @@ const cases = [
   { args: ['forwarded', '0'], status: 42, environment: 'wrong' },
   // Exact argv comparison below catches double appending and shell interpolation.
   { args: ["spaces 'quotes' $HOME ; literal", '0'], status: 41 },
+  { args: ['', '0'], status: 41 },
   { args: ['forwarded', '0', 'extra'], status: 44 },
+  { args: ['forwarded', '0', '', 'a"b', 'space tail\\', 'C:\\tail\\',
+    '%PATH%', 'wow!', 'a^b', 'a&b', 'a|b', 'a<b', 'a>b', '(a)', 'Grüße'], status: 44 },
 ];
 for (const test of cases) {
   const result = invoke(

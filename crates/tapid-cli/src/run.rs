@@ -447,7 +447,9 @@ fn shell_invocation(
             OsString::from("/D"),
             OsString::from("/S"),
             OsString::from("/C"),
-            OsString::from(format!("{script}{suffix}")),
+            // /S strips the first and last quotes in /C's command string. Supply
+            // an outer pair so it cannot consume the script/argument quotes.
+            OsString::from(format!("\"{script}{suffix}\"")),
         ],
     ))
 }

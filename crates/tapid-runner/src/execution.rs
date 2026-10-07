@@ -1990,9 +1990,12 @@ fn serialize_windows_command_line_units(
 
     let mut command_line = Vec::new();
     quote(program, &mut command_line);
-    for (index, argument) in arguments.iter().enumerate() {
+    for argument in arguments {
         command_line.push(u16::from(b' '));
-        if verbatim_last && index + 1 == arguments.len() {
+        if verbatim_last {
+            // The checked verbatim boundary permits only /D /S /C and one
+            // command payload. cmd.exe parses its own command line: quoting
+            // these switches changes how it finds and strips payload quotes.
             command_line.extend_from_slice(argument);
         } else {
             quote(argument, &mut command_line);
@@ -4921,7 +4924,7 @@ mod tests {
         let command_line =
             serialize_windows_command_line_units(&program, &arguments, true).unwrap();
         let mut expected: Vec<u16> =
-            r#""cmd.exe" "/D" "/S" "/C" echo "a b" & exit 0"#.encode_utf16().collect();
+            r#""cmd.exe" /D /S /C echo "a b" & exit 0"#.encode_utf16().collect();
         expected.push(0);
         assert_eq!(command_line, expected);
     }
