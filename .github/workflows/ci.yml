@@ -43,6 +43,10 @@ jobs:
           target/debug/tapid --version
       - name: Prepare project-local build and temporary storage
         run: mkdir -p examples/news-site-consumer/.next examples/news-site-consumer/.tmp
+      - name: Verify pinned news-site resolution inputs and strict graph comparator
+        env:
+          TAPID_NEWS_FIXTURE_BINARY: ${{ github.workspace }}/target/debug/tapid
+        run: python3 -m unittest discover -s tests -p test_news_site_fixture.py -v
       - name: Install npm reference tree
         run: |
           mkdir -p "$RUNNER_TEMP/news-site-npm-reference"
