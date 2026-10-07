@@ -100,6 +100,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       TAPID_SOURCE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Node 22 below owns the otherwise optional CLI assertion probes.
+      TAPID_REQUIRE_NODE_ASSERTIONS: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -132,7 +134,8 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p tapid --lib --locked native_windows_shim_materialization_rejects_collisions_before_writes
       - name: Run tests
-        run: cargo test --workspace --all-features --locked
+        # Retain success output so each Node assertion branch has a receipt.
+        run: cargo test --workspace --all-features --locked -- --show-output
       - name: Install Python for development and documentation tests
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:

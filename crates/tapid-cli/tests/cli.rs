@@ -49,6 +49,63 @@ fn run_with_isolated_path(cwd: &PathBuf, args: &[&str], path: &OsStr) -> std::pr
         .unwrap()
 }
 
+// Keep Node optional for local test runs; native CI explicitly opts in below.
+fn node_assertion_output(
+    command: &mut Command,
+    required: bool,
+    context: &str,
+) -> Option<std::process::Output> {
+    match command.output() {
+        Ok(output) => Some(output),
+        Err(error) if required => {
+            panic!("Node assertion probe required but could not spawn ({context}): {error}")
+        }
+        Err(_) => None,
+    }
+}
+
+#[test]
+#[should_panic(
+    expected = "Node assertion probe required but could not spawn (missing-node-regression)"
+)]
+fn required_node_assertion_probe_rejects_spawn_failure() {
+    let project = tapid_test_support::TempProject::new("missing-node-probe").unwrap();
+    node_assertion_output(
+        &mut Command::new(project.path().join("node-does-not-exist")),
+        true,
+        "missing-node-regression",
+    );
+}
+
+#[test]
+fn optional_node_assertion_probe_preserves_spawn_fallback() {
+    let project = tapid_test_support::TempProject::new("optional-node-probe").unwrap();
+    assert!(
+        node_assertion_output(
+            &mut Command::new(project.path().join("node-does-not-exist")),
+            false,
+            "optional-node-regression",
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn required_node_assertion_probe_preserves_spawned_output() {
+    // Use this test executable so these helper regressions need no Node setup.
+    let output = node_assertion_output(
+        Command::new(std::env::current_exe().unwrap()).arg("--list"),
+        true,
+        "spawned-output-regression",
+    )
+    .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("required_node_assertion_probe_preserves_spawned_output: test")
+    );
+}
+
 #[test]
 fn install_accepts_a_relative_project_directory() {
     let cwd = temp_dir("relative-project-dir");
@@ -142,20 +199,26 @@ fn aliased_root_cycle_keeps_locked_dependencies_during_install_and_replay() {
             fs::read_to_string(dir.join("node_modules/b/index.js")).unwrap(),
             "module.exports = \"b2\";\n"
         );
-        if let Ok(node) = Command::new("node")
-            .args([
-                "-e",
-                "console.log(require('app'), require('a'), require('b'))",
-            ])
-            .current_dir(&dir)
-            .output()
-        {
+        if let Some(node) = node_assertion_output(
+            Command::new("node")
+                .args([
+                    "-e",
+                    "console.log(require('app'), require('a'), require('b'))",
+                ])
+                .current_dir(&dir),
+            std::env::var_os("TAPID_REQUIRE_NODE_ASSERTIONS").is_some(),
+            "aliased-root-cycle",
+        ) {
             assert!(
                 node.status.success(),
                 "{}",
                 String::from_utf8_lossy(&node.stderr)
             );
             assert_eq!(String::from_utf8_lossy(&node.stdout).trim(), "b1 b1 b2");
+            eprintln!(
+                "TAPID_NODE_ASSERTION_OK aliased-root-cycle phase={} output=b1 b1 b2",
+                if replay { "offline-frozen" } else { "install" }
+            );
         }
         assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_bytes);
     }
@@ -278,9 +341,17 @@ fn npm_aliases_preserve_local_names_actual_identities_and_offline_replay() {
         );
         assert!(!dir.join("node_modules/first/node_modules/h3").exists());
         assert!(dir.join("node_modules/third/index.js").is_file());
-        if let Ok(node) = Command::new("node").args(["-e", "console.log([require('first'), require('second'), require('third'), require('alias-parent'), require('@local/direct')].join('|'))"]).current_dir(&dir).output() {
+        if let Some(node) = node_assertion_output(
+            Command::new("node").args(["-e", "console.log([require('first'), require('second'), require('third'), require('alias-parent'), require('@local/direct')].join('|'))"]).current_dir(&dir),
+            std::env::var_os("TAPID_REQUIRE_NODE_ASSERTIONS").is_some(),
+            "npm-aliases",
+        ) {
             assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
             assert_eq!(String::from_utf8_lossy(&node.stdout).trim(), "first|second|first|prerelease:scoped|scoped");
+            eprintln!(
+                "TAPID_NODE_ASSERTION_OK npm-aliases phase={} output=first|second|first|prerelease:scoped|scoped",
+                if args.contains(&"--offline") { "frozen" } else { "install" }
+            );
         }
 
         fs::remove_dir_all(dir.join("node_modules")).unwrap();
