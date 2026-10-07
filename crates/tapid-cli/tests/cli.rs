@@ -1550,10 +1550,19 @@ fn run_without_runtime_flag_discovers_node_then_reaches_sandbox_preflight() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // PATH discovery succeeds, but env_clear intentionally removes Windows'
+    // required host environment before request validation can reach containment.
+    #[cfg(windows)]
+    assert_eq!(
+        stderr,
+        "error: invalid runner execution request: Windows AppContainer launch requires the runner's LOCALAPPDATA environment variable\n"
+    );
+    #[cfg(not(windows))]
     assert!(
         stderr.contains("sandbox execution failed (unsupported-containment)"),
         "{stderr}"
     );
+    assert!(output.stdout.is_empty());
     assert!(!stderr.contains("required arguments were not provided"));
     cleanup(dir);
 }
@@ -1688,11 +1697,13 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
         r#"{"name":"demo","version":"1.0.0","scripts":{"dev":"printf spawned > SHOULD_NOT_EXIST"}}"#,
     )
     .unwrap();
-    fs::write(
-        dir.join("tapid.toml"),
-        "[run.scripts.dev]\nenvironment = [\"SECRET_TOKEN\"]\n",
-    )
-    .unwrap();
+    let policy = "[run.scripts.dev]\nenvironment = [\"SECRET_TOKEN\"]\n";
+    // Windows supports read-only profiles. Request a specifically unsupported
+    // write grant so this remains a pre-spawn containment rejection, not a
+    // failure caused by executing the stand-in Node binary.
+    #[cfg(windows)]
+    let policy = format!("{policy}write = [\"SHOULD_NOT_EXIST\"]\n");
+    fs::write(dir.join("tapid.toml"), policy).unwrap();
     let secret = "tapid-super-secret-value";
     let runtime = dir.join(if cfg!(windows) { "node.exe" } else { "node" });
     fs::copy(env!("CARGO_BIN_EXE_tapid"), &runtime).unwrap();
@@ -1715,10 +1726,20 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("sandbox execution failed (unsupported-containment)"));
+    assert!(
+        stderr.contains("sandbox execution failed (unsupported-containment)"),
+        "{stderr}"
+    );
+    #[cfg(windows)]
+    assert!(
+        stderr.contains("project write policies remain unsupported until declared writes and ACL revocation are natively verified"),
+        "{stderr}"
+    );
     assert!(stderr.contains("no process was started"));
     assert!(stderr.contains("no enforcement receipt was issued"));
     assert!(!stderr.contains(secret));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+    assert!(output.stdout.is_empty());
     assert!(!dir.join("SHOULD_NOT_EXIST").exists());
     cleanup(dir);
 }
