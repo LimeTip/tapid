@@ -564,7 +564,7 @@ fn windows_disabled_subprocess_policy_prevents_child_process_creation() {
     let command = r#"start "" /B cmd.exe /D /S /C "echo CHILD_PROCESS_MARKER""#;
     let request = command_request(
         &root,
-        &command,
+        command,
         ExecutionLimits::new(Some(3), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
     );
     let outcome = execute(&request).expect("subprocess restriction should remain contained");

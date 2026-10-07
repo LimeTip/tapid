@@ -72,7 +72,7 @@ fn appcontainer_actual_token_file_access_probe() {
         if disposition == CREATE_NEW {
             eprintln!("{label}: CREATE_OPEN_OK");
         }
-        let byte = [b'X'];
+        let byte = *b"X";
         let mut written = 0;
         let result =
             unsafe { WriteFile(handle, byte.as_ptr(), 1, &mut written, std::ptr::null_mut()) };
@@ -566,8 +566,10 @@ fn restoring_appcontainer_grant_preserves_concurrent_dacl_changes() {
     assert!(saved.status.success());
     let bytes = std::fs::read(&saved_acl).unwrap();
     let utf16 = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect::<Vec<_>>();
     let acl = String::from_utf16_lossy(&utf16);
     assert!(

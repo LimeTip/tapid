@@ -535,7 +535,7 @@ impl WindowsPathAcl {
                         87,
                     ));
                 } else {
-                    let mut entry = EXPLICIT_ACCESS_W {
+                    let entry = EXPLICIT_ACCESS_W {
                         grfAccessPermissions: 0,
                         grfAccessMode: REVOKE_ACCESS,
                         grfInheritance: 0 as ACE_FLAGS,
@@ -553,7 +553,7 @@ impl WindowsPathAcl {
                     // SAFETY: entry points to the owned SID; current_dacl remains valid until the
                     // returned ACL is attached or freed.
                     let removed =
-                        unsafe { SetEntriesInAclW(1, &mut entry, current_dacl, &mut updated_dacl) };
+                        unsafe { SetEntriesInAclW(1, &entry, current_dacl, &mut updated_dacl) };
                     if removed != 0 || updated_dacl.is_null() {
                         restore_error = Some(unsupported_acl(
                             "remove AppContainer filesystem ACE",
@@ -609,10 +609,10 @@ impl WindowsPathAcl {
             }
         }
         for parent_grant in self.parent_grants.iter_mut().rev() {
-            if let Err(error) = parent_grant.restore_unlocked() {
-                if restore_error.is_none() {
-                    restore_error = Some(error);
-                }
+            if let Err(error) = parent_grant.restore_unlocked()
+                && restore_error.is_none()
+            {
+                restore_error = Some(error);
             }
         }
         if let Some(error) = restore_error {
@@ -670,10 +670,10 @@ impl WindowsFilesystemGrants {
     pub fn restore(&mut self) -> Result<(), ExecutionError> {
         let mut first_error = None;
         for grant in self.grants.iter_mut().rev() {
-            if let Err(error) = grant.restore() {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
+            if let Err(error) = grant.restore()
+                && first_error.is_none()
+            {
+                first_error = Some(error);
             }
         }
         match first_error {

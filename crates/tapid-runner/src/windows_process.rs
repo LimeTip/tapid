@@ -122,7 +122,7 @@ impl WindowsStdioPipes {
             stderr_read: 0,
             stderr_write: 0,
         };
-        let mut attributes = SECURITY_ATTRIBUTES {
+        let attributes = SECURITY_ATTRIBUTES {
             nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
                 .expect("SECURITY_ATTRIBUTES size fits u32"),
             lpSecurityDescriptor: null_mut(),
@@ -135,7 +135,7 @@ impl WindowsStdioPipes {
             (&mut pipes.stdout_read, &mut pipes.stdout_write),
             (&mut pipes.stderr_read, &mut pipes.stderr_write),
         ] {
-            if unsafe { CreatePipe(read, write, &mut attributes, 0) } == 0 {
+            if unsafe { CreatePipe(read, write, &attributes, 0) } == 0 {
                 return Err(unsupported_job("create child standard I/O pipe"));
             }
         }
@@ -369,7 +369,7 @@ impl WindowsSuspendedChild {
         command_line: &[u16],
         environment: &[u16],
         current_directory: &[u16],
-        mut stdio: Option<&mut WindowsStdioPipes>,
+        stdio: Option<&mut WindowsStdioPipes>,
     ) -> Result<Self, ExecutionError> {
         if !is_single_nul_terminated(application)
             || !is_single_nul_terminated(command_line)
@@ -426,7 +426,7 @@ impl WindowsSuspendedChild {
         if created == 0 {
             return Err(unsupported_job("create suspended child"));
         }
-        if let Some(pipes) = stdio.as_deref_mut() {
+        if let Some(pipes) = stdio {
             pipes.close_child_ends();
         }
         if information.hProcess == 0 || information.hThread == 0 {
@@ -603,7 +603,7 @@ impl WindowsSuspendedChild {
             }
             let remaining_ms = timeout_ms - elapsed_ms;
             // SAFETY: the process handle is valid and the wait duration is a short bounded poll.
-            match unsafe { WaitForSingleObject(self.process, remaining_ms.min(20).max(1)) } {
+            match unsafe { WaitForSingleObject(self.process, remaining_ms.clamp(1, 20)) } {
                 WAIT_OBJECT_0 => {
                     self.exited = true;
                     let mut exit_code = 0;
