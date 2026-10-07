@@ -12,6 +12,9 @@ use tapid_runner::{
     FilesystemPolicy, SandboxMode, SandboxPolicy, Termination, execute,
 };
 
+#[path = "support/windows_acl.rs"]
+mod windows_acl;
+
 fn temporary_project(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -19,10 +22,26 @@ fn temporary_project(label: &str) -> PathBuf {
         .as_nanos();
     let path = std::env::temp_dir().join(format!("tapid-{label}-{}-{nonce}", std::process::id()));
     fs::create_dir(&path).unwrap();
+    // Initialize ONLY this disposable root before any exact restoration snapshot.
+    windows_acl::initialize_inheritance(&path);
     path
 }
 
-fn project_dacl(path: &PathBuf) -> Vec<u8> {
+#[derive(Debug, PartialEq, Eq)]
+struct DaclSnapshot {
+    listing: Vec<u8>,
+    control_and_acl: (u16, Vec<u8>),
+}
+
+impl std::ops::Deref for DaclSnapshot {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.listing
+    }
+}
+
+fn project_dacl(path: &PathBuf) -> DaclSnapshot {
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
     let icacls = PathBuf::from(system_root).join("System32/icacls.exe");
     let output = Command::new(icacls).arg(path).output().unwrap();
@@ -32,7 +51,10 @@ fn project_dacl(path: &PathBuf) -> Vec<u8> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    output.stdout
+    DaclSnapshot {
+        listing: output.stdout,
+        control_and_acl: windows_acl::read_acl(path),
+    }
 }
 
 fn managed_policy() -> SandboxPolicy {

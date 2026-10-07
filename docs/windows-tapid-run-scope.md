@@ -41,6 +41,12 @@ sandbox execution failed (unsupported-containment): sandbox containment is unava
 
 This is only a baseline reproduction of the missing backend, not Windows support acceptance: it did not run the complete build/test/start workload or prove ManagedTree controls. The Windows runner has since been ported to the modular architecture, but it must still pass the exact CLI and native ManagedTree acceptance above before documentation or release claims change.
 
+## Windows ACL restoration evidence boundary
+
+The experimental Windows backend restores temporary AppContainer grants, but does not guarantee byte-identical security metadata for arbitrary legacy-inheritance trees. Windows `SetSecurityInfo`/`SetNamedSecurityInfo` can convert matching explicit ACEs to inherited ACEs and set `SE_DACL_AUTO_INHERITED` while preserving effective permissions. This is distinct from changing the security-significant `SE_DACL_PROTECTED` bit. Such a conversion can also occur in descendants when inheritable ACEs are reapplied.
+
+Native restoration tests establish the current inheritance model on **new disposable fixture roots only**, before taking their baseline. Setup permits only setting the auto-inherited control bit and marking existing ACEs inherited; ACE order, identities, access masks, other flags, and protection must remain unchanged. The library regression additionally checks unchanged descendant ACE bytes during setup. After setup, cleanup comparisons remain exact: integration tests compare the complete `icacls` output, raw DACL bytes, and security-descriptor control bits without masking inheritance. Tests do not normalize shared temp directories, project ancestors, volume roots, or SystemRoot, and this test-only setup is not a production workaround or evidence of arbitrary-metadata restoration.
+
 ## Current Windows-write investigation (2026-10-05)
 
 The native `Access is denied` failure in the declared-write path was traced to `WindowsFilesystemGrants::apply` skipping project-policy read grants whenever the canonical path was beneath `SystemRoot`. VM 126 uses `C:\Windows\SystemTemp` for temporary project roots, so the project-root read/traversal grant was skipped even though the writable subtree received its inherited write ACE. The fix now skips only backend-runtime read grants beneath `SystemRoot`; it does not enable Windows write support.
