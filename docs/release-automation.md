@@ -16,7 +16,7 @@ Repository administrators review the environment-policy change explicitly. Durin
 
 ## Prepare and review
 
-In GitHub Actions, run "Prepare release" from `main`. Leave `version` empty for the next patch, or supply a newer stable product version. The same entrypoint works from a terminal:
+In GitHub Actions, run "Prepare release" from `main`. Leave `version` empty to reuse an unpublished product version already on `main`, or choose the next patch when `main` matches the latest public release. You can also supply an explicit stable version newer than the public baseline and at least as new as the version on `main`. The same entrypoint works from a terminal:
 
 ```sh
 gh workflow run release-prepare.yml --repo LimeTip/tapid --ref main
