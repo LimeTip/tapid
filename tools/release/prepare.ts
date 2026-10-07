@@ -66,6 +66,12 @@ export function preparationFiles(version: string, baseline: string, preparedFrom
   return { notesPath, notes, intent: `${JSON.stringify({ schema: "tapid-release-intent-v1", version, baseline, prepared_from: preparedFrom, notes: notesPath, packages }, null, 2)}\n` };
 }
 
+async function validateExistingNotes(notesPath: string): Promise<void> {
+  if (!(await lstat(notesPath)).isFile() || !(await readFile(notesPath, "utf8")).trim()) {
+    throw new Error(`existing release notes must be a nonempty regular file: ${notesPath}`);
+  }
+}
+
 export async function prepareRelease(requested: string, baseline: string, options: { directory?: string; run?: Run; lookup?: RegistryLookup } = {}): Promise<void> {
   const directory = options.directory ?? process.cwd();
   const run: Run = options.run ?? (async (command, args) => (await execFileAsync(command, args, { cwd: directory, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })).stdout.trim());
@@ -80,6 +86,12 @@ export async function prepareRelease(requested: string, baseline: string, option
   const preparedFrom = await run("git", ["rev-parse", "HEAD"]);
   if (await run("git", ["cat-file", "-t", `refs/tags/${baseline}`]) !== "tag") throw new Error("baseline must be an annotated tag");
   await run("git", ["merge-base", "--is-ancestor", `refs/tags/${baseline}^{commit}`, "HEAD"]);
+  const notesPath = join(directory, `docs/releases/${version}.md`);
+  try {
+    await validateExistingNotes(notesPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   await run("release-plz", ["update"]);
   const proposed = (await metadata()).packages.find((pkg) => pkg.name === "tapid")?.version;
   if (!proposed || newer(proposed, version)) throw new Error(`version analysis requires ${proposed}; prepare again with that explicit product version`);
@@ -107,14 +119,11 @@ export async function prepareRelease(requested: string, baseline: string, option
   if (!history.length) throw new Error("no commits since the baseline release");
   const files = preparationFiles(version, baseline, preparedFrom, plan.packages, history);
   await mkdir(join(directory, dirname(files.notesPath)), { recursive: true });
-  const notesPath = join(directory, files.notesPath);
   try {
     await writeFile(notesPath, files.notes, { flag: "wx" });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    if (!(await lstat(notesPath)).isFile() || !(await readFile(notesPath, "utf8")).trim()) {
-      throw new Error(`existing release notes must be a nonempty regular file: ${files.notesPath}`);
-    }
+    await validateExistingNotes(notesPath);
   }
   await writeFile(join(directory, "docs/releases/intent.json"), files.intent);
   await writeFile(join(directory, "release-preparation.json"), `${JSON.stringify({ version, baseline, packages: plan.packages, notes: files.notesPath }, null, 2)}\n`);

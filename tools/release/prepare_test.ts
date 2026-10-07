@@ -182,12 +182,16 @@ test("already-bumped preparation preserves reviewed notes and refreshes the rele
     await rm(join(directory, intent.notes));
     await rm(join(directory, "docs/releases/intent.json"));
     await writeFile(join(directory, intent.notes), " \n");
+    commands.length = 0;
     await rejects(prepareRelease("", "v0.0.11", options), /nonempty regular file/);
+    strictEqual(commands.some((command) => command.startsWith("release-plz ") || command.startsWith("cargo update ")), false);
     strictEqual(await readFile(join(directory, intent.notes), "utf8"), " \n");
     await rejects(readFile(join(directory, "docs/releases/intent.json")), /ENOENT/);
     await rm(join(directory, intent.notes));
     await mkdir(join(directory, intent.notes));
+    commands.length = 0;
     await rejects(prepareRelease("", "v0.0.11", options), /nonempty regular file/);
+    strictEqual(commands.some((command) => command.startsWith("release-plz ") || command.startsWith("cargo update ")), false);
     await rm(join(directory, intent.notes), { recursive: true });
     commands.length = 0;
     ancestryValid = false;
