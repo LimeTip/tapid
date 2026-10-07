@@ -675,6 +675,15 @@ test("native Windows archive fixture refreshes release records before each insta
   const workflow = await text(".github/workflows/ci.yml");
   const fixture = workflow.slice(workflow.indexOf("  windows-installer-contract:"), workflow.indexOf("  package:"));
   assert(fixture.includes('function Write-FixtureReleaseRecord'));
+  assert(fixture.includes('name: Windows installer contract'));
+  assert(fixture.includes('actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8'));
+  assert(fixture.includes('digest-mismatch: error'));
+  assert(!fixture.includes('rust-toolchain@') && !fixture.includes('cargo build'));
+  const verified = fixture.indexOf('tools/release/ci_binary.ts verify');
+  const execute = fixture.indexOf('$actual = & target/debug/tapid.exe --version');
+  const install = fixture.indexOf('name: Install and reject archive fixtures');
+  assert(verified >= 0 && verified < execute && execute < install);
+  assert(fixture.includes("Copy-Item -LiteralPath (Join-Path $PWD 'target/debug/tapid.exe')"));
   assertEquals(fixture.match(/^          Write-FixtureReleaseRecord$/gm)?.length, 2);
   assert(fixture.includes('tapid-release-v1`t1.2.3'));
   assert(fixture.includes('$size = (Get-Item -LiteralPath $archive).Length'));
