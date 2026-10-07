@@ -8,12 +8,22 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tapid_runner::{
-    AssuranceLevel, CleanupConfidence, ExecutionErrorCategory, ExecutionLimits, ExecutionRequest,
-    FilesystemPolicy, SandboxMode, SandboxPolicy, Termination, execute,
+    execute, AssuranceLevel, CleanupConfidence, ExecutionErrorCategory, ExecutionLimits,
+    ExecutionRequest, FilesystemPolicy, SandboxMode, SandboxPolicy, Termination,
 };
 
 #[path = "support/windows_acl.rs"]
 mod windows_acl;
+
+fn temporary_child_directory(parent: &std::path::Path, label: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = parent.join(format!("tapid-{label}-{}-{nonce}", std::process::id()));
+    fs::create_dir(&path).unwrap();
+    path
+}
 
 fn temporary_project(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -403,7 +413,7 @@ fn windows_ctrl_c_helper() {
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::Console::{
-        CTRL_C_EVENT, GenerateConsoleCtrlEvent, GetConsoleProcessList, GetConsoleWindow,
+        GenerateConsoleCtrlEvent, GetConsoleProcessList, GetConsoleWindow, CTRL_C_EVENT,
     };
 
     let started = Instant::now();
@@ -751,13 +761,14 @@ fn windows_node_runtime_can_be_launched_directly_when_test_runtime_is_configured
         eprintln!("skipping: TAPID_TEST_LOCALAPPDATA is not set");
         return;
     };
-    fs::create_dir_all(&local_app_data).unwrap();
-    let root = fs::canonicalize(local_app_data).unwrap();
     let Some(node) = std::env::var_os("TAPID_TEST_NODE").map(PathBuf::from) else {
         eprintln!("skipping: TAPID_TEST_NODE is not set");
         return;
     };
     let node = fs::canonicalize(node).unwrap();
+    fs::create_dir_all(&local_app_data).unwrap();
+    let root = temporary_child_directory(&local_app_data, "node-runtime");
+    let root = fs::canonicalize(root).unwrap();
     let runtime_bin = node.parent().unwrap().to_path_buf();
     let system32 = fs::canonicalize(
         PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot is required"))
