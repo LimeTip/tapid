@@ -1,6 +1,6 @@
-<p align="center">
-  <img src=".github/assets/tapid-banner.png" alt="Tapid by LimeTip, in white text on a subtle black gradient." width="85%">
-</p>
+<h1 align="center">
+  <img src=".github/assets/tapid-banner.png" alt="Tapid by LimeTip" width="85%">
+</h1>
 
 <p align="center">
   A JavaScript and TypeScript package manager written in Rust,<br>
@@ -10,7 +10,7 @@
 <p align="center">
   <a href="https://github.com/LimeTip/tapid/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/LimeTip/tapid/ci.yml?branch=main&amp;style=flat&amp;label=CI&amp;labelColor=202020&amp;color=a3e635" alt="CI status"></a>
   <a href="https://github.com/LimeTip/tapid/releases"><img src="https://img.shields.io/github/v/release/LimeTip/tapid?style=flat&amp;label=release&amp;labelColor=202020&amp;color=a3e635" alt="Latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-a3e635?style=flat&amp;labelColor=202020" alt="License: MIT"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-a3e635?style=flat&amp;labelColor=202020" alt="License: Apache 2.0"></a>
 </p>
 
 <p align="center">
@@ -253,4 +253,8 @@ Longer-term work includes broader npm compatibility, native package and registry
 
 ## License
 
-Tapid is developed by LimeTip Company and is licensed under the MIT License. See `LICENSE` for the complete text.
+The Tapid CLI and its supporting crates in this repository are developed by LimeTip AB and licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the complete text.
+
+Copyright 2026 LimeTip AB.
+
+Run `tapid license` to print the complete license and copyright attribution embedded in the executable. This command works offline and does not require a project.
