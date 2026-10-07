@@ -19,6 +19,7 @@
     "typescript": "5.9.3"
   },
   "overrides": {
+    "caniuse-lite": "1.0.30001814",
     "nanoid": "3.3.19",
     "postcss": "8.5.28"
   }

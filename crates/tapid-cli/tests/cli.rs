@@ -36,10 +36,10 @@ fn license_prints_complete_apache_text_without_accessing_a_project() {
     } else {
         manifest_dir.join("../../LICENSE")
     };
-    let expected = format!(
-        "Copyright 2026 LimeTip AB.\n\n{}",
-        fs::read_to_string(license_path).unwrap()
-    );
+    let expected = fs::read_to_string(license_path).unwrap();
+    let mut lines = expected.lines();
+    assert_eq!(lines.next(), Some("Copyright 2026 LimeTip AB."));
+    assert_eq!(lines.next(), Some(""));
     assert_eq!(output.stdout, expected.as_bytes());
     assert_eq!(fs::read_dir(project.path()).unwrap().count(), 2);
 }
