@@ -9,7 +9,7 @@ use std::{
 };
 use tapid_lockfile::Lockfile;
 
-/// Verifies exact license output with an empty environment and invalid project files.
+/// Verifies exact license output with no application environment and invalid project files.
 #[test]
 fn license_prints_complete_apache_text_without_accessing_a_project() {
     let project = tapid_test_support::TempProject::new("license").unwrap();
@@ -17,12 +17,16 @@ fn license_prints_complete_apache_text_without_accessing_a_project() {
     project
         .write("tapid.toml", b"invalid configuration")
         .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+    command
         .arg("license")
         .current_dir(project.path())
-        .env_clear()
-        .output()
-        .unwrap();
+        .env_clear();
+    // Keep coverage instrumentation from writing a profile into the project.
+    if let Some(profile_file) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile_file);
+    }
+    let output = command.output().unwrap();
     assert!(output.status.success(), "{:?}", output);
     assert!(output.stderr.is_empty());
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
