@@ -4,6 +4,31 @@ import { checkApprovedPlan, evaluateCi, waitForCi } from "./automation.ts";
 
 const sha = "a".repeat(40);
 const run = (overrides: Record<string, unknown> = {}) => ({ id: 10, run_number: 2, head_sha: sha, head_branch: "main", event: "push", status: "completed", conclusion: "success", ...overrides });
+const codeqlNames = ['Analyze (actions)', 'Analyze (rust)', 'Analyze (javascript-typescript)', 'Analyze (python)'];
+const codeqlChecks = () => codeqlNames.map((name, index) => ({ id: index + 1, name, head_sha: sha, app: { id: 15368 }, status: 'completed', conclusion: 'success' }));
+
+test('exact main CI owns command help without an obsolete standalone check', async () => {
+  const { requiredChecks } = await import('./automation.ts');
+  // Spell out the retained checks independently of the production list.
+  strictEqual(JSON.stringify(requiredChecks), JSON.stringify(codeqlNames));
+  await waitForCi({ sha, readRuns: async () => [run()], readChecks: async () => codeqlChecks() });
+});
+
+test('migrated command-help gate still blocks non-success CI and every missing or failed CodeQL scope', async () => {
+  for (const conclusion of ['failure', 'cancelled']) {
+    await rejects(waitForCi({ sha, readRuns: async () => [run({ conclusion })], readChecks: async () => codeqlChecks() }), /CI did not succeed/);
+  }
+  for (const [index, name] of codeqlNames.entries()) {
+    let elapsed = 0;
+    await rejects(waitForCi({ sha, readRuns: async () => [run()], readChecks: async () => codeqlChecks().filter((_, i) => i !== index), now: () => elapsed, sleep: async ms => { elapsed += ms; }, timeoutMs: 10 }), /timed out/);
+    await rejects(waitForCi({ sha, readRuns: async () => [run()], readChecks: async () => codeqlChecks().map((check, i) => i === index ? { ...check, conclusion: 'failure' } : check) }), new RegExp(`required check did not succeed.*${name.replace(/[()]/g, '\\$&')}`));
+  }
+  for (const overrides of [{ head_sha: 'b'.repeat(40) }, { event: 'pull_request' }, { head_branch: 'release/prepare' }]) {
+    let elapsed = 0;
+    await rejects(waitForCi({ sha, readRuns: async () => [run(overrides)], readChecks: async () => codeqlChecks(), now: () => elapsed, sleep: async ms => { elapsed += ms; }, timeoutMs: 10 }), /timed out/);
+  }
+});
+
 const packages = [{ name: "tapid-core", version: "0.0.7" }, { name: "tapid", version: "0.0.12" }];
 const intent = { schema: "tapid-release-intent-v1", version: "0.0.12", baseline: "v0.0.11", prepared_from: "b".repeat(40), notes: "docs/releases/0.0.12.md", packages };
 const metadata = { packages };
@@ -57,7 +82,7 @@ test("every approved package remains bound to source metadata after partial publ
   throws(() => checkApprovedPlan({ ...intent, version: "0.0.13" }, { packages, blockers: [] }, metadata));
 });
 
-test('exact-source CodeQL and documentation checks reject foreign, stale and failed evidence', async () => {
+test('exact-source CodeQL checks reject foreign, stale and failed evidence', async () => {
   const { evaluateChecks, requiredChecks } = await import('./automation.ts');
   const checks = requiredChecks.map((name, index) => ({ id: index + 1, name, head_sha: sha, check_suite: { head_branch: 'main' }, app: { id: 15368 }, status: 'completed', conclusion: 'success' }));
   strictEqual(evaluateChecks(checks, sha), 'success');
