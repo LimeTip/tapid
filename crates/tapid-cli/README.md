@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tapid)](https://crates.io/crates/tapid)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid)](https://crates.io/crates/tapid)
 [![Docs.rs](https://docs.rs/tapid/badge.svg)](https://docs.rs/tapid)
-[![License](https://img.shields.io/crates/l/tapid)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 The `tapid` command-line client for the Tapid JavaScript and TypeScript package manager, written in Rust. It provides deterministic installation and lockfile replay, verified package storage, Node-compatible linking, and explicit root-script execution.
@@ -29,6 +29,7 @@ The next-release installers, expected for 0.0.11, select archives through `https
 
 ```text
 tapid init [PATH]
+tapid license
 tapid manifest validate [PATH]
 tapid lock verify
 tapid install [OPTIONS]
@@ -37,6 +38,8 @@ tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
+
+`tapid license` prints the complete Apache-2.0 license and LimeTip AB copyright attribution embedded in the executable. It works offline and does not require a project.
 
 `tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
 

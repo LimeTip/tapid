@@ -7,7 +7,7 @@ import {
 } from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { arch, platform } from "node:process";
@@ -223,12 +223,10 @@ test("release workflow uses Node.js 24 actions and the Visual Studio 2026 ARM ru
 });
 
 test("repository workflows avoid the deprecated Node.js 20 action majors", async () => {
-  for (const path of [
-    ".github/workflows/ci.yml",
-    ".github/workflows/crates-publication.yml",
-    ".github/workflows/release-publication.yml",
-    ".github/workflows/website-installer-sync.yml",
-  ]) {
+  const workflows = await readdir(join(root, ".github/workflows"));
+  assert(workflows.includes("ci.yml"));
+  for (const name of workflows.filter((name: string) => name.endsWith(".yml"))) {
+    const path = `.github/workflows/${name}`;
     const workflow = await text(path);
     for (const legacyAction of [
       "actions/checkout@v4",
@@ -677,6 +675,15 @@ test("native Windows archive fixture refreshes release records before each insta
   const workflow = await text(".github/workflows/ci.yml");
   const fixture = workflow.slice(workflow.indexOf("  windows-installer-contract:"), workflow.indexOf("  package:"));
   assert(fixture.includes('function Write-FixtureReleaseRecord'));
+  assert(fixture.includes('name: Windows installer contract'));
+  assert(fixture.includes('actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8'));
+  assert(fixture.includes('digest-mismatch: error'));
+  assert(!fixture.includes('rust-toolchain@') && !fixture.includes('cargo build'));
+  const verified = fixture.indexOf('tools/release/ci_binary.ts verify');
+  const execute = fixture.indexOf('$actual = & target/debug/tapid.exe --version');
+  const install = fixture.indexOf('name: Install and reject archive fixtures');
+  assert(verified >= 0 && verified < execute && execute < install);
+  assert(fixture.includes("Copy-Item -LiteralPath (Join-Path $PWD 'target/debug/tapid.exe')"));
   assertEquals(fixture.match(/^          Write-FixtureReleaseRecord$/gm)?.length, 2);
   assert(fixture.includes('tapid-release-v1`t1.2.3'));
   assert(fixture.includes('$size = (Get-Item -LiteralPath $archive).Length'));

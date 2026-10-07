@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Product version, leave empty for next patch
+        description: Product version; empty reuses an unpublished version or chooses the next patch
         required: false
         type: string
 
@@ -77,7 +77,7 @@ jobs:
         if: steps.existing.outputs.url == ''
         run: |
           node --experimental-strip-types --test tools/release/prepare_test.ts tools/release/publish_test.ts
-          cargo package --workspace --locked
+          cargo package --workspace --locked --allow-dirty
           git diff --check
       - name: Read prepared version
         if: steps.existing.outputs.url == ''

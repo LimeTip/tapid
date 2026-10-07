@@ -1,5 +1,7 @@
 import { deepStrictEqual, match, rejects, strictEqual, throws } from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +13,15 @@ test("product defaults to next patch and accepts only a newer stable explicit ve
   for (const version of ["0.0.11", "0.0.10", "v0.0.12", "0.0.12-rc.1", "01.0.0", "../notes"]) {
     throws(() => nextProductVersion("0.0.11", version));
   }
+});
+
+test("an unpublished main version is reused without a second bump", () => {
+  strictEqual(nextProductVersion("0.0.12", "", "0.0.11"), "0.0.12");
+  strictEqual(nextProductVersion("0.0.12", "0.0.12", "0.0.11"), "0.0.12");
+  strictEqual(nextProductVersion("0.0.12", "0.1.0", "0.0.11"), "0.1.0");
+  throws(() => nextProductVersion("0.0.13", "0.0.12", "0.0.11"));
+  throws(() => nextProductVersion("0.0.12", "0.0.11", "0.0.11"));
+  throws(() => nextProductVersion("0.0.10", "", "0.0.11"));
 });
 
 test("baseline drift blocks preparation", () => {
@@ -67,6 +78,34 @@ test("preparation workflow is main-only, uses App only after checks, and never p
   match(workflow, /name: Prepare complete release tree\n\s+if: steps\.existing\.outputs\.url == ''/);
 });
 
+test("preparation packages uncommitted version bumps and still verifies compilation", async () => {
+  const exec = promisify(execFile);
+  const workflow = await readFile(new URL("../../.github/workflows/release-prepare.yml", import.meta.url), "utf8");
+  const args = workflow.match(/^\s+cargo (package[^\n]+)$/m)![1].trim().split(/\s+/);
+  const cargo = (await exec("rustup", ["which", "cargo"])).stdout.trim();
+  const rustc = (await exec("rustup", ["which", "rustc"])).stdout.trim();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "tapid-prepare-package-")));
+  const env = { PATH: process.env.PATH, HOME: join(directory, "home"), CARGO_HOME: join(directory, "cargo-home"), RUSTC: rustc, GIT_CONFIG_NOSYSTEM: "1" };
+  const run = (command: string, arguments_: string[]) => exec(command, arguments_, { cwd: directory, env });
+  const manifest = (version: string) => `[package]\nname = "tapid-preparation-fixture"\nversion = "${version}"\nedition = "2021"\n[workspace]\n`;
+  try {
+    await mkdir(join(directory, "src"));
+    await mkdir(env.HOME);
+    await writeFile(join(directory, "Cargo.toml"), manifest("0.0.1"));
+    await writeFile(join(directory, "src/lib.rs"), "pub fn version() -> u8 { 1 }\n");
+    await run(cargo, ["generate-lockfile", "--offline"]);
+    await run("git", ["init"]);
+    await run("git", ["add", "."]);
+    await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "initial fixture"]);
+    await writeFile(join(directory, "Cargo.toml"), manifest("0.0.2"));
+    await run(cargo, ["generate-lockfile", "--offline"]);
+    await run(cargo, [...args, "--offline"]);
+    strictEqual((await readFile(join(directory, "target/package/tapid-preparation-fixture-0.0.2.crate"))).length > 0, true);
+    await writeFile(join(directory, "src/lib.rs"), "invalid Rust syntax\n");
+    await rejects(run(cargo, [...args, "--offline"]), /could not compile|failed to verify/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("tooling-only preparation uses maintained version tool and creates both final files", async () => {
   const directory = await mkdtemp(join(tmpdir(), "tapid-prepare-"));
   const commands: string[] = [];
@@ -99,5 +138,51 @@ test("tooling-only preparation uses maintained version tool and creates both fin
     version = "0.0.11";
     await rejects(prepareRelease("", "v0.0.11", { directory, run, lookup: async () => { throw new Error("registry outage"); } }), /registry outage/);
     await rejects(readFile(join(directory, intent.notes)), /ENOENT/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("already-bumped preparation retains analysis, baseline ancestry, and reviewed intent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tapid-prepare-bumped-"));
+  const commands: string[] = [];
+  let version = "0.0.12";
+  let proposed = "0.0.12";
+  let ancestryValid = true;
+  const run = async (command: string, args: string[]) => {
+    commands.push(`${command} ${args.join(" ")}`);
+    if (command === "cargo" && args[0] === "metadata") return JSON.stringify({ packages: [{ name: "tapid", version, dependencies: [] }] });
+    if (command === "git" && args[0] === "cat-file") return "tag";
+    if (command === "git" && args[0] === "rev-parse") return "d".repeat(40);
+    if (command === "git" && args[0] === "merge-base" && !ancestryValid) throw new Error("baseline is not an ancestor");
+    if (command === "git" && args[0] === "log") return `${"c".repeat(40)}\tReviewed version bump`;
+    if (command === "release-plz" && args[0] === "update") version = proposed;
+    if (command === "release-plz" && args[0] === "set-version") version = args[1].split("@")[1];
+    return "";
+  };
+  const options = { directory, run, lookup: async () => ({ published: false, latestVersion: "0.0.11" }) };
+  try {
+    await writeFile(join(directory, "Cargo.toml"), "fixture");
+    await writeFile(join(directory, "Cargo.lock"), "fixture");
+    await prepareRelease("", "v0.0.11", options);
+    const intent = JSON.parse(await readFile(join(directory, "docs/releases/intent.json"), "utf8"));
+    strictEqual(intent.version, "0.0.12");
+    strictEqual(intent.baseline, "v0.0.11");
+    strictEqual(intent.prepared_from, "d".repeat(40));
+    deepStrictEqual(intent.packages, [{ name: "tapid", version: "0.0.12" }]);
+    strictEqual(commands.includes("release-plz update"), true);
+    strictEqual(commands.includes("git merge-base --is-ancestor refs/tags/v0.0.11^{commit} HEAD"), true);
+    await rm(join(directory, intent.notes));
+    await rm(join(directory, "docs/releases/intent.json"));
+    commands.length = 0;
+    ancestryValid = false;
+    await rejects(prepareRelease("", "v0.0.11", options), /not an ancestor/);
+    strictEqual(commands.includes("release-plz update"), false);
+    ancestryValid = true;
+    proposed = "0.1.0";
+    await rejects(prepareRelease("", "v0.0.11", options), /version analysis requires 0.1.0/);
+    await rejects(readFile(join(directory, "docs/releases/intent.json")), /ENOENT/);
+    version = "0.0.10";
+    commands.length = 0;
+    await rejects(prepareRelease("", "v0.0.11", options), /main.*baseline/);
+    strictEqual(commands.includes("release-plz update"), false);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
