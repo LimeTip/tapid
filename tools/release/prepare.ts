@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -23,10 +23,11 @@ function newer(version: string, baseline: string): boolean {
   return index >= 0 && left[index] > right[index];
 }
 
-export function nextProductVersion(current: string, requested: string): string {
-  const [major, minor, patch] = stable(current);
-  const version = requested || `${major}.${minor}.${patch + 1n}`;
-  if (!newer(version, current)) throw new Error("product version must be newer than the baseline");
+export function nextProductVersion(current: string, requested: string, baseline: string = current): string {
+  const [major, minor, patch] = stable(baseline);
+  if (newer(baseline, current)) throw new Error("main product version must not be older than the public release baseline");
+  const version = requested || (newer(current, baseline) ? current : `${major}.${minor}.${patch + 1n}`);
+  if (!newer(version, baseline) || newer(current, version)) throw new Error("product version must be newer than the public baseline and not older than main");
   return version;
 }
 
@@ -65,18 +66,32 @@ export function preparationFiles(version: string, baseline: string, preparedFrom
   return { notesPath, notes, intent: `${JSON.stringify({ schema: "tapid-release-intent-v1", version, baseline, prepared_from: preparedFrom, notes: notesPath, packages }, null, 2)}\n` };
 }
 
+async function validateExistingNotes(notesPath: string): Promise<void> {
+  if (!(await lstat(notesPath)).isFile() || !(await readFile(notesPath, "utf8")).trim()) {
+    throw new Error(`existing release notes must be a nonempty regular file: ${notesPath}`);
+  }
+}
+
 export async function prepareRelease(requested: string, baseline: string, options: { directory?: string; run?: Run; lookup?: RegistryLookup } = {}): Promise<void> {
   const directory = options.directory ?? process.cwd();
   const run: Run = options.run ?? (async (command, args) => (await execFileAsync(command, args, { cwd: directory, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })).stdout.trim());
   const metadata = async () => JSON.parse(await run("cargo", ["metadata", "--no-deps", "--format-version", "1", "--locked"])) as CargoMetadata;
   const before = await metadata();
   const current = before.packages.find((pkg) => pkg.name === "tapid")?.version;
-  if (!current || baseline !== `v${current}`) throw new Error("main product version must match the latest public release baseline");
+  if (!current) throw new Error("workspace metadata must contain the tapid product version");
+  const previous = baseline.replace(/^v/, "");
+  releaseVersion(baseline, previous);
+  const version = nextProductVersion(current, requested, previous);
   if (await run("git", ["status", "--porcelain"])) throw new Error("preparation requires a clean checkout");
   const preparedFrom = await run("git", ["rev-parse", "HEAD"]);
   if (await run("git", ["cat-file", "-t", `refs/tags/${baseline}`]) !== "tag") throw new Error("baseline must be an annotated tag");
   await run("git", ["merge-base", "--is-ancestor", `refs/tags/${baseline}^{commit}`, "HEAD"]);
-  const version = nextProductVersion(current, requested);
+  const notesPath = join(directory, `docs/releases/${version}.md`);
+  try {
+    await validateExistingNotes(notesPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   await run("release-plz", ["update"]);
   const proposed = (await metadata()).packages.find((pkg) => pkg.name === "tapid")?.version;
   if (!proposed || newer(proposed, version)) throw new Error(`version analysis requires ${proposed}; prepare again with that explicit product version`);
@@ -104,7 +119,12 @@ export async function prepareRelease(requested: string, baseline: string, option
   if (!history.length) throw new Error("no commits since the baseline release");
   const files = preparationFiles(version, baseline, preparedFrom, plan.packages, history);
   await mkdir(join(directory, dirname(files.notesPath)), { recursive: true });
-  await writeFile(join(directory, files.notesPath), files.notes, { flag: "wx" });
+  try {
+    await writeFile(notesPath, files.notes, { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    await validateExistingNotes(notesPath);
+  }
   await writeFile(join(directory, "docs/releases/intent.json"), files.intent);
   await writeFile(join(directory, "release-preparation.json"), `${JSON.stringify({ version, baseline, packages: plan.packages, notes: files.notesPath }, null, 2)}\n`);
   console.log(`Prepared Tapid ${version}: ${plan.packages.length} package versions`);

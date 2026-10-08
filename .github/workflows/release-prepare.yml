@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Product version, leave empty for next patch
+        description: Product version; empty reuses an unpublished version or chooses the next patch
         required: false
         type: string
 

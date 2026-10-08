@@ -1,13 +1,66 @@
-# Tapid
+<h1 align="center">
+  <img src=".github/assets/tapid-banner.png" alt="Tapid by LimeTip" width="85%">
+</h1>
 
-[![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/tapid)](https://crates.io/crates/tapid)
-[![Crates.io downloads](https://img.shields.io/crates/d/tapid)](https://crates.io/crates/tapid)
-[![Docs.rs](https://docs.rs/tapid/badge.svg)](https://docs.rs/tapid)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
-[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+<p align="center">
+  A JavaScript and TypeScript package manager written in Rust,<br>
+  with verified downloads, reproducible installs, and dependency lifecycle scripts disabled during installation.
+</p>
 
-Tapid is a security-focused JavaScript and TypeScript **package manager**, written in Rust. It resolves dependencies, checks downloaded bytes against registry-declared integrity metadata by default, stores verified content, and materializes a reproducible `node_modules` tree from `tapid.lock`. Tapid is not a JavaScript runtime: today its primary compatibility target is the Node.js/npm ecosystem, and projects use their own runtime to execute code. Tapid's package format and install workflow are designed around that ecosystem; using Deno or Bun is a future compatibility goal, not a guarantee of current support. The current implementation covers a small, explicit npm-compatible subset. Development releases are available from GitHub Releases; production support is not yet available. See the [production adoption gate](docs/production-adoption.md) for the evidence required before any release or platform can be called production-supported.
+<p align="center">
+  <a href="https://github.com/LimeTip/tapid/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/LimeTip/tapid/ci.yml?branch=main&amp;style=flat&amp;label=CI&amp;labelColor=202020&amp;color=a3e635" alt="CI status"></a>
+  <a href="https://github.com/LimeTip/tapid/releases"><img src="https://img.shields.io/github/v/release/LimeTip/tapid?style=flat&amp;label=release&amp;labelColor=202020&amp;color=a3e635" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-a3e635?style=flat&amp;labelColor=202020" alt="License: Apache 2.0"></a>
+</p>
+
+<p align="center">
+  <a href="https://tapid.dev">Website</a> ·
+  <a href="crates/tapid-cli/README.md">CLI guide</a> ·
+  <a href="docs/compatibility.md">Compatibility</a> ·
+  <a href="#contributing">Contribute</a>
+</p>
+
+## Install Tapid
+
+macOS and Linux:
+
+```bash
+curl -fsSL https://tapid.dev/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+iwr -useb https://tapid.dev/install.ps1 | iex
+```
+
+These install the latest published development release. Open a new terminal, or follow the PATH instructions printed by the installer, before using `tapid`.
+
+For specific versions, source builds, verification, upgrades, and uninstall instructions, see the [installation details](#installation-details). For release readiness, see [Development status](#development-status).
+
+## Quick start
+
+Create a project, install a package, then replay the install without network access:
+
+```bash
+mkdir demo
+cd demo
+tapid init
+tapid i is-char
+tapid install --offline --frozen
+```
+
+`tapid i` adds the dependency to `package.json`, writes `tapid.lock`, and creates `node_modules`. The replay command uses the lockfile and locally stored verified package trees. Use your project's Node.js runtime and tooling to execute code.
+
+See the [CLI guide](crates/tapid-cli/README.md) for adding, removing, updating, and inspecting dependencies.
+
+## Development status
+
+Tapid is under active development. Releases are available for evaluation and compatibility testing; production support is not yet available. The current target is a bounded subset of the Node.js/npm ecosystem. Deno and Bun compatibility remains a future goal.
+
+Download verification checks package bytes against registry-declared integrity. It does not authenticate publishers or detect malicious or vulnerable packages. Experimental `tapid run` is a separate Node.js-only script launcher with platform-specific containment limits.
+
+See the [supported subset and limitations](#supported-subset-and-limitations) and [production adoption gate](docs/production-adoption.md) before evaluating Tapid for a production project.
 
 ## What Tapid manages
 
@@ -41,44 +94,13 @@ A `tapid.lock` records the root manifest digest, exact selected package identiti
 
 The lockfile pins what was selected and supports verified replay; registry integrity verifies downloaded bytes against registry metadata, not publisher identity or package safety.
 
-## Install Tapid
-
-**macOS and Linux**
-
-```bash
-curl -fsSL https://tapid.dev/install.sh | bash
-```
-
-**Windows PowerShell**
-
-```powershell
-iwr -useb https://tapid.dev/install.ps1 | iex
-```
-
-These commands install the latest published Tapid release from the immutable GitHub release assets published by `LimeTip/tapid` and verify the selected archive against its `SHA256SUMS` entry. See [installation details](#installation-details) for release selection, contributor source builds, alternate repositories, and uninstall instructions.
-
-Tapid is a package manager: it manages packages and lockfiles, and is not a runtime. Node executes Node.js code; workerd executes Workers code; Wrangler owns Workers workflows and deployment. The optional `tapid run` convenience invokes a project script through the platform shell, with Node executing any Node.js programs the script calls. It is not required to install or replay packages and does not establish runtime, Workers, or deployment support. See [Production adoption gate](docs/production-adoption.md) for the current development-only status, exact pending support matrix, release policy, required evidence, and canary/rollback procedure.
-
-## Quick start
-
-The shortest path from an empty directory to installing a package is:
-
-```bash
-mkdir my-app
-cd my-app
-tapid init
-tapid i is-char
-```
-
-`tapid i <package>` is an alias for `tapid install <package>`. The package form adds the dependency to `package.json`, resolves it from the configured registry, writes `tapid.lock`, and materializes `node_modules`. A package version can be supplied as `<package>@<version>`. Use your project's runtime and tooling to run scripts. The experimental `tapid run` command is a separate, Node.js-only script launcher; it does not provide a runtime or select Deno/Bun. On Linux and macOS, an explicit `assurance = "restricted"` profile asks the native backend to limit the script's configured filesystem and network authority; this is not full process-tree management or a guarantee that arbitrary code is safe. See the [CLI guide](crates/tapid-cli/README.md#experimental-root-script-containment) for the limits and setup.
-
 ## Current package-management implementation
 
 The consumer workflow exercises deterministic dependency resolution, npm metadata and artifact retrieval, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline/frozen replay, and suppression of dependency lifecycle scripts. This is a bounded npm-compatible subset, not full npm or pnpm compatibility.
 
 ### Synthetic news-site compatibility fixture
 
-`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/React/TypeScript application for evaluating package-manager compatibility on a representative news-site workload. The route at `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Its npm-generated `package-lock.json` (lockfile v3) is the reference install. Install that reference in a separate directory with `npm ci`, then run a clean Tapid install and frozen/offline replay in the fixture. `scripts/compare-news-site-package-graphs.py` compares reachable names/versions and dependency/peer edges, source origins, integrity, and platform-optional selections; it also reports physical-only packages even when unreachable. Tapid—not npm or a direct Node command—runs the fixture's `build`, `test`, and `start` scripts. Lockfile generation used Node.js v26.10.0 / npm 11.19.1; CI uses Ubuntu 24.04 / Node.js 22 and records its toolchain versions. The fixture contains no private code, customer information, credentials, or proprietary assets. From the repository root:
+`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/React/TypeScript application for evaluating package-manager compatibility on a representative news-site workload. The route at `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Its npm-generated `package-lock.json` (lockfile v3) is the reference install. Direct dependencies and every floating transitive dependency are pinned to that reference through exact manifest versions and flat `overrides`; Tapid's native online resolver does not import the npm lock. This prevents later registry publications (including `caniuse-lite`) from changing just the Tapid side. Update those pins and the npm reference together deliberately, not during CI. `tests/test_news_site_fixture.py` verifies the entire locked dependency/optional-dependency closure and proves that the strict comparator rejects version/edge drift. Install that reference in a separate directory with `npm ci`, then run a clean Tapid install and frozen/offline replay in the fixture. `scripts/compare-news-site-package-graphs.py` compares reachable names/versions and dependency/peer edges, source origins, integrity, and platform-optional selections; it also reports physical-only packages even when unreachable. Tapid—not npm or a direct Node command—runs the fixture's `build`, `test`, and `start` scripts. Lockfile generation used Node.js v26.10.0 / npm 11.19.1; CI uses Ubuntu 24.04 / Node.js 22 and records its toolchain versions. The fixture contains no private code, customer information, credentials, or proprietary assets. From the repository root:
 
 ```bash
 cargo build --locked --bin tapid
@@ -198,17 +220,28 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
 - ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock and seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. ManagedTree, configured resource-limit profiles, Windows native containment, and the broader Linux Restricted probe matrix remain unsupported or pending. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
 
+## Contributing
+
+Help us make Tapid work with more real projects. Useful contributions include:
+
+- Trying it in a disposable copy of a Node.js project and reporting compatibility failures with a minimal reproduction, platform, and Tapid version.
+- Improving installation instructions and examples when a step is unclear.
+- Adding isolated package fixtures and regression tests for unsupported or failing cases.
+- Working on Rust capabilities such as resolution, manifests, archives, and installed layouts.
+
+Start with the [contributing guide](CONTRIBUTING.md) and [open issues](https://github.com/LimeTip/tapid/issues). For a substantial change, describe the problem and proposed approach before implementation. Report security vulnerabilities through [SECURITY.md](SECURITY.md).
+
 ## Development
 
-Node.js 22.6.0 or later is required for the TypeScript commands.
+Use Python 3, Git, Rust with rustfmt and Clippy, and Node.js 22.6.0 or later. Run Cargo through the development wrapper to reuse build artifacts across worktrees. See the [testing guide](docs/testing.md) for focused checks and the full local lane.
 
 ```text
 node --experimental-strip-types tools/check_architecture.ts
 node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
-cargo test --manifest-path tests/integration/Cargo.toml --tests --locked
+python3 scripts/dev.py fmt --all --check
+python3 scripts/dev.py clippy --workspace --all-targets --all-features --locked -- -D warnings
+python3 scripts/dev.py test --workspace --all-features --locked
+python3 scripts/dev.py test --manifest-path tests/integration/Cargo.toml --tests --locked
 git diff --check
 ```
 

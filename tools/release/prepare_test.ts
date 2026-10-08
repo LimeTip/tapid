@@ -15,6 +15,15 @@ test("product defaults to next patch and accepts only a newer stable explicit ve
   }
 });
 
+test("an unpublished main version is reused without a second bump", () => {
+  strictEqual(nextProductVersion("0.0.12", "", "0.0.11"), "0.0.12");
+  strictEqual(nextProductVersion("0.0.12", "0.0.12", "0.0.11"), "0.0.12");
+  strictEqual(nextProductVersion("0.0.12", "0.1.0", "0.0.11"), "0.1.0");
+  throws(() => nextProductVersion("0.0.13", "0.0.12", "0.0.11"));
+  throws(() => nextProductVersion("0.0.12", "0.0.11", "0.0.11"));
+  throws(() => nextProductVersion("0.0.10", "", "0.0.11"));
+});
+
 test("baseline drift blocks preparation", () => {
   throws(() => preparationFiles("0.0.12", "v0.0.12", "a".repeat(40), [{ name: "tapid", version: "0.0.12" }], []), /baseline/);
 });
@@ -129,5 +138,72 @@ test("tooling-only preparation uses maintained version tool and creates both fin
     version = "0.0.11";
     await rejects(prepareRelease("", "v0.0.11", { directory, run, lookup: async () => { throw new Error("registry outage"); } }), /registry outage/);
     await rejects(readFile(join(directory, intent.notes)), /ENOENT/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("already-bumped preparation preserves reviewed notes and refreshes the release intent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tapid-prepare-bumped-"));
+  const commands: string[] = [];
+  let version = "0.0.12";
+  let proposed = "0.0.12";
+  let ancestryValid = true;
+  const run = async (command: string, args: string[]) => {
+    commands.push(`${command} ${args.join(" ")}`);
+    if (command === "cargo" && args[0] === "metadata") return JSON.stringify({ packages: [{ name: "tapid", version, dependencies: [] }] });
+    if (command === "git" && args[0] === "cat-file") return "tag";
+    if (command === "git" && args[0] === "rev-parse") return "d".repeat(40);
+    if (command === "git" && args[0] === "merge-base" && !ancestryValid) throw new Error("baseline is not an ancestor");
+    if (command === "git" && args[0] === "log") return `${"c".repeat(40)}\tReviewed version bump`;
+    if (command === "release-plz" && args[0] === "update") version = proposed;
+    if (command === "release-plz" && args[0] === "set-version") version = args[1].split("@")[1];
+    return "";
+  };
+  const options = { directory, run, lookup: async () => ({ published: false, latestVersion: "0.0.11" }) };
+  try {
+    await writeFile(join(directory, "Cargo.toml"), "fixture");
+    await writeFile(join(directory, "Cargo.lock"), "fixture");
+    await mkdir(join(directory, "docs/releases"), { recursive: true });
+    const reviewedNotes = "# Tapid 0.0.12 release notes\n\nHandwritten release highlights.\n";
+    await writeFile(join(directory, "docs/releases/0.0.12.md"), reviewedNotes);
+    await writeFile(join(directory, "docs/releases/intent.json"), "stale intent");
+    await writeFile(join(directory, "release-preparation.json"), "stale preparation");
+    await prepareRelease("", "v0.0.11", options);
+    const intent = JSON.parse(await readFile(join(directory, "docs/releases/intent.json"), "utf8"));
+    strictEqual(intent.version, "0.0.12");
+    strictEqual(intent.baseline, "v0.0.11");
+    strictEqual(intent.prepared_from, "d".repeat(40));
+    deepStrictEqual(intent.packages, [{ name: "tapid", version: "0.0.12" }]);
+    strictEqual(await readFile(join(directory, intent.notes), "utf8"), reviewedNotes);
+    const preparation = JSON.parse(await readFile(join(directory, "release-preparation.json"), "utf8"));
+    strictEqual(preparation.notes, intent.notes);
+    deepStrictEqual(preparation.packages, intent.packages);
+    strictEqual(commands.includes("release-plz update"), true);
+    strictEqual(commands.includes("git merge-base --is-ancestor refs/tags/v0.0.11^{commit} HEAD"), true);
+    await rm(join(directory, intent.notes));
+    await rm(join(directory, "docs/releases/intent.json"));
+    await writeFile(join(directory, intent.notes), " \n");
+    commands.length = 0;
+    await rejects(prepareRelease("", "v0.0.11", options), /nonempty regular file/);
+    strictEqual(commands.some((command) => command.startsWith("release-plz ") || command.startsWith("cargo update ")), false);
+    strictEqual(await readFile(join(directory, intent.notes), "utf8"), " \n");
+    await rejects(readFile(join(directory, "docs/releases/intent.json")), /ENOENT/);
+    await rm(join(directory, intent.notes));
+    await mkdir(join(directory, intent.notes));
+    commands.length = 0;
+    await rejects(prepareRelease("", "v0.0.11", options), /nonempty regular file/);
+    strictEqual(commands.some((command) => command.startsWith("release-plz ") || command.startsWith("cargo update ")), false);
+    await rm(join(directory, intent.notes), { recursive: true });
+    commands.length = 0;
+    ancestryValid = false;
+    await rejects(prepareRelease("", "v0.0.11", options), /not an ancestor/);
+    strictEqual(commands.includes("release-plz update"), false);
+    ancestryValid = true;
+    proposed = "0.1.0";
+    await rejects(prepareRelease("", "v0.0.11", options), /version analysis requires 0.1.0/);
+    await rejects(readFile(join(directory, "docs/releases/intent.json")), /ENOENT/);
+    version = "0.0.10";
+    commands.length = 0;
+    await rejects(prepareRelease("", "v0.0.11", options), /main.*baseline/);
+    strictEqual(commands.includes("release-plz update"), false);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

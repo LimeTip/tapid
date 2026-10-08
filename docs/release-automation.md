@@ -16,13 +16,15 @@ Repository administrators review the environment-policy change explicitly. Durin
 
 ## Prepare and review
 
-In GitHub Actions, run "Prepare release" from `main`. Leave `version` empty for the next patch, or supply a newer stable product version. The same entrypoint works from a terminal:
+In GitHub Actions, run "Prepare release" from `main`. Leave `version` empty to reuse an unpublished product version already on `main`, or choose the next patch when `main` matches the latest public release. You can also supply an explicit stable version newer than the public baseline and at least as new as the version on `main`. The same entrypoint works from a terminal:
 
 ```sh
 gh workflow run release-prepare.yml --repo LimeTip/tapid --ref main
 ```
 
 For an explicit version, add `-f version=X.Y.Z`. The version analysis may block a default patch and report a required larger bump. Review that result rather than overriding it blindly.
+
+Preparation preserves existing nonempty release notes for the selected version, generates notes when absent, and always regenerates the release intent and package plan.
 
 The generated PR contains the product version, only changed supporting-crate versions and affected dependency requirements, regenerated lockfiles, release notes, and `docs/releases/intent.json`, with schema `tapid-release-intent-v1`, consumed by the coordinator. Its required `prepared_from` SHA records the `main` commit analyzed during preparation. The release merge commit must have that SHA as its first parent. If another PR advances `main`, close the old release PR and prepare again so the version analysis includes those changes. Review the version table and notes, then merge after the required checks pass. Automated preparation is a proposal; it does not decide whether a change deserves a breaking release or whether generated notes describe it correctly.
 
