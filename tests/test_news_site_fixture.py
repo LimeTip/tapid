@@ -54,7 +54,7 @@ class NewsSiteFixtureTests(unittest.TestCase):
         requirement = self.manifest["overrides"].get(
             "caniuse-lite", self.lock["packages"]["node_modules/next"]["dependencies"]["caniuse-lite"]
         )
-        self.assertEqual(requirement, "1.0.30001814")
+        self.assertEqual(requirement, self.lock["packages"]["node_modules/caniuse-lite"]["version"])
 
     def test_native_resolution_inputs_pin_entire_npm_reference_graph(self):
         assert_pinned_graph(self, self.manifest, self.lock)
@@ -73,7 +73,7 @@ class NewsSiteFixtureTests(unittest.TestCase):
 
     def test_override_and_committed_lock_cannot_disagree(self):
         manifest = copy.deepcopy(self.manifest)
-        manifest["overrides"]["caniuse-lite"] = "1.0.30001815"
+        manifest["overrides"]["caniuse-lite"] = "1.0.30001816"
         with self.assertRaisesRegex(AssertionError, "caniuse-lite"):
             assert_pinned_graph(self, manifest, self.lock)
 
@@ -89,8 +89,8 @@ class NewsSiteFixtureTests(unittest.TestCase):
             requirement = self.lock["packages"]["node_modules/next"]["dependencies"]["caniuse-lite"]
             for name, version, dependencies in (
                 ("next", "15.5.27", {"caniuse-lite": requirement}),
-                ("caniuse-lite", "1.0.30001814", {}),
                 ("caniuse-lite", "1.0.30001815", {}),
+                ("caniuse-lite", "1.0.30001816", {}),
             ):
                 manifest = {"name": name, "version": version, "dependencies": dependencies}
                 data = json.dumps(manifest).encode()
@@ -106,8 +106,8 @@ class NewsSiteFixtureTests(unittest.TestCase):
             fixture = root / "registry.json"
             fixture.write_text(json.dumps({"packages": records}))
             for label, overrides, expected in (
-                ("floating", {}, "1.0.30001815"),
-                ("pinned", {"caniuse-lite": self.manifest["overrides"].get("caniuse-lite", requirement)}, "1.0.30001814"),
+                ("floating", {}, "1.0.30001816"),
+                ("pinned", {"caniuse-lite": self.manifest["overrides"].get("caniuse-lite", requirement)}, "1.0.30001815"),
             ):
                 with self.subTest(label=label):
                     project = root / label

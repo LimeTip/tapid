@@ -60,7 +60,7 @@
     "@types/node": "22.19.11",
     "@types/react": "19.1.17",
     "@types/react-dom": "19.1.9",
-    "caniuse-lite": "1.0.30001814",
+    "caniuse-lite": "1.0.30001815",
     "client-only": "0.0.1",
     "csstype": "3.2.3",
     "detect-libc": "2.1.2",

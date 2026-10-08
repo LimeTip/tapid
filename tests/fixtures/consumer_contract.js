@@ -37,7 +37,10 @@ function reviewedContracts(manifest, metadata) {
 function loadConsumerContracts() {
   const manifest = fs.readFileSync(path.join(__dirname, '../../crates/tapid-cli/Cargo.toml'), 'utf8');
   const metadata = JSON.parse(fs.readFileSync(path.join(__dirname, 'consumer_contracts.json'), 'utf8'));
-  return { current: metadata.current, currentTag: `v${productVersion(manifest)}`,
+  // Source capabilities may lead the reviewed release contract. Never apply
+  // source-only Windows support to a binary selected by an explicit release tag.
+  validateContract(metadata.source);
+  return { current: metadata.source, currentTag: `v${productVersion(manifest)}`,
     releases: reviewedContracts(manifest, metadata) };
 }
 

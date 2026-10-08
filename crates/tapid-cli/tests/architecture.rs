@@ -96,15 +96,18 @@ fn sandboxed_run_path_cannot_spawn_directly() {
 }
 
 #[test]
-fn run_reads_only_allowlisted_host_environment_and_does_not_replay_child_output() {
+fn run_reads_only_allowlisted_host_environment_and_avoids_duplicate_child_output() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let planner = fs::read_to_string(root.join("run.rs")).expect("read run planner");
     let command = fs::read_to_string(root.join("commands/run.rs")).expect("read run command");
 
     assert!(planner.contains("std::env::var_os(name)"));
     assert!(!planner.contains("std::env::vars_os()"));
-    assert!(!command.contains("outcome.stdout()"));
-    assert!(!command.contains("outcome.stderr()"));
+    assert!(command.contains("forward_child_output_for_cli("));
+    assert!(command.contains(r##"#[cfg(target_os = "macos")]"##));
+    assert!(command.contains("#[cfg(not(target_os = \"macos\"))]"));
+    assert!(command.contains("outcome.stdout()"));
+    assert!(command.contains("outcome.stderr()"));
 }
 
 #[test]

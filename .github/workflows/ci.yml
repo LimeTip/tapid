@@ -203,6 +203,23 @@ jobs:
           if (Test-Path -LiteralPath $binary) { throw 'Tapid was not uninstalled' }
           Write-Host 'Windows developer install and uninstall passed.'
 
+  windows-msvc-cross-check:
+    name: Windows MSVC compile-only check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain and Windows target
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Compile tapid-runner and Windows tests for MSVC
+        run: cargo check -p tapid-runner --tests --target x86_64-pc-windows-msvc --locked
+
   nextest:
     name: Nextest (Ubuntu)
     runs-on: ubuntu-latest
@@ -317,6 +334,7 @@ jobs:
             shell: bash
           - os: windows-latest
             shell: pwsh
+      # Hosted Windows CI complements native Windows 11 acceptance on VM 126.
     defaults:
       run:
         shell: ${{ matrix.shell }}
@@ -336,8 +354,12 @@ jobs:
       - name: Create dynamic Node fixture project
         run: |
           node tests/fixtures/create_consumer_project.js
-      - name: Verify install and lifecycle suppression; reject unsupported containment (Linux/Windows)
-        if: runner.os != 'macOS'
+      - name: Verify install and lifecycle suppression; reject unsupported Linux containment
+        if: runner.os == 'Linux'
+        run: node tests/fixtures/validate_consumer_project.js
+      - name: Verify native read-only child, forwarding and exit codes (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
         run: node tests/fixtures/validate_consumer_project.js
       - name: Verify native Restricted child, forwarding and exit codes (macOS)
         if: runner.os == 'macOS'

@@ -305,10 +305,11 @@ function assertWindowsHandoff(ci: string) {
   assert.match(producer, /name: Consumer validation \(\$\{\{ matrix.os \}\}\)/);
   assert.match(producer, /fail-fast: false/);
   assert.match(step(producer, 'Build Tapid binary'), /run: cargo build --bin tapid --locked\n/);
-  for (const [name, condition] of [
-    ['Verify install and lifecycle suppression; reject unsupported containment (Linux/Windows)', "runner.os != 'macOS'"],
-    ['Verify native Restricted child, forwarding and exit codes (macOS)', "runner.os == 'macOS'"],
-  ]) assert.equal(step(producer, name), `      - name: ${name}\n        if: ${condition}\n        run: node tests/fixtures/validate_consumer_project.js\n`);
+  for (const [name, condition, timeout] of [
+    ['Verify install and lifecycle suppression; reject unsupported Linux containment', "runner.os == 'Linux'", ''],
+    ['Verify native read-only child, forwarding and exit codes (Windows)', "runner.os == 'Windows'", '        timeout-minutes: 5\n'],
+    ['Verify native Restricted child, forwarding and exit codes (macOS)', "runner.os == 'macOS'", ''],
+  ] as const) assert.equal(step(producer, name), `      - name: ${name}\n        if: ${condition}\n${timeout}        run: node tests/fixtures/validate_consumer_project.js\n`);
   const prepare = step(producer, 'Prepare same-run Windows CLI handoff');
   const upload = step(producer, 'Retain same-run Windows CLI');
   for (const s of [prepare, upload]) assert.match(s, /if: runner.os == 'Windows'\n/);
@@ -356,14 +357,29 @@ test('Windows handoff contract rejects ownership, stale-attempt, bypass and fixt
     ci.replace(verifier, verifier.replace(step(verifier, 'Verify same-run native verifier'), '')),
     ci.replace(producer, producer.replace(upload, '').replace('      - name: Build Tapid binary', upload + '      - name: Build Tapid binary')),
     ci.replace(upload, upload.replace("runner.os == 'Windows'", 'always()')),
-    ci.replace(producer, producer.replace("if: runner.os != 'macOS'", 'if: false')),
+    ci.replace(producer, producer.replace("if: runner.os == 'Linux'", 'if: false')),
     ci.replace(producer, producer.replace("if: runner.os == 'macOS'", 'if: false')),
     ci.replace(producer, producer.replace('run: node tests/fixtures/validate_consumer_project.js', 'run: echo skipped')),
     ci.replace(upload, upload.replace('overwrite: false', 'overwrite: true')),
     ci.replace(verifier, verifier.replace('$actual = & target/debug/tapid.exe --version', '$actual = & tapid --version')),
     ci.replace('if ($actual -cne "tapid $expected")', 'if ($false)'),
   ];
-  for (const broken of mutations) assert.throws(() => assertWindowsHandoff(broken));
+  const windowsConsumer = step(producer, 'Verify native read-only child, forwarding and exit codes (Windows)');
+  for (const replacement of [
+    '',
+    windowsConsumer.replace("runner.os == 'Windows'", 'false'),
+    windowsConsumer.replace("runner.os == 'Windows'", "runner.os != 'macOS'"),
+    windowsConsumer.replace('        timeout-minutes: 5\n', ''),
+    windowsConsumer.replace('run: node tests/fixtures/validate_consumer_project.js', 'run: echo skipped'),
+    windowsConsumer.replace('        run:', '        continue-on-error: true\n        run:'),
+  ]) {
+    assert.notEqual(replacement, windowsConsumer, 'Windows consumer mutation must change its exact owner');
+    mutations.push(ci.replace(producer, producer.replace(windowsConsumer, replacement)));
+  }
+  for (const broken of mutations) {
+    assert.notEqual(broken, ci, 'handoff mutation must not be vacuous');
+    assert.throws(() => assertWindowsHandoff(broken));
+  }
   for (const text of ['exactly one member named tapid.exe', 'release record signature verification failed', 'bootstrap archive checksum mismatch', "SetEnvironmentVariable('Path', $originalUserPath, 'User')"]) {
     assert.throws(() => assertWindowsHandoff(ci.replace(verifier, verifier.replace(text, 'disabled'))));
   }

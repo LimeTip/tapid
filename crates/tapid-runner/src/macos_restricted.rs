@@ -1851,6 +1851,85 @@ impl Drop for ReservedNode {
     }
 }
 
+// Relocation must not silently change the executable's library search authority.
+// External dylibs require a separately verified transitive closure, not a symlink
+// back to the installation or DYLD_* injection. Inspect the held source descriptor.
+fn validate_snapshot_dependencies(source: &mut fs::File) -> std::io::Result<()> {
+    let invalid = |message: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+    let mut magic = [0; 4];
+    source.read_exact(&mut magic)?;
+    if &magic[..2] == b"#!" {
+        source.seek(SeekFrom::Start(0))?;
+        return Ok(());
+    }
+    let header_size = match u32::from_le_bytes(magic) {
+        0xfeed_facf => 32,
+        0xfeed_face => 28,
+        _ => {
+            return Err(invalid(
+                "unsupported Mach-O runtime format; use a standalone thin Node distribution",
+            ));
+        }
+    };
+    let mut header = vec![0; header_size - 4];
+    source.read_exact(&mut header)?;
+    let word = |bytes: &[u8]| u32::from_le_bytes(bytes.try_into().unwrap());
+    let count = word(&header[12..16]) as usize;
+    let size = word(&header[16..20]) as usize;
+    if size > 1024 * 1024 || count > size / 8 {
+        return Err(invalid("invalid Mach-O load-command bounds"));
+    }
+    let mut commands = vec![0; size];
+    source.read_exact(&mut commands)?;
+    let mut offset = 0;
+    for _ in 0..count {
+        let prefix = commands
+            .get(offset..offset + 8)
+            .ok_or_else(|| invalid("truncated Mach-O load command"))?;
+        let kind = word(&prefix[..4]) & 0x7fff_ffff;
+        let length = word(&prefix[4..]) as usize;
+        if length < 8 || !length.is_multiple_of(4) {
+            return Err(invalid("invalid Mach-O load-command length"));
+        }
+        let command = commands
+            .get(offset..offset + length)
+            .ok_or_else(|| invalid("truncated Mach-O load command"))?;
+        // LC_LOAD_DYLIB, WEAK, REEXPORT, LAZY, UPWARD and LOAD_DYLINKER.
+        if matches!(kind, 0xc | 0x18 | 0x1f | 0x20 | 0x23 | 0xe) {
+            let minimum = if kind == 0xe { 12 } else { 24 };
+            if length < minimum {
+                return Err(invalid("invalid Mach-O dependency command"));
+            }
+            let start = word(&command[8..12]) as usize;
+            if start < minimum || start >= length {
+                return Err(invalid("invalid Mach-O dependency string offset"));
+            }
+            let name = &command[start..];
+            let end = name
+                .iter()
+                .position(|b| *b == 0)
+                .ok_or_else(|| invalid("unterminated Mach-O dependency name"))?;
+            let name = &name[..end];
+            let system = name.starts_with(b"/usr/lib/") || name.starts_with(b"/System/Library/");
+            if !system || name.split(|b| *b == b'/').any(|p| p == b".." || p == b".") {
+                return Err(invalid(
+                    "nonrelocatable Mach-O dependency; use a standalone Node distribution with only Apple system libraries",
+                ));
+            }
+        } else if kind == 0x27 {
+            return Err(invalid(
+                "Mach-O dyld environment is unsupported for runtime snapshots",
+            ));
+        }
+        offset += length;
+    }
+    if offset != size {
+        return Err(invalid("invalid Mach-O load-command total"));
+    }
+    source.seek(SeekFrom::Start(0))?;
+    Ok(())
+}
+
 fn copy_runtime_snapshot(
     source: &Path,
     target: &Path,
@@ -1861,6 +1940,7 @@ fn copy_runtime_snapshot(
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(source)?;
     let before = source_file.metadata()?;
+    validate_snapshot_dependencies(&mut source_file)?;
     let mut target_file = fs::OpenOptions::new()
         .read(true)
         .write(true)

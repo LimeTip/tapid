@@ -1623,6 +1623,7 @@ dependencies = [
  "serde",
  "sha2",
  "tapid-policy",
+ "tapid-test-support",
  "toml",
  "windows-sys 0.52.0",
 ]

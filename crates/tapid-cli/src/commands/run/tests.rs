@@ -1,6 +1,44 @@
 use super::*;
 
 #[test]
+fn child_output_is_forwarded_to_its_matching_stream_without_text_conversion() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    forward_child_output(
+        &[0x66, 0x00, 0x6f],
+        &[0x65, 0x72, 0x72],
+        &mut stdout,
+        &mut stderr,
+    )
+    .unwrap();
+    assert_eq!(stdout, [0x66, 0x00, 0x6f]);
+    assert_eq!(stderr, b"err");
+}
+
+#[test]
+fn cli_does_not_replay_output_already_streamed_by_native_backend() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    forward_child_output_for_cli(b"child-out", b"child-err", &mut stdout, &mut stderr).unwrap();
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        assert!(
+            stdout.is_empty(),
+            "native runner already streams child stdout"
+        );
+        assert!(
+            stderr.is_empty(),
+            "native runner already streams child stderr"
+        );
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        assert_eq!(stdout, b"child-out");
+        assert_eq!(stderr, b"child-err");
+    }
+}
+
+#[test]
 fn nonzero_and_limit_terminations_map_to_stable_cli_exits() {
     #[cfg(not(windows))]
     assert_eq!(
@@ -38,4 +76,12 @@ fn nonzero_and_limit_terminations_map_to_stable_cli_exits() {
     ] {
         assert_eq!(termination_exit_code(&termination), ExitCode::from(1));
     }
+}
+
+#[test]
+fn cancelled_termination_maps_to_sigint_exit_code() {
+    assert_eq!(
+        termination_exit_code(&tapid_runner::Termination::Cancelled),
+        ExitCode::from(130)
+    );
 }

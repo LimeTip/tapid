@@ -23,22 +23,56 @@ assert.ok(!releaseTag || releases.has(releaseTag), 'unreviewed root-script relea
 const contract = releaseTag ? releases.get(releaseTag) : current;
 const legacy = contract.legacy;
 const nativeRestricted = contract.nativePlatforms.includes(process.platform);
+const nativeWindows = nativeRestricted && process.platform === 'win32' && !releaseTag;
 const lifecycleMarker = path.join(project, 'LIFECYCLE_SHOULD_NOT_RUN');
 const startMarker = 'TAPID_FIXTURE_STARTED=';
 assert.ok(['darwin', 'linux', 'win32'].includes(process.platform), 'unsupported validation host');
 
 /** Invoke the supplied binary with fixture input and return its bounded result. */
-function invoke(args, fixtureEnvironment = '1') {
+function invoke(args, fixtureEnvironment = '1', label = JSON.stringify(args)) {
+  const startedAt = process.hrtime.bigint();
+  process.stderr.write(`[tapid-consumer] start ${JSON.stringify({
+    label,
+    binary,
+    args,
+    platform: process.platform,
+    timeoutMs: 60_000,
+  })}\n`);
   const result = spawnSync(binary, args, {
     encoding: 'utf8',
-    env: { ...process.env, TAPID_FIXTURE: fixtureEnvironment },
+    env: {
+      ...process.env,
+      TAPID_FIXTURE: fixtureEnvironment,
+      // Host-only, opt-in stage names/timings locate native CI hangs without logging secrets.
+      ...(nativeWindows ? { TAPID_WINDOWS_STAGE_TRACE: '1' } : {}),
+    },
     timeout: 60_000,
     maxBuffer: 4 * 1024 * 1024,
     shell: false,
   });
+  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  const summary = {
+    label,
+    elapsedMs: Math.round(elapsedMs),
+    status: result.status,
+    signal: result.signal,
+    pid: result.pid,
+    stdoutBytes: Buffer.byteLength(result.stdout || ''),
+    stderrBytes: Buffer.byteLength(result.stderr || ''),
+    error: result.error && {
+      name: result.error.name,
+      code: result.error.code,
+      errno: result.error.errno,
+      syscall: result.error.syscall,
+      message: result.error.message,
+    },
+  };
+  process.stderr.write(`[tapid-consumer] finish ${JSON.stringify(summary)}\n`);
   process.stdout.write(result.stdout || '');
   process.stderr.write(result.stderr || '');
-  assert.ifError(result.error);
+  if (result.error) {
+    throw new Error(`Tapid invocation failed: ${JSON.stringify(summary)}`, { cause: result.error });
+  }
   assert.equal(result.signal, null, 'CLI must exit normally');
   assert.ok(Number.isInteger(result.status), 'CLI must return an exit code');
   assert.equal(fs.existsSync(lifecycleMarker), false, 'install lifecycle must never run');
@@ -51,7 +85,7 @@ assert.match(policy, /assurance = "restricted"/);
 assert.match(policy, /write = \[\]/);
 assert.match(policy, /network = false/);
 assert.doesNotMatch(policy, /timeout_seconds|max_output_bytes|max_processes|max_memory_bytes/);
-assert.equal(invoke(['install', '--project-dir', project, '--offline', '--frozen']).status, 0);
+assert.equal(invoke(['install', '--project-dir', project, '--offline', '--frozen'], '1', 'install').status, 0);
 assert.ok(fs.statSync(path.join(project, 'node_modules')).isDirectory());
 
 const cases = [
@@ -61,12 +95,16 @@ const cases = [
   { args: ['forwarded', '0'], status: 42, environment: 'wrong' },
   // Exact argv comparison below catches double appending and shell interpolation.
   { args: ["spaces 'quotes' $HOME ; literal", '0'], status: 41 },
+  { args: ['', '0'], status: 41 },
   { args: ['forwarded', '0', 'extra'], status: 44 },
+  { args: ['forwarded', '0', '', 'a"b', 'space tail\\', 'C:\\tail\\',
+    '%PATH%', 'wow!', 'a^b', 'a&b', 'a|b', 'a<b', 'a>b', '(a)', 'Grüße'], status: 44 },
 ];
 for (const test of cases) {
   const result = invoke(
     ['run', '--project-dir', project, ...(legacy ? [] : ['--receipt-json']), 'test', '--', ...test.args],
     test.environment,
+    `run-case:${JSON.stringify(test.args)}`,
   );
   const output = result.stdout + result.stderr;
   const receipts = result.stderr.split(/\r?\n/).filter(line => line.startsWith('{')).map(line => JSON.parse(line));
@@ -90,7 +128,9 @@ for (const test of cases) {
     const receipt = receipts[0];
     assert.equal(receipt.schema_version, 1);
     assert.equal(receipt.assurance, 'Restricted');
-    const expectedBackend = process.platform === 'linux'
+    const expectedBackend = process.platform === 'win32'
+      ? 'tapid-runner/windows-appcontainer-job'
+      : process.platform === 'linux'
       ? 'tapid-runner/linux-landlock-seccomp-restricted'
       : 'tapid-runner/macos-seatbelt-restricted-experimental';
     assert.equal(receipt.backend.name, expectedBackend);
@@ -103,6 +143,8 @@ for (const test of cases) {
 }
 console.log(legacy
   ? `${releaseTag}: legacy uncontained forwarding, environment, exit codes and lifecycle suppression passed; no containment claim.`
+  : nativeRestricted && process.platform === 'win32'
+  ? 'Windows native Restricted: install, lifecycle suppression, child marker, exact forwarding, environment and exit codes passed.'
   : nativeRestricted && process.platform === 'linux'
   ? 'Linux native Restricted: install, lifecycle suppression, child marker, exact forwarding, environment and exit codes passed.'
   : nativeRestricted && process.platform === 'darwin'

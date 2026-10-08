@@ -1,4 +1,8 @@
 {
+  "source": {
+    "legacy": false,
+    "nativePlatforms": ["darwin", "linux", "win32"]
+  },
   "current": {
     "legacy": false,
     "nativePlatforms": ["darwin", "linux"]

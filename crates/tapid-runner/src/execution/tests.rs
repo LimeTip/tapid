@@ -453,6 +453,81 @@ fn unix_search_directory_must_match_native_join_paths_semantics() {
 }
 
 #[test]
+fn windows_environment_block_sorts_names_and_has_double_termination() {
+    let environment = BTreeMap::from([
+        (OsString::from("zName"), OsString::from("last")),
+        (OsString::from("PATH"), OsString::from("🚀")),
+        (OsString::from("alpha"), OsString::from("first")),
+    ]);
+    let block = windows_environment_block_units(&environment).unwrap();
+    #[cfg(windows)]
+    let expected = format!(
+        "alpha=first{0}LOCALAPPDATA={1}{0}PATH=🚀{0}SYSTEMROOT={2}{0}zName=last{0}{0}",
+        '\0',
+        std::env::var("LOCALAPPDATA").unwrap(),
+        std::env::var("SystemRoot").unwrap()
+    );
+    #[cfg(not(windows))]
+    let expected = format!("alpha=first{0}PATH=🚀{0}zName=last{0}{0}", '\0');
+    assert_eq!(String::from_utf16(&block).unwrap(), expected);
+}
+#[test]
+fn windows_environment_block_pins_the_host_local_appdata_for_appcontainer_creation() {
+    let requested = vec![
+        (
+            "localappdata".encode_utf16().collect(),
+            "D:\\untrusted".encode_utf16().collect(),
+        ),
+        (
+            "SystemRoot".encode_utf16().collect(),
+            "D:\\malicious-system".encode_utf16().collect(),
+        ),
+        (
+            "PATH".encode_utf16().collect(),
+            "bin".encode_utf16().collect(),
+        ),
+    ];
+    let host_local_app_data: Vec<u16> = r"C:\Users\runner\AppData\Local".encode_utf16().collect();
+    let host_system_root: Vec<u16> = r"C:\Windows".encode_utf16().collect();
+    let entries = windows_appcontainer_environment_entries(
+        requested,
+        &host_local_app_data,
+        &host_system_root,
+    );
+    let block = assemble_windows_environment_block(entries).unwrap();
+    let expected = format!(
+        "LOCALAPPDATA={}\0PATH=bin\0SYSTEMROOT={}\0\0",
+        r"C:\Users\runner\AppData\Local", r"C:\Windows"
+    );
+    assert_eq!(String::from_utf16(&block).unwrap(), expected);
+}
+#[test]
+fn windows_environment_block_rejects_case_insensitive_duplicate_names() {
+    let environment = BTreeMap::from([
+        (OsString::from("PATH"), OsString::from("one")),
+        (OsString::from("Path"), OsString::from("two")),
+    ]);
+    assert_eq!(
+        windows_environment_block_units(&environment)
+            .unwrap_err()
+            .category(),
+        ExecutionErrorCategory::InvalidRequest
+    );
+}
+#[test]
+fn windows_child_path_strips_extended_prefixes_from_search_directories() {
+    let drive: Vec<u16> = r"\\?\C:\Windows\System32".encode_utf16().collect();
+    let unc: Vec<u16> = r"\\?\UNC\example.com\share\bin".encode_utf16().collect();
+    assert_eq!(
+        String::from_utf16(&windows_environment_path_units(&drive)).unwrap(),
+        r"C:\Windows\System32"
+    );
+    assert_eq!(
+        String::from_utf16(&windows_environment_path_units(&unc)).unwrap(),
+        r"\\example.com\share\bin"
+    );
+}
+#[test]
 fn windows_join_paths_helper_matches_quoted_separator_semantics() {
     let first: Vec<u16> = r"C:\runtime\bin".encode_utf16().collect();
     let with_separator: Vec<u16> = r"C:\runtime;tools\bin".encode_utf16().collect();
@@ -498,6 +573,7 @@ fn windows_alias_helper_rejects_ascii_case_equivalent_paths() {
     assert!(windows_path_units_semantically_equal(&upper, &lower));
 }
 
+#[cfg(not(windows))]
 #[test]
 fn required_mode_preflight_fails_before_a_child_can_create_a_marker() {
     let unique = SystemTime::now()
@@ -847,20 +923,16 @@ fn public_outcome_contract_distinguishes_termination_and_enforcement() {
     let _ = inspect;
 }
 
+#[cfg(not(windows))]
 #[test]
-fn containment_support_reports_backend_capabilities_without_claiming_execution() {
+fn unsupported_backend_support_report_does_not_claim_execution() {
     let request = ExecutionRequest::builder("node")
         .policy(required_policy())
         .build()
         .unwrap();
-
     let support = platform_backend::containment_support(&request);
     assert!(!support.backend().name().is_empty());
     assert!(!support.backend().version().is_empty());
-    #[cfg(target_os = "macos")]
-    assert!(support.backend().deprecation().is_some());
-    #[cfg(not(target_os = "macos"))]
-    assert!(support.backend().deprecation().is_none());
     assert_eq!(support.enforceable(), &EnforcementDimensions::none());
     assert!(support.requested().filesystem_read());
     assert!(support.requested().filesystem_write());
@@ -871,6 +943,18 @@ fn containment_support_reports_backend_capabilities_without_claiming_execution()
     assert!(support.unsupported_reason().is_some());
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_support_report_matches_the_integrated_backend_contract() {
+    let request = ExecutionRequest::builder("node")
+        .policy(required_policy())
+        .build()
+        .unwrap();
+    let support = platform_backend::containment_support(&request);
+    assert!(support.is_supported());
+    assert_eq!(support.enforceable(), support.requested());
+    assert!(support.unsupported_reason().is_none());
+}
 #[test]
 fn requested_evidence_distinguishes_subprocess_denial_from_descendant_lifecycle() {
     let denied = SandboxPolicy::new(
@@ -1147,6 +1231,12 @@ fn backend_terminations_coherent_with_exact_preflight_limits_are_accepted() {
             vec![],
             vec![],
         ),
+        (
+            Termination::Cancelled,
+            ExecutionLimits::default(),
+            vec![],
+            vec![],
+        ),
     ];
 
     for (termination, limits, stdout, stderr) in cases {
@@ -1257,7 +1347,7 @@ fn search_directories_are_ordered_backend_runtime_receipt_grants() {
             assert_eq!(
                 preflight.child_environment.get(OsStr::new("PATH")),
                 Some(
-                    &std::env::join_paths(request.executable_search_paths())
+                    &join_executable_search_paths(request.executable_search_paths())
                         .expect("validated search paths must join")
                 )
             );
@@ -2008,6 +2098,33 @@ fn project_root_limit_and_nul_are_rejected_before_support_probing() {
 }
 
 #[test]
+fn windows_command_line_serializes_quoted_arguments_and_trailing_backslashes() {
+    let program: Vec<u16> = r"C:\Program Files\node.exe".encode_utf16().collect();
+    let arguments: Vec<Vec<u16>> = ["", "a b", "x\"y", "trail\\"]
+        .into_iter()
+        .map(|argument| argument.encode_utf16().collect())
+        .collect();
+    let command_line = serialize_windows_command_line_units(&program, &arguments, false).unwrap();
+    let mut expected: Vec<u16> = r#""C:\Program Files\node.exe" "" "a b" "x\"y" "trail\\""#
+        .encode_utf16()
+        .collect();
+    expected.push(0);
+    assert_eq!(command_line, expected);
+}
+#[test]
+fn windows_command_line_preserves_validated_verbatim_command_payload() {
+    let program: Vec<u16> = "cmd.exe".encode_utf16().collect();
+    let arguments: Vec<Vec<u16>> = ["/D", "/S", "/C", r#"echo "a b" & exit 0"#]
+        .into_iter()
+        .map(|argument| argument.encode_utf16().collect())
+        .collect();
+    let command_line = serialize_windows_command_line_units(&program, &arguments, true).unwrap();
+    let mut expected: Vec<u16> =
+        r#""cmd.exe" /D /S /C echo "a b" & exit 0"#.encode_utf16().collect();
+    expected.push(0);
+    assert_eq!(command_line, expected);
+}
+#[test]
 fn windows_command_line_bound_rejects_the_prior_raw_unit_limit() {
     let prior_raw_limit = 1 + 1 + 16_382 + 1 + 16_381 + 1;
     assert_eq!(prior_raw_limit, MAX_ARGV_UNITS);
@@ -2359,6 +2476,23 @@ fn native_object_binding_holds_identity_and_receipt_reports_it() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(windows)]
+fn windows_pinned_environment_units() -> usize {
+    use std::os::windows::ffi::OsStrExt;
+    ["LOCALAPPDATA", "SYSTEMROOT"]
+        .into_iter()
+        .map(|name| {
+            name.encode_utf16().count()
+                + 1
+                + std::env::var_os(name).unwrap().encode_wide().count()
+                + 1
+        })
+        .sum()
+}
+#[cfg(not(windows))]
+fn windows_pinned_environment_units() -> usize {
+    0
+}
 #[test]
 fn complete_environment_block_limit_counts_mandatory_path() {
     let exact_policy = SandboxPolicy::new(
@@ -2373,10 +2507,12 @@ fn complete_environment_block_limit_counts_mandatory_path() {
     let final_block_terminator = 1;
     let empty_path_entry = "PATH".len() + 1 + 1;
     let explicit_entry_framing = "ONE".len() + 1 + 1;
+    let pinned_host_environment_units = windows_pinned_environment_units();
     let exact_value_units = MAX_ENVIRONMENT_BLOCK_UNITS
         - final_block_terminator
         - empty_path_entry
-        - explicit_entry_framing;
+        - explicit_entry_framing
+        - pinned_host_environment_units;
     assert!(
         ExecutionRequest::builder("node")
             .policy(exact_policy.clone())
@@ -2423,8 +2559,12 @@ fn complete_environment_combined_bound_includes_joined_path_and_has_no_off_by_on
     let path_units = os_units(path.as_os_str());
     let path_entry_units = "PATH".len() + 1 + path_units + 1;
     let explicit_entry_framing = "ONE".len() + 1 + 1;
-    let exact_value_units =
-        MAX_ENVIRONMENT_BLOCK_UNITS - 1 - path_entry_units - explicit_entry_framing;
+    let pinned_host_environment_units = windows_pinned_environment_units();
+    let exact_value_units = MAX_ENVIRONMENT_BLOCK_UNITS
+        - 1
+        - path_entry_units
+        - explicit_entry_framing
+        - pinned_host_environment_units;
 
     assert!(
         ExecutionRequest::builder("node")

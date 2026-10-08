@@ -6,12 +6,19 @@ use request::windows_path_units_semantically_equal;
 pub use request::{ExecutionRequest, ExecutionRequestBuilder};
 #[cfg(test)]
 use request::{
+    assemble_windows_environment_block, join_executable_search_paths,
+    windows_appcontainer_environment_entries, windows_environment_path_units,
+};
+#[cfg(test)]
+use request::{
     join_windows_path_units, os_units, validate_executable_search_paths,
     validate_windows_command_line_units, windows_command_line_units_upper_bound,
 };
+#[cfg(any(windows, test))]
+use request::{serialize_windows_command_line_units, windows_environment_block_units};
 
 mod supervision;
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
 use supervision::ExecutionLifecycle;
 use supervision::{
     ExecutionBackend, OwnedExecutionAttempt, PreparationError, execute_with_backend,
@@ -1185,6 +1192,7 @@ pub enum Termination {
     OutputLimitExceeded,
     ProcessLimitExceeded,
     MemoryLimitExceeded,
+    Cancelled,
 }
 
 /// Captured execution result paired with an enforcement receipt.
@@ -1707,6 +1715,16 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
     )
 }
 
+#[cfg(windows)]
+#[path = "windows_execution.rs"]
+mod platform_backend;
+#[cfg(any(windows, test))]
+#[path = "windows_cancellation.rs"]
+mod windows_cancellation;
+#[cfg(windows)]
+#[path = "windows_job.rs"]
+mod windows_job;
+
 #[cfg(target_os = "macos")]
 #[path = "macos_restricted.rs"]
 mod platform_backend;
@@ -1715,7 +1733,7 @@ mod platform_backend;
 #[path = "linux_restricted.rs"]
 mod platform_backend;
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform_backend {
     use super::{
         BackendIdentity, ContainmentSupport, EnforcementDimensions, ExecutionBackend,
