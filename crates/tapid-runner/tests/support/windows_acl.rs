@@ -88,16 +88,23 @@ pub fn initialize_inheritance(root: &std::path::Path) {
             || initialized.0 == initial.0 | windows_sys::Win32::Security::SE_DACL_AUTO_INHERITED,
         "fixture setup may only set the auto-inherited control bit"
     );
+    assert_inheritance_transition(&initial.1, &initialized.1);
+}
+
+fn assert_inheritance_transition(initial: &[u8], initialized: &[u8]) {
     // Windows can convert matching explicit ACEs to inherited ACEs on the root.
     // Permit only that one-way bookkeeping transition during SETUP, not cleanup.
     assert_eq!(
-        initialized.1.len(),
-        initial.1.len(),
+        initialized.len(),
+        initial.len(),
         "fixture ACL size must not change"
     );
-    let mut expected = initial.1.clone();
+    let mut expected = initial.to_vec();
     let mut offset = std::mem::size_of::<windows_sys::Win32::Security::ACL>();
-    while offset < expected.len() {
+    assert!(expected.len() >= offset, "valid ACL header");
+    let ace_count = u16::from_le_bytes([expected[4], expected[5]]);
+    // AclSize includes unused capacity; only AceCount entries are ACEs.
+    for _ in 0..ace_count {
         assert!(offset + 4 <= expected.len(), "valid ACE header");
         let size = u16::from_le_bytes([expected[offset + 2], expected[offset + 3]]) as usize;
         assert!(
@@ -106,7 +113,7 @@ pub fn initialize_inheritance(root: &std::path::Path) {
         );
         let inherited = windows_sys::Win32::Security::INHERITED_ACE as u8;
         let old_flags = expected[offset + 1];
-        let new_flags = initialized.1[offset + 1];
+        let new_flags = initialized[offset + 1];
         assert!(
             new_flags == old_flags || new_flags == old_flags | inherited,
             "fixture setup may only mark an existing ACE inherited"
@@ -115,7 +122,34 @@ pub fn initialize_inheritance(root: &std::path::Path) {
         offset += size;
     }
     assert_eq!(
-        initialized.1, expected,
+        initialized, expected,
         "fixture setup must preserve every other ACL byte"
     );
+}
+
+#[test]
+fn inheritance_transition_preserves_unused_acl_capacity() {
+    // A valid allow ACE for S-1-1-0, plus eight bytes of unused ACL capacity.
+    let initial = vec![
+        2, 0, 36, 0, 1, 0, 0, 0, 0, 0, 20, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0,
+    ];
+    // SAFETY: IsValidAcl reads this complete synthetic ACL buffer only.
+    assert_ne!(
+        unsafe { windows_sys::Win32::Security::IsValidAcl(initial.as_ptr().cast()) },
+        0,
+        "synthetic ACL must be valid on Windows"
+    );
+    let mut initialized = initial.clone();
+    initialized[9] |= windows_sys::Win32::Security::INHERITED_ACE as u8;
+    assert_inheritance_transition(&initial, &initialized);
+}
+
+#[test]
+#[should_panic(expected = "fixture setup must preserve every other ACL byte")]
+fn inheritance_transition_rejects_changed_unused_acl_capacity() {
+    let initial = [2, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut initialized = initial;
+    initialized[9] = windows_sys::Win32::Security::INHERITED_ACE as u8;
+    assert_inheritance_transition(&initial, &initialized);
 }

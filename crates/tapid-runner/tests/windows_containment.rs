@@ -236,19 +236,35 @@ fn windows_appcontainer_cannot_read_files_outside_the_project_grant() {
 #[test]
 fn windows_appcontainer_cannot_write_outside_the_project_grant() {
     let root = temporary_project("deny-write");
-    let outside = root.with_extension("should-not-exist.txt");
-    let command = format!(r#"echo TAPID_OUTSIDE_WRITE>{}"#, outside.display());
+    let outside = root.with_extension("outside write.txt");
+    let command = format!(r#"echo TAPID_OUTSIDE_WRITE>"{}""#, outside.display());
+    // Positive control: the very same payload must address the exact spaced target.
+    let system_root = std::env::var_os("SystemRoot").unwrap();
+    use std::os::windows::process::CommandExt;
+    let output = Command::new(PathBuf::from(system_root).join("System32").join("cmd.exe"))
+        .raw_arg(format!("/D /S /C \"{command}\""))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "host redirect must succeed: {:?}",
+        output
+    );
+    assert_eq!(fs::read(&outside).unwrap(), b"TAPID_OUTSIDE_WRITE\r\n");
+    fs::remove_file(&outside).unwrap();
+    let baseline_acl = project_dacl(&root);
     let request = command_request(
         &root,
         &command,
         ExecutionLimits::new(Some(10), Some(4096), Some(4), Some(128 * 1024 * 1024)).unwrap(),
     );
     let outcome = execute(&request).expect("write denial should be an ordinary contained exit");
-    assert!(matches!(outcome.termination(), Termination::Exited(_)));
+    assert!(matches!(outcome.termination(), Termination::Exited(code) if *code != 0));
     assert!(
         !outside.exists(),
         "AppContainer wrote outside its policy grant"
     );
+    assert_eq!(project_dacl(&root), baseline_acl);
     fs::remove_dir_all(root).unwrap();
 }
 
