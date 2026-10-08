@@ -1,0 +1,49 @@
+
+running 20 tests
+test windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths ... ok
+test windows_appcontainer_can_modify_existing_file_in_declared_subtree ... ignored, re-enable after AppContainer existing-file writes pass on Windows 11
+test windows_appcontainer_cannot_read_files_outside_the_project_grant ... ok
+test windows_appcontainer_cannot_write_outside_the_project_grant ... ok
+test windows_appcontainer_enforces_the_combined_output_limit ... ok
+test windows_appcontainer_timeout_terminates_the_managed_job ... ok
+test windows_child_process_probe_helper ... CHILD_PROCESS_MARKER
+ok
+test windows_ctrl_c_cancels_execution_and_restores_project_dacl ... [windows-ctrl-c parent] spawned helper pid=3804 executable=C:\Users\tapidtest\AppData\Local\Temp\tapid-pr208-acl\containment.exe flags=CREATE_NEW_CONSOLE elapsed=4.1504ms
+[windows-ctrl-c parent] helper exited after 360.6617ms: status=exit code: 0
+helper stdout:
+
+running 1 test
+test windows_ctrl_c_cancels_execution_and_restores_project_dacl ... DACL_ACTIVE
+CTRL_C_HELPER_SUCCESS elapsed=124.3854ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.12s
+
+
+helper stderr:
+[windows-ctrl-c helper] start pid=3804 console_window=0xd0050c console_process_count=1 console_pids=[3804]
+[windows-ctrl-c helper] baseline captured after 33.0015ms: root=C:\Users\TAPIDT~1\AppData\Local\Temp\tapid-ctrl-c-3804-1791481357726790300 dacl="C:\\Users\\TAPIDT~1\\AppData\\Local\\Temp\\tapid-ctrl-c-3804-1791481357726790300 NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)\n                                                                           BUILTIN\\Administrators:(I)(OI)(CI)(F)\n                                                                           TAPID-WIN11\\tapidtest:(I)(OI)(CI)(F)\n\nSuccessfully processed 1 files; Failed processing 0 files\r\n"
+[windows-ctrl-c worker] execute started
+[windows-ctrl-c helper] grant active after 88.0462ms: root=C:\Users\TAPIDT~1\AppData\Local\Temp\tapid-ctrl-c-3804-1791481357726790300 baseline_dacl="C:\\Users\\TAPIDT~1\\AppData\\Local\\Temp\\tapid-ctrl-c-3804-1791481357726790300 NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)\n                                                                           BUILTIN\\Administrators:(I)(OI)(CI)(F)\n                                                                           TAPID-WIN11\\tapidtest:(I)(OI)(CI)(F)\n\nSuccessfully processed 1 files; Failed processing 0 files\r\n" active_dacl="C:\\Users\\TAPIDT~1\\AppData\\Local\\Temp\\tapid-ctrl-c-3804-1791481357726790300 S-1-15-2-2133668665-3664333173-3626602082-2897407448-1055916392-654214490-1685482512:(OI)(CI)(R)\n                                                                           S-1-15-2-2133668665-3664333173-3626602082-2897407448-1055916392-654214490-1685482512:(X)\n                                                                           S-1-15-2-2133668665-3664333173-3626602082-2897407448-1055916392-654214490-1685482512:(CI)(IO)(X)\n                                                                           NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)\n                                                                           BUILTIN\\Administrators:(I)(OI)(CI)(F)\n                                                                           TAPID-WIN11\\tapidtest:(I)(OI)(CI)(F)\n\nSuccessfully processed 1 files; Failed processing 0 files\r\n"
+[windows-ctrl-c helper] control event sent after 88.541ms; waiting up to 10s; console_pids=[3804]
+[windows-ctrl-c worker] execute returned after 110.0858ms: Ok(Cancelled)
+[windows-ctrl-c helper] outcome after 110.3314ms: termination=Cancelled cleanup=KernelOwnedComplete confirmed=EnforcementDimensions { filesystem_read: false, filesystem_write: false, network: false, environment_sanitization: false, descriptor_hygiene: false, subprocess_restriction: false, descendant_authority_propagation: false, descendant_lifecycle: true, process_tree_membership: true, complete_cleanup: true, timeout: false, output: false, process_count: false, memory: false } evidence=[DimensionEvidence { dimension: DescendantLifecycle, scope: ManagedTree, mechanism: "Windows Job Object active-process count reached zero before filesystem grants were restored; kill-on-close remains the final kernel-owned boundary", limitations: [] }, DimensionEvidence { dimension: ProcessTreeMembership, scope: ManagedTree, mechanism: "Windows Job Object active-process count reached zero before filesystem grants were restored; kill-on-close remains the final kernel-owned boundary", limitations: [] }, DimensionEvidence { dimension: CompleteCleanup, scope: ManagedTree, mechanism: "Windows Job Object active-process count reached zero before filesystem grants were restored; kill-on-close remains the final kernel-owned boundary", limitations: [] }] stdout_bytes=0 stderr_bytes=0
+[windows-ctrl-c helper] cleanup verified after 124.0946ms: DACL restored exactly
+
+ok
+test windows_disabled_subprocess_policy_prevents_child_process_creation ... ok
+test windows_managed_tree_executes_with_checked_appcontainer_and_job_evidence ... ok
+test windows_missing_executable_failure_restores_project_dacl ... ok
+test windows_network_enabled_policy_fails_closed_before_spawn ... ok
+test windows_network_probe_is_denied_with_a_reachable_host_positive_control ... ok
+test windows_node_preserves_argv_environment_exit_and_readonly_boundaries ... ok
+test windows_node_runtime_can_be_launched_directly_when_test_runtime_is_configured ... ok
+test windows_node_runtime_can_resolve_a_script_file_inside_the_project_grant ... ok
+test windows_node_runtime_can_spawn_a_child_inside_the_appcontainer ... ok
+test windows_node_timeout_reaps_descendant_before_restoring_project_dacl ... ok
+test windows_runtime_directory_ace_allows_launching_read_execute_binaries ... ok
+test windows_write_policy_fails_closed_before_spawn_until_native_acceptance ... ok
+
+test result: ok. 19 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 12.66s
+
+EXIT=0

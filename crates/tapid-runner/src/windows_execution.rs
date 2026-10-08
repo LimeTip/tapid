@@ -163,7 +163,7 @@ impl<'a> WindowsExecutionLifecycle<'a> {
         let appcontainer = self.appcontainer.as_ref().expect("AppContainer prepared");
         trace_windows_stage("prepare: filesystem grants");
         self.grants = Some(WindowsFilesystemGrants::apply(
-            appcontainer.sid(),
+            appcontainer,
             &self.preflight.bindings.receipt().grants,
         )?);
         trace_windows_stage("prepare: Job Object");

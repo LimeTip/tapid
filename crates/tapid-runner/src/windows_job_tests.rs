@@ -240,7 +240,7 @@ fn appcontainer_actual_token_file_access_probe() {
             binding: FilesystemBindingMode::CanonicalPath,
         },
     ];
-    let mut grants = WindowsFilesystemGrants::apply(container.sid(), &resolved_grants).unwrap();
+    let mut grants = WindowsFilesystemGrants::apply(&container, &resolved_grants).unwrap();
     let active_acls = audit_paths
         .iter()
         .map(|path| query_acl(&icacls, path))
@@ -672,7 +672,7 @@ fn appcontainer_policy_only_allows_declared_write_subtree() {
             binding: FilesystemBindingMode::CanonicalPath,
         },
     ];
-    let mut grants = WindowsFilesystemGrants::apply(container.sid(), &resolved_grants).unwrap();
+    let mut grants = WindowsFilesystemGrants::apply(&container, &resolved_grants).unwrap();
 
     let payload = format!("echo authorized>\"{}\"", allowed_file.display());
     let (job, mut child) = create_appcontainer_child_in(&container, &payload);
