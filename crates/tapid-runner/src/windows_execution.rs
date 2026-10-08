@@ -314,6 +314,18 @@ impl ExecutionLifecycle for WindowsExecutionLifecycle<'_> {
         let (stdout, stderr) = self.capture.take().expect("prepared capture").finish()?;
         trace_windows_stage("execute: cleanup");
         let completion = self.cleanup_resources();
+        // Cleanup is part of the cancellation scope. Atomically stop owning console events and
+        // snapshot the final generation, so an event cannot be swallowed after a late check.
+        let cancelled = self
+            .cancellation
+            .take()
+            .expect("prepared cancellation scope")
+            .finish();
+        let termination = if cancelled {
+            WindowsChildTermination::Cancelled
+        } else {
+            termination
+        };
         trace_windows_stage("execute: complete");
         if let Some(error) = self.cleanup_error.clone() {
             return Err(error.with_completion(completion));

@@ -938,20 +938,21 @@ function finish() {
 
 #[test]
 fn windows_runtime_directory_ace_allows_launching_read_execute_binaries() {
-    let Some(node) = std::env::var_os("TAPID_TEST_NODE").map(PathBuf::from) else {
-        eprintln!("skipping: TAPID_TEST_NODE is not set");
-        return;
-    };
-    let node = fs::canonicalize(node).unwrap();
-    let runtime_bin = node.parent().unwrap().to_path_buf();
+    use tapid_test_support::TempProject;
+
+    // Never write probes or apply test ACLs to a shared Node installation.
+    let runtime = TempProject::new("runtime-executable-acl").unwrap();
+    let project = TempProject::new("runtime-executable-project").unwrap();
+    let runtime_bin = runtime.path().to_path_buf();
+    let root = project.path().to_path_buf();
+    windows_acl::initialize_inheritance(&runtime_bin);
+    windows_acl::initialize_inheritance(&root);
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
     let probe = runtime_bin.join("cmd.exe");
-    assert!(
-        !probe.exists(),
-        "test runtime unexpectedly contains cmd.exe"
-    );
     fs::copy(PathBuf::from(system_root).join("System32/cmd.exe"), &probe).unwrap();
-    let root = temporary_project("runtime-executable-acl");
+    let baseline_runtime_acl = project_dacl(&runtime_bin);
+    let baseline_probe_acl = project_dacl(&probe);
+    let baseline_project_acl = project_dacl(&root);
     let request = ExecutionRequest::builder(probe.as_os_str())
         .args(["/D", "/S", "/C", "echo RUNTIME_EXECUTABLE_MARKER"])
         .executable_search_path(&runtime_bin)
@@ -968,8 +969,10 @@ fn windows_runtime_directory_ace_allows_launching_read_execute_binaries() {
         String::from_utf8_lossy(outcome.stderr())
     );
     assert!(String::from_utf8_lossy(outcome.stdout()).contains("RUNTIME_EXECUTABLE_MARKER"));
-    fs::remove_file(probe).unwrap();
-    fs::remove_dir_all(root).unwrap();
+    assert_eq!(project_dacl(&runtime_bin), baseline_runtime_acl);
+    assert_eq!(project_dacl(&probe), baseline_probe_acl);
+    assert_eq!(project_dacl(&root), baseline_project_acl);
+    // TempProject removes both fixtures even if any assertion above unwinds.
 }
 
 #[test]

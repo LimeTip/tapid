@@ -40,5 +40,8 @@ libc = "0.2.189"
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.189"
 
+[dev-dependencies]
+tapid-test-support = { path = "../tapid-test-support" }
+
 [lib]
 path = "src/lib.rs"

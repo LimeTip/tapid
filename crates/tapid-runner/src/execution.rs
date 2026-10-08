@@ -1718,7 +1718,7 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
 #[cfg(windows)]
 #[path = "windows_execution.rs"]
 mod platform_backend;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[path = "windows_cancellation.rs"]
 mod windows_cancellation;
 #[cfg(windows)]
