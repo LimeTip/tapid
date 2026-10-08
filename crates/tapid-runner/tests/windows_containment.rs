@@ -943,8 +943,8 @@ fn windows_runtime_directory_ace_allows_launching_read_execute_binaries() {
     // Never write probes or apply test ACLs to a shared Node installation.
     let runtime = TempProject::new("runtime-executable-acl").unwrap();
     let project = TempProject::new("runtime-executable-project").unwrap();
-    let runtime_bin = runtime.path().to_path_buf();
-    let root = project.path().to_path_buf();
+    let runtime_bin = fs::canonicalize(runtime.path()).unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
     windows_acl::initialize_inheritance(&runtime_bin);
     windows_acl::initialize_inheritance(&root);
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
