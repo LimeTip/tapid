@@ -18,7 +18,7 @@ const step = (owner: string, name: string) => {
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const testCacheInputs = '        with:\n          key: source-install-release-v1\n';
 const assertTestBootstrap = (ci: string) => {
-  for (const id of ['test', 'nextest', 'coverage', 'security', 'package']) {
+  for (const id of ['test', 'windows-msvc-cross-check', 'nextest', 'coverage', 'security', 'package']) {
     const inputs = id === 'test' ? testCacheInputs.trimEnd() : '';
     assert.equal(step(job(ci, id), 'Cache Rust build artifacts').trimEnd(),
       `      - name: Cache Rust build artifacts\n        uses: ${pin}` + (inputs ? `\n${inputs}` : ''), `${id} cache inputs must remain exactly scoped`);
@@ -49,7 +49,7 @@ test('Test bootstrap rejects omitted, wrong, unstable and overbroad keys', async
     assert.notEqual(changed, cache, `vacuous mutation: ${label}`);
     assert.throws(() => assertTestBootstrap(ci.replace(native, native.replace(cache, changed))), undefined, label);
   }
-  for (const id of ['nextest', 'coverage', 'security', 'package']) {
+  for (const id of ['windows-msvc-cross-check', 'nextest', 'coverage', 'security', 'package']) {
     const owner = job(ci, id); const other = step(owner, 'Cache Rust build artifacts');
     const changed = owner.replace(other, other + testCacheInputs);
     assert.notEqual(changed, owner, `vacuous mutation: ${id}`);
@@ -68,7 +68,7 @@ const assertArmCache = (ci: string) => {
   // binary paths and architecture assertions. Update only after reviewing scope.
   assert.equal(digest(arm.replace(cache, '')), '229ab398815e869c840b8f53cc8cce8206f937a6d89252d4223f1e27586d8d9f');
   assertTestBootstrap(ci);
-  assert.equal((ci.match(/uses: Swatinem\/rust-cache@/g) || []).length, 6);
+  assert.equal((ci.match(/uses: Swatinem\/rust-cache@/g) || []).length, 7);
 };
 
 test('ARM dependency cache retains both real native release builds and consistent reviewed pins', async () => {
@@ -108,7 +108,7 @@ test('ARM contracts reject cache bypass, matrix, flags, ordering and pin mutatio
     assert.notEqual(changed, arm, `vacuous mutation: ${name}`);
     assert.throws(() => assertArmCache(ci.replace(arm, changed)), undefined, name);
   }
-  for (const id of ['test', 'nextest', 'coverage', 'security', 'package']) {
+  for (const id of ['test', 'windows-msvc-cross-check', 'nextest', 'coverage', 'security', 'package']) {
     const owner = job(ci, id);
     const changed = owner.replace(pin, 'Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2');
     assert.notEqual(changed, owner);
