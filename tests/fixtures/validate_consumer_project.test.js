@@ -146,8 +146,8 @@ for (const platform of ['linux', 'darwin']) {
     });
   }
 }
-for (const failure of ['success', 'unrelated', 'child', 'receipt']) {
-  test(`win32: ${currentTag} rejects ${failure} instead of fail-closed containment`, () => {
+for (const failure of ['argv', 'exit', 'backend', 'assurance', 'enforcement', 'missing-receipt', 'unsupported']) {
+  test(`win32: ${currentTag} rejects incorrect ${failure}`, () => {
     assert.throws(() => validate('win32', failure, currentTag), error => {
       assert.doesNotMatch(error.message, /unreviewed root-script release/);
       return true;
@@ -155,9 +155,16 @@ for (const failure of ['success', 'unrelated', 'child', 'receipt']) {
   });
 }
 
-test('source Windows support never changes reviewed published contracts', () => {
+for (const failure of ['success', 'unrelated', 'child', 'receipt']) {
+  test(`win32: v0.0.11 rejects ${failure} instead of fail-closed containment`, () => {
+    assert.throws(() => validate('win32', failure, 'v0.0.11'));
+  });
+}
+
+test('Windows support preserves historical release contracts', () => {
   assert.ok(current.nativePlatforms.includes('win32'));
   for (const [tag, contract] of releases) {
+    if (tag === currentTag) continue;
     assert.equal(contract.nativePlatforms.includes('win32'), false, `${tag} must retain its reviewed published contract`);
   }
 });

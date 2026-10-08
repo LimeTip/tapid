@@ -5,9 +5,13 @@
   },
   "current": {
     "legacy": false,
-    "nativePlatforms": ["darwin", "linux"]
+    "nativePlatforms": ["darwin", "linux", "win32"]
   },
   "historical": {
+    "v0.0.11": {
+      "legacy": false,
+      "nativePlatforms": ["darwin", "linux"]
+    },
     "v0.0.9": {
       "legacy": true,
       "nativePlatforms": []

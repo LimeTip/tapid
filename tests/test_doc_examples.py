@@ -69,11 +69,16 @@ class RunnerTests(unittest.TestCase):
         inventory = json.loads((ROOT / 'docs/examples/contracts.json').read_text())
         capability = next(c for c in inventory['capabilities'] if c['id'] == 'self-upgrade')
         self.assertEqual(capability['first_supported_release'], 'v0.0.10')
-        self.assertEqual(capability['expected_releases'], ['v0.0.10', 'v0.0.11'])
+        self.assertEqual(capability['expected_releases'], ['v0.0.10', 'v0.0.11', 'v0.0.12'])
         self.assertEqual(capability['verified_releases'], [])
 
     def test_published_0011_upgrade_help_has_reviewed_expectation(self):
         code, report = self.published_fixture('v0.0.11', 'upgrade-help')
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report['status'], 'passed')
+
+    def test_published_0012_upgrade_help_has_reviewed_expectation(self):
+        code, report = self.published_fixture('v0.0.12', 'upgrade-help')
         self.assertEqual(code, 0, report)
         self.assertEqual(report['status'], 'passed')
 
@@ -86,16 +91,18 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('no upgrade subcommand', report['examples'][0]['reason'])
 
     def test_published_upgrade_unknown_tags_require_review(self):
-        for tag in ('v0.0.8', 'v0.0.12', 'v1.0.0'):
+        for tag in ('v0.0.8', 'v0.0.13', 'v1.0.0'):
             code, report = self.published_fixture(tag, 'upgrade')
             self.assertNotEqual(code, 0)
             self.assertIn('needs review', report['error'])
             self.assertEqual(report['examples'], [])
 
     def test_published_upgrade_supported_release_requires_destination(self):
-        code, report = self.published_fixture('v0.0.10', 'upgrade')
-        self.assertNotEqual(code, 0)
-        self.assertIn('explicit expected target', report['examples'][0]['error'])
+        for tag in ('v0.0.10', 'v0.0.11', 'v0.0.12'):
+            with self.subTest(tag=tag):
+                code, report = self.published_fixture(tag, 'upgrade')
+                self.assertNotEqual(code, 0)
+                self.assertIn('explicit expected target', report['examples'][0]['error'])
 
     def test_published_0010_upgrade_fixture_checks_exact_destination_and_state(self):
         # Offline harness regression only: this shell fixture is not a release.
@@ -278,7 +285,7 @@ class RunnerTests(unittest.TestCase):
         for job in (workflow.split('  unix:', 1)[1].split('  windows:', 1)[0],
                     workflow.split('  windows:', 1)[1]):
             latest = job.split('      - name: Install latest release through discovery', 1)[1].split('      - name:', 1)[0]
-            self.assertIn("if: ${{ !cancelled() && steps.install_published.outcome == 'success' }}", latest)
+            self.assertIn("if: ${{ !cancelled() && steps.install_public.outcome == 'success' }}", latest)
             self.assertIn('id: install_latest', latest)
             self.assertIn('id: install_published', job)
         upgrade = workflow.split('      - name: Run canonical published upgrade', 1)[1].split('      - name:', 1)[0]
