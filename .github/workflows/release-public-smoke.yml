@@ -203,6 +203,8 @@ jobs:
           retention-days: 30
           if-no-files-found: error
       - name: Check the public website installer with an explicit version
+        id: install_public
+        if: ${{ !cancelled() && steps.install_published.outcome == 'success' }}
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
@@ -223,8 +225,8 @@ jobs:
           cmp "$RUNNER_TEMP/tapid-public/tapid" "$RUNNER_TEMP/tapid/tapid"
       - name: Install latest release through discovery
         id: install_latest
-        # Keep discovery evidence independent of documentation/root-script failures.
-        if: ${{ !cancelled() && steps.install_published.outcome == 'success' }}
+        # Discovery requires the successfully downloaded and validated public installer.
+        if: ${{ !cancelled() && steps.install_public.outcome == 'success' }}
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.latest_tag }}
@@ -391,7 +393,7 @@ jobs:
           $env:USERPROFILE = Join-Path $env:RUNNER_TEMP 'tapid-home'
           $env:LOCALAPPDATA = $env:USERPROFILE
           $binary = Join-Path $env:RUNNER_TEMP 'tapid/tapid.exe'
-          # Reviewed native contract rejects unsupported containment without a child or receipt.
+          # Reviewed release contract requires native containment, forwarding and receipts.
           node tests/fixtures/validate_consumer_project.js --binary $binary --release-tag $env:RELEASE_TAG
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Retain native documentation evidence
@@ -407,6 +409,8 @@ jobs:
           retention-days: 30
           if-no-files-found: error
       - name: Check the public website installer with an explicit version
+        id: install_public
+        if: ${{ !cancelled() && steps.install_published.outcome == 'success' }}
         shell: powershell
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
@@ -435,8 +439,8 @@ jobs:
           if ((Get-FileHash $binary).Hash -cne (Get-FileHash $tagged).Hash) { throw 'Public and tagged installer outputs differ' }
       - name: Install latest release through discovery
         id: install_latest
-        # Keep discovery evidence independent of documentation/root-script failures.
-        if: ${{ !cancelled() && steps.install_published.outcome == 'success' }}
+        # Discovery requires the successfully downloaded and validated public installer.
+        if: ${{ !cancelled() && steps.install_public.outcome == 'success' }}
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.latest_tag }}
