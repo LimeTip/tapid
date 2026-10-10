@@ -34,9 +34,14 @@ fn import(args: Args) -> Result<(), String> {
     let manifest = read_manifest(&manifest_path)?;
     tapid_manifest::PackageManifest::parse(&manifest).map_err(|e| e.to_string())?;
     let digest = crate::filesystem::atomic::digest_bytes(manifest.as_bytes());
-    let lock =
+    let mut lock =
         ImportedNpmLockfile::import(&input, &manifest, &digest).map_err(|e| e.to_string())?;
     let config = crate::registry::RegistryConfig::load(&project)?;
+    let workspace = crate::online::workspace_materialization(&project, &config)?;
+    lock.bind_workspace_manifests(&crate::online::imported_workspace_manifests(
+        &project, &workspace,
+    )?)
+    .map_err(|e| e.to_string())?;
     for package in lock.graph().map_err(|e| e.to_string())?.packages.values() {
         if config.origin_for_name(&package.name)? != package.registry {
             return Err(format!(
@@ -61,6 +66,12 @@ fn import(args: Args) -> Result<(), String> {
     if read_manifest(&manifest_path)? != manifest {
         return Err("package.json changed during import; retry".into());
     }
+    let current_workspace = crate::online::workspace_materialization(&project, &config)?;
+    lock.validate_workspace_manifests(&crate::online::imported_workspace_manifests(
+        &project,
+        &current_workspace,
+    )?)
+    .map_err(|e| e.to_string())?;
     let backup = crate::filesystem::atomic::replace_lockfile(&destination, &json)?;
     crate::filesystem::atomic::discard_lockfile_backup(backup.as_deref())
 }

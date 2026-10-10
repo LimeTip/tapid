@@ -15,6 +15,10 @@ pub(crate) fn fetch_imported(
     imported
         .validate_replay(&manifest, &root_digest(project)?)
         .map_err(|e| OperationalError::new(ErrorKind::LockManifestMismatch, e.to_string()))?;
+    let workspace = workspace_materialization(project, registry_config)?;
+    imported
+        .validate_workspace_manifests(&imported_workspace_manifests(project, &workspace)?)
+        .map_err(|e| OperationalError::new(ErrorKind::LockManifestMismatch, e.to_string()))?;
     let graph = imported
         .graph()
         .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?;
@@ -310,6 +314,57 @@ pub(crate) fn fetch_imported(
         },
         trees,
         transaction,
-        WorkspaceLinkPlan { links: Vec::new() },
+        workspace.links,
     ))
+}
+
+/// Read the same contained workspace sources used by native installs.
+/// Digests also detect edits between discovery and import publication.
+pub(crate) fn imported_workspace_manifests(
+    project: &Path,
+    workspace: &WorkspaceMaterialization,
+) -> Result<BTreeMap<String, (String, String)>, String> {
+    let mut manifests = BTreeMap::new();
+    for (source, _) in workspace.members.values() {
+        let member_root = project.join(source.path());
+        for ancestor in member_root
+            .ancestors()
+            .take_while(|ancestor| *ancestor != project)
+        {
+            match fs::symlink_metadata(ancestor.join("node_modules")) {
+                Ok(_) => {
+                    return Err(format!(
+                        "/packages/{}: node_modules: remove the member or ancestor node_modules tree before importing or replaying root-hoisted workspace selections",
+                        source.path().replace('/', "~1")
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        let path = project.join(source.path()).join("package.json");
+        if !fs::symlink_metadata(&path)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_file()
+        {
+            return Err("workspace package.json must be a regular, non-symlink file".into());
+        }
+        let canonical = fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        if !canonical.starts_with(project) {
+            return Err("workspace manifest escapes project root".into());
+        }
+        let text = fs::read_to_string(&canonical).map_err(|e| e.to_string())?;
+        let current_digest = digest(text.as_bytes()).to_string();
+        let key = LockfilePackageKey::workspace(source.clone()).to_string();
+        if !workspace
+            .locked
+            .iter()
+            .any(|member| member.key() == key && member.manifest_digest() == current_digest)
+        {
+            return Err("workspace member manifest changed during discovery; retry".into());
+        }
+        manifests.insert(source.path().to_owned(), (text, current_digest));
+    }
+    Ok(manifests)
 }

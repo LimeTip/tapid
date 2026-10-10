@@ -39,9 +39,15 @@ A plain `tapid install` also preserves an imported graph. Explicit dependency mu
 
 The importer accepts v3 `packages` entries for registry tarballs with canonical, credential-free HTTPS URLs, a conventional package/version tarball path, and one canonical padded SHA-512 integrity value. It supports nested duplicate versions, npm aliases with explicit actual package names, already selected ancestor peer providers, and distinct peer contexts when the resulting Tapid instance graph can represent them. It retains ordinary npm descriptive metadata, including license, engines, funding, deprecation, bin metadata, and install-script flags. Retaining engines metadata does not add runtime engine enforcement.
 
-Links and workspace entries fail explicitly in this first import slice, including projects that use Tapid's otherwise supported workspace installation. Git/file sources, SHA-1 or multiple SRI values, bundled packages, unknown fields, unreachable entries, self-instance edges, and conflicting placements for the same Tapid instance fail before writing. A diagnostic identifies the JSON pointer, package, field, and reason. Duplicate JSON keys are rejected. Unsupported versions include instructions for producing a v3 lock.
+Workspace imports accept root `node_modules/<name>` links to declared, contained workspace members. Member names, versions, dependency sections, peer metadata, and bins must match the npm lock. Tapid records each member manifest digest and rejects changed manifests or membership on replay. Every member is linked, including members not named in root dependencies. Member registry dependencies and peers must use root-hoisted placements; selected local member dependencies must satisfy their declared ranges.
 
-The importer does not reproduce npm's physical hoisting layout. Tapid's managed layout binds the exact selected dependency and peer instances by their local import names. The committed reference fixture checks nested versions and peer lookup with Node, compares selected package versions with offline `npm ci`, and checks byte-stable import output.
+Remove any existing `node_modules` trees inside members or between a member and the workspace root before import and replay. These trees would override the imported root selections during Node lookup. Import leaves them untouched and refuses to proceed while they exist.
+
+Nested member `node_modules` placements, renamed or nested local links, links to undeclared targets, and registry dependencies on local members remain unsupported and fail explicitly.
+
+Git/file sources, SHA-1 or multiple SRI values, bundled packages, unknown fields, unreachable entries, self-instance edges, and conflicting placements for the same Tapid instance fail before writing. A diagnostic identifies the JSON pointer, package, field, and reason. Duplicate JSON keys are rejected. Unsupported versions include instructions for producing a v3 lock.
+
+The importer does not reproduce npm's physical hoisting layout. Tapid's managed layout binds the exact selected dependency and peer instances by their local import names. The committed reference fixture checks nested versions and peer lookup with Node, compares selected package versions with offline `npm ci`, and checks byte-stable import output. Workspace tests check scoped local links, member dependency and peer imports, optional omission, frozen installation, and offline replay.
 
 ## Optional packages and platforms
 
@@ -51,7 +57,7 @@ Tapid differs from `npm ci` when an applicable optional package fails download, 
 
 ## Rollback
 
-Import failures leave the manifest, previous lock, store, and active dependencies unchanged. Import refuses pending install recovery instead of attempting it. Restore your saved `tapid.lock` to undo a successful import. Import itself has not changed `node_modules`.
+Import failures leave root and member manifests, the previous lock, store, and active dependencies unchanged. Import refuses pending install recovery instead of attempting it. Restore your saved `tapid.lock` to undo a successful import. Import itself has not changed `node_modules`.
 
 After an install, restore the saved lock and matching manifest, then replay their verified trees, or restore the saved npm project and run `npm ci`. Keep the npm lock backup until you have checked your application with its chosen runtime and tools.
 
