@@ -16,5 +16,5 @@ pub use models::{
     FetchMode, PackageMetadata, PackagePlatform, RawPackageMetadata, RawRegistrySnapshot,
     RegistryArtifact, RegistryKind, RegistryPackageId, RegistrySnapshot,
 };
-pub use npm::NpmRegistry;
+pub use npm::{NpmPackageEvidence, NpmRegistry};
 pub use transport::{HttpResponse, HttpTransport, HttpsTransport};

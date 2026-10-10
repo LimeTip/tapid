@@ -30,6 +30,7 @@ The next-release installers, expected for 0.0.11, select archives through `https
 ```text
 tapid init [PATH]
 tapid license
+tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
 tapid lock verify
 tapid import-package-lock <PATH>
@@ -46,6 +47,29 @@ parsing. Root scripts perform the same check before loading run policy or
 executing a script.
 
 `tapid license` prints the complete Apache-2.0 license and LimeTip AB copyright attribution embedded in the executable. It works offline and does not require a project.
+
+`tapid explain react@19.0.0` reads full npm metadata for an exact version using
+the current directory's `tapid.toml` registry routing. It requires no manifest
+and writes no project, lockfile, store, or installed files. Scoped names and
+`npm:` prefixes are supported; ranges, tags, aliases, and JSR are unsupported.
+Use `--project-dir` to select registry configuration, or `--registry-metadata`
+to inspect a local full npm metadata JSON snapshot without network access.
+
+The summary separates registry-reported SHA-512 integrity, signatures, and
+attestation references from verified bytes. `--artifact-file package.tgz`
+checks a local regular file against the reported digest without extracting it.
+A mismatch exits 1; missing expected integrity remains unknown. Files are
+bounded to 32 MiB for metadata and 512 MiB for artifacts. The command does not
+download artifacts or attestations, verify publisher identity or provenance,
+query vulnerability providers, scan for malware, or obtain human review. It
+marks those checks and missing evidence explicitly. It records when Tapid fetched
+live metadata, read a local snapshot, or checked local bytes. Registry-reported
+publication and metadata modification times appear when present, after RFC 3339
+validation, and remain unverified. Missing timestamps stay unavailable. These
+times do not establish evidence freshness, which remains unknown.
+A digest match does not establish package safety or
+intended content. `--json` emits the versioned evidence summary, including on a
+byte mismatch; see the [JSON protocol](../../docs/json-results.md).
 
 `tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
 
