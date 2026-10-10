@@ -636,13 +636,14 @@ where
                         name.clone(),
                         version.clone(),
                     ));
-                    preferred.roots.retain(|(origin, local), selected| {
+                    preferred.roots.retain(|(origin, local, actual), selected| {
                         !(origin == &registry
                             && selected == &version
+                            && actual == &name
                             && roots.iter().any(|dependency| {
                                 dependency.registry == registry
                                     && &dependency.name == local
-                                    && dependency.requirement.package_name(local) == &name
+                                    && dependency.requirement.package_name(local) == actual
                             }))
                     });
                     if !removed {

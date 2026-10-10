@@ -1083,3 +1083,39 @@ fn locked_preferences_preserve_transitives_but_never_override_ranges_or_origins(
         );
     }
 }
+
+#[test]
+fn root_preferences_do_not_cross_alias_target_changes() {
+    let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+    let metadata = registry(
+        origin.as_str(),
+        vec![package("bar", "1.0.0", &[]), package("bar", "2.0.0", &[])],
+    );
+    let preferred = ResolutionPreferences {
+        versions: BTreeSet::new(),
+        roots: BTreeMap::from([(
+            (
+                origin.clone(),
+                "foo".parse().unwrap(),
+                "foo".parse().unwrap(),
+            ),
+            "1.0.0".parse().unwrap(),
+        )]),
+    };
+
+    let resolution = resolve_graph_with_preferences(
+        &[Dependency::new(
+            origin.clone(),
+            "foo".parse().unwrap(),
+            req("npm:bar@*"),
+        )],
+        &[metadata],
+        ResolutionOptions::default(),
+        |parent, _| Ok(parent.clone()),
+        &preferred,
+    )
+    .unwrap();
+
+    assert_eq!(resolution.roots[0].name.as_str(), "bar");
+    assert_eq!(resolution.roots[0].version.to_string(), "2.0.0");
+}

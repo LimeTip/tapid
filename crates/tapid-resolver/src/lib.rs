@@ -440,14 +440,15 @@ pub struct ResolutionOptions {
     pub frozen: bool,
 }
 
-/// Exact version preferences from a previous graph, scoped by registry and local
-/// root name. Preferences never override declared version requirements.
+/// Exact version preferences from a previous graph, scoped by registry, local
+/// root name, and actual package name. Preferences never override declared
+/// version requirements.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ResolutionPreferences {
     /// Previously selected versions, including transitive versions.
     pub versions: BTreeSet<(RegistryOrigin, PackageName, PackageVersion)>,
     /// Previously selected direct bindings, ahead of other locked versions.
-    pub roots: BTreeMap<(RegistryOrigin, PackageName), PackageVersion>,
+    pub roots: BTreeMap<(RegistryOrigin, PackageName, PackageName), PackageVersion>,
 }
 
 /// Exact package identities, root selections, and parent-to-child edges for a graph.
@@ -619,7 +620,9 @@ where
             &requirements,
             &candidate_index,
             preferred,
-            preferred.roots.get(&(registry.clone(), local_name.clone())),
+            preferred
+                .roots
+                .get(&(registry.clone(), local_name.clone(), name.clone())),
         ) {
             Ok(package) => package,
             Err(ResolveError::MissingCandidate { .. })

@@ -856,6 +856,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
                         local
                             .parse()
                             .map_err(|error: tapid_core::DomainError| error.to_string())?,
+                        key.name,
                     ),
                     key.version,
                 );
