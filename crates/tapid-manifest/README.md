@@ -11,6 +11,8 @@ Pure parsing, validation, and deterministic serialization for the selected npm-c
 
 The crate validates required `name` and `version`, optional `private`, `description`, and `license`, string-valued dependency maps, string-valued `scripts`, and package executable metadata. `bin` accepts either a string target or an object of command names to relative targets. Commands and targets are validated and exposed in deterministic order. Absolute, traversal, malformed, and unsupported bin values are rejected.
 
-`PackageManifest::parse` accepts document text and `to_json` emits stable JSON with sorted map keys. Filesystem reads, archive extraction, link creation, and process execution are intentionally owned by other crates and the CLI.
+`PackageManifest::parse` accepts document text and `to_json` emits stable JSON with sorted map keys. Archive extraction, link creation, and process execution are owned by other crates and the CLI.
 
 `with_dependency_kind` adds a dependency to one section and removes declarations of that name from other sections. `update_dependency_kind` changes an existing declaration only in the selected section, preserving overlapping declarations and unrelated fields. It returns an error when that section does not declare the name.
+
+`Workspace::discover` reads root and member manifests, checks canonical path containment, and selects members by exact package name. It accepts string, array, and `workspaces.packages` declarations with literal directory paths and `*` as a whole component for one directory level. Unsupported glob syntax fails with a diagnostic. Overlapping patterns are deduplicated, duplicate names are rejected, and manifests must be regular files. See the [workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces) for the exact supported subset.

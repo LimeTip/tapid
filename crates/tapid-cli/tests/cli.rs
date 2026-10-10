@@ -11,6 +11,7 @@ use tapid_lockfile::Lockfile;
 
 #[path = "cli_cases/ci.rs"]
 mod ci_tests;
+mod workspace_acceptance;
 
 /// Verifies exact license output with no application environment and invalid project files.
 #[test]

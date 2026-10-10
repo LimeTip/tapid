@@ -63,24 +63,27 @@ impl Workspace {
         }
         paths = paths
             .into_iter()
-            .map(|path| contained_path(&project_dir, &path))
+            .map(|path| {
+                // Inspect the declared manifest before canonicalization loses symlink identity.
+                let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                    format!(
+                        "cannot inspect workspace manifest {}: {error}",
+                        path.display()
+                    )
+                })?;
+                if !metadata.file_type().is_file() {
+                    return Err(format!(
+                        "workspace manifest must be a regular file, not a symlink: {}",
+                        path.display()
+                    ));
+                }
+                contained_path(&project_dir, &path)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         paths.sort();
         paths.dedup();
         let mut members = Vec::new();
         for path in paths {
-            let metadata = fs::symlink_metadata(&path).map_err(|error| {
-                format!(
-                    "cannot inspect workspace manifest {}: {error}",
-                    path.display()
-                )
-            })?;
-            if !metadata.file_type().is_file() {
-                return Err(format!(
-                    "workspace manifest must be a regular file, not a symlink: {}",
-                    path.display()
-                ));
-            }
             let canonical = fs::canonicalize(&path).map_err(|error| {
                 format!(
                     "cannot resolve workspace manifest {}: {error}",
@@ -232,6 +235,20 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
     {
         return Err(format!("workspace pattern is outside project: {pattern}"));
     }
+    if !relative
+        .components()
+        .any(|component| matches!(component, std::path::Component::Normal(_)))
+        || pattern.contains(['?', '[', ']', '{', '}', '!', '(', ')', '\\'])
+        || (cfg!(windows) && pattern.contains(':'))
+        || relative.components().any(|component| {
+            let name = component.as_os_str().to_string_lossy();
+            name.contains('*') && name != "*"
+        })
+    {
+        return Err(format!(
+            "unsupported workspace pattern '{pattern}'; use a relative directory path or a whole path component '*' for one directory level"
+        ));
+    }
     let mut paths = vec![root.to_path_buf()];
     for component in relative.components() {
         let name = component.as_os_str();
@@ -281,20 +298,141 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
             }
         }
     }
-    let mut manifests = paths
-        .into_iter()
-        .map(|path| path.join("package.json"))
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
+    let mut manifests = Vec::new();
+    for path in paths {
+        let manifest = path.join("package.json");
+        match fs::symlink_metadata(&manifest) {
+            // Keep every existing entry for the regular-file validation in discovery.
+            // Following the final component here would hide dangling symlinks.
+            Ok(_) => manifests.push(manifest),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect workspace manifest {}: {error}",
+                    manifest.display()
+                ));
+            }
+        }
+    }
     manifests.sort();
     Ok(manifests)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::expand_pattern;
+    use super::{Workspace, expand_pattern};
     use proptest::prelude::*;
-    use std::path::Path;
+    use std::{fs, path::Path};
+    use tapid_test_support::TempProject;
+
+    #[test]
+    fn unsupported_workspace_patterns_fail_instead_of_silently_dropping_members() {
+        for pattern in [
+            "packages/**",
+            "packages/u*",
+            "packages/?i",
+            "packages/[ab]",
+            "{apps,packages}/*",
+            "!packages/private",
+            "packages/@(ui)",
+            "packages/+(ui)",
+            "packages/\\*",
+            "",
+            ".",
+            "./",
+        ] {
+            let project = TempProject::new("unsupported-workspace-pattern").unwrap();
+            project
+                .write(
+                    "package.json",
+                    &serde_json::to_vec(&serde_json::json!({
+                        "name": "root", "version": "1.0.0", "workspaces": [pattern]
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            let error = Workspace::discover(project.path()).unwrap_err();
+            assert!(
+                error.contains("unsupported workspace pattern"),
+                "{pattern}: {error}"
+            );
+            assert!(error.contains("whole path component '*'"), "{error}");
+        }
+    }
+
+    #[test]
+    fn workspace_patterns_support_literal_paths_and_multiple_single_level_wildcards() {
+        let project = TempProject::new("supported-workspace-patterns").unwrap();
+        project.write("package.json", br#"{"name":"root","version":"1.0.0","workspaces":["apps/news","packages/*/*","apps/*"]}"#).unwrap();
+        for (path, name) in [
+            ("apps/news", "news"),
+            ("packages/group/ui", "ui"),
+            ("packages/group/tools", "tools"),
+        ] {
+            project
+                .write(
+                    format!("{path}/package.json"),
+                    format!(r#"{{"name":"{name}","version":"1.0.0"}}"#).as_bytes(),
+                )
+                .unwrap();
+        }
+        let workspace = Workspace::discover(project.path()).unwrap();
+        assert_eq!(
+            workspace
+                .members()
+                .iter()
+                .map(|member| member.name())
+                .collect::<Vec<_>>(),
+            ["news", "tools", "ui"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_patterns_allow_colons_in_literal_paths() {
+        let project = TempProject::new("colon-workspace-pattern").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/foo:bar"]}"#,
+            )
+            .unwrap();
+        project
+            .write(
+                "packages/foo:bar/package.json",
+                br#"{"name":"foo-bar","version":"1.0.0"}"#,
+            )
+            .unwrap();
+
+        let workspace = Workspace::discover(project.path()).unwrap();
+
+        assert_eq!(workspace.members().len(), 1);
+        assert_eq!(workspace.members()[0].name(), "foo-bar");
+    }
+
+    #[test]
+    fn workspace_ignores_absent_manifests_but_rejects_directory_manifest_entries() {
+        let project = TempProject::new("workspace-manifest-directory").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        fs::create_dir_all(project.path().join("packages/ui")).unwrap();
+        assert!(
+            Workspace::discover(project.path())
+                .unwrap()
+                .members()
+                .is_empty()
+        );
+        fs::create_dir(project.path().join("packages/ui/package.json")).unwrap();
+        let error = Workspace::discover(project.path()).unwrap_err();
+        assert!(
+            error.contains("workspace manifest must be a regular file"),
+            "{error}"
+        );
+    }
 
     proptest! {
         #[test]
@@ -310,6 +448,54 @@ mod containment_tests {
     use super::*;
     use std::os::unix::fs::symlink;
     use tapid_test_support::TempProject;
+
+    #[test]
+    fn workspace_rejects_symlinked_member_manifest_even_with_contained_target() {
+        let project = TempProject::new("workspace-manifest-symlink").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        project
+            .write(
+                "packages/ui/real.json",
+                br#"{"name":"ui","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        symlink("real.json", project.path().join("packages/ui/package.json")).unwrap();
+        let error = Workspace::discover(project.path()).unwrap_err();
+        assert!(
+            error.contains("workspace manifest must be a regular file, not a symlink"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn workspace_rejects_dangling_and_directory_target_manifest_symlinks() {
+        for pattern in ["packages/*", "packages/ui"] {
+            for target in ["missing.json", "directory"] {
+                let project = TempProject::new("workspace-nonfile-manifest").unwrap();
+                project
+                    .write(
+                        "package.json",
+                        format!(
+                            r#"{{"name":"root","version":"1.0.0","workspaces":["{pattern}"]}}"#
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                fs::create_dir_all(project.path().join("packages/ui/directory")).unwrap();
+                symlink(target, project.path().join("packages/ui/package.json")).unwrap();
+                let error = Workspace::discover(project.path()).unwrap_err();
+                assert!(
+                    error.contains("workspace manifest must be a regular file, not a symlink"),
+                    "{pattern}, {target}: {error}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn workspace_rejects_symlink_escape_before_parsing_member() {

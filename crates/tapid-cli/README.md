@@ -41,6 +41,10 @@ tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
 
+`tapid manifest validate` rejects symlinks and other non-regular files before
+parsing. Root scripts perform the same check before loading run policy or
+executing a script.
+
 `tapid license` prints the complete Apache-2.0 license and LimeTip AB copyright attribution embedded in the executable. It works offline and does not require a project.
 
 `tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
@@ -74,6 +78,35 @@ The fixture option is for local tests and air-gapped development. It is not a re
 Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result remains unchanged for its own operation and warns if it first recovered an interrupted transaction.
 
 A nonzero exit after commit does not mean the dependency change failed. Tapid reports that the change committed and warns against repeating the operation. Cleanup failures preserve the durable commit decision. If rollback cannot finish, Tapid reports recovery required and retains its journal for the next recovery attempt. Contention errors advise waiting for the competing operation. Diagnostic messages are limited to 4 KiB each, and HTTP URL user information, query values, and fragments are redacted. Use global `--json` for versioned machine results from these commands. Use `outdated --json --json-limit 0` to include every direct dependency. See the [JSON protocol](../../docs/json-results.md) for fields, truncation markers, lossless recovery paths, partial results, parsing errors, and command coverage.
+
+## npm workspaces
+
+Declare members with root `workspaces`, for example `["apps/*", "packages/*"]`.
+Literal paths and `*` as a whole directory component are supported; unsupported
+glob syntax fails before mutation. Ordinary semver dependencies on member names
+link locally without registry fallback. `workspace:*`, `workspace:^`, and
+`workspace:~` are also accepted as compatibility syntax.
+
+Run these commands from the workspace root:
+
+```text
+tapid install
+tapid install --workspace news
+tapid add @example/ui@^1.0.0 --workspace news
+tapid update --workspace news
+tapid remove @example/ui --workspace news
+tapid prune --workspace news
+tapid install --offline --workspace news
+tapid install --frozen --workspace news
+tapid run dev --workspace news
+```
+
+Selection uses the exact member package name. Without `--workspace`, mutations
+and scripts select the root. Install and prune activate the full graph using the
+root lock and root `node_modules`; member scripts run from their directory using
+root policy. Pass `--project-dir <root>` when running elsewhere. See the
+[workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces)
+for discovery, replay, selection, and compatibility limits.
 
 ## Private npm registry routing (development feature)
 
