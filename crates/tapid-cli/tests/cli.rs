@@ -4301,6 +4301,15 @@ fn run_executes_root_or_explicitly_selected_workspace_member_script() {
         cleanup(dir);
         return;
     }
+    if !root_output.status.success()
+        && root_stderr.contains(
+            "sandbox execution failed (policy-violation): cannot create verified reserved Node snapshot: nonrelocatable Mach-O dependency",
+        )
+    {
+        eprintln!("skipping: selected Node runtime is not relocatable for Restricted execution: {root_stderr}");
+        cleanup(dir);
+        return;
+    }
     assert!(root_output.status.success(), "{}", root_stderr);
     let root_stdout = String::from_utf8_lossy(&root_output.stdout);
     assert!(root_stdout.contains("ROOT_SCRIPT"), "{root_stdout}");
