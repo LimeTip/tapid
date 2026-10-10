@@ -33,6 +33,7 @@ tapid license
 tapid manifest validate [PATH]
 tapid lock verify
 tapid install [OPTIONS]
+tapid ci [OPTIONS]
 tapid upgrade [OPTIONS]
 tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 ```
@@ -69,7 +70,7 @@ The fixture option is for local tests and air-gapped development. It is not a re
 
 ## Install and lifecycle outcomes
 
-`install`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
+`install`, `ci`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
 
 Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result remains unchanged for its own operation and warns if it first recovered an interrupted transaction.
 
@@ -131,6 +132,17 @@ frozen modes. Preserve a separate verified backup of `tapid.lock`, then delibera
 run online `tapid install` and review changed versions, artifacts and edges. The
 online path replaces the lock after re-resolution, not identity migration. See
 [compatibility and recovery](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#persisted-registry-identity-compatibility).
+
+## Install locked dependencies in CI
+
+```text
+tapid ci --project-dir ./example
+tapid ci --offline --store-dir /absolute/path/to/verified-store
+```
+
+`ci` requires a valid `tapid.lock` and matching root and workspace manifests. It installs exact locked versions and dependency edges without version resolution or changes to `package.json` and `tapid.lock`. Existing verified store trees are reused; missing trees are downloaded from locked HTTPS URLs and checked against locked SHA-512 integrity and SHA-256 tree digests. Private registry downloads use the configured route and exact-origin credentials. Every registry package must have a locked artifact URL, including with a warm cache or `--offline`. Incomplete locks require regeneration with `tapid install` and review of the resulting changes. Explicit `--registry-fixture` installs can supply local artifacts without locked URLs for tests and air-gapped development. This exception requires a readable fixture containing every URL-less locked registry, name, and version, even with a warm cache or `--offline`.
+
+Installation uses atomic managed `node_modules` replacement and coordinated store publication. Validation or activation failure preserves the previous install when rollback succeeds. An unmanaged `node_modules` is rejected. Dependency lifecycle scripts do not run. `--offline` disables downloads and requires all trees in the store. Package arguments and the unverified-artifact exception are unavailable on `ci`.
 
 ## Offline and frozen
 

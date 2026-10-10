@@ -16,6 +16,7 @@ The CLI supports bounded live npm metadata and artifact retrieval in addition to
 - Resolver root selections and exact dependency edges are preserved through lockfile construction, linking, and replay.
 - Project activation uses an operating-system advisory lock and owner-marked staging directories. A later run reclaims only stages matching the prior unlocked owner's exact marker; live, malformed, oversized, symlinked, and ambiguous state fails closed.
 - Online verified trees are staged privately, then published under the store's cross-process lock before lockfile replacement; publication remains rollback-capable and readers are blocked until managed project activation succeeds and the commit decision is durable. Durable project and store journals define recovery across process crashes: a pending decision restores the pre-operation state, while a committed decision completes cleanup.
+- `tapid ci` installs the locked graph without resolution or manifest/lockfile edits. Missing trees use locked artifact URLs, integrity and tree digests, with coordinated store publication and atomic managed activation. `tapid ci --offline` requires all verified trees in the store.
 - Lifecycle scripts remain disabled during installation.
 
 The explicit `--allow-unverified-registry-artifacts` compatibility option can retain npm versions without declared integrity for an interactive online install. It emits a warning and cannot be combined with `--offline` or `--frozen`. It does not turn a locally computed digest into registry authentication.
