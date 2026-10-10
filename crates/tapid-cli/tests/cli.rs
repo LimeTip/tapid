@@ -4574,12 +4574,12 @@ fn run_without_runtime_flag_discovers_node_then_reaches_sandbox_preflight() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // PATH discovery succeeds, but env_clear intentionally removes Windows'
-    // required host environment before request validation can reach containment.
+    // PATH discovery succeeds. The isolated home supplies LOCALAPPDATA, but
+    // env_clear removes SystemRoot before validation can reach containment.
     #[cfg(windows)]
     assert_eq!(
         stderr,
-        "error: invalid runner execution request: Windows AppContainer launch requires the runner's LOCALAPPDATA environment variable\n"
+        "error: invalid runner execution request: Windows AppContainer launch requires the runner's SystemRoot environment variable\n"
     );
     #[cfg(not(windows))]
     assert!(
