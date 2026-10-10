@@ -119,7 +119,7 @@ fn digest(data: &[u8]) -> ArtifactDigest {
         .parse()
         .expect("sha256 digest")
 }
-fn integrity(data: &[u8]) -> PackageIntegrity {
+pub(crate) fn integrity(data: &[u8]) -> PackageIntegrity {
     let mut h = Sha512::new();
     h.update(data);
     format!("sha512-{}", STANDARD.encode(h.finalize()))

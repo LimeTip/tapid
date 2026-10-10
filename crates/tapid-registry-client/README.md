@@ -13,6 +13,14 @@ Read-only, validated registry metadata and artifact-download boundary for Tapid.
 
 `NpmRegistry` accepts an HTTPS npm registry origin, normally `https://registry.npmjs.org`, and package names such as `foo` or `@scope/name`. It requests npm's abbreviated install metadata, validates package and version identity, exposes string dependency requirements, and requires an HTTPS `dist.tarball`. Normal fetches require a valid SHA-512 `dist.integrity`, normalize equivalent padded and unpadded Base64 to canonical padded SRI, and exclude historical records that omit integrity. The explicit compatibility option can retain missing-integrity records for an interactive install, but those artifacts are not registry-authenticated and the CLI warns before proceeding.
 
+`NpmRegistry::inspect` requests full npm metadata for one exact version and
+returns `NpmPackageEvidence`. It validates identity, SHA-512 SRI and HTTPS
+references, while retaining absent evidence instead of excluding the version.
+`NpmPackageEvidence::from_metadata` applies the same contract to local snapshots.
+It reports signature counts and attestation references without fetching or
+verifying them. Malformed supplied evidence fails closed. Installation retains
+its stricter artifact and integrity requirements.
+
 ## JSR
 
 `JsrRegistry` accepts scoped names such as `@std/path` and the current `/{scope}/{name}/meta.json` shape. Version keys must be strict semver. It preserves `manifest.dependencies` and `manifest.peerDependencies` as separate metadata maps. An artifact is returned only when metadata explicitly supplies an HTTPS `npm.tarball` and valid SHA-512 `npm.integrity`; integrity is never derived from the package name, version, URL, or response transport. Missing or unusable integrity returns `UnsupportedIntegrity`.

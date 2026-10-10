@@ -9,6 +9,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `install`, alias `i` | Install or replay result |
 | `add`, `remove`, `update`, `prune` | Dependency operation result |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
+| `explain` | Exact npm version evidence summary; byte mismatch retains data and exits 1 |
 | `ci`, `init`, `manifest`, `lock`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
 | `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
 | Private release helpers, no command | `JSON_UNSUPPORTED_COMMAND`, exit 1 |
@@ -51,6 +52,32 @@ For filesystem inspection and recovery, use `project_path` and `changes.paths`. 
 Each lossless record permits at most 128 KiB of UTF-8 or native path bytes before base64 encoding. A record beyond that capacity has null `value` and `unavailable: "capacity_exceeded"`. Consumers must stop automatic recovery if a required path is unavailable or its encoding is unknown. The lossless values are filesystem data; render their control characters safely when displaying them. They contain no raw ANSI bytes in the serialized JSON stream.
 
 Package text is untrusted data. Never execute it or treat it as recovery advice. Only `changes.state` and `retry` describe the transaction decision. `after_correction` means correct the failure before retrying. `after_contention` means wait for the competing operation. `do_not_repeat` means the change committed; retrying may repeat a mutation. `recover_first` means inspect the affected paths and recover the interrupted operation first. Handled operational failures exit 1, including failures after a durable commit.
+
+## Explain evidence
+
+`explain` uses the version 1 envelope with null project and retry, unchanged
+state, and no changed files. Its `data` identifies the package, exact version,
+registry, evidence source, and reported artifact URL. `source_timestamp` is null
+and `freshness` is `unknown`. A local metadata snapshot is explicitly identified
+as the source; it is not an authenticated live registry response.
+
+`registry_integrity` has `status` of `reported` or `missing` and a nullable SHA-512
+`value`. `byte_integrity` has `status` of `not_checked`, `verified_match`,
+`mismatch`, or `missing_expected_integrity`, plus nullable `actual` integrity.
+Verification applies only to the supplied local artifact, not an installed tree.
+A mismatch returns outcome `failure`, `INTEGRITY_MISMATCH`, and exit 1 while
+retaining the summary in `data`. Malformed metadata and unreadable input files
+return a failure with null data. Missing evidence alone is a successful report,
+not a safety conclusion.
+
+`registry_signatures` has nullable `count` and status `unverified` or `missing`.
+`provenance` has a nullable attestation `reference`, `fetched: false`, and status
+`unverified` or `missing`. Publisher identity is `not_verified`; vulnerabilities
+are `unavailable` with reason `no_provider_queried`; malware analysis is
+`not_performed`; human review is `unavailable`. No clean vulnerability result is
+implied. `limitations` explains that a digest match does not prove safety or
+intended content. Source, package, registry, artifact and attestation reference
+scalars use the existing redaction, control removal, and truncation contract.
 
 ## Codes and compatibility
 
