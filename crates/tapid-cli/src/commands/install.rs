@@ -1,3 +1,4 @@
+use crate::application::outcome::OperationFailure;
 use clap::Args as ClapArgs;
 use std::{path::PathBuf, process::ExitCode};
 
@@ -45,26 +46,25 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
 }
 
 /// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
-pub(crate) fn run(args: Args) -> ExitCode {
+pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     let target_manifest_path = if let Some(name) = args.workspace.as_deref() {
-        let workspace = match tapid_manifest::Workspace::discover(&args.project_dir) {
-            Ok(workspace) => workspace,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return ExitCode::from(1);
+        match crate::application::lifecycle::resolve_workspace(&args.project_dir, Some(name)) {
+            Ok(selection) => {
+                args.project_dir = selection.root_dir;
+                selection.manifest_path
             }
-        };
-        match workspace.select_path(Some(name)) {
-            Ok(path) => path.to_path_buf(),
             Err(error) => {
-                eprintln!("error: {error}");
-                return ExitCode::from(1);
+                return crate::output::json::failure_or_human(
+                    &OperationFailure::unchanged(&args.project_dir, error),
+                    "install",
+                    json,
+                );
             }
         }
     } else {
         PathBuf::from("package.json")
     };
-    if args.allow_unverified_registry_artifacts && !args.offline && !args.frozen {
+    if !json && args.allow_unverified_registry_artifacts && !args.offline && !args.frozen {
         eprintln!(
             "warning: npm artifacts without registry integrity are not authenticated against a registry-declared digest"
         );
@@ -86,7 +86,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
             mode,
             args.registry_fixture.as_deref(),
             args.allow_unverified_registry_artifacts,
-            |completed, total| eprintln!("Replay snapshot progress: {completed}/{total}"),
+            |event| crate::output::report_progress(event, json),
         )
     } else {
         crate::application::install::run(
@@ -96,11 +96,14 @@ pub(crate) fn run(args: Args) -> ExitCode {
             mode,
             args.registry_fixture.as_deref(),
             args.allow_unverified_registry_artifacts,
-            |completed, total| eprintln!("Replay snapshot progress: {completed}/{total}"),
+            |event| crate::output::report_progress(event, json),
         )
     };
     match result {
         Ok(report) => {
+            if json {
+                return crate::output::json::installed(&report, "install");
+            }
             crate::output::report_warnings(&report.outcome.warnings);
             if report.replayed {
                 println!("Replayed lockfile: {} package(s)", report.package_count);
@@ -109,9 +112,6 @@ pub(crate) fn run(args: Args) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            crate::output::report_failure(&error);
-            ExitCode::from(1)
-        }
+        Err(error) => crate::output::json::failure_or_human(&error, "install", json),
     }
 }

@@ -23,8 +23,27 @@ mod documentation;
     about = "A deterministic JavaScript and TypeScript package manager"
 )]
 pub(crate) struct Cli {
+    /// Emit a versioned JSON result for supported package commands.
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
+}
+
+impl Cli {
+    // Check after Clap propagates global arguments. A subcommand's `requires`
+    // check cannot see --json when it appears before the subcommand.
+    pub(crate) fn validate_json_options(&self) -> Result<(), clap::Error> {
+        if !self.json
+            && matches!(&self.command, Some(Command::Outdated(args)) if args.json_limit.is_some())
+        {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "--json-limit requires --json",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -110,7 +129,7 @@ pub(crate) enum Command {
   tapid outdated
   tapid outdated --workspace web"
     )]
-    Outdated(lifecycle::ReadOnlyArgs),
+    Outdated(lifecycle::OutdatedArgs),
     /// Rebuild node_modules from tapid.lock to remove stale packages.
     #[command(
         long_about = "Replay tapid.lock from the verified store to replace managed node_modules and remove stale packages.\n\nRequires a matching package.json, a valid lockfile, and all referenced verified trees. Uses frozen replay without network access. Does not delete cached trees from the store.\n\n--registry-fixture and --allow-unverified-registry-artifacts have no effect on this command.",
@@ -129,8 +148,50 @@ pub(crate) enum Command {
     Upgrade(upgrade::Args),
 }
 
+impl Command {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::License => "license",
+            Self::VerifyReleaseRecord(_) => "__verify-release-record",
+            Self::PrepareReleaseInstall(_) => "__prepare-release-install",
+            Self::Init(_) => "init",
+            Self::ImportPackageLock(_) => "import-package-lock",
+            Self::Manifest(_) => "manifest",
+            Self::Lock(_) => "lock",
+            Self::Run(_) => "run",
+            Self::Install(_) => "install",
+            Self::Ci(_) => "ci",
+            Self::Add(_) => "add",
+            Self::Remove(_) => "remove",
+            Self::Update(_) => "update",
+            Self::Outdated(_) => "outdated",
+            Self::Prune(_) => "prune",
+            Self::Upgrade(_) => "upgrade",
+        }
+    }
+}
+
 /// Routes a parsed command to its handler, or prints usage guidance when no command is given.
-pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
+pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
+    if json
+        && !matches!(
+            command,
+            Some(
+                Command::Install(_)
+                    | Command::Add(_)
+                    | Command::Remove(_)
+                    | Command::Update(_)
+                    | Command::Outdated(_)
+                    | Command::Prune(_)
+            )
+        )
+    {
+        return crate::output::json::protocol_error(
+            command.as_ref().map_or("none", Command::operation),
+            "JSON_UNSUPPORTED_COMMAND",
+            1,
+        );
+    }
     match command {
         Some(Command::License) => license::run(),
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
@@ -145,13 +206,13 @@ pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
         Some(Command::Lock(args)) => lock::run(args),
         Some(Command::Run(args)) => run::run(args),
 
-        Some(Command::Install(args)) => install::run(args),
+        Some(Command::Install(args)) => install::run(args, json),
         Some(Command::Ci(args)) => ci::run(args),
-        Some(Command::Add(args)) => lifecycle::add(args),
-        Some(Command::Remove(args)) => lifecycle::remove(args),
-        Some(Command::Update(args)) => lifecycle::update(args),
-        Some(Command::Outdated(args)) => lifecycle::outdated(args),
-        Some(Command::Prune(args)) => lifecycle::prune(args),
+        Some(Command::Add(args)) => lifecycle::add(args, json),
+        Some(Command::Remove(args)) => lifecycle::remove(args, json),
+        Some(Command::Update(args)) => lifecycle::update(args, json),
+        Some(Command::Outdated(args)) => lifecycle::outdated(args, json),
+        Some(Command::Prune(args)) => lifecycle::prune(args, json),
         Some(Command::Upgrade(args)) => upgrade::run(args),
     }
 }

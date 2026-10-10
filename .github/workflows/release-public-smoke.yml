@@ -48,6 +48,8 @@ jobs:
       latest_installer_sh: ${{ steps.release.outputs.latest_installer_sh }}
       latest_installer_ps1: ${{ steps.release.outputs.latest_installer_ps1 }}
       previous_tag: ${{ steps.release.outputs.previous_tag }}
+      previous_installer_sh: ${{ steps.release.outputs.previous_installer_sh }}
+      previous_installer_ps1: ${{ steps.release.outputs.previous_installer_ps1 }}
       record_aware: ${{ steps.release.outputs.record_aware }}
       unix_matrix: ${{ steps.release.outputs.unix_matrix }}
     steps:
@@ -101,6 +103,28 @@ jobs:
               for extension in ('sh', 'ps1'):
                   print(f'{kind}_installer_{extension}=' + installer_url(tag, sha, extension))
           PYTHON
+          previous_tag="$(sed -n 's/^previous_tag=//p' "$GITHUB_OUTPUT" | tail -n 1)"
+          if [ -n "$previous_tag" ]; then
+            previous_sha="$(gh api "repos/LimeTip/tapid/commits/$previous_tag" --jq .sha)"
+            [[ "$previous_sha" =~ ^[a-f0-9]{40}$ ]]
+            if python3 - "$previous_tag" <<'PYTHON'
+          import sys
+          version = tuple(map(int, sys.argv[1][1:].split('.')))
+          raise SystemExit(0 if version <= (0, 0, 10) else 1)
+          PYTHON
+            then
+              previous_installer_sh="https://raw.githubusercontent.com/LimeTip/tapid/$previous_sha/scripts/install.sh"
+              previous_installer_ps1="https://raw.githubusercontent.com/LimeTip/tapid/$previous_sha/scripts/install.ps1"
+            else
+              previous_installer_sh="https://github.com/LimeTip/tapid/releases/download/$previous_tag/install.sh"
+              previous_installer_ps1="https://github.com/LimeTip/tapid/releases/download/$previous_tag/install.ps1"
+            fi
+          else
+            previous_installer_sh=""
+            previous_installer_ps1=""
+          fi
+          printf 'previous_installer_sh=%s\nprevious_installer_ps1=%s\n' \
+            "$previous_installer_sh" "$previous_installer_ps1" >> "$GITHUB_OUTPUT"
           printf 'tag=%s\nsha=%s\n' "$tag" "$sha" >> "$GITHUB_OUTPUT"
           if [ "$EVENT_NAME" = schedule ]; then
             printf 'unix_matrix=["ubuntu-latest"]\n' >> "$GITHUB_OUTPUT"
@@ -274,6 +298,7 @@ jobs:
         shell: bash
         env:
           PREVIOUS_TAG: ${{ needs.resolve.outputs.previous_tag }}
+          PREVIOUS_INSTALLER_URL: ${{ needs.resolve.outputs.previous_installer_sh }}
           LATEST_TAG: ${{ needs.resolve.outputs.latest_tag }}
           RECORD_AWARE: ${{ needs.resolve.outputs.record_aware }}
         run: |
@@ -285,8 +310,11 @@ jobs:
           binary="$RUNNER_TEMP/tapid-latest/tapid"
           expected_digest="$(shasum -a 256 "$binary" | cut -d ' ' -f 1)"
           if [ -n "$PREVIOUS_TAG" ]; then
+            previous_installer="$RUNNER_TEMP/previous-install.sh"
+            curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL \
+              "$PREVIOUS_INSTALLER_URL" -o "$previous_installer"
             env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh \
-              sh "$RUNNER_TEMP/public-install.sh" --version "$PREVIOUS_TAG" --install-dir "$RUNNER_TEMP/tapid-previous"
+              sh "$previous_installer" --version "$PREVIOUS_TAG" --install-dir "$RUNNER_TEMP/tapid-previous"
             binary="$RUNNER_TEMP/tapid-previous/tapid"
             test "$("$binary" --version)" = "tapid ${PREVIOUS_TAG#v}"
             "$binary" upgrade 2>&1 | tee "$RUNNER_TEMP/public-upgrade.txt"
@@ -460,6 +488,7 @@ jobs:
         shell: pwsh
         env:
           PREVIOUS_TAG: ${{ needs.resolve.outputs.previous_tag }}
+          PREVIOUS_INSTALLER_URL: ${{ needs.resolve.outputs.previous_installer_ps1 }}
           LATEST_TAG: ${{ needs.resolve.outputs.latest_tag }}
           RECORD_AWARE: ${{ needs.resolve.outputs.record_aware }}
         run: |
@@ -470,9 +499,11 @@ jobs:
           $binary = Join-Path $env:RUNNER_TEMP 'tapid-latest/tapid.exe'
           $expectedDigest = (Get-FileHash $binary).Hash
           if ($env:PREVIOUS_TAG) {
-            $installer = Join-Path $env:RUNNER_TEMP 'public-install.ps1'
+            $previousInstaller = Join-Path $env:RUNNER_TEMP 'previous-install.ps1'
+            curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL $env:PREVIOUS_INSTALLER_URL --output $previousInstaller
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $installDir = Join-Path $env:RUNNER_TEMP 'tapid-previous'
-            & $installer -Version $env:PREVIOUS_TAG -InstallDir $installDir
+            & $previousInstaller -Version $env:PREVIOUS_TAG -InstallDir $installDir
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $binary = Join-Path $installDir 'tapid.exe'
             if ((& $binary --version) -cne ('tapid ' + $env:PREVIOUS_TAG.Substring(1))) { throw 'Unexpected previous version' }

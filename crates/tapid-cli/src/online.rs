@@ -726,6 +726,7 @@ pub fn resolve_and_fetch(
     fixture_path: Option<&Path>,
     allow_missing_integrity: bool,
     registry_config: &crate::registry::RegistryConfig,
+    mut progress: impl FnMut(crate::application::install::Progress),
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
     let WorkspaceRootResolution {
@@ -835,6 +836,7 @@ pub fn resolve_and_fetch(
                 )
             }
         },
+        |fetched| progress(crate::application::install::Progress::Metadata(fetched)),
     )?;
     validate_workspace_peer_providers(
         &workspace_peer_dependencies,
@@ -1027,7 +1029,10 @@ pub fn resolve_and_fetch(
         });
         let completed = index + 1;
         if artifact_progress_checkpoint(completed, artifact_total) {
-            eprintln!("Artifact verification progress: {completed}/{artifact_total}");
+            progress(crate::application::install::Progress::Artifact(
+                completed,
+                artifact_total,
+            ));
         }
     }
     let mut dependencies_by_parent = BTreeMap::new();
