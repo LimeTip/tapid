@@ -111,21 +111,34 @@ async function publishedFixture(
     return { code: result.status, report: json(report) };
   });
 }
-for (const tag of ["v0.0.10", "v0.0.11", "v0.0.12"])
+const inventory = json(join(root, "docs/examples/contracts.json"));
+const upgradeCapability = inventory.capabilities.find(c => c.id === "self-upgrade");
+const reviewedTags: string[] = upgradeCapability.expected_releases;
+const knownTags: string[] = [...new Set<string>(inventory.examples.flatMap(example =>
+  Object.keys(example.release_expectations ?? {}),
+))];
+const unknownMajor = knownTags.reduce((maximum, tag) => {
+  const major = BigInt(tag.slice(1).split(".")[0]);
+  return major > maximum ? major : maximum;
+}, 0n) + 1n;
+const unknownTag = `v${unknownMajor}.0.0`;
+
+test("upgrade inventory agrees on reviewed supported releases", () => {
+  assert.ok(reviewedTags.length > 0);
+  assert.equal(upgradeCapability.first_supported_release, "v0.0.10");
+  for (const id of ["upgrade", "upgrade-help"]) {
+    const expectations = inventory.examples.find(example => example.id === id).release_expectations;
+    const supportedTags = Object.entries(expectations)
+      .filter(([, outcome]: [string, any]) => outcome.exit_code === 0 && !outcome.skip)
+      .map(([tag]) => tag);
+    assert.deepEqual(supportedTags.sort(), [...reviewedTags].sort());
+  }
+});
+for (const tag of reviewedTags)
   fixture(`${tag} upgrade help has reviewed expectation`, async () => {
     const { code, report } = await publishedFixture(tag, "upgrade-help");
     assert.equal(code, 0, JSON.stringify(report));
     assert.equal(report.status, "passed");
-    const capability = json(
-      join(root, "docs/examples/contracts.json"),
-    ).capabilities.find((c) => c.id === "self-upgrade");
-    assert.equal(capability.first_supported_release, "v0.0.10");
-    assert.deepEqual(capability.expected_releases, [
-      "v0.0.10",
-      "v0.0.11",
-      "v0.0.12",
-    ]);
-    assert.deepEqual(capability.verified_releases, []);
   });
 fixture(
   "published upgrade skips only reviewed unsupported release",
@@ -143,8 +156,8 @@ fixture(
   },
 );
 fixture("published upgrade unknown tags require review", async () => {
-  for (const tag of ["v0.0.8", "v0.0.13", "v1.0.0"]) {
-    const { code, report } = await publishedFixture(tag, "upgrade");
+  for (const example of ["upgrade", "upgrade-help"]) {
+    const { code, report } = await publishedFixture(unknownTag, example);
     assert.notEqual(code, 0);
     assert.match(report.error, /needs review/);
     assert.deepEqual(report.examples, []);
@@ -153,53 +166,57 @@ fixture("published upgrade unknown tags require review", async () => {
 fixture(
   "published upgrade supported releases require destination",
   async () => {
-    for (const tag of ["v0.0.10", "v0.0.11", "v0.0.12"]) {
+    for (const tag of reviewedTags) {
       const { code, report } = await publishedFixture(tag, "upgrade");
       assert.notEqual(code, 0);
       assert.match(report.examples[0].error, /explicit expected target/);
     }
   },
 );
-fixture(
-  "published 0.0.10 upgrade checks exact destination and state",
-  async () => {
-    const replacement = '#!/bin/sh\necho "tapid 0.0.10"\n';
-    const state = JSON.stringify({
-      schema: "tapid-release-state-v2",
-      verification: "checksum",
-      last_known_good: { version: "0.0.10", artifact_sha256: "a".repeat(64) },
-    });
-    const body = `[ "$2" = --dry-run ] && exit 0\ntest -f "$(dirname "$0")/.tapid-managed" || exit 1\nprintf %s ${quote(state)} > "$(dirname "$0")/.tapid-release-state.json"\nprintf %s ${quote(replacement)} > "$0"`;
-    for (const [hash, version, error] of [
-      [sha256(replacement), "tapid 0.0.10", null],
-      ["0".repeat(64), "tapid 0.0.10", "upgrade target digest mismatch"],
-      [sha256(replacement), "tapid 0.0.11", "upgrade target version mismatch"],
-    ]) {
-      const { code, report } = await publishedFixture(
-        "v0.0.10",
-        "upgrade",
-        body,
-        [
-          "--upgrade-target-sha256",
-          hash!,
-          "--upgrade-target-version",
-          version!,
-        ],
-      );
-      if (error) {
-        assert.notEqual(code, 0);
-        assert.equal(report.examples[0].error, error);
-      } else {
-        assert.equal(code, 0, JSON.stringify(report));
-        assert.deepEqual(report.examples[0].binary_after, {
-          sha256: hash,
-          version,
-        });
-        assert.equal(report.examples[0].upgrade_state.verification, "checksum");
+for (const tag of reviewedTags)
+  fixture(
+    `published ${tag} upgrade checks exact destination and state`,
+    async () => {
+      const sourceVersion = tag.slice(1);
+      const [major, minor, patch] = sourceVersion.split(".");
+      const wrongVersion = `tapid ${major}.${minor}.${BigInt(patch) + 1n}`;
+      const replacement = `#!/bin/sh\necho "tapid ${sourceVersion}"\n`;
+      const state = JSON.stringify({
+        schema: "tapid-release-state-v2",
+        verification: "checksum",
+        last_known_good: { version: sourceVersion, artifact_sha256: "a".repeat(64) },
+      });
+      const body = `[ "$2" = --dry-run ] && exit 0\ntest -f "$(dirname "$0")/.tapid-managed" || exit 1\nprintf %s ${quote(state)} > "$(dirname "$0")/.tapid-release-state.json"\nprintf %s ${quote(replacement)} > "$0"`;
+      for (const [hash, version, error] of [
+        [sha256(replacement), `tapid ${sourceVersion}`, null],
+        ["0".repeat(64), `tapid ${sourceVersion}`, "upgrade target digest mismatch"],
+        [sha256(replacement), wrongVersion, "upgrade target version mismatch"],
+      ]) {
+        const { code, report } = await publishedFixture(
+          tag,
+          "upgrade",
+          body,
+          [
+            "--upgrade-target-sha256",
+            hash!,
+            "--upgrade-target-version",
+            version!,
+          ],
+        );
+        if (error) {
+          assert.notEqual(code, 0);
+          assert.equal(report.examples[0].error, error);
+        } else {
+          assert.equal(code, 0, JSON.stringify(report));
+          assert.deepEqual(report.examples[0].binary_after, {
+            sha256: hash,
+            version,
+          });
+          assert.equal(report.examples[0].upgrade_state.verification, "checksum");
+        }
       }
-    }
-  },
-);
+    },
+  );
 fixture("0.0.9 help enforces negative outcome", async () => {
   assert.equal(
     (

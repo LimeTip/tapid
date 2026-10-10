@@ -1,6 +1,6 @@
 import { strictEqual, throws, rejects } from "node:assert/strict";
 import { test } from "node:test";
-import { checkApprovedPlan, evaluateCi, waitForCi } from "./automation.ts";
+import { checkReviewedContracts, checkApprovedPlan, evaluateCi, waitForCi } from "./automation.ts";
 
 const sha = "a".repeat(40);
 const run = (overrides: Record<string, unknown> = {}) => ({ id: 10, run_number: 2, head_sha: sha, head_branch: "main", event: "push", status: "completed", conclusion: "success", ...overrides });
@@ -94,4 +94,37 @@ test('exact-source CodeQL checks reject foreign, stale and failed evidence', asy
   throws(() => evaluateChecks([...checks, { ...checks[0], id: 100, conclusion: 'failure' }], sha), /did not succeed/);
   let elapsed = 0;
   await rejects(waitForCi({ sha, readRuns: async () => [run()], readChecks: async () => [], now: () => elapsed, sleep: async ms => { elapsed += ms; }, timeoutMs: 10 }), /timed out/);
+});
+
+const contracts = () => ({ schema_version: 1, examples: ['upgrade', 'upgrade-help'].map(id => ({ id, release_expectations: { 'v0.0.12': { exit_code: 0 } } })), capabilities: [{ id: 'self-upgrade', expected_releases: ['v0.0.12'] }] });
+
+test('release preflight requires reviewed expectations for its exact intended tag', () => {
+  checkReviewedContracts(intent, contracts());
+  const next = { ...intent, version: '0.0.13', notes: 'docs/releases/0.0.13.md', packages: [{ name: 'tapid', version: '0.0.13' }] };
+  throws(() => checkReviewedContracts(next, contracts()), /v0.0.13/);
+  for (const id of ['upgrade', 'upgrade-help']) {
+    const missing = contracts();
+    delete missing.examples.find(example => example.id === id)!.release_expectations['v0.0.12'];
+    throws(() => checkReviewedContracts(intent, missing), new RegExp(id));
+    const absent = contracts();
+    absent.examples = absent.examples.filter(example => example.id !== id);
+    throws(() => checkReviewedContracts(intent, absent), new RegExp(id));
+    for (const outcome of [{ skip: 'not reviewed' }, { exit_code: 2 }, {}]) {
+      const invalid = contracts();
+      invalid.examples.find(example => example.id === id)!.release_expectations['v0.0.12'] = outcome as any;
+      throws(() => checkReviewedContracts(intent, invalid), new RegExp(id));
+    }
+  }
+  const missing = contracts();
+  missing.capabilities[0].expected_releases = [];
+  throws(() => checkReviewedContracts(intent, missing), /self-upgrade/);
+  for (const invalid of [null, {}, { ...contracts(), examples: [] }, { ...contracts(), capabilities: [] }]) {
+    throws(() => checkReviewedContracts(intent, invalid));
+  }
+});
+
+test('current release intent has reviewed published documentation contracts before publication', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const [intent, contracts] = await Promise.all(['docs/releases/intent.json', 'docs/examples/contracts.json'].map(async path => JSON.parse(await readFile(new URL('../../' + path, import.meta.url), 'utf8'))));
+  checkReviewedContracts(intent, contracts);
 });
