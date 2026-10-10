@@ -67,6 +67,8 @@ The fixture option is for local tests and air-gapped development. It is not a re
 
 ## Install and lifecycle outcomes
 
+`update` preserves declared ranges. `update --latest` replaces each selected declaration's range with `*`, retaining its section and npm alias target. A name declared in multiple sections is updated in every section where it appears. Naming packages leaves other declarations unchanged; omitting names selects all declarations.
+
 `install`, `ci`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
 
 Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result remains unchanged for its own operation and warns if it first recovered an interrupted transaction.
