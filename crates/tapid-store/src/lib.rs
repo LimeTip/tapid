@@ -316,6 +316,17 @@ impl Store {
         F: FnOnce(&Path, &Path) -> io::Result<bool>,
     {
         let _guard = self.read_guard()?;
+        self.verified_tree_snapshot_unlocked(digest, clone_tree)
+    }
+
+    fn verified_tree_snapshot_unlocked<F>(
+        &self,
+        digest: &ArtifactDigest,
+        clone_tree: F,
+    ) -> Result<PathBuf, IngestError>
+    where
+        F: FnOnce(&Path, &Path) -> io::Result<bool>,
+    {
         let source = self.marked_tree_path(digest)?;
         let reservation = create_replay_reservation(&self.root)?;
         let reservation_identity = Handle::from_path(&reservation)?;
@@ -1010,6 +1021,19 @@ impl Drop for StorePublication {
 }
 
 impl StorePublication {
+    /// Creates a digest-verified replay snapshot while this publication holds
+    /// the exclusive store lock, without trying to acquire a second lock.
+    /// The snapshot remains independent if the publication rolls back.
+    pub fn verified_tree_snapshot(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
+        let store = Store::new(
+            self.trees_dir
+                .parent()
+                .ok_or(IngestError::InvalidRoot)?
+                .to_path_buf(),
+        );
+        store.verified_tree_snapshot_unlocked(digest, clone_snapshot_tree)
+    }
+
     pub fn resolve_path(&self, staged_or_existing: &Path) -> PathBuf {
         self.staged_paths
             .iter()

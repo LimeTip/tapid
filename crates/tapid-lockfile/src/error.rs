@@ -68,7 +68,7 @@ impl fmt::Display for LockfileError {
             }
             Self::NonCanonicalRegistryIdentity => write!(
                 f,
-                "noncanonical persisted registry identity; replay is refused without rekeying; preserve a backup of tapid.lock, then deliberately re-resolve online with `tapid install` (without --offline or --frozen) and review the new graph; see docs/compatibility.md"
+                "noncanonical persisted registry identity; replay is refused without rekeying; preserve a backup of tapid.lock, then deliberately remove the incompatible original lock and re-resolve online with `tapid install` (without --offline or --frozen) and review the new graph; see docs/compatibility.md"
             ),
             Self::InvalidPackageKey(key) => {
                 write!(f, "invalid canonical lockfile package key: {key}")

@@ -28,7 +28,8 @@ Schema `4` remains readable for controlled compatibility when package keys use c
 Persisted registry identities must be canonical in package records, keys, roots
 and edges. `NonCanonicalRegistryIdentity` rejects older uppercase/default-port
 spellings, including schema 4, without rekeying or collapsing identities. Preserve
-a separate backup, deliberately re-resolve using online `tapid install` without
+a separate verified backup, deliberately remove the incompatible original lock,
+then re-resolve using online `tapid install` without
 `--offline`/`--frozen`, then review the new graph. This may change versions and
 artifacts; it is not a byte-preserving migration. See the repository
 [compatibility and recovery contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#persisted-registry-identity-compatibility).
@@ -40,3 +41,5 @@ Consumer replay uses `STORE/trees/<digest>/` and a regular `.tapid-tree` marker 
 This is a lockfile model and replay contract, not a complete npm lockfile implementation or dependency resolver. Rich peer, optional, platform, lifecycle, provenance, audit, and complete dependency-edge semantics remain limited to the tested subset.
 
 Schema 7 preserves alias names separately from actual package identities. `rootBindings` maps local direct names to exact package keys. `dependencyAliases` records each renamed transitive dependency and its actual target name; it must agree with the exact dependency key. Alias metadata in older schemas, unsafe names, inconsistent targets, and dangling bindings are rejected. Schema 6 locks without alias metadata retain their existing replay support. Older clients reject schema 7.
+
+CLI frozen installation can hydrate missing trees using recorded artifact URLs and registry-declared integrity provenance. It verifies archive integrity and the pinned tree digest without changing the graph or serialized lock. Offline requires existing verified trees. Locks lacking these archive fields can still replay warm content under the documented schema rules, but cannot hydrate cold content.

@@ -91,14 +91,14 @@ token-env = "TAPID_ACME_NPM_TOKEN"
 
 The only supported credential provider is an environment variable selected by `token-env`. For local use, populate it through an operating-system secret manager or a protected shell environment; in CI, map the corresponding CI secret into the install job's environment. Do not put literal tokens in configuration, command arguments, scripts, or logs. Tapid does not implicitly read `.npmrc`, npm configuration variables, or home-directory credentials. Registry selection order is: exact package scope, then `[registries.default]`, then the public npm registry. Credential selection follows only the chosen entry and has no implicit cross-entry fallback. This initial feature does not implement credential helper or file providers.
 
-Do not put tokens in `package.json`, `tapid.toml`, command-line arguments, or `tapid.lock`. Offline/frozen replay uses the registry identities already pinned in the lockfile and does not require credentials or contact a registry. Registry credentials are excluded from root-script environments even if a run policy tries to allowlist the corresponding variable. Private-registry support is under development and is not a production-support claim.
+Do not put tokens in `package.json`, `tapid.toml`, command-line arguments, or `tapid.lock`. Offline and warm replay use the registry identities already pinned in the lockfile without credentials or registry requests. Frozen hydration uses credentials only for the configured origin of a missing pinned artifact. Changed registry routing fails explicitly. Registry credentials are excluded from root-script environments even if a run policy tries to allowlist the corresponding variable. Private-registry support is under development and is not a production-support claim.
 
 ## Legacy registry identities
 
 Locks containing noncanonical persisted registry origins (such as uppercase hosts
 or explicit `:443`) fail closed before activation/store mutation in offline and
 frozen modes. Preserve a separate verified backup of `tapid.lock`, then deliberately
-run online `tapid install` and review changed versions, artifacts and edges. The
+remove the incompatible original lock deliberately, then run online `tapid install` and review changed versions, artifacts and edges. The
 online path replaces the lock after re-resolution, not identity migration. See
 [compatibility and recovery](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#persisted-registry-identity-compatibility).
 
@@ -121,9 +121,11 @@ tapid install --frozen --project-dir ./example
 tapid install --offline --frozen --store-dir ./verified-store
 ```
 
-Both flags require `tapid.lock` and all referenced verified trees. Replay validates the root manifest digest, exact package identities, tree digests, regular `.tapid-tree` markers, and available store content before staging. It performs no network resolution or archive download. Activation replaces managed `node_modules` atomically; failed validation or staging does not intentionally activate partial output.
+Both flags require `tapid.lock` and matching root and workspace manifests. Replay validates exact package identities, configured registry routes, supported target contexts, tree digests, and regular `.tapid-tree` markers before staging. Activation replaces managed `node_modules` atomically.
 
-`--frozen` currently selects the same no-network replay path as `--offline`. It does not yet implement the complete npm frozen-lockfile policy.
+`--frozen` can download a missing tree from its pinned HTTPS archive URL. It verifies registry-declared SHA-512 integrity, archive structure, and the locked canonical tree digest. It does not resolve metadata or rewrite the lock. Missing URLs or provenance, corrupt stored trees, changed routing, incompatible platforms, and failed verification stop installation. `--offline` forbids downloads, including with `--frozen`.
+
+Ordinary installation also replays a matching lock. Changed manifests retain compatible locked roots and transitive selections while resolving necessary changes. `tapid update` explicitly refreshes the graph. Unsupported or noncanonical locks require a verified backup and deliberate removal before generating a replacement. These are Tapid's supported lock semantics, not the complete npm frozen-lockfile policy.
 
 ## Experimental Node.js root-script runner and `.bin` handling
 

@@ -216,7 +216,7 @@ tapid install --offline --project-dir ./example
 tapid install --frozen --project-dir ./example
 ```
 
-Offline and frozen replay do not resolve metadata or fetch archives. The lockfile manifest digest, package identities, tree digests, markers, and managed output are validated before atomic activation. `--store-dir PATH` selects another verified store root.
+Ordinary install reuses a matching lock. Changed manifests preserve compatible locked selections; `tapid update` requests a fresh graph. Frozen installation keeps the exact graph and lock bytes, and can download missing pinned archives without resolving metadata. Offline installation forbids downloads, including with `--frozen`. Hydration requires a pinned HTTPS URL and registry-declared SHA-512 provenance, then verifies the archive and locked tree digest. Replay validates manifest digests, registry routes, platform contexts, tree markers, and managed output before atomic activation. `--store-dir PATH` selects another verified store root. See [locked installation decisions](docs/adr/0008-locked-install-selection-and-hydration.md).
 
 ## Supported subset and limitations
 

@@ -1,5 +1,298 @@
-//! Fetch exact locked artifacts without consulting registry version metadata.
+//! Verification and hydration of the graph already selected by a lockfile.
 use super::*;
+
+pub(crate) fn validate_locked_routes(
+    lock: &Lockfile,
+    config: &crate::registry::RegistryConfig,
+) -> Result<(), OperationalError> {
+    for (key, _) in lock.packages_typed()? {
+        let registry = key.source.registry().ok_or("expected registry identity")?;
+        if registry.as_str() != JSR && config.origin_for_name(&key.name)? != *registry {
+            return Err(OperationalError::new(
+                ErrorKind::RegistryConfiguration,
+                format!("registry identity mismatch for locked package {}", key.name),
+            ));
+        }
+        let context = crate::context::parse_platform(&key.platform_context)?;
+        let constraints = PackagePlatform {
+            os: context.os.into_iter().collect(),
+            cpu: context.cpu.into_iter().collect(),
+            libc: context.libc.into_iter().collect(),
+        };
+        if !current_platform_matches(&constraints) {
+            return Err(OperationalError::new(
+                ErrorKind::Lockfile,
+                format!(
+                    "locked package {} targets a different platform; regenerate the lock for this target",
+                    key.name
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn hydrate_locked(
+    lock: &Lockfile,
+    store: &Store,
+    config: &crate::registry::RegistryConfig,
+    fixture_path: Option<&Path>,
+) -> Result<Option<StoreTransaction>, OperationalError> {
+    let mut transports = BTreeMap::new();
+    let allowed_origins = config.configured_origins();
+    // Load fixtures only if an archive is actually missing.
+    let mut fixture_packages = None;
+    hydrate_with_fetch(lock, store, |key, url| {
+        let registry = key.source.registry().ok_or("expected registry identity")?;
+        if let Some(path) = fixture_path {
+            if fixture_packages.is_none() {
+                fixture_packages = Some(fixture(path)?.packages);
+            }
+            let record = fixture_packages
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|p| {
+                    p.registry == registry.as_str()
+                        && p.name == key.name.as_str()
+                        && p.version == key.version.to_string()
+                })
+                .ok_or_else(|| {
+                    OperationalError::new(
+                        ErrorKind::RegistryMetadata,
+                        "fixture has no exact locked artifact",
+                    )
+                })?;
+            if let Some(encoded) = record.artifact.strip_prefix("base64:") {
+                STANDARD.decode(encoded).map_err(|error| {
+                    OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+                })
+            } else {
+                fs::read(&record.artifact).map_err(|error| {
+                    OperationalError::from_source(ErrorKind::RegistryTransport, error)
+                })
+            }
+        } else {
+            let transport = artifact_transport_for_package(
+                &mut transports,
+                config,
+                registry,
+                &key.name,
+                &allowed_origins,
+            )?;
+            let response = if registry.as_str() == JSR {
+                JsrRegistry::new(transport, registry.clone()).download_artifact(url)
+            } else {
+                NpmRegistry::new(transport, registry.clone()).download_artifact(url)
+            }
+            .map_err(|error| OperationalError::from_source(ErrorKind::RegistryTransport, error))?;
+            if response.status != 200 {
+                return Err(OperationalError::new(
+                    ErrorKind::RegistryTransport,
+                    format!("cannot download locked artifact: HTTP {}", response.status),
+                ));
+            }
+            Ok(response.body)
+        }
+    })
+}
+
+fn hydrate_with_fetch(
+    lock: &Lockfile,
+    store: &Store,
+    mut fetch: impl FnMut(&LockfilePackageKey, &str) -> Result<Vec<u8>, OperationalError>,
+) -> Result<Option<StoreTransaction>, OperationalError> {
+    let mut transaction = store.transaction();
+    let mut staged = BTreeSet::new();
+    for (key, package) in lock.packages_typed()? {
+        let digest: ArtifactDigest = package
+            .tree_digest()
+            .parse()
+            .map_err(|error: tapid_core::DomainError| error.to_string())?;
+        match store.verified_tree_path(&digest) {
+            Ok(_) => continue,
+            Err(tapid_store::IngestError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && !store
+                        .root()
+                        .join("trees")
+                        .join(digest.as_str())
+                        .try_exists()
+                        .map_err(|error| {
+                            OperationalError::from_source(ErrorKind::Store, error)
+                        })? => {}
+            Err(error) => {
+                return Err(OperationalError::from(error).context("locked store tree is invalid"));
+            }
+        }
+        if package.registry_integrity_declared() != Some(true) {
+            return Err(OperationalError::new(
+                ErrorKind::Integrity,
+                "locked artifact lacks registry-declared integrity provenance",
+            ));
+        }
+        let url = package.artifact_url().ok_or_else(|| {
+            OperationalError::new(
+                ErrorKind::Lockfile,
+                "locked artifact has no pinned archive URL",
+            )
+        })?;
+        let bytes = fetch(&key, url)?;
+        let expected: PackageIntegrity = package
+            .artifact_integrity()
+            .parse()
+            .map_err(|error: tapid_core::DomainError| error.to_string())?;
+        if !integrity_matches(&expected, &integrity(&bytes)) {
+            return Err(OperationalError::new(
+                ErrorKind::Integrity,
+                format!("integrity mismatch for locked package {}", key.name),
+            ));
+        }
+        fs::create_dir_all(store.root())
+            .map_err(|error| OperationalError::from_source(ErrorKind::Store, error))?;
+        let temp_id = NEXT_TEMP_TREE_ID.fetch_add(1, Ordering::Relaxed);
+        let temp = store.root().join(format!(
+            ".online-tree-{}-{temp_id}-locked",
+            std::process::id()
+        ));
+        let _guard = TemporaryTree(temp.clone());
+        extract_to(
+            &bytes,
+            ArchiveFormat::TarGz,
+            &temp,
+            ArchiveLimits::default(),
+        )
+        .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
+        let actual = canonical_tree_digest(&temp)
+            .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
+        if actual != digest.as_str() {
+            return Err(OperationalError::new(
+                ErrorKind::Integrity,
+                format!("locked tree digest mismatch for {}", key.name),
+            ));
+        }
+        if staged.insert(digest.to_string()) {
+            transaction
+                .stage_verified_tree(&digest, &temp)
+                .map_err(OperationalError::from)?;
+        }
+    }
+    Ok((!staged.is_empty()).then_some(transaction))
+}
+
+pub(super) fn locked_records(
+    lock: &Lockfile,
+    fixture_records: &BTreeMap<PackageRecordKey, PackageRecord>,
+    using_fixture: bool,
+) -> Result<Vec<PackageRecord>, OperationalError> {
+    let mut identities = BTreeSet::new();
+    lock.packages_typed()?
+        .into_iter()
+        .map(|(key, package)| {
+            let registry = key
+                .source
+                .registry()
+                .cloned()
+                .ok_or("expected registry identity")?;
+            if !identities.insert((registry.clone(), key.name.clone(), key.version.clone())) {
+                return Err(OperationalError::new(ErrorKind::Lockfile, format!(
+                    "multiple locked contexts for {}@{} cannot be reused during changed-graph resolution; request an explicit update",
+                    key.name, key.version)));
+            }
+            let platform = crate::context::parse_platform(&key.platform_context)?;
+            let dependencies = package
+                .dependencies()
+                .iter()
+                .map(|(name, target)| {
+                    let target: LockfilePackageKey = target.parse()?;
+                    let requirement = if name == target.name.as_str() {
+                        target.version.to_string()
+                    } else {
+                        format!("npm:{}@{}", target.name, target.version)
+                    };
+                    Ok((name.clone(), requirement))
+                })
+                .collect::<Result<BTreeMap<_, _>, OperationalError>>()?;
+            let peers = crate::context::parse_peer(&key.peer_context)?
+                .entries()
+                .iter()
+                .map(|(name, version)| (name.to_string(), version.to_string()))
+                .collect();
+            let fixture_key = (
+                registry.to_string(),
+                key.name.to_string(),
+                key.version.to_string(),
+            );
+            Ok(PackageRecord {
+                registry,
+                name: key.name,
+                version: key.version,
+                integrity: Some(
+                    package
+                        .artifact_integrity()
+                        .parse()
+                        .map_err(|error: tapid_core::DomainError| error.to_string())?,
+                ),
+                artifact: if using_fixture {
+                    fixture_records
+                        .get(&fixture_key)
+                        .map(|record| record.artifact.clone())
+                        .unwrap_or_default()
+                } else {
+                    package.artifact_url().unwrap_or_default().to_owned()
+                },
+                dependencies,
+                peer_dependencies: peers,
+                optional_peer_dependencies: BTreeSet::new(),
+                optional_dependencies: BTreeMap::new(),
+                platform: PackagePlatform {
+                    os: platform.os.into_iter().collect(),
+                    cpu: platform.cpu.into_iter().collect(),
+                    libc: platform.libc.into_iter().collect(),
+                },
+                fixture: using_fixture,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_graph_seeding_rejects_multiple_contexts_for_one_exact_version() {
+        let digest = format!("sha256-{}", "0".repeat(64));
+        let integrity = format!("sha512-{}", STANDARD.encode([0; 64]));
+        let mut lock = Lockfile::new(&digest).unwrap();
+        let empty = tapid_core::PeerContext::default();
+        let bound = empty
+            .clone()
+            .with("react".parse().unwrap(), "18.2.0".parse().unwrap());
+        for peer in [&empty, &bound] {
+            lock.insert_package(
+                LockedPackage::new_with_context_and_provenance(
+                    NPM,
+                    "plugin",
+                    "1.0.0",
+                    &integrity,
+                    &digest,
+                    (
+                        peer,
+                        &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+                    ),
+                    RegistryIntegrityProvenance::RegistryDeclared,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let failure = locked_records(&lock, &BTreeMap::new(), false)
+            .err()
+            .expect("ambiguous context reuse must fail");
+        assert_eq!(failure.kind, ErrorKind::Lockfile);
+    }
+}
 
 fn matches_locked_identity(record: &FixturePackage, key: &LockfilePackageKey) -> bool {
     key.source
@@ -192,7 +485,7 @@ pub(crate) fn prepare_locked_install(
 }
 
 #[cfg(test)]
-mod tests {
+mod ci_tests {
     use super::*;
 
     #[test]
