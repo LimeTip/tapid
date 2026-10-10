@@ -1082,6 +1082,14 @@ impl LockedPackage {
         &self.tree_digest
     }
 
+    pub fn artifact_integrity(&self) -> &str {
+        &self.artifact_integrity
+    }
+
+    pub fn artifact_url(&self) -> Option<&str> {
+        self.artifact_url.as_deref()
+    }
+
     pub fn dependencies(&self) -> &BTreeMap<String, String> {
         &self.dependencies
     }
