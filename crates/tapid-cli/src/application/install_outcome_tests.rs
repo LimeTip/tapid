@@ -1055,6 +1055,84 @@ fn adding_a_root_does_not_require_metadata_for_unchanged_locked_packages() {
 }
 
 #[test]
+fn fetching_another_version_preserves_locked_dependency_edges() {
+    let (project, fixture) = project_with_fixture("locked-packument-refresh", INTEGRITY);
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let base = metadata["packages"][0].clone();
+    metadata["packages"][0]["dependencies"] = serde_json::json!({"dep":"1.0.0"});
+    let mut dependency = base.clone();
+    dependency["name"] = "dep".into();
+    metadata["packages"]
+        .as_array_mut()
+        .unwrap()
+        .push(dependency.clone());
+    fs::write(&fixture, metadata.to_string()).unwrap();
+    let store = project.path().join("store");
+    run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_, _| {},
+    )
+    .unwrap();
+    let before = read_lock(&project.path().join("tapid.lock")).unwrap();
+    let pinned_key = before.root_bindings()["plugin"].clone();
+    let pinned = before
+        .packages_typed()
+        .unwrap()
+        .into_iter()
+        .find(|(key, _)| key.to_string() == pinned_key)
+        .unwrap()
+        .1;
+    assert_eq!(pinned.dependencies().len(), 1);
+
+    let mut next = base;
+    next["version"] = "2.0.0".into();
+    metadata["packages"].as_array_mut().unwrap().push(next);
+    metadata["packages"][0]["dependencies"] = serde_json::json!({"dep":"2.0.0"});
+    dependency["version"] = "2.0.0".into();
+    metadata["packages"]
+        .as_array_mut()
+        .unwrap()
+        .push(dependency);
+    fs::write(&fixture, metadata.to_string()).unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0","plugin-next":"npm:plugin@2.0.0"}}"#).unwrap();
+    run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_, _| {},
+    )
+    .unwrap();
+    let after = read_lock(&project.path().join("tapid.lock")).unwrap();
+    assert_eq!(after.root_bindings()["plugin"], pinned_key);
+    let preserved = after
+        .packages_typed()
+        .unwrap()
+        .into_iter()
+        .find(|(key, _)| key.to_string() == pinned_key)
+        .unwrap()
+        .1;
+    assert_eq!(preserved, pinned);
+    let next: tapid_lockfile::LockfilePackageKey =
+        after.root_bindings()["plugin-next"].parse().unwrap();
+    assert_eq!(next.version.to_string(), "2.0.0");
+}
+
+#[test]
 fn unrelated_root_changes_preserve_direct_and_transitive_versions_of_one_package() {
     let (project, fixture) = project_with_fixture("locked-multiple-versions", INTEGRITY);
     project

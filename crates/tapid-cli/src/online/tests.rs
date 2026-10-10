@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn fetched_locked_versions_refresh_only_peer_metadata() {
+    let mut pinned = named_record("plugin", "1.0.0", &[("dep", "1.0.0")]);
+    pinned
+        .peer_dependencies
+        .insert("react".into(), "18.2.0".into());
+    let mut mutable = named_record("plugin", "1.0.0", &[("unexpected", "2.0.0")]);
+    mutable.platform.os = vec!["unsupported-test-os".into()];
+    mutable
+        .optional_dependencies
+        .insert("unexpected-optional".into(), "1".into());
+    mutable
+        .peer_dependencies
+        .insert("react".into(), "^18".into());
+    mutable.optional_peer_dependencies.insert("react".into());
+    let registry: RegistryOrigin = NPM.parse().unwrap();
+    let roots = [
+        ("plugin", "1.0.0"),
+        ("plugin-next", "npm:plugin@2.0.0"),
+        ("react", "18.3.0"),
+    ]
+    .into_iter()
+    .map(|(name, range)| {
+        Dependency::new(
+            registry.clone(),
+            name.parse().unwrap(),
+            range.parse().unwrap(),
+        )
+    })
+    .collect::<Vec<_>>();
+    let (resolution, records) = resolution::resolve_with_preferences(
+        &roots,
+        |parent, _| Ok(parent.clone()),
+        &BTreeMap::new(),
+        |_, name| {
+            assert_eq!(name.as_str(), "plugin");
+            Ok(vec![mutable.clone(), named_record("plugin", "2.0.0", &[])])
+        },
+        &tapid_resolver::ResolutionPreferences::default(),
+        vec![
+            pinned.clone(),
+            named_record("dep", "1.0.0", &[]),
+            named_record("react", "18.3.0", &[]),
+        ],
+    )
+    .unwrap();
+    let preserved = &records[&(NPM.into(), "plugin".into(), "1.0.0".into())];
+    assert_eq!(preserved.dependencies, pinned.dependencies);
+    assert_eq!(
+        preserved.optional_dependencies,
+        pinned.optional_dependencies
+    );
+    assert_eq!(preserved.platform, pinned.platform);
+    assert_eq!(preserved.artifact, pinned.artifact);
+    assert_eq!(preserved.integrity, pinned.integrity);
+    assert_eq!(preserved.peer_dependencies, mutable.peer_dependencies);
+    assert_eq!(
+        preserved.optional_peer_dependencies,
+        mutable.optional_peer_dependencies
+    );
+    assert!(
+        resolution
+            .selected
+            .iter()
+            .any(|package| package.name.as_str() == "plugin"
+                && package.version.to_string() == "2.0.0")
+    );
+}
+
+#[test]
 fn optional_alias_fetches_the_actual_package_and_retains_the_local_edge() {
     let mut parent = named_record("parent", "1.0.0", &[]);
     parent

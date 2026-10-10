@@ -2,7 +2,7 @@
 name = "tapid-store"
 readme = "README.md"
 description = "Local content-addressed package store foundations for Tapid"
-version = "0.0.7"
+version = "0.0.8"
 edition.workspace = true
 license.workspace = true
 license-file.workspace = true

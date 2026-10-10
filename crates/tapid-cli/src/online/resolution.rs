@@ -417,6 +417,43 @@ where
     let mut normalized = NormalizedRecords::new();
     let mut metadata = Vec::<RegistryMetadata>::new();
     let mut preferred = preferred.clone();
+    let pinned_records = seed
+        .iter()
+        .map(|record| {
+            (
+                (
+                    record.registry.to_string(),
+                    record.name.to_string(),
+                    record.version.to_string(),
+                ),
+                record.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut fetch = |registry: &RegistryOrigin, name: &PackageName| {
+        fetch(registry, name).map(|packages| {
+            packages
+                .into_iter()
+                .map(|package| {
+                    let key = (
+                        package.registry.to_string(),
+                        package.name.to_string(),
+                        package.version.to_string(),
+                    );
+                    if let Some(pinned) = pinned_records.get(&key) {
+                        // The lock owns exact edges, platform constraints, and artifacts.
+                        // Only peer ranges are recovered from metadata for rebinding.
+                        let mut preserved = pinned.clone();
+                        preserved.peer_dependencies = package.peer_dependencies;
+                        preserved.optional_peer_dependencies = package.optional_peer_dependencies;
+                        preserved
+                    } else {
+                        package
+                    }
+                })
+                .collect()
+        })
+    };
     insert_records(
         &mut records,
         &mut normalized,

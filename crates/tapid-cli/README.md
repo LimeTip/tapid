@@ -98,7 +98,7 @@ Do not put tokens in `package.json`, `tapid.toml`, command-line arguments, or `t
 Locks containing noncanonical persisted registry origins (such as uppercase hosts
 or explicit `:443`) fail closed before activation/store mutation in offline and
 frozen modes. Preserve a separate verified backup of `tapid.lock`, then deliberately
-remove the incompatible original lock deliberately, then run online `tapid install` and review changed versions, artifacts and edges. The
+remove the incompatible original lock, then run online `tapid install` and review changed versions, artifacts and edges. The
 online path replaces the lock after re-resolution, not identity migration. See
 [compatibility and recovery](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#persisted-registry-identity-compatibility).
 
