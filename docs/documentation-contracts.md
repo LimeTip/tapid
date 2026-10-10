@@ -25,9 +25,9 @@ translation performed by the Unix runner.
 
 Capability `verified_releases` lists versions actually checked. Self-upgrade's
 `first_supported_release: "v0.0.10"` and `expected_releases: ["v0.0.10", "v0.0.11", "v0.0.12", "v0.0.13"]` are
-reviewed implementation expectations, **not published execution evidence**;
-its `verified_releases` remains empty until actual published verification is
-reviewed. v0.0.9 lacks `upgrade` and retains reinstall guidance. `upgrade-help`
+reviewed implementation expectations, not published execution evidence.
+Its `verified_releases: ["v0.0.13"]` records the reviewed published execution
+evidence below. v0.0.9 lacks `upgrade` and retains reinstall guidance. `upgrade-help`
 expects exit 2 plus the unrecognized-subcommand message for v0.0.9, and exit 0
 for v0.0.10, v0.0.11, v0.0.12 and v0.0.13. The published `upgrade` journey explicitly skips v0.0.9 as unsupported
 without executing it; the negative help probe still runs separately. Only the
@@ -96,8 +96,27 @@ discovery also runs through the public scripts. The canonical documentation
 upgrade runner remains Unix-only. Windows has separate native workflow upgrade
 checks and its native quickstart.
 
-These configuration changes do not prove published execution of v0.0.10,
-v0.0.11 or v0.0.12. Self-upgrade's verified-release list remains empty.
+Published v0.0.13 upgrade verification passed on 2026-10-10 in
+[release run 38081911700, attempt 2](https://github.com/LimeTip/tapid/actions/runs/38081911700/attempts/2).
+The selected release source was `a6e109b65b5835c8bd6e023ca283488bd67512bf`;
+the runner/docs source was `36dbe685aaffc7a691086f051d857315c7d84869`.
+The canonical same-release dry-run and upgrade journey passed on Linux and macOS,
+with exact destination version/digest assertions, persisted upgrade provenance,
+and `verification: "signature"`. All three platform jobs passed the previous-version
+transition and repeat-upgrade checks, including unchanged bytes and the
+"already up to date" message.
+
+The reviewed canonical reports are
+[doc-contract-upgrade-Linux](https://github.com/LimeTip/tapid/actions/runs/38081911700/artifacts/11682141376)
+and [doc-contract-upgrade-macOS](https://github.com/LimeTip/tapid/actions/runs/38081911700/artifacts/11682016167).
+The transition and repeat receipts are in
+[public-installer-Linux](https://github.com/LimeTip/tapid/actions/runs/38081911700/artifacts/11682236113),
+[public-installer-macOS](https://github.com/LimeTip/tapid/actions/runs/38081911700/artifacts/11681726692),
+and [public-installer-Windows](https://github.com/LimeTip/tapid/actions/runs/38081911700/artifacts/11681966296).
+These artifacts have 30-day retention. The later crates.io publication failure
+is separate from these successful upgrade checks and leaves the full release
+incomplete. This evidence does not verify the canonical upgrade journeys whose
+source releases are v0.0.10, v0.0.11 or v0.0.12.
 
 ## Execution and evidence boundaries
 
