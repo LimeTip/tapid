@@ -8,6 +8,10 @@
     "nativePlatforms": ["darwin", "linux", "win32"]
   },
   "historical": {
+    "v0.0.12": {
+      "legacy": false,
+      "nativePlatforms": ["darwin", "linux", "win32"]
+    },
     "v0.0.11": {
       "legacy": false,
       "nativePlatforms": ["darwin", "linux"]

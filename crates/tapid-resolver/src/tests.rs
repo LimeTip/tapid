@@ -1015,3 +1015,107 @@ fn unsupported_ranges_and_modes_fail_closed() {
         Err(ResolveError::UnsupportedMode(_))
     ));
 }
+
+#[test]
+fn locked_preferences_preserve_transitives_but_never_override_ranges_or_origins() {
+    let registry: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+    let other: RegistryOrigin = "https://other.example".parse().unwrap();
+    let package = |name: &str, version: &str, dependencies| PackageVersionMetadata {
+        name: name.parse().unwrap(),
+        version: version.parse().unwrap(),
+        dependencies,
+        peer_dependencies: BTreeMap::new(),
+        optional_peer_dependencies: BTreeSet::new(),
+    };
+    let metadata = RegistryMetadata::normalize(
+        registry.clone(),
+        vec![
+            package(
+                "root",
+                "1.0.0",
+                BTreeMap::from([("child".parse().unwrap(), req("*"))]),
+            ),
+            package(
+                "root",
+                "2.0.0",
+                BTreeMap::from([("child".parse().unwrap(), req("^2"))]),
+            ),
+            package("child", "1.0.0", BTreeMap::new()),
+            package("child", "2.0.0", BTreeMap::new()),
+        ],
+    )
+    .unwrap();
+    let preferred = ResolutionPreferences {
+        versions: BTreeSet::from([
+            (
+                registry.clone(),
+                "root".parse().unwrap(),
+                "1.0.0".parse().unwrap(),
+            ),
+            (
+                registry.clone(),
+                "child".parse().unwrap(),
+                "1.0.0".parse().unwrap(),
+            ),
+            (other, "child".parse().unwrap(), "2.0.0".parse().unwrap()),
+        ]),
+        roots: BTreeMap::new(),
+    };
+    for (range, expected) in [("*", "1.0.0"), ("^2", "2.0.0")] {
+        let resolution = resolve_graph_with_preferences(
+            &[Dependency::new(
+                registry.clone(),
+                "root".parse().unwrap(),
+                req(range),
+            )],
+            std::slice::from_ref(&metadata),
+            ResolutionOptions::default(),
+            |parent, _| Ok(parent.clone()),
+            &preferred,
+        )
+        .unwrap();
+        assert_eq!(resolution.selected.len(), 2);
+        assert!(
+            resolution
+                .selected
+                .iter()
+                .all(|id| id.version.to_string() == expected)
+        );
+    }
+}
+
+#[test]
+fn root_preferences_do_not_cross_alias_target_changes() {
+    let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+    let metadata = registry(
+        origin.as_str(),
+        vec![package("bar", "1.0.0", &[]), package("bar", "2.0.0", &[])],
+    );
+    let preferred = ResolutionPreferences {
+        versions: BTreeSet::new(),
+        roots: BTreeMap::from([(
+            (
+                origin.clone(),
+                "foo".parse().unwrap(),
+                "foo".parse().unwrap(),
+            ),
+            "1.0.0".parse().unwrap(),
+        )]),
+    };
+
+    let resolution = resolve_graph_with_preferences(
+        &[Dependency::new(
+            origin.clone(),
+            "foo".parse().unwrap(),
+            req("npm:bar@*"),
+        )],
+        &[metadata],
+        ResolutionOptions::default(),
+        |parent, _| Ok(parent.clone()),
+        &preferred,
+    )
+    .unwrap();
+
+    assert_eq!(resolution.roots[0].name.as_str(), "bar");
+    assert_eq!(resolution.roots[0].version.to_string(), "2.0.0");
+}
