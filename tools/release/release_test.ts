@@ -396,7 +396,7 @@ test("public Unix upgrade binds selected source and independent latest destinati
 test("public installers exercise explicit and latest discovery plus supported upgrades", async () => {
   const workflow = await text(".github/workflows/release-public-smoke.yml");
   assert(workflow.includes("--limit 100 --json tagName,isDraft,isPrerelease"));
-  assert(workflow.includes("(0, 0, 10) <= version(r['tagName']) < latest"));
+  assert(workflow.includes('compare(version(r.tagName), minimum) >= 0 && compare(version(r.tagName), latest) < 0'));
   const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
   const windows = workflow.slice(workflow.indexOf("  windows:"));
   for (const job of [unix, windows]) {
@@ -664,7 +664,7 @@ cp "$TAPID_TEST_FIXTURE/\${url##*/}" "$out"
 test("CI runs the TypeScript tool suite", async () => {
   const workflow = await text(".github/workflows/ci.yml");
   assert(workflow.includes("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"));
-  const suite = workflow.split(/\r?\n/).find(line => line.includes("run: node --experimental-strip-types --test"));
+  const suite = workflow.split(/\r?\n/).find(line => line.includes("run: node --experimental-strip-types --test tools/check_architecture_test.ts"));
   assert(suite);
   assert(suite.includes("tools/check_architecture_test.ts"));
   assert(suite.includes("tools/release/*_test.ts"), "CI must discover every release helper's tests");

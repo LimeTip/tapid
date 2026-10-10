@@ -12,6 +12,14 @@ tapid run dev
 
 ## Architecture rules
 
+Rust owns package-manager behavior, capability tests, and security verification.
+TypeScript owns developer commands, release orchestration, documentation checks,
+and website/consumer fixtures. Helper regressions use Node's built-in test runner.
+Run TypeScript directly with Node.js 22.6.0 or later and `--experimental-strip-types`.
+Do not introduce Python tooling or tests. Shell and PowerShell remain appropriate
+for platform-specific installer integration. [ADR 0008](adr/0008-rust-and-typescript-tooling.md)
+records this language choice and the preserved verification contracts.
+
 1. Build a domain-oriented modular monolith. Group behavior by domain capability, not by technical layer or arbitrary file size.
 2. Design deep modules with small interfaces. Keep implementation private and expose a curated interface through deliberate crate-root re-exports.
 3. Introduce hexagonal ports only at real I/O seams such as network, filesystem, clock, process, and terminal interaction. Do not add traits for hypothetical variation.

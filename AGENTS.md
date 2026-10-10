@@ -20,11 +20,13 @@ Tapid is a Rust package manager with 18 capability crates. Start with the task m
 | Containment, process supervision, filesystem grants | `crates/tapid-runner/src/execution/`, `execution.rs`, platform backends | Package `tapid-runner`; ADR 0005 and `docs/platform-validation.md` |
 | Client upgrades and release verification | `crates/tapid-cli/src/application/upgrade.rs`, `tapid-release-client/`, `tapid-signatures/` | Owning crates; package `tapid`, target `upgrade` |
 | Releases, installers, publishing | `tools/release/`, `scripts/install.*`, `.github/workflows/` | `tools/release/*_test.ts`; `docs/release-distribution.md` |
-| Documentation examples | `scripts/check-doc-examples.py`, `docs/documentation-contracts.md` | `tests/test_doc_examples.py` |
-| Developer commands and cache reuse | `scripts/dev.py`, `.cargo/config.toml` | `tests/test_dev.py` |
+| Documentation examples | `scripts/check-doc-examples.ts`, `docs/documentation-contracts.md` | `tests/doc_examples_test.ts` |
+| Developer commands and cache reuse | `scripts/dev.ts`, `.cargo/config.toml` | `tests/dev_test.ts` |
 
 ## Change rules
 
+- Use Rust for package-manager behavior, capability tests, and security verification. Use TypeScript on Node.js for developer commands, release orchestration, documentation checks, and website/consumer fixtures. Keep regression tests in the same language as the helper. Do not add Python scripts, Python tests, or a Python development dependency.
+- Run TypeScript directly with `node --experimental-strip-types`; prefer Node's built-in test runner and standard library. Keep shell and PowerShell for platform-specific installer integration.
 - Keep domain behavior in its capability crate. The CLI composes capabilities and owns interaction. `main.rs` only dispatches and converts exits.
 - Keep implementation modules private and preserve deliberate public re-exports. Split cohesive responsibilities rather than targeting a file-length quota.
 - Use strict red-green-refactor for production behavior. For private refactors, run existing behavior tests before and after.
@@ -36,9 +38,9 @@ Tapid is a Rust package manager with 18 capability crates. Start with the task m
 
 ## Verification
 
-Use `python3 scripts/dev.py <cargo arguments>` from the repository root. It reuses Cargo artifacts across worktrees and respects `CARGO_TARGET_DIR`. The CLI package name is `tapid`, not `tapid-cli`.
+Use `node --experimental-strip-types scripts/dev.ts <cargo arguments>` from the repository root. It reuses Cargo artifacts across worktrees and respects `CARGO_TARGET_DIR`. The CLI package name is `tapid`, not `tapid-cli`.
 
-Start with a focused test, such as `python3 scripts/dev.py test -p tapid-resolver --lib --locked <test-name>`. Confirm that the filter ran tests. Before handoff, run the affected crate tests and Clippy plus formatting. Cross-cutting changes use the full local lane once. [docs/testing.md](docs/testing.md) defines the commands and triggers, including non-Rust checks.
+Start with a focused test, such as `node --experimental-strip-types scripts/dev.ts test -p tapid-resolver --lib --locked <test-name>`. Confirm that the filter ran tests. Before handoff, run the affected crate tests and Clippy plus formatting. Cross-cutting changes use the full local lane once. [docs/testing.md](docs/testing.md) defines the commands and triggers, including non-Rust checks.
 
 CI retains cross-platform, compatibility, security, coverage, nextest, and packaging gates. Installing optional CI tools or running mutation testing is not required for an ordinary local change.
 

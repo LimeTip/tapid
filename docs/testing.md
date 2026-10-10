@@ -16,24 +16,27 @@ Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, o
 
 ## Development prerequisites and build reuse
 
-Use Python 3, Git, Rust with rustfmt and Clippy, and Node.js 22.6.0 or later. Run Cargo from the repository root through:
+Use Git, Rust with rustfmt and Clippy, and Node.js 22.6.0 or later.
+Rust owns package-manager behavior and security verification. TypeScript owns
+developer scripts, release orchestration, documentation checks, and website/consumer
+fixtures. Python and uv are not required to develop or test Tapid.
+
+Run Cargo from the repository root through:
 
 ```text
-python3 scripts/dev.py <cargo arguments>
+node --experimental-strip-types scripts/dev.ts <cargo arguments>
 ```
-
-On Windows, use `python` if that is the name of your Python 3 executable.
 
 The wrapper selects `<git-common-dir>/target/dev` using Git's canonical common directory for every repository layout. For a conventional checkout this is `<primary-checkout>/.git/target/dev`. All worktrees of the same repository and the nested integration workspace reuse that directory. Distinct Git common directories have separate caches, including bare and custom layouts. Existing conventional-checkout artifacts in `<primary-checkout>/target/dev` are not reused at the new path, so its first build is cold. Cargo still checks source changes, toolchains, profiles, features, and compiler flags; incompatible artifacts are rebuilt. Concurrent Cargo builds sharing a target directory may wait for its build lock. Keep compiler flags consistent to maximize reuse.
 
-An explicit `CARGO_TARGET_DIR` takes precedence. Direct `cargo` commands use the root worktree's `target` directory for both workspaces through `.cargo/config.toml`, but do not share it across worktrees. Commands and documentation that need a binary should obtain the target path from `python3 scripts/dev.py metadata --no-deps --format-version 1 --locked` rather than assume `target/debug/tapid` after a wrapper build.
+An explicit `CARGO_TARGET_DIR` takes precedence. Direct `cargo` commands use the root worktree's `target` directory for both workspaces through `.cargo/config.toml`, but do not share it across worktrees. Commands and documentation that need a binary should obtain the target path from `node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked` rather than assume `target/debug/tapid` after a wrapper build.
 
 ## Focused development lane
 
 Use strict red-green-refactor for production behavior. Add one observable failing test, confirm its expected failure, implement the smallest change, then rerun that test. Pure refactors use existing behavior tests before and after the move. Run Cargo commands sequentially to avoid build-lock contention.
 
 ```text
-python3 scripts/dev.py test -p tapid-resolver --lib --locked <test-name>
+node --experimental-strip-types scripts/dev.ts test -p tapid-resolver --lib --locked <test-name>
 ```
 
 Replace the package and filter with the relevant test. The CLI package is named `tapid`, although its directory is `crates/tapid-cli`. Use `--test cli`, `--test upgrade`, or `--test run_planning` for the corresponding CLI integration target. A filter matching zero tests is not validation.
@@ -43,18 +46,18 @@ Replace the package and filter with the relevant test. The CLI package is named 
 For an isolated Rust change, run the affected crate's tests and Clippy plus workspace formatting:
 
 ```text
-python3 scripts/dev.py test -p tapid-resolver --all-features --locked
-python3 scripts/dev.py clippy -p tapid-resolver --all-targets --all-features --locked -- -D warnings
-python3 scripts/dev.py fmt --all --check
+node --experimental-strip-types scripts/dev.ts test -p tapid-resolver --all-features --locked
+node --experimental-strip-types scripts/dev.ts clippy -p tapid-resolver --all-targets --all-features --locked -- -D warnings
+node --experimental-strip-types scripts/dev.ts fmt --all --check
 ```
 
 Include direct consumers when a public interface or behavior they rely on changes. Changes to shared core types, dependency manifests, multi-crate behavior, containment, install transactions, or broad refactoring require the full local lane once after the final change:
 
 ```text
-python3 scripts/dev.py fmt --all --check
-python3 scripts/dev.py clippy --workspace --all-targets --all-features --locked -- -D warnings
-python3 scripts/dev.py test --workspace --all-features --locked
-python3 scripts/dev.py test --manifest-path tests/integration/Cargo.toml --locked
+node --experimental-strip-types scripts/dev.ts fmt --all --check
+node --experimental-strip-types scripts/dev.ts clippy --workspace --all-targets --all-features --locked -- -D warnings
+node --experimental-strip-types scripts/dev.ts test --workspace --all-features --locked
+node --experimental-strip-types scripts/dev.ts test --manifest-path tests/integration/Cargo.toml --locked
 node --experimental-strip-types tools/check_architecture.ts
 ```
 
@@ -62,9 +65,11 @@ Add checks for the files changed:
 
 - Architecture tooling: `node --experimental-strip-types --test tools/check_architecture_test.ts`.
 - Release tooling: `node --experimental-strip-types --test tools/release/*_test.ts`.
-- Documentation runner: `python3 -m unittest discover -s tests -p test_doc_examples.py -v` and the affected examples in `scripts/check-doc-examples.py`.
-- Development wrapper: `python3 -m unittest discover -s tests -p test_dev.py -v`.
-- Dependency or publication metadata: `python3 scripts/dev.py metadata --no-deps --format-version 1 --locked` and `python3 scripts/dev.py package --workspace --locked`.
+- Documentation runner: `node --experimental-strip-types --test tests/doc_examples_test.ts` and the affected examples in `scripts/check-doc-examples.ts`.
+- Development wrapper: `node --experimental-strip-types --test tests/dev_test.ts`.
+- All TypeScript helpers and release tooling: `node --experimental-strip-types --test tests/*_test.ts tools/release/*_test.ts`.
+- News-site native-resolution fixture: set `TAPID_NEWS_FIXTURE_BINARY` to a source-built CLI and run `node --experimental-strip-types --test tests/news_site_fixture_test.ts`. CI requires the binary; without it, only that native probe skips locally.
+- Dependency or publication metadata: `node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked` and `node --experimental-strip-types scripts/dev.ts package --workspace --locked`.
 
 Prose-only documentation changes need link and command review, not Rust compilation. Report the commands run and any unavailable platform checks. Do not rerun successful checks unless subsequent changes affect their results.
 
@@ -73,17 +78,17 @@ Prose-only documentation changes need link and command review, not Rust compilat
 Workspace packaging, nextest, coverage, dependency audit, and dependency policy remain required in their existing CI jobs. They are not additional local steps for every code change. Run them locally when investigating their results or changing their configuration:
 
 ```text
-python3 scripts/dev.py package --workspace --locked
-python3 scripts/dev.py nextest run --workspace --all-features --locked
-python3 scripts/dev.py llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
-python3 scripts/dev.py deny check
-python3 scripts/dev.py audit
+node --experimental-strip-types scripts/dev.ts package --workspace --locked
+node --experimental-strip-types scripts/dev.ts nextest run --workspace --all-features --locked
+node --experimental-strip-types scripts/dev.ts llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+node --experimental-strip-types scripts/dev.ts deny check
+node --experimental-strip-types scripts/dev.ts audit
 ```
 
 Coverage writes the CI artifact `lcov.info`. Mutation testing is a focused periodic test-strength check, not a per-change requirement:
 
 ```text
-python3 scripts/dev.py mutants --package tapid-manifest --timeout 60
+node --experimental-strip-types scripts/dev.ts mutants --package tapid-manifest --timeout 60
 ```
 
 Install optional tools when working on their lanes. Their absence does not block unrelated local changes or justify weakening CI.
@@ -98,13 +103,13 @@ The oracle uses Node.js 22 and lockfile-pinned `semver` 7.8.5 to validate the au
 
 ```sh
 (cd tests/node-semver-oracle && npm ci --ignore-scripts --no-audit --no-fund && npm test --offline)
-python3 scripts/dev.py fmt --all --check
+node --experimental-strip-types scripts/dev.ts fmt --all --check
 ```
 
-Formatting uses the stable Rust toolchain's rustfmt component, with no repository-specific rustfmt configuration or pinned rustfmt version. Its CI input is the Ubuntu checkout of the same source revision; this assumes the tracked source text is canonical there, rather than validating foreign-OS checkout line-ending conversions. Formatting and JavaScript oracle environment checks on macOS/Windows are intentionally retired. Rust resolver/semver compatibility tests still run within the native workspace suite on every platform, as do Clippy, Python development-cache tests, and the nested integration workspace. Documentation process-supervision tests remain on both Unix platforms. Node.js 22 setup remains unconditional on all three native platforms for the CLI assertions and sandbox tests, not just for the Ubuntu oracle.
+Formatting uses the stable Rust toolchain's rustfmt component, with no repository-specific rustfmt configuration or pinned rustfmt version. Its CI input is the Ubuntu checkout of the same source revision; this assumes the tracked source text is canonical there, rather than validating foreign-OS checkout line-ending conversions. Formatting and JavaScript oracle environment checks on macOS/Windows are intentionally retired. Rust resolver/semver compatibility tests still run within the native workspace suite on every platform, as do Clippy, TypeScript development-cache tests, and the nested integration workspace. Documentation process-supervision tests remain on both Unix platforms. Node.js 22 setup remains unconditional on all three native platforms for the CLI assertions and sandbox tests, not just for the Ubuntu oracle.
 
 The main native `test` job runs `cargo test --workspace --all-features --locked -- --show-output` from the repository root on all three platforms, including the CLI command-description tests. The Windows leg also owns `native_windows_shim_materialization_rejects_collisions_before_writes`: its source remains `#[cfg(windows)]`, `#[test]`, and not ignored; there is no separate filtered invocation. Node.js 22 is installed before testing and `TAPID_REQUIRE_NODE_ASSERTIONS=1` makes the CLI Node probes fail closed, with successful assertion receipts in the logs. The nested integration workspace remains a separate invocation.
 
-The main `release-contract` job owns Unix installer syntax (`sh -n`) and offline `--help`, plus PowerShell tokenization with a nonzero exit on parser errors. Its release-helper suite also exercises that exact PowerShell validator against the real installer and deterministic malformed input, without executing either input or adding a workflow lane. The regression can skip only when `pwsh` is missing locally; CI must execute it. Standalone CLI documentation and website installer validation workflows are no longer needed; no replacement duplicate or manual runner is introduced. Release automation requires successful exact-SHA main-push CI and all four existing CodeQL analysis checks; the obsolete standalone command-help check is not a separate prerequisite. Other release identity, candidate, publication, and smoke gates remain unchanged.
+The main `release-contract` job owns Unix installer syntax (`sh -n`) and offline `--help`, plus PowerShell tokenization with a nonzero exit on parser errors. Its release-helper suite also exercises that exact PowerShell validator against the real installer and deterministic malformed input, without executing either input or adding a workflow lane. The regression can skip only when `pwsh` is missing locally; CI must execute it. Standalone CLI documentation and website installer validation workflows are no longer needed; no replacement duplicate or manual runner is introduced. Release automation requires successful exact-SHA main-push CI and CodeQL analysis for Actions, Rust, and JavaScript/TypeScript; the obsolete standalone command-help check is not a separate prerequisite. Other release identity, candidate, publication, and smoke gates remain unchanged.
 
 The security and package jobs use runner-provided workspaces and do not rely on local absolute paths. A local command may be unavailable on a developer machine, but CI treats the corresponding gate as required.

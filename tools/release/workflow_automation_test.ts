@@ -105,7 +105,7 @@ const assertSourceOnlyOwners = (ci: string) => {
   for (const [name, command] of [
     ['Run Clippy', 'cargo clippy --workspace --all-targets --all-features --locked -- -D warnings'],
     ['Run tests', 'cargo test --workspace --all-features --locked -- --show-output'],
-    ['Test development build cache selection', 'python -m unittest discover -s tests -p test_dev.py -v'],
+    ['Test development build cache selection', 'node --experimental-strip-types --test tests/dev_test.ts'],
     ['Run nested integration workspace', 'cargo test --manifest-path tests/integration/Cargo.toml --locked'],
   ]) {
     const retained = step(native, name);
@@ -113,11 +113,9 @@ const assertSourceOnlyOwners = (ci: string) => {
     assert.doesNotMatch(retained, /if:|continue-on-error:|--exclude|--skip|--ignored/);
   }
   const docs = step(native, 'Test executable documentation runner (Unix)');
-  assert.match(docs, /if: runner.os != 'Windows'\n        run: python3 -m unittest discover -s tests -p test_doc_examples.py -v\n/);
+  assert.match(docs, /if: runner.os != 'Windows'\n        run: node --experimental-strip-types --test tests\/doc_examples_test.ts\n/);
   assert.doesNotMatch(docs, /continue-on-error:/);
-  const python = step(native, 'Install Python for development and documentation tests');
-  assert.match(python, /python-version: '3.12'/);
-  assert.doesNotMatch(python, /if:|continue-on-error:/);
+  assert.doesNotMatch(ci, /setup-python|python-version|\.py\b/);
   assert.match(step(native, 'Install Rust toolchain'), /components: rustfmt, clippy/);
   assert.match(job(ci, 'package'), /needs: \[test, security\]/);
 };
@@ -167,7 +165,7 @@ test('main native workspace owns command-help and Windows collision tests withou
   assert.match(native, /TAPID_REQUIRE_NODE_ASSERTIONS: '1'/);
   assert(native.indexOf('node-version: 22') < native.indexOf('cargo test --workspace'));
   assert.match(native, /run: cargo test --workspace --all-features --locked -- --show-output\n/);
-  const workspaceStep = native.slice(native.indexOf('      - name: Run tests\n'), native.indexOf('      - name: Install Python'));
+  const workspaceStep = native.slice(native.indexOf('      - name: Run tests\n'), native.indexOf('      - name: Verify generated release record'));
   assert.doesNotMatch(workspaceStep, /working-directory:|--exclude|--skip|--ignored|continue-on-error:|if:/);
   assert.doesNotMatch(native, /defaults:|continue-on-error:/);
   assert.match(native, /cargo test --manifest-path tests\/integration\/Cargo.toml --locked/);
@@ -332,8 +330,8 @@ function assertWindowsHandoff(ci: string) {
   assert.doesNotMatch(verifier, /cargo build|rust-toolchain@|rust-cache@/);
   assert.doesNotMatch(download + verify, /\n        if:/);
   const fixture = verifier.slice(verifier.indexOf('      - name: Install and reject archive fixtures'));
-  // Stage 3 fixture snapshot: no installer/security assertion or cleanup changes permitted.
-  assert.equal(createHash('sha256').update(fixture).digest('hex'), 'ab1cd26c75fe0313e34482f1982369469e0a8f4920158b3c93515e1a521b9348');
+  // Fixture snapshot includes the TypeScript signer; installer/security assertions and cleanup are retained.
+  assert.equal(createHash('sha256').update(fixture).digest('hex'), '3fa2d311751b9ef3a8d66ed82e627051e7e10d5bb7620e00bb22b4771debaaca');
 }
 
 test('Windows-only consumer handoff retains real verifier and same-attempt fail-closed ownership', async () => {

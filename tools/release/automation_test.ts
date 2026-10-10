@@ -4,7 +4,7 @@ import { checkApprovedPlan, evaluateCi, waitForCi } from "./automation.ts";
 
 const sha = "a".repeat(40);
 const run = (overrides: Record<string, unknown> = {}) => ({ id: 10, run_number: 2, head_sha: sha, head_branch: "main", event: "push", status: "completed", conclusion: "success", ...overrides });
-const codeqlNames = ['Analyze (actions)', 'Analyze (rust)', 'Analyze (javascript-typescript)', 'Analyze (python)'];
+const codeqlNames = ['Analyze (actions)', 'Analyze (rust)', 'Analyze (javascript-typescript)'];
 const codeqlChecks = () => codeqlNames.map((name, index) => ({ id: index + 1, name, head_sha: sha, app: { id: 15368 }, status: 'completed', conclusion: 'success' }));
 
 test('exact main CI owns command help without an obsolete standalone check', async () => {

@@ -12,14 +12,24 @@ for (const [selected, latest] of [['v0.0.10', 'v0.0.10'], ['v0.0.10', 'v0.0.11']
     const directory = await mkdtemp(join(tmpdir(), 'tapid-smoke-installer-'));
     try {
       const workflow = await readFile(new URL('../../.github/workflows/release-public-smoke.yml', import.meta.url), 'utf8');
-      const block = workflow.split("<<'PYTHON' >> \"$GITHUB_OUTPUT\"\n")[1].split('          PYTHON')[0]
+      const block = workflow.split("<<'JAVASCRIPT' >> \"$GITHUB_OUTPUT\"\n")[1].split('          JAVASCRIPT')[0]
         .split('\n').map(line => line.startsWith('          ') ? line.slice(10) : line).join('\n');
-      await writeFile(join(directory, 'releases.json'), '[]');
-      const { stdout } = await run('python3', ['-c', block], { env: {
+      await writeFile(join(directory, 'releases.json'), JSON.stringify([
+        { tagName: 'v0.0.9', isDraft: false, isPrerelease: false },
+        { tagName: 'v0.0.10', isDraft: false, isPrerelease: false },
+        { tagName: 'v0.0.11', isDraft: false, isPrerelease: false },
+        { tagName: 'v99.0.0', isDraft: false, isPrerelease: false },
+        { tagName: 'v0.9.0', isDraft: true, isPrerelease: false },
+        { tagName: 'v0.8.0', isDraft: false, isPrerelease: true },
+        { tagName: 'invalid', isDraft: false, isPrerelease: false },
+      ]));
+      const { stdout } = await run(process.execPath, ['-e', block], { env: {
         ...process.env, RUNNER_TEMP: directory, SELECTED_TAG: selected, LATEST_TAG: latest,
         SELECTED_SHA: 'a'.repeat(40), LATEST_SHA: 'b'.repeat(40),
       } });
       const values = Object.fromEntries(stdout.trim().split('\n').map(line => line.split('=')));
+      strictEqual(values.previous_tag, latest === 'v0.0.10' ? '' : latest === 'v0.0.11' ? 'v0.0.10' : 'v0.0.11');
+      strictEqual(values.record_aware, String(latest !== 'v0.0.10'));
       for (const [kind, tag, sha] of [['selected', selected, 'a'.repeat(40)], ['latest', latest, 'b'.repeat(40)]]) {
         for (const extension of ['sh', 'ps1']) {
           const expected = tag === 'v0.0.10'

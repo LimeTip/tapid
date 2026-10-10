@@ -996,28 +996,27 @@ mod upgrade_tests {
 
     #[test]
     fn tar_artifact_rejects_traversal_members() {
-        let root = temp("traversal");
-        let outside = root.parent().unwrap().join(format!(
-            "tapid-outside-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::write(&outside, b"outside").unwrap();
-        let archive = root.join("artifact.tar.gz");
-        let output = Command::new("python3")
-            .args([
-                "-c",
-                "import tarfile,sys; t=tarfile.open(sys.argv[1],'w:gz'); i=tarfile.TarInfo('../tapid'); i.size=3; t.addfile(i, __import__('io').BytesIO(b'new')); t.close()",
-                archive.to_str().unwrap(),
-            ])
-            .output()
-            .unwrap();
+        let fixture = tapid_test_support::TempProject::new("upgrade-traversal").unwrap();
+        // Construct the malicious header directly: archive writers often sanitize
+        // parent components before the reader's traversal check can see them.
+        let mut archive = vec![0_u8; 2048];
+        archive[..8].copy_from_slice(b"../tapid");
+        archive[100..108].copy_from_slice(b"0000755\0");
+        archive[108..116].copy_from_slice(b"0000000\0");
+        archive[116..124].copy_from_slice(b"0000000\0");
+        archive[124..136].copy_from_slice(b"00000000003\0");
+        archive[136..148].copy_from_slice(b"00000000000\0");
+        archive[148..156].fill(b' ');
+        archive[156] = b'0';
+        archive[257..263].copy_from_slice(b"ustar\0");
+        archive[263..265].copy_from_slice(b"00");
+        let checksum: u32 = archive[..512].iter().map(|byte| u32::from(*byte)).sum();
+        archive[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
+        archive[512..515].copy_from_slice(b"new");
+        let plain = fixture.write("artifact.tar", &archive).unwrap();
+        let output = Command::new("gzip").arg("-c").arg(plain).output().unwrap();
         assert!(output.status.success());
-        assert!(materialize_artifact("tapid.tar.gz", &fs::read(&archive).unwrap()).is_err());
-        let _ = fs::remove_file(outside);
-        fs::remove_dir_all(root).unwrap();
+        assert!(materialize_artifact("tapid.tar.gz", &output.stdout).is_err());
     }
 
     #[test]
