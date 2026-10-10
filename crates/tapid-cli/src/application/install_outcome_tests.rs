@@ -649,6 +649,139 @@ fn invalid_fixture_artifact_preserves_metadata_and_transport_categories() {
 }
 
 #[test]
+fn online_platform_fallback_discards_only_incompatible_locked_selections() {
+    for newer in [false, true] {
+        let (project, fixture) = project_with_fixture("online-platform-fallback", INTEGRITY);
+        project
+            .write(
+                "package.json",
+                br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*","stable":"*"}}"#,
+            )
+            .unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+        let base = metadata["packages"][0].clone();
+        let mut stable = base.clone();
+        stable["name"] = "stable".into();
+        metadata["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(stable.clone());
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let store = project.path().join("store");
+        run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        let lock_path = project.path().join("tapid.lock");
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+        let stable_key = lock["rootBindings"]["stable"].as_str().unwrap().to_owned();
+        let stable_pin = lock["packages"][&stable_key].clone();
+        let old_key = lock["rootBindings"]["plugin"].as_str().unwrap().to_owned();
+        let context = "os=unsupported;cpu=;libc=";
+        let new_key = old_key.replace("os=;cpu=;libc=", context);
+        let mut package = lock["packages"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&old_key)
+            .unwrap();
+        package["platformContext"] = context.into();
+        package["treeDigest"] = format!("sha256-{}", "0".repeat(64)).into();
+        package["artifactIntegrity"] = format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode([0; 64])
+        )
+        .into();
+        lock["packages"][&new_key] = package;
+        lock["rootBindings"]["plugin"] = new_key.clone().into();
+        for root in lock["roots"].as_array_mut().unwrap() {
+            if root.as_str() == Some(&old_key) {
+                *root = new_key.clone().into();
+            }
+        }
+        let incompatible_lock = lock.to_string();
+        fs::write(&lock_path, &incompatible_lock).unwrap();
+        if newer {
+            let mut next = base;
+            next["version"] = "2.0.0".into();
+            metadata["packages"].as_array_mut().unwrap().push(next);
+        }
+        stable["version"] = "2.0.0".into();
+        metadata["packages"].as_array_mut().unwrap().push(stable);
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let report = run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        assert!(!report.replayed);
+        let resolved = read_lock(&lock_path).unwrap();
+        let plugin: tapid_lockfile::LockfilePackageKey =
+            resolved.root_bindings()["plugin"].parse().unwrap();
+        assert_eq!(
+            plugin.version.to_string(),
+            if newer { "2.0.0" } else { "1.0.0" }
+        );
+        assert_eq!(resolved.root_bindings()["stable"], stable_key);
+        let resolved_json: serde_json::Value =
+            serde_json::from_str(&resolved.to_json().unwrap()).unwrap();
+        assert_eq!(resolved_json["packages"][&stable_key], stable_pin);
+        fs::write(&lock_path, &incompatible_lock).unwrap();
+        for mode in [
+            InstallMode::Frozen,
+            InstallMode::Offline,
+            InstallMode::Ci,
+            InstallMode::CiOffline,
+        ] {
+            let failure = run(
+                project.path(),
+                None,
+                Some(&store),
+                mode,
+                Some(&fixture),
+                false,
+                |_| {},
+            )
+            .unwrap_err();
+            assert_eq!(failure.error.kind, ErrorKind::Lockfile, "{failure:?}");
+            assert!(failure.error.to_string().contains("different platform"));
+            assert!(failure.error.to_string().contains("tapid update"));
+            assert_eq!(fs::read_to_string(&lock_path).unwrap(), incompatible_lock);
+        }
+        project
+            .write(
+                "tapid.toml",
+                b"[registries.default]\nurl='https://different.example'\n",
+            )
+            .unwrap();
+        let failure = run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            false,
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(failure.error.kind, ErrorKind::RegistryConfiguration);
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), incompatible_lock);
+    }
+}
+
+#[test]
 fn repeated_online_install_preserves_locked_selection() {
     let (project, fixture) = project_with_fixture("locked-selection", INTEGRITY);
     project

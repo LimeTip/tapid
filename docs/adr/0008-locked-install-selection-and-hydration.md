@@ -40,9 +40,12 @@ this decision.
 Noncanonical persisted origins and unsupported lock schemas fail in ordinary
 online installs too. No install silently migrates identities or relaxes integrity.
 After preserving and verifying a separate backup, deliberately remove an
-incompatible lock before generating and reviewing a replacement. Changed routing
-or platform contexts fail during ordinary and frozen replay; an explicit update
-can resolve a fresh graph for the selected routes and target.
+incompatible lock before generating and reviewing a replacement. Changed
+routing fails during ordinary and frozen replay. An ordinary online install on
+another target resolves a new graph, retaining only target-compatible locked
+selections. Frozen, offline, and CI installs reject mismatched platform contexts;
+an explicit `tapid update` can resolve a fresh graph for the selected routes and
+target.
 
 Store publication stays reversible until project activation and the durable
 commit decision. Publication can create digest-verified snapshots while holding
@@ -63,8 +66,8 @@ and recovery contract without changing the lock schema.
 The supported resolver and npm compatibility subset remain bounded. This does
 not add automatic peer placement, portable multi-target optional graphs, imported
 lock acceptance, lifecycle script execution, or registry identity migration.
-Recorded target-specific packages require the matching target; users regenerate
-for another target deliberately.
+Recorded target-specific packages require the matching target for replay.
+Ordinary online installation can regenerate for another target.
 
 Changed-input resolution rejects several persisted contexts for one exact registry
 package version rather than collapsing them. Frozen replay retains exact contexts;

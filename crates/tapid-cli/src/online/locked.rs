@@ -1,10 +1,12 @@
 //! Verification and hydration of the graph already selected by a lockfile.
 use super::*;
 
+/// Validate every registry identity and report whether the locked target can replay.
 pub(crate) fn validate_locked_routes(
     lock: &Lockfile,
     config: &crate::registry::RegistryConfig,
-) -> Result<(), OperationalError> {
+) -> Result<bool, OperationalError> {
+    let mut platforms_match = true;
     for (key, _) in lock.packages_typed()? {
         let registry = key.source.registry().ok_or("expected registry identity")?;
         if registry.as_str() != JSR && config.origin_for_name(&key.name)? != *registry {
@@ -13,23 +15,30 @@ pub(crate) fn validate_locked_routes(
                 format!("registry identity mismatch for locked package {}", key.name),
             ));
         }
-        let context = crate::context::parse_platform(&key.platform_context)?;
-        let constraints = PackagePlatform {
-            os: context.os.into_iter().collect(),
-            cpu: context.cpu.into_iter().collect(),
-            libc: context.libc.into_iter().collect(),
-        };
-        if !current_platform_matches(&constraints) {
-            return Err(OperationalError::new(
-                ErrorKind::Lockfile,
-                format!(
-                    "locked package {} targets a different platform; regenerate the lock for this target",
-                    key.name
-                ),
-            ));
+        platforms_match &= locked_platform_matches(&key)?;
+    }
+    Ok(platforms_match)
+}
+
+pub(super) fn locked_platform_matches(key: &LockfilePackageKey) -> Result<bool, OperationalError> {
+    let context = crate::context::parse_platform(&key.platform_context)?;
+    Ok(current_platform_matches(&PackagePlatform {
+        os: context.os.into_iter().collect(),
+        cpu: context.cpu.into_iter().collect(),
+        libc: context.libc.into_iter().collect(),
+    }))
+}
+
+pub(super) fn reusable_locked_packages(
+    lock: &Lockfile,
+) -> Result<Vec<(LockfilePackageKey, &LockedPackage)>, OperationalError> {
+    let mut packages = Vec::new();
+    for (key, package) in lock.packages_typed()? {
+        if locked_platform_matches(&key)? && package.registry_integrity_declared() != Some(false) {
+            packages.push((key, package));
         }
     }
-    Ok(())
+    Ok(packages)
 }
 
 pub(crate) fn hydrate_locked(
@@ -189,9 +198,8 @@ pub(super) fn locked_records(
     using_fixture: bool,
 ) -> Result<Vec<PackageRecord>, OperationalError> {
     let mut identities = BTreeSet::new();
-    lock.packages_typed()?
+    reusable_locked_packages(lock)?
         .into_iter()
-        .filter(|(_, package)| package.registry_integrity_declared() != Some(false))
         .map(|(key, package)| {
             let registry = key
                 .source

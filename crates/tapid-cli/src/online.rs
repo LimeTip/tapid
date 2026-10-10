@@ -817,10 +817,9 @@ pub(crate) fn resolve_and_fetch_with_lock(
     let mut metadata_transports = BTreeMap::<(String, String), HttpsTransport>::new();
     let preferred = previous_lock
         .map(|lock| {
-            lock.packages_typed().map(|packages| {
+            locked::reusable_locked_packages(lock).map(|packages| {
                 packages
                     .into_iter()
-                    .filter(|(_, package)| package.registry_integrity_declared() != Some(false))
                     .filter_map(|(key, _)| {
                         key.source
                             .registry()
@@ -858,6 +857,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
                     key.name.clone(),
                     key.version.clone(),
                 ))
+                && locked::locked_platform_matches(&key)?
             {
                 preferred.roots.insert(
                     (
@@ -936,11 +936,10 @@ pub(crate) fn resolve_and_fetch_with_lock(
         allowed_origins: configured_origins,
     };
     let pinned_packages = previous_lock
-        .map(|lock| lock.packages_typed())
+        .map(locked::reusable_locked_packages)
         .transpose()?
         .unwrap_or_default()
         .into_iter()
-        .filter(|(_, package)| package.registry_integrity_declared() != Some(false))
         .map(|(key, package)| {
             Ok((
                 (

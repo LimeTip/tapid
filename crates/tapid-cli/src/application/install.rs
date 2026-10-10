@@ -480,7 +480,7 @@ fn perform_install(
         if let Some(lock) = &previous_lock {
             let registry_config = crate::registry::RegistryConfig::load(&project_dir)
                 .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-            online::validate_locked_routes(lock, &registry_config)?;
+            replayable &= online::validate_locked_routes(lock, &registry_config)?;
             let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
             let current = workspace
                 .locked
@@ -702,7 +702,12 @@ fn perform_install(
     journal
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-    online::validate_locked_routes(&lock, &registry_config)?;
+    if !online::validate_locked_routes(&lock, &registry_config)? {
+        return Err(OperationalError::new(
+            ErrorKind::Lockfile,
+            "locked packages target a different platform; regenerate tapid.lock with tapid update and review the resulting changes",
+        ));
+    }
     if ci && !offline {
         let (mut input, trees, transaction, _cached_snapshots) = online::prepare_locked_install(
             &lock,
