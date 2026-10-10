@@ -304,36 +304,36 @@ fn request_builder_preserves_ordered_executable_search_paths() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn process_memory_stats_access_requires_linux_restricted_sandbox() {
+fn process_memory_stats_access_requires_linux_required_sandbox() {
     let default = ExecutionRequest::builder("node").build().unwrap();
     assert!(!default.allow_process_memory_stats());
 
-    assert!(
-        ExecutionRequest::builder("node")
-            .policy(required_policy())
-            .allow_process_memory_stats(true)
-            .build()
-            .is_err(),
-        "ManagedTree must not accept the Restricted-only opt-in"
-    );
-    let disabled_restricted = SandboxPolicy::new_with_assurance(
-        SandboxMode::Disabled,
-        AssuranceLevel::Restricted,
-        FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
-        false,
-        vec![],
-        true,
-        ExecutionLimits::default(),
-    )
-    .unwrap();
-    assert!(
-        ExecutionRequest::builder("node")
-            .policy(disabled_restricted)
-            .allow_process_memory_stats(true)
-            .build()
-            .is_err(),
-        "Disabled mode must not accept an opt-in that it cannot enforce"
-    );
+    let managed = ExecutionRequest::builder("node")
+        .policy(required_policy())
+        .allow_process_memory_stats(true)
+        .build()
+        .unwrap();
+    assert!(managed.allow_process_memory_stats());
+    for assurance in [AssuranceLevel::Restricted, AssuranceLevel::ManagedTree] {
+        let disabled = SandboxPolicy::new_with_assurance(
+            SandboxMode::Disabled,
+            assurance,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            ExecutionRequest::builder("node")
+                .policy(disabled)
+                .allow_process_memory_stats(true)
+                .build()
+                .is_err(),
+            "Disabled mode must not accept an opt-in that it cannot enforce"
+        );
+    }
 
     let restricted = SandboxPolicy::new_with_assurance(
         SandboxMode::Required,
@@ -363,7 +363,7 @@ fn process_memory_stats_access_is_rejected_off_linux() {
     assert!(
         error
             .to_string()
-            .contains("only by the Linux Restricted backend")
+            .contains("only by Linux containment backends")
     );
 }
 

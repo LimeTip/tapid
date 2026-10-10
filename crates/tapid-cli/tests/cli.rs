@@ -61,17 +61,23 @@ fn temp_dir(label: &str) -> PathBuf {
     fs::create_dir_all(&path).unwrap();
     path
 }
-fn run(cwd: &PathBuf, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .unwrap()
+fn isolated_command(cwd: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+    command.args(args).current_dir(cwd);
+    if matches!(
+        args.first(),
+        Some(&"install" | &"i" | &"add" | &"remove" | &"update" | &"prune")
+    ) && !args.contains(&"--store-dir")
+    {
+        command.arg("--store-dir").arg(cwd.join(".test-store"));
+    }
+    command
 }
-fn run_with_env(cwd: &PathBuf, args: &[&str], key: &str, value: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .args(args)
-        .current_dir(cwd)
+fn run(cwd: &Path, args: &[&str]) -> std::process::Output {
+    isolated_command(cwd, args).output().unwrap()
+}
+fn run_with_env(cwd: &Path, args: &[&str], key: &str, value: &str) -> std::process::Output {
+    isolated_command(cwd, args)
         .env(key, value)
         .output()
         .unwrap()
@@ -5163,6 +5169,148 @@ fn install_supports_an_explicit_dynamic_project_directory() {
 }
 
 #[test]
+fn dependency_lifecycle_policy_rejects_prepare_before_mutating_project() {
+    let project = tapid_test_support::TempProject::new("dependency-hook-policy").unwrap();
+    let home = tapid_test_support::TempHome::new("dependency-hook-policy").unwrap();
+    let manifest = br#"{"name":"demo","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    project
+        .write(
+            "tapid.lifecycle.toml",
+            br#"schema = 1
+[[approvals]]
+package = "native-demo"
+version = "1.0.0"
+hook = "prepare"
+"#,
+        )
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args(["install", "--store-dir"])
+        .arg(home.path().join("store"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("unsupported dependency lifecycle hook prepare"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!project.path().join("tapid.lock").exists());
+    assert!(!project.path().join("node_modules").exists());
+    assert!(!home.path().join("store").exists());
+}
+
+#[test]
+fn dependency_lifecycle_hooks_are_reported_and_never_run_by_default() {
+    let project = tapid_test_support::TempProject::new("dependency-hooks-denied").unwrap();
+    let home = tapid_test_support::TempHome::new("dependency-hooks-denied").unwrap();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"},"scripts":{"install":"echo root > ROOT_SCRIPT_RAN"}}"#).unwrap();
+    let archive = "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=";
+    let bytes = STANDARD.decode(archive).unwrap();
+    let fixture = serde_json::json!({"packages":[{
+        "registry":"https://registry.npmjs.org", "name":"native-demo", "version":"1.0.0",
+        "integrity":format!("sha512-{}", STANDARD.encode(Sha512::digest(&bytes))),
+        "artifact":format!("base64:{archive}")
+    }]});
+    project
+        .write("registry.json", &serde_json::to_vec(&fixture).unwrap())
+        .unwrap();
+    for flags in [
+        vec!["install", "--registry-fixture", "registry.json"],
+        vec!["install", "--offline", "--frozen"],
+        vec!["ci", "--registry-fixture", "registry.json"],
+        vec!["ci", "--offline", "--registry-fixture", "registry.json"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .args(flags)
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for hook in ["preinstall", "install", "postinstall", "prepare"] {
+            assert!(
+                stderr.contains(&format!(
+                    "skipped dependency lifecycle hook {hook} for native-demo@1.0.0"
+                )),
+                "{stderr}"
+            );
+        }
+        assert!(!project.path().join("ROOT_SCRIPT_RAN").exists());
+        assert!(!project.path().join("SHOULD_NOT_EXIST").exists());
+        assert!(
+            !project
+                .path()
+                .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+                .exists()
+        );
+    }
+    project
+        .write(
+            "tapid.lifecycle.toml",
+            format!(
+                r#"schema = 1
+[[approvals]]
+package = "native-demo"
+version = "1.0.0"
+system-toolchain = true
+archive-digest = "sha512-{}"
+hook = "install"
+script-digest = "sha256-{}"
+read = ["."]
+write = ["."]
+network = false
+environment = {{}}
+timeout-seconds = 5
+max-output-bytes = 1024
+max-processes = 32
+max-memory-bytes = 134217728
+tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
+"#,
+                "A".repeat(86) + "==",
+                "0".repeat(64),
+                serde_json::to_string(&project.path().join("unused-sh").to_str().unwrap()).unwrap(),
+                "0".repeat(64)
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let before = fs::read(project.path().join("tapid.lock")).unwrap();
+    for args in [
+        vec!["install", "--offline", "--frozen"],
+        vec!["ci", "--registry-fixture", "registry.json"],
+        vec!["ci", "--offline", "--registry-fixture", "registry.json"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .args(args)
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "mismatched lifecycle approval must reject replay"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("does not match version/archive"));
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+    }
+}
+
+#[test]
 fn ci_replaces_managed_modules_without_changing_project_files_or_running_scripts() {
     let project = tapid_test_support::TempProject::new("ci-empty").unwrap();
     let dir = project.path().to_path_buf();
@@ -5550,4 +5698,224 @@ fn lifecycle_workspace_symlink_escape_preserves_external_project() {
         );
         assert!(!external.path().join("member/node_modules").exists());
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn approved_dependency_lifecycle_builds_native_output_and_replays_exactly() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("lifecycle-native").unwrap();
+    let home = tapid_test_support::TempHome::new("lifecycle-native").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let archive = "H4sIAAAAAAAA/+3UXUvDMBQGYK/9FSGCbcGlqZsTVATRCd6J26UgNT3OaJfUJJ3K2H+3+0BhCN7MD/B9bk57QjlJ4G2Vq8d8SGm1qOLBW7OxZrLR7XTmtbFaZbu9//4872dZt51tMLnujXym9iF3zfifmPUHTbjJR8QPWFODHlOroJHlO4yPyXltzWwlE1LIWc8rp6vgm96Ea9NcXFnOv7QFsRaxa67v4spZRd4LMmMxOLm8OLsZ9PqDm37v9Ko3SN5XX3SIO7vJoaOnWjuKozsfJeLZ6UDnuqT+q1FxNCRDLg9UiPASop2P9yi55mx7m6W1d+mtNulQKXZPZWmFYi3LFmfh0+lvX++ft8x9ury8b5nxVf4zubeSf9mVbeT/J2xpo8q6ye+RD4W24v54U5vARrk28djqIplUdfDx8u/AlB1VTTwLPktuqJ1h8nC6+duHAAAAAAAAAAAAAAAAAAAAAPjH3gAN/fj4ACgAAA==";
+    // Exact fixture archive and script hashes are approvals, not package-name trust.
+    let bytes = STANDARD.decode(archive).unwrap();
+    let script = r#"node -e "if(process.env.TAPID_TEST_SECRET)process.exit(42);require('fs').writeFileSync('generated.txt','generated')" && /usr/bin/gcc hello.c -o native"#;
+    let sh = fs::canonicalize("/bin/sh").unwrap();
+    let node = fs::canonicalize("/usr/bin/node").unwrap();
+    let policy = format!(
+        r#"schema = 1
+[[approvals]]
+package = "native-demo"
+version = "1.0.0"
+archive-digest = "sha512-{}"
+hook = "install"
+script-digest = "sha256-{:x}"
+system-toolchain = true
+process-memory-stats = true
+read = ["."]
+write = ["."]
+network = false
+environment = {{ TMPDIR = "." }}
+timeout-seconds = 20
+max-output-bytes = 8192
+max-processes = 64
+max-memory-bytes = 536870912
+tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}", digest="sha256-{:x}"}}]
+"#,
+        STANDARD.encode(Sha512::digest(&bytes)),
+        Sha256::digest(script.as_bytes()),
+        sh.display(),
+        Sha256::digest(fs::read(&sh).unwrap()),
+        node.display(),
+        Sha256::digest(fs::read(&node).unwrap())
+    );
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    project.write("registry.json", &serde_json::to_vec(&serde_json::json!({"packages":[{"registry":"https://registry.npmjs.org","name":"native-demo","version":"1.0.0","integrity":format!("sha512-{}", STANDARD.encode(Sha512::digest(&bytes))),"artifact":format!("base64:{archive}")}]})).unwrap()).unwrap();
+    let install = |flags: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .arg("install")
+            .args(flags)
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .env("TAPID_TEST_SECRET", "must-not-inherit")
+            .output()
+            .unwrap()
+    };
+    let first = install(&["--registry-fixture", "registry.json"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let package = project.path().join("node_modules/native-demo");
+    assert_eq!(
+        fs::read(package.join("generated.txt")).unwrap(),
+        b"generated"
+    );
+    let native = Command::new(package.join("native")).output().unwrap();
+    assert!(native.status.success());
+    assert_eq!(native.stdout, b"native compiled\n");
+    let lock_bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&lock_bytes).unwrap()["lockfileVersion"],
+        9
+    );
+    let verified = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args(["lock", "verify"])
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    for flags in [
+        vec!["--registry-fixture", "registry.json"],
+        vec!["--offline", "--registry-fixture", "registry.json"],
+    ] {
+        let replay = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .arg("ci")
+            .args(flags)
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .output()
+            .unwrap();
+        assert!(
+            replay.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes
+        );
+        assert_eq!(
+            fs::read(package.join("generated.txt")).unwrap(),
+            b"generated"
+        );
+        assert!(
+            fs::read_dir(home.path().join("store/.staging"))
+                .unwrap()
+                .all(|entry| { !entry.unwrap().path().join("tree").exists() }),
+            "ci must release private replay snapshots"
+        );
+    }
+    let lock = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
+    let source = lock.packages().values().next().unwrap();
+    assert_ne!(source.tree_digest(), source.install_tree_digest());
+    let source_tree = tapid_store::Store::new(home.path().join("store"))
+        .verified_tree_path(&source.tree_digest().parse().unwrap())
+        .unwrap();
+    assert!(!source_tree.join("package/generated.txt").exists());
+    let mut forged: serde_json::Value = serde_json::from_slice(&lock_bytes).unwrap();
+    for package in forged["packages"].as_object_mut().unwrap().values_mut() {
+        package["derivedHooks"][0]["attestation"] =
+            format!("hmac-sha256-{}", "0".repeat(64)).into();
+    }
+    let forged_bytes = serde_json::to_vec(&forged).unwrap();
+    project.write("tapid.lock", &forged_bytes).unwrap();
+    let rejected = install(&["--offline", "--frozen"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("missing or mismatched verified lifecycle output")
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        forged_bytes
+    );
+    assert_eq!(
+        fs::read(package.join("generated.txt")).unwrap(),
+        b"generated"
+    );
+    project.write("tapid.lock", &lock_bytes).unwrap();
+    let replay = install(&["--offline", "--frozen"]);
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_bytes
+    );
+    assert_eq!(
+        fs::read(package.join("generated.txt")).unwrap(),
+        b"generated"
+    );
+    project
+        .write(
+            "tapid.lifecycle.toml",
+            format!("{policy}\n# changed policy\n").as_bytes(),
+        )
+        .unwrap();
+    let rejected = install(&["--offline", "--frozen"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("missing or mismatched verified lifecycle output")
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_bytes
+    );
+    assert_eq!(
+        fs::read(package.join("generated.txt")).unwrap(),
+        b"generated"
+    );
+    // A changed recipe whose hook fails must leave the active
+    // generated package and both source and output store entries unchanged.
+    project
+        .write(
+            "tapid.lifecycle.toml",
+            policy.replace("write = [\".\"]", "write = []").as_bytes(),
+        )
+        .unwrap();
+    let failed = install(&["--registry-fixture", "registry.json"]);
+    assert!(
+        !failed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&failed.stderr)
+            .contains("dependency lifecycle hook install failed")
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_bytes
+    );
+    assert_eq!(
+        fs::read(package.join("generated.txt")).unwrap(),
+        b"generated"
+    );
+    assert!(
+        Command::new(package.join("native"))
+            .status()
+            .unwrap()
+            .success()
+    );
 }

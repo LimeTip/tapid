@@ -2,6 +2,9 @@
 
 #![deny(unsafe_code)]
 
+mod tree_validation;
+pub use tree_validation::validate_tree;
+
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
@@ -250,16 +253,47 @@ pub fn canonical_tree_digest(root: &Path) -> io::Result<String> {
         if !manifest.is_empty() {
             manifest.push('\n');
         }
-        files.push((EXECUTABLE_MANIFEST.to_owned(), 3, manifest.into_bytes()));
+        files.push((
+            EXECUTABLE_MANIFEST.to_owned(),
+            3,
+            TreePayload::Bytes(manifest.into_bytes()),
+        ));
     }
-    files.sort();
+    files.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
     let mut h = Sha256::new();
     for (path, kind, data) in files {
         h.update((path.len() as u64).to_be_bytes());
         h.update(path.as_bytes());
         h.update([kind]);
-        h.update((data.len() as u64).to_be_bytes());
-        h.update(data);
+        match data {
+            TreePayload::Bytes(bytes) => {
+                h.update((bytes.len() as u64).to_be_bytes());
+                h.update(bytes);
+            }
+            TreePayload::File(path, length) => {
+                h.update(length.to_be_bytes());
+                let mut file = fs::File::open(path)?;
+                let mut remaining = length;
+                let mut buffer = [0u8; 65536];
+                while remaining != 0 {
+                    let count = file.read(&mut buffer[..remaining.min(65536) as usize])?;
+                    if count == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "tree file changed during hashing",
+                        ));
+                    }
+                    h.update(&buffer[..count]);
+                    remaining -= count as u64;
+                }
+                if file.read(&mut buffer[..1])? != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "tree file grew during hashing",
+                    ));
+                }
+            }
+        }
     }
     Ok(format!("sha256-{}", hex::encode(h.finalize())))
 }
@@ -315,11 +349,16 @@ fn read_executable_manifest(root: &Path) -> io::Result<Option<BTreeSet<String>>>
     Ok(Some(paths))
 }
 
+enum TreePayload {
+    Bytes(Vec<u8>),
+    File(std::path::PathBuf, u64),
+}
+
 fn collect_tree(
     root: &Path,
     current: &Path,
     executable_paths: Option<&BTreeSet<String>>,
-    out: &mut Vec<(String, u8, Vec<u8>)>,
+    out: &mut Vec<(String, u8, TreePayload)>,
 ) -> io::Result<()> {
     for item in fs::read_dir(current)? {
         let item = item?;
@@ -340,7 +379,7 @@ fn collect_tree(
             ));
         }
         if m.is_dir() {
-            out.push((rel.clone(), 1, Vec::new()));
+            out.push((rel.clone(), 1, TreePayload::Bytes(Vec::new())));
             collect_tree(root, &p, executable_paths, out)?;
         } else if m.is_file() {
             let kind = executable_paths.map_or_else(
@@ -354,7 +393,7 @@ fn collect_tree(
                     "file executable mode differs from the canonical manifest",
                 ));
             }
-            out.push((rel, kind, fs::read(&p)?));
+            out.push((rel, kind, TreePayload::File(p, m.len())));
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
