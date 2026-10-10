@@ -78,14 +78,18 @@ The release pull request must:
 - update only changed supporting-crate versions and affected dependency requirements;
 - regenerate `Cargo.lock` through Cargo;
 - add `docs/releases/<version>.md`;
+- review and add the exact intended tag to both upgrade expectations and the self-upgrade expected-release list in `docs/examples/contracts.json`;
 - avoid hardcoding the version in reusable smoke or installer automation;
 - pass the complete required check set and automated review on its final head;
 - have every actionable review conversation answered and resolved.
 
-Run the release contract tests before declaring the pull request ready:
+Run the release contract tests before declaring the pull request ready. The suite
+checks that the release intent has reviewed published documentation expectations.
+Preflight repeats that check on the exact selected source before tag creation or
+release promotion. Unknown versions continue to fail closed.
 
 ```sh
-node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/installers_test.ts tools/release/publish_test.ts
+node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/*_test.ts tests/doc_examples_test.ts
 ```
 
 Before merge, record the exact pull-request head and base. After merge, read back the concrete merge commit and verify that it is the expected protected `main` tip. Wait for post-merge CI and security checks on that exact commit.
