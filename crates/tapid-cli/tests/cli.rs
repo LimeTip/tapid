@@ -178,6 +178,147 @@ fn required_node_assertion_probe_preserves_spawned_output() {
 }
 
 #[test]
+fn install_output_summarizes_changes_and_replay() {
+    let project = tapid_test_support::TempProject::new("install-output").unwrap();
+    project
+        .write("package.json", br#"{"name":"output","version":"1.0.0"}"#)
+        .unwrap();
+    let output = run(project.path(), &["install"]);
+    assert!(output.status.success(), "{:?}", output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Installed 0 package(s) in "), "{stdout}");
+    assert!(
+        stdout.contains("Changed: node_modules, tapid.lock"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("package.json"), "{stdout}");
+    assert!(
+        stdout.contains("Lock selections: 0 added, 0 changed, 0 reused, 0 removed"),
+        "{stdout}"
+    );
+    assert!(output.stderr.is_empty(), "{:?}", output);
+    let output = run(project.path(), &["install", "--offline", "--frozen"]);
+    assert!(output.status.success(), "{:?}", output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Replayed lockfile: 0 package(s) in "),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Changed: node_modules"), "{stdout}");
+    assert!(!stdout.contains("tapid.lock"), "{stdout}");
+}
+
+#[test]
+fn install_output_counts_exact_lock_selections() {
+    let project = tapid_test_support::TempProject::new("install-output-counts").unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let manifest = br#"{"name":"output","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#;
+    project.write("package.json", manifest).unwrap();
+    let args = ["install", "--registry-fixture", "registry.json"];
+    for expected in [
+        "Lock selections: 1 added, 0 changed, 0 reused, 0 removed",
+        "Lock selections: 0 added, 0 changed, 1 reused, 0 removed",
+    ] {
+        let output = run(project.path(), &args);
+        assert!(output.status.success(), "{:?}", output);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(expected),
+            "{:?}",
+            output
+        );
+        assert!(output.stderr.is_empty(), "{:?}", output);
+    }
+    let output = run(project.path(), &["install", "--offline", "--frozen"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Lock selections: 0 added, 0 changed, 1 reused, 0 removed")
+    );
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("tapid.lock")).unwrap()).unwrap();
+    for package in lock["packages"].as_object_mut().unwrap().values_mut() {
+        package["artifactUrl"] = serde_json::json!("https://registry.npmjs.org/h3/-/h3-1.0.0.tgz");
+    }
+    project
+        .write("tapid.lock", &serde_json::to_vec(&lock).unwrap())
+        .unwrap();
+    let output = run(project.path(), &args);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Lock selections: 0 added, 0 changed, 1 reused, 0 removed"),
+        "{:?}",
+        output
+    );
+    project
+        .write(
+            "package.json",
+            br#"{"name":"output","version":"1.0.0","dependencies":{"h3":"2.0.0"}}"#,
+        )
+        .unwrap();
+    let output = run(project.path(), &args);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Lock selections: 1 added, 0 changed, 0 reused, 1 removed"),
+        "{:?}",
+        output
+    );
+}
+
+#[test]
+fn install_output_reports_registry_failure_without_success_summary() {
+    let project = tapid_test_support::TempProject::new("install-output-registry").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"output","version":"1.0.0","dependencies":{"@acme/private":"1.0.0"}}"#,
+        )
+        .unwrap();
+    project.write("tapid.toml", b"[registries.'@acme']\nurl='https://packages.example'\ntoken-env='TAPID_INSTALL_OUTPUT_MISSING'\n").unwrap();
+    let mut command = isolated_command(project.path(), &["install"], true);
+    command.env_remove("TAPID_INSTALL_OUTPUT_MISSING");
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Install failed during registry access."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("REGISTRY_AUTH_MISSING"), "{stderr}");
+    assert!(
+        stderr.contains("Check the credentials configured"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("TAPID_INSTALL_OUTPUT_MISSING"), "{stderr}");
+}
+
+#[test]
+fn install_output_explains_missing_lock_without_claiming_changes() {
+    let project = tapid_test_support::TempProject::new("install-output-failure").unwrap();
+    project
+        .write("package.json", br#"{"name":"output","version":"1.0.0"}"#)
+        .unwrap();
+    let output = run(project.path(), &["install", "--offline", "--frozen"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("diagnostic: LOCKFILE_MISSING"), "{stderr}");
+    assert!(stderr.contains("Project files unchanged."), "{stderr}");
+    assert!(
+        stderr.contains("Install failed during lockfile validation."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Run 'tapid install' online to create tapid.lock."),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn install_accepts_a_relative_project_directory() {
     let cwd = temp_dir("relative-project-dir");
     let project = cwd.join("project");
@@ -3952,6 +4093,12 @@ fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
         assert!(!output.status.success(), "{failure} unexpectedly succeeded");
         let stderr = String::from_utf8_lossy(&output.stderr);
         if failure == "integrity" {
+            assert!(output.stdout.is_empty());
+            assert!(
+                stderr.contains("Install failed during artifact verification."),
+                "{stderr}"
+            );
+            assert!(stderr.contains("plugin"), "{stderr}");
             assert!(stderr.contains("integrity"), "unexpected error: {stderr}");
         } else {
             assert!(

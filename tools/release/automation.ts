@@ -76,6 +76,23 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+export function checkReviewedContracts(intentInput: unknown, contractsInput: unknown): void {
+  const intent = validateReleaseIntent(intentInput);
+  const contracts = record(contractsInput);
+  const tag = `v${intent.version}`;
+  if (contracts.schema_version !== 1 || !Array.isArray(contracts.examples) || !Array.isArray(contracts.capabilities)) throw Error("invalid documentation contracts");
+  for (const id of ["upgrade", "upgrade-help"]) {
+    const matches = contracts.examples.filter(example => example?.id === id);
+    if (matches.length !== 1) throw Error(`missing or duplicate documentation example: ${id}`);
+    const expectations = matches[0].release_expectations;
+    if (!expectations || !Object.hasOwn(expectations, tag)) throw Error(`release capability expectation needs review: ${id} ${tag}`);
+    const outcome = record(expectations[tag]);
+    if (outcome.exit_code !== 0 || Object.hasOwn(outcome, "skip")) throw Error(`release capability must support ${id} ${tag}`);
+  }
+  const capabilities = contracts.capabilities.filter(capability => capability?.id === "self-upgrade");
+  if (capabilities.length !== 1 || !Array.isArray(capabilities[0].expected_releases) || !capabilities[0].expected_releases.includes(tag)) throw Error(`self-upgrade expectation needs review: ${tag}`);
+}
+
 export function checkApprovedPlan(intentInput: unknown, planInput: unknown, metadataInput: unknown): void {
   const intent = validateReleaseIntent(intentInput);
   const plan = record(planInput), metadata = record(metadataInput);
@@ -111,5 +128,9 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
     const evidence = await Promise.all(args.map(async (path) => JSON.parse(await readFile(path, "utf8"))));
     checkApprovedPlan(...evidence as [unknown, unknown, unknown]);
     console.log("Publication plan matches the approved candidate and exact source metadata");
-  } else throw Error("usage: automation.ts wait-ci SHA | check-plan INTENT PLAN METADATA");
+  } else if (command === "check-contracts" && args.length === 2) {
+    const evidence = await Promise.all(args.map(async path => JSON.parse(await readFile(path, "utf8"))));
+    checkReviewedContracts(evidence[0], evidence[1]);
+    console.log("Published documentation contracts cover the exact release intent");
+  } else throw Error("usage: automation.ts wait-ci SHA | check-plan INTENT PLAN METADATA | check-contracts INTENT CONTRACTS");
 }

@@ -53,6 +53,7 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
 
 /// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
 pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
+    let mut reporter = crate::output::install::Reporter::new(json);
     let overrides = crate::application::ExecutionOverrides {
         allow_unapproved: args.allow_unapproved_dependency_scripts,
         without_containment: args.unsafe_no_dependency_sandbox,
@@ -67,11 +68,12 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
                 selection.manifest_path
             }
             Err(error) => {
-                return crate::output::json::failure_or_human(
-                    &OperationFailure::unchanged(&args.project_dir, error),
-                    "install",
-                    json,
-                );
+                let failure = OperationFailure::unchanged(&args.project_dir, error);
+                if json {
+                    return crate::output::json::failure_or_human(&failure, "install", true);
+                }
+                reporter.failure(&failure);
+                return ExitCode::from(1);
             }
         }
     } else {
@@ -99,21 +101,20 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
         args.registry_fixture.as_deref(),
         args.allow_unverified_registry_artifacts,
         overrides,
-        |event| crate::output::report_progress(event, json),
+        |event| reporter.progress(event),
     );
     match result {
         Ok(report) => {
             if json {
                 return crate::output::json::installed(&report, "install");
             }
-            crate::output::report_warnings(&report.outcome.warnings);
-            if report.replayed {
-                println!("Replayed lockfile: {} package(s)", report.package_count);
-            } else {
-                println!("Installed {} package(s)", report.package_count);
-            }
+            reporter.summary(&report);
             ExitCode::SUCCESS
         }
-        Err(error) => crate::output::json::failure_or_human(&error, "install", json),
+        Err(error) if json => crate::output::json::failure_or_human(&error, "install", true),
+        Err(error) => {
+            reporter.failure(&error);
+            ExitCode::from(1)
+        }
     }
 }

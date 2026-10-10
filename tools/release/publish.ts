@@ -51,11 +51,16 @@ export type PublicationAdapter = {
   waitForPublished(pkg: Package): Promise<void>;
 };
 
-/** Returns local non-dev dependencies that must be published before this package. */
-function internalDependencies(pkg: MetadataPackage): string[] {
+/** Returns local publication prerequisites, including publishable development dependencies. */
+function internalDependencies(pkg: MetadataPackage, packages: ReadonlyMap<string, MetadataPackage>): string[] {
   return (pkg.dependencies ?? []).flatMap((dependency) => {
     if (typeof dependency === "string") return [dependency];
-    return dependency.source === null && dependency.kind !== "dev" ? [dependency.name] : [];
+    if (dependency.source !== null) return [];
+    const local = packages.get(dependency.name);
+    // Private test fixtures are not publication roots. Published test crates,
+    // however, must be available when Cargo packages their consumers.
+    if (dependency.kind === "dev" && local && !publishableToCratesIo(local)) return [];
+    return [dependency.name];
   }).sort();
 }
 
@@ -104,7 +109,7 @@ export function publicationPlan(metadata: CargoMetadata, published: Set<string>)
       throw new Error(`workspace dependency ${name} is not publishable to crates.io`);
     }
     visiting.add(name);
-    for (const dependency of internalDependencies(pkg)) visit(dependency);
+    for (const dependency of internalDependencies(pkg, packages)) visit(dependency);
     visiting.delete(name);
     visited.add(name);
     ordered.push({ name: pkg.name, version: pkg.version });
@@ -187,10 +192,11 @@ export async function planPublication(metadata: CargoMetadata, isInRegistry: Reg
     catch (error) { blockers.push(error instanceof Error ? error.message : String(error)); }
   }
   const packageNames = new Set(packages.map((pkg) => pkg.name));
+  const metadataPackages = new Map(metadata.packages.map(pkg => [pkg.name, pkg]));
   const dependentBumps: PublicationPlan["dependentBumps"] = [];
   for (const pkg of metadata.packages) {
-    for (const dependency of internalDependencies(pkg)) {
-      const local = metadata.packages.find((candidate) => candidate.name === dependency);
+    for (const dependency of internalDependencies(pkg, metadataPackages)) {
+      const local = metadataPackages.get(dependency);
       if (local && packageNames.has(dependency) && packageNames.has(pkg.name)) {
         dependentBumps.push({ dependent: pkg.name, dependency, requiredVersion: local.version });
       }

@@ -81,6 +81,7 @@ jobs:
             exit 1
           }
           test -s "$RUNNER_TEMP/tapid-release-source/$(jq -r .notes "$INTENT")"
+          node --experimental-strip-types tools/release/automation.ts check-contracts "$INTENT" "$RUNNER_TEMP/tapid-release-source/docs/examples/contracts.json"
           printf 'commit=%s\ntag=%s\nversion=%s\n' "$SOURCE_SHA" "$TAG" "$VERSION" >> "$GITHUB_OUTPUT"
       - name: Wait for successful CI on exact main commit
         env:

@@ -1,9 +1,9 @@
 {
   "schema": "tapid-release-intent-v1",
-  "version": "0.0.12",
-  "baseline": "v0.0.11",
-  "prepared_from": "58cd976ec7234e0ba0c2120a3a354a854a2826b2",
-  "notes": "docs/releases/0.0.12.md",
+  "version": "0.0.13",
+  "baseline": "v0.0.12",
+  "prepared_from": "2890048006ebbf092dd0d0419be9f316090ab59b",
+  "notes": "docs/releases/0.0.13.md",
   "packages": [
     {
       "name": "tapid-archive",
@@ -30,8 +30,16 @@
       "version": "0.0.7"
     },
     {
+      "name": "tapid-registry-client",
+      "version": "0.0.7"
+    },
+    {
+      "name": "tapid-resolver",
+      "version": "0.0.8"
+    },
+    {
       "name": "tapid-lockfile",
-      "version": "0.0.11"
+      "version": "0.0.12"
     },
     {
       "name": "tapid-policy",
@@ -46,16 +54,8 @@
       "version": "0.0.5"
     },
     {
-      "name": "tapid-registry-client",
-      "version": "0.0.7"
-    },
-    {
       "name": "tapid-release-client",
       "version": "0.0.5"
-    },
-    {
-      "name": "tapid-resolver",
-      "version": "0.0.7"
     },
     {
       "name": "tapid-runner",
@@ -63,7 +63,7 @@
     },
     {
       "name": "tapid-store",
-      "version": "0.0.7"
+      "version": "0.0.8"
     },
     {
       "name": "tapid-test-support",
@@ -75,7 +75,7 @@
     },
     {
       "name": "tapid",
-      "version": "0.0.12"
+      "version": "0.0.13"
     }
   ]
 }

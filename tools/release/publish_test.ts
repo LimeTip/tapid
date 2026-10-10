@@ -133,7 +133,7 @@ test("publication plan includes packages explicitly permitted for crates.io", ()
   ]);
 });
 
-test("publication plan includes local build dependencies and excludes dev and registry dependencies", () => {
+test("publication plan includes local build dependencies and excludes unpublishable dev and registry dependencies", () => {
   const objectMetadata = {
     packages: [
       {
@@ -433,4 +433,37 @@ test("publication read-back waits until the exact version is visible", async () 
   );
   assertEquals(checks, 3);
   assertEquals(delays, [5_000, 10_000]);
+});
+
+
+test('publication orders publishable development dependencies before their consumers', () => {
+  const packages = [
+    { name: 'tapid-store', version: '1.0.0', dependencies: [{ name: 'tapid-test-support', source: null, kind: 'dev' }] },
+    { name: 'tapid-test-support', version: '1.0.0', dependencies: [] },
+    { name: 'tapid', version: '1.0.0', dependencies: ['tapid-store'] },
+  ];
+  assertEquals(publicationPlan({ packages }, new Set()), [
+    { name: 'tapid-test-support', version: '1.0.0' },
+    { name: 'tapid-store', version: '1.0.0' },
+    { name: 'tapid', version: '1.0.0' },
+  ]);
+  assertEquals(publicationPlan({ packages }, new Set(['tapid-test-support@1.0.0'])), [
+    { name: 'tapid-store', version: '1.0.0' },
+    { name: 'tapid', version: '1.0.0' },
+  ]);
+});
+
+test('publication rejects missing and cyclic publishable development dependencies', () => {
+  const consumer = { name: 'tapid', version: '1.0.0', dependencies: [{ name: 'tapid-test-support', source: null, kind: 'dev' }] };
+  assertThrows(() => publicationPlan({ packages: [consumer] }, new Set()), /missing publishable package tapid-test-support/);
+  assertThrows(() => publicationPlan({ packages: [consumer, { name: 'tapid-test-support', version: '1.0.0', dependencies: ['tapid'] }] }, new Set()), /dependency cycle/);
+});
+
+test('publication planning reports a development dependency bump when both versions are missing', async () => {
+  const plan = await planPublication({ packages: [
+    { name: 'tapid', version: '1.0.0', dependencies: [{ name: 'tapid-test-support', source: null, kind: 'dev' }] },
+    { name: 'tapid-test-support', version: '1.0.0', dependencies: [] },
+  ] }, async () => false);
+  assertEquals(plan.blockers, []);
+  assertEquals(plan.dependentBumps, [{ dependent: 'tapid', dependency: 'tapid-test-support', requiredVersion: '1.0.0' }]);
 });
