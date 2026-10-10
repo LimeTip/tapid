@@ -396,3 +396,27 @@ test('public installer discovery runs independently and requires its downloaded 
     assert(section.indexOf(publicInstall) < section.indexOf(discovery));
   }
 });
+
+test('release approval still runs when recovery skips the build job', async () => {
+  const publication = await workflow('release-publication');
+  const assemble = job(publication, 'assemble');
+  const signing = job(publication, 'draft-release');
+  assert(assemble.includes("needs.build.result == 'success' || needs.build.result == 'skipped'"));
+  assert.match(signing, /if: \$\{\{ !cancelled\(\) && needs\.assemble\.result == 'success' \}\}/);
+  assert.match(signing, /environment: stable-release/);
+});
+
+test('previous-release upgrade uses that release installer beneath the current rollback floor', async () => {
+  const smoke = await workflow('release-public-smoke');
+  const unix = job(smoke, 'unix');
+  const windows = job(smoke, 'windows');
+  const unixUpgrade = step(unix, 'Check previous-version upgrade and repeat upgrade through the public service');
+  const windowsUpgrade = step(windows, 'Check previous-version upgrade and repeat upgrade through the public service');
+  assert(unixUpgrade.includes('https://github.com/$GITHUB_REPOSITORY/releases/download/$PREVIOUS_TAG/install.sh'));
+  assert(unixUpgrade.includes('previous_installer="$RUNNER_TEMP/previous-install.sh"'));
+  assert(unixUpgrade.includes('sh "$previous_installer" --version "$PREVIOUS_TAG"'));
+  assert(!unixUpgrade.includes('sh "$RUNNER_TEMP/public-install.sh" --version "$PREVIOUS_TAG"'));
+  assert(windowsUpgrade.includes('https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:PREVIOUS_TAG/install.ps1'));
+  assert(windowsUpgrade.includes('& $previousInstaller -Version $env:PREVIOUS_TAG'));
+  assert(!windowsUpgrade.includes('& $installer -Version $env:PREVIOUS_TAG'));
+});

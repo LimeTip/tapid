@@ -285,8 +285,11 @@ jobs:
           binary="$RUNNER_TEMP/tapid-latest/tapid"
           expected_digest="$(shasum -a 256 "$binary" | cut -d ' ' -f 1)"
           if [ -n "$PREVIOUS_TAG" ]; then
+            previous_installer="$RUNNER_TEMP/previous-install.sh"
+            curl --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$PREVIOUS_TAG/install.sh" -o "$previous_installer"
             env -i HOME="$RUNNER_TEMP/tapid-home" PATH=/usr/bin:/bin SHELL=/bin/sh \
-              sh "$RUNNER_TEMP/public-install.sh" --version "$PREVIOUS_TAG" --install-dir "$RUNNER_TEMP/tapid-previous"
+              sh "$previous_installer" --version "$PREVIOUS_TAG" --install-dir "$RUNNER_TEMP/tapid-previous"
             binary="$RUNNER_TEMP/tapid-previous/tapid"
             test "$("$binary" --version)" = "tapid ${PREVIOUS_TAG#v}"
             "$binary" upgrade 2>&1 | tee "$RUNNER_TEMP/public-upgrade.txt"
@@ -470,9 +473,12 @@ jobs:
           $binary = Join-Path $env:RUNNER_TEMP 'tapid-latest/tapid.exe'
           $expectedDigest = (Get-FileHash $binary).Hash
           if ($env:PREVIOUS_TAG) {
-            $installer = Join-Path $env:RUNNER_TEMP 'public-install.ps1'
+            $previousInstaller = Join-Path $env:RUNNER_TEMP 'previous-install.ps1'
+            $previousInstallerUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:PREVIOUS_TAG/install.ps1"
+            curl.exe --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 --max-filesize 262144 -fsSL $previousInstallerUrl --output $previousInstaller
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $installDir = Join-Path $env:RUNNER_TEMP 'tapid-previous'
-            & $installer -Version $env:PREVIOUS_TAG -InstallDir $installDir
+            & $previousInstaller -Version $env:PREVIOUS_TAG -InstallDir $installDir
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $binary = Join-Path $installDir 'tapid.exe'
             if ((& $binary --version) -cne ('tapid ' + $env:PREVIOUS_TAG.Substring(1))) { throw 'Unexpected previous version' }
