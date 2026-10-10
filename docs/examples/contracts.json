@@ -58,9 +58,9 @@
       "source_status": "implemented",
       "first_supported_release": "v0.0.10",
       "expected_releases": ["v0.0.10", "v0.0.11", "v0.0.12", "v0.0.13"],
-      "verified_releases": [],
+      "verified_releases": ["v0.0.13"],
       "examples": ["upgrade", "upgrade-help"],
-      "boundaries": ["v0.0.9 has no upgrade subcommand; reinstall via the documented installer.", "v0.0.10, v0.0.11, v0.0.12 and v0.0.13 have reviewed upgrade expectations; published verification remains pending and unknown source tags require review.", "Public smoke separately checks a previous supported release upgrading to latest and a repeat upgrade on Unix and Windows; v0.0.10 cannot assert truthful repeat output.", "Checksum-only fallback must not be described as signature verification."]
+      "boundaries": ["v0.0.9 has no upgrade subcommand; reinstall via the documented installer.", "v0.0.10, v0.0.11, v0.0.12 and v0.0.13 have reviewed upgrade expectations. Published v0.0.13 verification passed in release run 38081911700, attempt 2; earlier source releases remain unverified and unknown source tags require review.", "Public smoke separately checks a previous supported release upgrading to latest and a repeat upgrade on Unix and Windows; v0.0.10 cannot assert truthful repeat output.", "Checksum-only fallback must not be described as signature verification."]
     }
   ]
 }
