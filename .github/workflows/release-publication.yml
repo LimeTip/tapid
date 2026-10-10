@@ -203,6 +203,7 @@ jobs:
   draft-release:
     environment: stable-release
     needs: assemble
+    if: ${{ !cancelled() && needs.assemble.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
