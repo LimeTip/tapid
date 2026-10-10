@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use serde_json::json;
 use tapid_archive::{ArchiveEntry, ValidationLimits, validate_entries};
-use tapid_core::{PackageInstanceId, PeerContext, PlatformContext};
+use tapid_core::{PeerContext, PlatformContext};
 use tapid_linker::{
     ManagedRoot, MaterializationInput, PackageInstance, VerifiedTreeReference, plan_materialization,
 };
@@ -13,7 +13,9 @@ use tapid_publish::{PackageSource, Publisher};
 use tapid_registry_client::{RawRegistrySnapshot, RegistrySnapshot};
 use tapid_resolver::{Dependency, Requirement, ResolutionOptions, resolve};
 use tapid_runner::{Approval, RunnerRequest, ValidationError, plan as runner_plan};
-use tapid_signatures::{KeyRing, SIGNATURE_ALGORITHM, TrustEnvelope, TrustedKey, VerificationError};
+use tapid_signatures::{
+    KeyRing, SIGNATURE_ALGORITHM, TrustEnvelope, TrustedKey, VerificationError,
+};
 use tapid_store::{IngestResult, Store};
 use tapid_test_support::TempProject;
 
@@ -46,7 +48,7 @@ fn contracts_flow_from_runtime_fixture_to_deterministic_plan() {
     assert_eq!(manifest.scripts()["build"], "echo build");
 
     // Registry bytes are a fixture, then normalized into the typed snapshot.
-    let registry = "https://registry.example.test".parse().unwrap();
+    let registry: tapid_core::RegistryOrigin = "https://registry.example.test".parse().unwrap();
     let raw: RawRegistrySnapshot = serde_json::from_slice(
         br#"{"registry":"https://registry.example.test/","packages":[
           {"name":"demo-lib","version":"1.0.0"},
@@ -60,7 +62,7 @@ fn contracts_flow_from_runtime_fixture_to_deterministic_plan() {
     assert_eq!(snapshot.candidates(&"demo-lib".parse().unwrap()).len(), 3);
 
     let dependency = Dependency::new(
-        registry.clone(),
+        registry.clone().into(),
         "demo-lib".parse().unwrap(),
         Requirement::from_str(manifest.dependencies()["demo-lib"].as_str()).unwrap(),
     );
@@ -110,11 +112,7 @@ fn contracts_flow_from_runtime_fixture_to_deterministic_plan() {
     // Link planning consumes verified, absolute runtime paths and is deterministic.
     let selected = &resolution.selected[0];
     let instance = PackageInstance {
-        id: PackageInstanceId::new(
-            selected.registry.clone(),
-            selected.name.clone(),
-            selected.version.clone(),
-        ),
+        id: selected.clone(),
         peer_context: PeerContext::default(),
         platform_context: PlatformContext::new(Some("linux"), Some("x86_64"), Some("gnu")).unwrap(),
         tree: VerifiedTreeReference::new(
@@ -238,9 +236,9 @@ fn trusted_keyring_verifies_authenticated_envelope_context() {
     let envelope = TrustEnvelope::unsigned("audit", "sha256-artifact", json!({"ok": true}));
     let signed = envelope.sign("audit-key-1", &secret).unwrap();
     let public_key = [
-        0x66, 0xbe, 0x7e, 0x33, 0x2c, 0x7a, 0x45, 0x33, 0x32, 0xbd, 0x9d, 0x0a, 0x7f, 0x7d,
-        0xb0, 0x55, 0xf5, 0xc5, 0xef, 0x1a, 0x06, 0xad, 0xa6, 0x6d, 0x98, 0xb3, 0x9f, 0xb6,
-        0x81, 0x0c, 0x47, 0x3a,
+        0x66, 0xbe, 0x7e, 0x33, 0x2c, 0x7a, 0x45, 0x33, 0x32, 0xbd, 0x9d, 0x0a, 0x7f, 0x7d, 0xb0,
+        0x55, 0xf5, 0xc5, 0xef, 0x1a, 0x06, 0xad, 0xa6, 0x6d, 0x98, 0xb3, 0x9f, 0xb6, 0x81, 0x0c,
+        0x47, 0x3a,
     ];
     let mut keyring = KeyRing::new();
     keyring

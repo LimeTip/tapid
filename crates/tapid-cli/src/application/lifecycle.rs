@@ -137,7 +137,8 @@ pub(crate) fn plan_update(
                 continue;
             };
             declared = true;
-            let requirement = if latest {
+            let requirement = if latest && crate::online::copied_declaration(requirement)?.is_none()
+            {
                 let parsed = requirement.parse::<Requirement>().map_err(|error| {
                     OperationalError::from_source(ErrorKind::InvalidRequest, error)
                         .context(format!("invalid dependency '{name}'"))
@@ -261,6 +262,8 @@ struct Fixture {
 }
 #[derive(Debug, Deserialize)]
 struct FixturePackage {
+    #[serde(default)]
+    dist_tags: BTreeSet<String>,
     registry: String,
     name: String,
     version: String,
@@ -300,7 +303,7 @@ fn versions_from_fixture(
     path: &Path,
     origin: &RegistryOrigin,
     name: &PackageName,
-) -> Result<Vec<PackageVersion>, OperationalError> {
+) -> Result<Vec<(PackageVersion, BTreeSet<String>)>, OperationalError> {
     let fixture: Fixture = serde_json::from_str(&fs::read_to_string(path).map_err(|error| {
         OperationalError::from_source(ErrorKind::RegistryMetadata, error)
             .context("cannot read registry fixture")
@@ -319,6 +322,7 @@ fn versions_from_fixture(
             package
                 .version
                 .parse()
+                .map(|version| (version, package.dist_tags))
                 .map_err(|error: tapid_core::DomainError| {
                     OperationalError::from_source(ErrorKind::RegistryMetadata, error)
                 })
@@ -330,7 +334,7 @@ fn versions_from_registry(
     transport: &HttpsTransport,
     origin: &RegistryOrigin,
     name: &PackageName,
-) -> Result<Vec<PackageVersion>, OperationalError> {
+) -> Result<Vec<(PackageVersion, BTreeSet<String>)>, OperationalError> {
     let artifacts = if origin.to_string() == "https://jsr.io" {
         JsrRegistry::new(transport, origin.clone())
             .fetch(&name.to_string())
@@ -342,7 +346,7 @@ fn versions_from_registry(
     };
     Ok(artifacts
         .into_iter()
-        .map(|artifact| artifact.identity.version)
+        .map(|artifact| (artifact.identity.version, artifact.dist_tags))
         .collect())
 }
 
@@ -473,6 +477,38 @@ fn outdated_entries(
                 ),
             ));
         }
+        if crate::online::copied_declaration(&declared)
+            .map_err(|reason| {
+                OperationalError::new(
+                    ErrorKind::InvalidRequest,
+                    format!("dependency '{identity}': {reason}"),
+                )
+            })?
+            .is_some()
+        {
+            let pinned = lock
+                .root_bindings()
+                .get(&identity)
+                .and_then(|key| key.parse::<LockfilePackageKey>().ok())
+                .filter(|key| {
+                    crate::online::validate_copied_root_binding(
+                        &manifest,
+                        &identity,
+                        key.source.copied(),
+                    )
+                    .unwrap_or(false)
+                });
+            entries.push(OutdatedEntry {
+                identity,
+                kind: kind_name(kind).into(),
+                declared,
+                locked: pinned.map(|key| key.version.to_string()),
+                newest_compatible: None,
+                newest_available: None,
+                diagnostic: None,
+            });
+            continue;
+        }
         let (manifest_origin, local_name) = crate::online::dep_parts(&identity)?;
         let requirement = declared.parse::<Requirement>().ok();
         let package_name = requirement
@@ -520,11 +556,12 @@ fn outdated_entries(
         let (newest_compatible, newest_available, diagnostic) = match versions {
             Ok(mut versions) => {
                 versions.sort();
-                let available = versions.last().cloned();
+                let available = versions.last().map(|(version, _)| version.clone());
                 let compatible = requirement.as_ref().and_then(|requirement| {
                     versions
                         .iter()
-                        .filter(|version| requirement.matches(version))
+                        .filter(|(version, tags)| requirement.matches_tagged_version(version, tags))
+                        .map(|(version, _)| version)
                         .max()
                         .cloned()
                 });

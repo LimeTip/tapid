@@ -22,7 +22,6 @@ fn npm_aliases_validate_actual_names_and_ranges() {
     for spec in [
         "npm:",
         "npm:pkg@",
-        "npm:pkg@latest",
         "npm:../pkg@1",
         "npm:@scope@1",
         "npm:pkg@npm:other@1",
@@ -142,6 +141,7 @@ fn dep(registry: &str, name: &str, range: &str) -> Dependency {
 }
 fn package(name: &str, version: &str, dependencies: &[(&str, &str)]) -> PackageVersionMetadata {
     PackageVersionMetadata {
+        dist_tags: BTreeSet::new(),
         name: name.parse().unwrap(),
         version: version.parse().unwrap(),
         dependencies: dependencies
@@ -706,6 +706,7 @@ fn optional_peer_dependency_rejects_an_incompatible_direct_provider() {
 #[test]
 fn preserves_peer_requirements_separately_from_ordinary_dependencies() {
     let peer: PackageVersionMetadata = PackageVersionMetadata {
+        dist_tags: BTreeSet::new(),
         name: "plugin".parse().unwrap(),
         version: "1.0.0".parse().unwrap(),
         dependencies: BTreeMap::from([("runtime".parse().unwrap(), req("^1.0.0"))]),
@@ -724,6 +725,7 @@ fn preserves_peer_requirements_separately_from_ordinary_dependencies() {
 #[test]
 fn available_versions_use_semver_order_before_rendering() {
     let first = PackageVersionMetadata {
+        dist_tags: BTreeSet::new(),
         name: "pkg".parse().unwrap(),
         version: "10.0.0".parse().unwrap(),
         dependencies: BTreeMap::new(),
@@ -731,6 +733,7 @@ fn available_versions_use_semver_order_before_rendering() {
         optional_peer_dependencies: BTreeSet::new(),
     };
     let second = PackageVersionMetadata {
+        dist_tags: BTreeSet::new(),
         name: "pkg".parse().unwrap(),
         version: "2.0.0".parse().unwrap(),
         dependencies: BTreeMap::new(),
@@ -743,11 +746,12 @@ fn available_versions_use_semver_order_before_rendering() {
 
 #[test]
 fn missing_metadata_is_reported_as_a_sorted_frontier() {
-    let registry: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+    let registry: PackageSource = "https://registry.npmjs.org".parse().unwrap();
     let app: PackageName = "app".parse().unwrap();
     let metadata = RegistryMetadata::normalize(
         registry.clone(),
         vec![PackageVersionMetadata {
+            dist_tags: BTreeSet::new(),
             name: app.clone(),
             version: "1.0.0".parse().unwrap(),
             dependencies: BTreeMap::from([
@@ -1018,9 +1022,10 @@ fn unsupported_ranges_and_modes_fail_closed() {
 
 #[test]
 fn locked_preferences_preserve_transitives_but_never_override_ranges_or_origins() {
-    let registry: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
-    let other: RegistryOrigin = "https://other.example".parse().unwrap();
+    let registry: PackageSource = "https://registry.npmjs.org".parse().unwrap();
+    let other: PackageSource = "https://other.example".parse().unwrap();
     let package = |name: &str, version: &str, dependencies| PackageVersionMetadata {
+        dist_tags: BTreeSet::new(),
         name: name.parse().unwrap(),
         version: version.parse().unwrap(),
         dependencies,
@@ -1086,7 +1091,7 @@ fn locked_preferences_preserve_transitives_but_never_override_ranges_or_origins(
 
 #[test]
 fn root_preferences_do_not_cross_alias_target_changes() {
-    let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+    let origin: PackageSource = "https://registry.npmjs.org".parse().unwrap();
     let metadata = registry(
         origin.as_str(),
         vec![package("bar", "1.0.0", &[]), package("bar", "2.0.0", &[])],
@@ -1118,4 +1123,54 @@ fn root_preferences_do_not_cross_alias_target_changes() {
 
     assert_eq!(resolution.roots[0].name.as_str(), "bar");
     assert_eq!(resolution.roots[0].version.to_string(), "2.0.0");
+}
+
+#[test]
+fn dist_tags_parse_without_matching_unrelated_versions() {
+    for spec in ["latest", "next", "beta-2", "npm:pkg@next"] {
+        let requirement = req(spec);
+        assert!(!requirement.matches(&"1.0.0".parse().unwrap()), "{spec}");
+    }
+}
+
+#[test]
+fn dist_tags_select_exact_targets_and_fail_when_missing() {
+    let origin = "https://registry.npmjs.org";
+    let mut stable = package("pkg", "1.0.0", &[]);
+    stable.dist_tags.insert("latest".into());
+    let mut next = package("pkg", "2.0.0-beta.1", &[]);
+    next.dist_tags.insert("next".into());
+    let metadata = registry(origin, vec![stable, next, package("pkg", "9.0.0", &[])]);
+    for (spec, expected) in [("latest", "1.0.0"), ("npm:pkg@next", "2.0.0-beta.1")] {
+        let result = resolve_graph(
+            &[dep(origin, "pkg", spec)],
+            std::slice::from_ref(&metadata),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(result.roots[0].version.to_string(), expected);
+    }
+    assert!(matches!(
+        resolve_graph(
+            &[dep(origin, "pkg", "missing")],
+            &[metadata],
+            Default::default()
+        ),
+        Err(ResolveError::MissingCandidate { .. })
+    ));
+}
+
+#[test]
+fn dist_tags_reject_ambiguous_targets_in_normalized_metadata() {
+    let mut first = package("pkg", "1.0.0", &[]);
+    first.dist_tags.insert("latest".into());
+    let mut second = package("pkg", "2.0.0", &[]);
+    second.dist_tags.insert("latest".into());
+    assert!(matches!(
+        RegistryMetadata::normalize(
+            "https://registry.npmjs.org".parse().unwrap(),
+            vec![first, second]
+        ),
+        Err(ResolveError::DuplicateMetadata { .. })
+    ));
 }

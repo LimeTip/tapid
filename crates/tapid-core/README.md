@@ -18,3 +18,10 @@ consumers must not silently apply this normalization to existing graph keys;
 `tapid-lockfile` rejects noncanonical persisted origins with explicit recovery.
 
 The API is experimental and may change before the first stable release.
+
+`PackageSource` retains registry origins or immutable copied file/Git identity.
+File identities contain a contained root-relative path and archive SHA-256;
+Git identities contain a credential-free canonical HTTPS repository, full commit,
+and archive SHA-256. `PackageInstanceId::from_source` preserves these identities
+through resolution and layout; `new` retains its registry-origin interface.
+`GitRepository` validates repository URLs without admitting them as registry origins.

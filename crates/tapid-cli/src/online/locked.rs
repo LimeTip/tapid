@@ -8,7 +8,10 @@ pub(crate) fn validate_locked_routes(
 ) -> Result<bool, OperationalError> {
     let mut platforms_match = true;
     for (key, _) in lock.packages_typed()? {
-        let registry = key.source.registry().ok_or("expected registry identity")?;
+        let Some(registry) = key.source.registry() else {
+            platforms_match &= locked_platform_matches(&key)?;
+            continue;
+        };
         if registry.as_str() != JSR && config.origin_for_name(&key.name)? != *registry {
             return Err(OperationalError::new(
                 ErrorKind::RegistryConfiguration,
@@ -46,12 +49,16 @@ pub(crate) fn hydrate_locked(
     store: &Store,
     config: &crate::registry::RegistryConfig,
     fixture_path: Option<&Path>,
+    project: &Path,
 ) -> Result<Option<StoreTransaction>, OperationalError> {
     let mut transports = BTreeMap::new();
     let allowed_origins = config.configured_origins();
     // Load fixtures only if an archive is actually missing.
     let mut fixture_packages = None;
     hydrate_with_fetch(lock, store, |key, url| {
+        if let Some(source) = key.source.copied() {
+            return copied::fetch_pinned(project, source, fixture_path);
+        }
         let registry = key.source.registry().ok_or("expected registry identity")?;
         if let Some(path) = fixture_path {
             if fixture_packages.is_none() {
@@ -137,13 +144,13 @@ fn hydrate_with_fetch(
                 return Err(OperationalError::from(error).context("locked store tree is invalid"));
             }
         }
-        if package.registry_integrity_declared() != Some(true) {
+        if key.source.registry().is_some() && package.registry_integrity_declared() != Some(true) {
             return Err(OperationalError::new(
                 ErrorKind::Integrity,
                 "locked artifact lacks registry-declared integrity provenance",
             ));
         }
-        let url = package.artifact_url().ok_or_else(|| {
+        let url = package.artifact_url().or_else(|| key.source.copied().map(PackageSource::as_str)).ok_or_else(|| {
             OperationalError::new(
                 ErrorKind::Lockfile,
                 "locked artifact has no pinned archive URL; regenerate tapid.lock with tapid update and review the resulting changes",
@@ -170,7 +177,12 @@ fn hydrate_with_fetch(
         let _guard = TemporaryTree(temp.clone());
         extract_to(
             &bytes,
-            ArchiveFormat::TarGz,
+            copied::archive_format(
+                &key.source
+                    .package_source()
+                    .ok_or("expected artifact source")?,
+                &bytes,
+            ),
             &temp,
             ArchiveLimits::default(),
         )
@@ -203,8 +215,7 @@ pub(super) fn locked_records(
         .map(|(key, package)| {
             let registry = key
                 .source
-                .registry()
-                .cloned()
+                .package_source()
                 .ok_or("expected registry identity")?;
             if !identities.insert((registry.clone(), key.name.clone(), key.version.clone())) {
                 return Err(OperationalError::new(ErrorKind::Lockfile, format!(
@@ -236,6 +247,9 @@ pub(super) fn locked_records(
                 key.version.to_string(),
             );
             Ok(PackageRecord {
+                git_reference: None,
+                copied_archive: None,
+        dist_tags: BTreeSet::new(),
                 registry,
                 name: key.name,
                 version: key.version,
@@ -385,7 +399,9 @@ pub(crate) fn validate_locked_artifact_sources(
     let packages = lock.packages_typed().map_err(OperationalError::from)?;
     let missing_urls = packages
         .iter()
-        .filter(|(_, package)| package.artifact_url().is_none())
+        .filter(|(key, package)| {
+            key.source.registry().is_some() && package.artifact_url().is_none()
+        })
         .collect::<Vec<_>>();
     if missing_urls.is_empty() {
         return Ok(());
@@ -439,6 +455,7 @@ pub(crate) fn prepare_locked_install(
     store: &Store,
     registry_config: &crate::registry::RegistryConfig,
     registry_fixture: Option<&Path>,
+    project: &Path,
     report_progress: impl FnMut(usize, usize),
 ) -> LockedInstallOutput {
     store.cleanup_stale_replay_snapshots().map_err(|error| {
@@ -472,68 +489,78 @@ pub(crate) fn prepare_locked_install(
                     if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(OperationalError::from(error)),
             }
-            let registry = key.source.registry().ok_or_else(|| {
-                OperationalError::new(
-                    ErrorKind::Lockfile,
-                    "registry package has no registry origin",
-                )
-            })?;
-            // Identity checks do not retrieve credentials or perform network work.
-            if registry.as_str() != JSR
-                && registry_config
-                    .origin_for_name(&key.name)
-                    .map_err(|error| {
-                        OperationalError::new(ErrorKind::RegistryConfiguration, error)
-                    })?
-                    != *registry
-            {
-                return Err(OperationalError::new(
-                    ErrorKind::RegistryConfiguration,
-                    "locked registry identity differs from configured route",
-                ));
-            }
-            let bytes = if let Some(path) = registry_fixture {
-                if fixtures.is_none() {
-                    fixtures = Some(fixture(path).map_err(|error| {
-                        OperationalError::new(ErrorKind::RegistryMetadata, error)
-                    })?);
-                }
-                let record = fixtures
-                    .as_ref()
-                    .expect("fixture loaded")
-                    .packages
-                    .iter()
-                    .find(|record| matches_locked_identity(record, key))
-                    .ok_or_else(|| {
-                        OperationalError::new(
-                            ErrorKind::RegistryMetadata,
-                            "fixture lacks exact locked artifact",
-                        )
-                    })?;
-                if let Some(encoded) = record.artifact.strip_prefix("base64:") {
-                    STANDARD.decode(encoded).map_err(|error| {
-                        OperationalError::from_source(ErrorKind::RegistryMetadata, error)
-                    })?
-                } else {
-                    fs::read(&record.artifact).map_err(|error| {
-                        OperationalError::from_source(ErrorKind::RegistryTransport, error)
-                    })?
-                }
+            let registry = key.source.registry();
+            let copied_bytes = key
+                .source
+                .copied()
+                .map(|source| copied::fetch_pinned(project, source, registry_fixture))
+                .transpose()?;
+            let bytes = if let Some(bytes) = copied_bytes {
+                bytes
             } else {
-                let url = package.artifact_url().ok_or_else(|| OperationalError::new(ErrorKind::Lockfile, "locked artifact URL is missing; regenerate tapid.lock with tapid update before using an empty store"))?;
-                let transport = artifact_transport_for_package(
-                    &mut transports,
-                    registry_config,
-                    registry,
-                    &key.name,
-                    &allowed_origins,
-                )?;
-                let response = NpmRegistry::new(transport, registry.clone())
-                    .download_artifact(url)
-                    .map_err(|error| {
-                        OperationalError::from_source(ErrorKind::RegistryTransport, error)
-                    })?;
-                response.body
+                let registry = registry.ok_or_else(|| {
+                    OperationalError::new(
+                        ErrorKind::Lockfile,
+                        "registry package has no registry origin",
+                    )
+                })?;
+                // Identity checks do not retrieve credentials or perform network work.
+                if registry.as_str() != JSR
+                    && registry_config
+                        .origin_for_name(&key.name)
+                        .map_err(|error| {
+                            OperationalError::new(ErrorKind::RegistryConfiguration, error)
+                        })?
+                        != *registry
+                {
+                    return Err(OperationalError::new(
+                        ErrorKind::RegistryConfiguration,
+                        "locked registry identity differs from configured route",
+                    ));
+                }
+                if let Some(path) = registry_fixture {
+                    if fixtures.is_none() {
+                        fixtures = Some(fixture(path).map_err(|error| {
+                            OperationalError::new(ErrorKind::RegistryMetadata, error)
+                        })?);
+                    }
+                    let record = fixtures
+                        .as_ref()
+                        .expect("fixture loaded")
+                        .packages
+                        .iter()
+                        .find(|record| matches_locked_identity(record, key))
+                        .ok_or_else(|| {
+                            OperationalError::new(
+                                ErrorKind::RegistryMetadata,
+                                "fixture lacks exact locked artifact",
+                            )
+                        })?;
+                    if let Some(encoded) = record.artifact.strip_prefix("base64:") {
+                        STANDARD.decode(encoded).map_err(|error| {
+                            OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+                        })?
+                    } else {
+                        fs::read(&record.artifact).map_err(|error| {
+                            OperationalError::from_source(ErrorKind::RegistryTransport, error)
+                        })?
+                    }
+                } else {
+                    let url = package.artifact_url().ok_or_else(|| OperationalError::new(ErrorKind::Lockfile, "locked artifact URL is missing; regenerate tapid.lock with tapid update before using an empty store"))?;
+                    let transport = artifact_transport_for_package(
+                        &mut transports,
+                        registry_config,
+                        registry,
+                        &key.name,
+                        &allowed_origins,
+                    )?;
+                    let response = NpmRegistry::new(transport, registry.clone())
+                        .download_artifact(url)
+                        .map_err(|error| {
+                            OperationalError::from_source(ErrorKind::RegistryTransport, error)
+                        })?;
+                    response.body
+                }
             };
             let expected: PackageIntegrity = package.artifact_integrity().parse().map_err(
                 |error: tapid_core::DomainError| {
@@ -554,7 +581,12 @@ pub(crate) fn prepare_locked_install(
             );
             extract_to(
                 &bytes,
-                ArchiveFormat::TarGz,
+                copied::archive_format(
+                    &key.source
+                        .package_source()
+                        .ok_or("expected artifact source")?,
+                    &bytes,
+                ),
                 &temporary.0,
                 ArchiveLimits::default(),
             )
@@ -610,6 +642,7 @@ mod ci_tests {
                 &store,
                 &crate::registry::RegistryConfig::default(),
                 None,
+                store.root(),
                 |_, _| {},
             )
             .unwrap();
@@ -667,6 +700,7 @@ mod ci_tests {
                     &store,
                     &crate::registry::RegistryConfig::default(),
                     None,
+                    store.root(),
                     |_, _| {}
                 )
                 .is_err()

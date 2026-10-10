@@ -74,6 +74,7 @@ pub(super) fn normalize_record(package: &PackageRecord) -> Result<NormalizedReco
         ));
     }
     let metadata = PackageVersionMetadata {
+        dist_tags: package.dist_tags.clone(),
         name: package.name.clone(),
         version: package.version.clone(),
         dependencies,
@@ -131,7 +132,7 @@ fn insert_records<F>(
     registry_for_dependency: &mut F,
 ) -> Result<(), String>
 where
-    F: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
 {
     let mut inserted_keys = BTreeSet::new();
     let mut inserted_names = BTreeMap::<String, BTreeSet<PackageName>>::new();
@@ -168,25 +169,27 @@ where
             .or_default()
             .push(key);
     }
-    let candidate_matches =
-        |registry: &RegistryOrigin, name: &PackageName, requirement: &Requirement| {
-            candidates
-                .get(&(registry.to_string(), name.to_string()))
-                .into_iter()
-                .flatten()
-                .any(|key| {
-                    normalized
-                        .get(*key)
-                        .and_then(|record| record.as_ref().ok())
-                        .is_some()
-                        && records.get(*key).is_some_and(|candidate| {
-                            current_platform_matches(&candidate.platform)
-                                && requirement.matches(&candidate.version)
-                        })
-                })
-        };
+    let candidate_matches = |registry: &PackageSource,
+                             name: &PackageName,
+                             requirement: &Requirement| {
+        candidates
+            .get(&(registry.to_string(), name.to_string()))
+            .into_iter()
+            .flatten()
+            .any(|key| {
+                normalized
+                    .get(*key)
+                    .and_then(|record| record.as_ref().ok())
+                    .is_some()
+                    && records.get(*key).is_some_and(|candidate| {
+                        current_platform_matches(&candidate.platform)
+                            && requirement
+                                .matches_tagged_version(&candidate.version, &candidate.dist_tags)
+                    })
+            })
+    };
 
-    let mut additions = BTreeMap::<RegistryOrigin, Vec<PackageVersionMetadata>>::new();
+    let mut additions = BTreeMap::<PackageSource, Vec<PackageVersionMetadata>>::new();
     for key in &inserted_keys {
         let Some(record) = normalized.get(key).and_then(|record| record.as_ref().ok()) else {
             continue;
@@ -316,7 +319,7 @@ pub(super) fn resolve_with_fetch<F>(
     mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
-    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
+    F: FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
     resolve_with_fetch_routed_and_overrides(
         roots,
@@ -338,7 +341,7 @@ pub(super) fn resolve_with_overrides<F>(
     mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
-    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
+    F: FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
     resolve_with_fetch_routed_and_overrides(
         roots,
@@ -360,8 +363,8 @@ pub(super) fn resolve_with_fetch_routed<R, F>(
     mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
-    R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
-    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
+    R: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+    F: FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
     resolve_with_fetch_routed_and_overrides(
         roots,
@@ -385,8 +388,8 @@ pub(super) fn resolve_with_fetch_routed_and_overrides<R, F>(
     progress: impl FnMut(usize),
 ) -> Result<ResolvedRecords, OperationalError>
 where
-    R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
-    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
+    R: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+    F: FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
 {
     resolve_with_preferences(
         roots,
@@ -409,8 +412,8 @@ pub(super) fn resolve_with_preferences<R, F>(
     mut progress: impl FnMut(usize),
 ) -> Result<ResolvedRecords, OperationalError>
 where
-    R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
-    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
+    R: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+    F: FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
 {
     let mut fetched = BTreeSet::<(String, String)>::new();
     let mut records = BTreeMap::<PackageRecordKey, PackageRecord>::new();
@@ -430,7 +433,7 @@ where
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let mut fetch = |registry: &RegistryOrigin, name: &PackageName| {
+    let mut fetch = |registry: &PackageSource, name: &PackageName| {
         fetch(registry, name).map(|packages| {
             packages
                 .into_iter()
@@ -447,6 +450,7 @@ where
                         if preserved.artifact.is_empty() && !package.fixture {
                             preserved.artifact = package.artifact;
                         }
+                        preserved.dist_tags = package.dist_tags;
                         preserved.peer_dependencies = package.peer_dependencies;
                         preserved.optional_peer_dependencies = package.optional_peer_dependencies;
                         preserved
@@ -478,7 +482,7 @@ where
             &preferred,
         ) {
             Ok(resolution) => {
-                let mut optional_frontier = BTreeSet::<(RegistryOrigin, PackageName)>::new();
+                let mut optional_frontier = BTreeSet::<(PackageSource, PackageName)>::new();
                 for parent in &resolution.selected {
                     let key = (
                         parent.registry.to_string(),
@@ -543,7 +547,7 @@ where
                     if metadata_progress_checkpoint(fetched.len()) {
                         progress(fetched.len());
                     }
-                    let registry: RegistryOrigin = registry
+                    let registry: PackageSource = registry
                         .parse()
                         .map_err(|error: tapid_core::DomainError| error.to_string())?;
                     let name: PackageName = name
@@ -581,7 +585,7 @@ where
                 if metadata_progress_checkpoint(fetched.len()) {
                     progress(fetched.len());
                 }
-                let registry: RegistryOrigin = registry
+                let registry: PackageSource = registry
                     .parse()
                     .map_err(|error: tapid_core::DomainError| error.to_string())?;
                 let name: PackageName = name
@@ -597,13 +601,40 @@ where
                 )?;
             }
             Err(error @ ResolveError::PeerDependency { .. }) => {
-                let ResolveError::PeerDependency { package, .. } = &error else {
+                let ResolveError::PeerDependency {
+                    package,
+                    peer,
+                    requirement,
+                    ..
+                } = &error
+                else {
                     unreachable!()
                 };
+                if requirement
+                    .parse::<Requirement>()
+                    .is_ok_and(|requirement| requirement.dist_tag().is_some())
+                    && let Some(provider) = roots.iter().find(|root| root.name.as_str() == peer)
+                {
+                    let actual_name = provider.requirement.package_name(&provider.name);
+                    if fetched.insert((provider.registry.to_string(), actual_name.to_string())) {
+                        if metadata_progress_checkpoint(fetched.len()) {
+                            progress(fetched.len());
+                        }
+                        insert_records(
+                            &mut records,
+                            &mut normalized,
+                            &mut metadata,
+                            overrides,
+                            fetch(&provider.registry, actual_name)?,
+                            &mut registry_for_dependency,
+                        )?;
+                        continue;
+                    }
+                }
                 let candidate = records
                     .values()
                     .find(|record| {
-                        tapid_registry_client::RegistryPackageId::new(
+                        tapid_registry_client::RegistryPackageId::from_source(
                             record.registry.clone(),
                             record.name.clone(),
                             record.version.clone(),
@@ -713,6 +744,12 @@ pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependenc
         ("optionalDependencies", manifest.optional_dependencies()),
     ] {
         for (name, range) in map {
+            if copied::declaration(range)
+                .map_err(|reason| format!("dependency '{name}': {reason}"))?
+                .is_some()
+            {
+                continue;
+            }
             if range.starts_with("workspace:") {
                 continue;
             }
@@ -725,7 +762,12 @@ pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependenc
                     "npm alias '{name}@{range}' cannot use a JSR dependency name"
                 ));
             }
-            roots.push(Dependency::new(registry, package, requirement));
+            if registry.as_str() == JSR && requirement.dist_tag().is_some() {
+                return Err(format!(
+                    "unsupported JSR dist-tag dependency '{name}@{range}': npm dist-tags only are supported"
+                ));
+            }
+            roots.push(Dependency::new(registry.into(), package, requirement));
         }
     }
     for dependency in &roots {

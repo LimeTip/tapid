@@ -23,7 +23,9 @@ fn requirement_satisfaction_matches_pinned_node_semver_corpus() {
 
         let parsed = range.parse::<Requirement>();
         assert_eq!(
-            parsed.is_ok(),
+            parsed
+                .as_ref()
+                .is_ok_and(|requirement| requirement.dist_tag().is_none()),
             expected_valid,
             "case {index}: range validity for {range:?}"
         );

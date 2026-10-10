@@ -8,6 +8,7 @@ pub enum LockfileError {
     Domain(DomainError),
     InvalidUrl(String),
     InvalidSha512(String),
+    InvalidCopiedArtifactEvidence,
     InvalidWorkspaceSource(String),
     UnsupportedVersion(u32),
     AliasMetadataInLegacySchema(u32),
@@ -49,6 +50,10 @@ impl fmt::Display for LockfileError {
                 write!(f, "lockfile URL is not an approved HTTPS origin: {value}")
             }
             Self::InvalidSha512(value) => write!(f, "invalid SHA-512 integrity: {value}"),
+            Self::InvalidCopiedArtifactEvidence => write!(
+                f,
+                "copied artifacts cannot carry registry authentication, download URLs, or derived hooks"
+            ),
             Self::InvalidWorkspaceSource(value) => {
                 write!(f, "invalid local workspace source identity: {value}")
             }
