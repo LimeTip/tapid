@@ -269,6 +269,41 @@ fixture("process timeout is bounded failure", async () => {
   assert.equal(report.failure_class, "timeout");
   assert.equal(report.commands.at(-1)!.exit_code, null);
 });
+for (const failure of ["timeout", "output-limit"]) {
+  test(
+    `process ${failure} signals its process group only once`,
+    unix,
+    async (t) => {
+      const originalKill = process.kill.bind(process);
+      const signals = new Map<number, number>();
+      t.mock.method(
+        process,
+        "kill",
+        (pid: number, signal?: NodeJS.Signals | number) => {
+          assert.ok(pid < 0, "termination must target the detached process group");
+          const count = (signals.get(pid) ?? 0) + 1;
+          signals.set(pid, count);
+          if (count > 1) {
+            throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+          }
+          return originalKill(pid, signal);
+        },
+      );
+      const report = await fixtureRun(
+        "tapid init\n",
+        failure === "timeout"
+          ? "sleep 10"
+          : "while :; do printf abcdefghijklmnopqrstuvwxyz; done",
+        failure === "timeout" ? { timeout: 0.1 } : { output_limit: 128 },
+      );
+      assert.equal(report.status, "failed");
+      assert.equal(report.failure_class, failure);
+      assert.equal(report.commands.at(-1)!.exit_code, null);
+      assert.ok(signals.size > 0);
+      for (const count of signals.values()) assert.equal(count, 1);
+    },
+  );
+}
 test("canonical quickstart keeps existing directory prerequisite", () => {
   assert.equal(
     read(join(root, "docs/examples/quickstart.sh")),

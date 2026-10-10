@@ -863,3 +863,24 @@ fn reader_failure_does_not_activate_partial_file() {
     assert!(!store.artifact_path(&expected).exists());
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn publication_snapshot_survives_rollback_without_reentering_store_lock() {
+    let project = tapid_test_support::TempProject::new("publication-snapshot").unwrap();
+    let source = project.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("package.json"), b"{}").unwrap();
+    let digest: ArtifactDigest = tapid_archive::canonical_tree_digest(&source)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let store = Store::new(project.path().join("store"));
+    let mut transaction = store.transaction();
+    transaction.stage_verified_tree(&digest, &source).unwrap();
+    let publication = transaction.publish().unwrap();
+    let snapshot = publication.verified_tree_snapshot(&digest).unwrap();
+    publication.rollback().unwrap();
+    assert_eq!(fs::read(snapshot.join("package.json")).unwrap(), b"{}");
+    assert!(store.verified_tree_path(&digest).is_err());
+    fs::remove_dir_all(snapshot).unwrap();
+}
