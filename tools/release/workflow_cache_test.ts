@@ -128,10 +128,10 @@ const assertInstallerCache = (ci: string) => {
   assert.equal((ci.match(/CARGO_TARGET_DIR/g) || []).length, 2, 'compiler target must not leak to other steps, jobs, global env or GITHUB_ENV');
   // Normalize only the approved Test bootstrap input, pin migration and two compiler env blocks.
   // All actual install commands, source-ref, fresh destination, help, uninstall,
-  // native tests and documentation ownership retain the snapshot with TypeScript helpers.
+  // Keep current-main TypeScript helper changes and freeze the reviewed Node prerequisite.
   assertTestBootstrap(ci);
   const original = native.replace(testCacheInputs, '').replaceAll(compilerEnv, '').replaceAll(pin, 'Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2');
-  assert.equal(digest(original), '8e36fde77fc2b4c8fa19c886e543c42de1ccec795c7b88b107d9d376e0402fe1');
+  assert.equal(digest(original), 'b923c74829b86d40bfb30fb3799d2202671867185bc49a44b71af0fa13fc59da');
 };
 const assertSourceInstallers = (sh: string, ps: string) => {
   const unixStart = sh.indexOf('if [ "$SOURCE_REF_SET" -eq 1 ]; then');

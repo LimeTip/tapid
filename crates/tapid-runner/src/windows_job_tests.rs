@@ -699,7 +699,11 @@ catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('WRITE_O
     } else {
         mutation_script
     };
-    let (termination, stdout, stderr) = run_node(&container, &node, &root, script);
+    // Prove the identical nontruncating, write-only open succeeds before revocation.
+    let script = format!(
+        "const probeFs=require('node:fs'); probeFs.closeSync(probeFs.openSync('writable/existing.txt',probeFs.constants.O_WRONLY)); console.log('WRITE_OPEN_BEFORE_REVOCATION');\n{script}"
+    );
+    let (termination, stdout, stderr) = run_node(&container, &node, &root, &script);
     eprintln!(
         "ordinary Node result={termination:?}; stdout={}; stderr={}",
         String::from_utf8_lossy(&stdout),
@@ -707,10 +711,31 @@ catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('WRITE_O
     );
     write_grant.restore().unwrap();
     exact_grant.restore().unwrap();
-    read_grant.restore().unwrap();
-    // Reuse exactly the same AppContainer SID while keeping ONLY its runtime grant alive.
-    let revoked = r#"const fs=require('node:fs'); try {fs.openSync('writable/existing.txt','r+'); throw Error('revoked write succeeded');} catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('SAME_SID_REVOKED');}"#;
+    // Revoke only writes: retain the independently declared metadata/traversal (or read)
+    // grant so denial of O_WRONLY cannot be mistaken for denial of read access.
+    // The same SID's runtime authority also remains alive until the Job is empty.
+    // The write-only payload has already proved content reads are denied. Node's stat
+    // also needs more than our ReadMetadata grant on this target, so supply independent
+    // read authority only for the revocation control; never reinstate write authority.
+    let mut revocation_read = if write_only {
+        Some(
+            WindowsPathAcl::grant(
+                &root,
+                container.sid(),
+                FilesystemAccess::Read,
+                FilesystemGrantKind::DirectorySubtree,
+            )
+            .unwrap(),
+        )
+    } else {
+        None
+    };
+    let revoked = r#"const fs=require('node:fs'); fs.statSync('writable/existing.txt'); fs.readFileSync('writable/existing.txt'); console.log('SAME_SID_METADATA_RETAINED'); try {fs.closeSync(fs.openSync('writable/existing.txt',fs.constants.O_WRONLY)); throw Error('revoked write succeeded');} catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('SAME_SID_REVOKED');}"#;
     let (revoked_status, revoked_out, revoked_err) = run_node(&container, &node, &root, revoked);
+    if let Some(grant) = &mut revocation_read {
+        grant.restore().unwrap();
+    }
+    read_grant.restore().unwrap();
     runtime_grant.restore().unwrap();
     for (path, baseline) in paths.iter().zip(&before) {
         let restored = read_acl(path);
@@ -736,6 +761,8 @@ catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('WRITE_O
         String::from_utf8_lossy(&revoked_err)
     );
     assert_eq!(revoked_status, WindowsChildTermination::Exited(0));
+    assert!(String::from_utf8_lossy(&stdout).contains("WRITE_OPEN_BEFORE_REVOCATION"));
+    assert!(String::from_utf8_lossy(&revoked_out).contains("SAME_SID_METADATA_RETAINED"));
     assert!(String::from_utf8_lossy(&revoked_out).contains("SAME_SID_REVOKED"));
     assert_eq!(
         termination,
