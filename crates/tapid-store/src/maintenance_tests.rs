@@ -239,3 +239,129 @@ fn cache_maintenance_reports_cleanup_failure_after_eviction_starts() {
     assert!(artifact.exists());
     assert!(store.clean_cache().is_ok());
 }
+
+#[cfg(unix)]
+#[test]
+fn cache_cleanup_cannot_follow_parent_symlink_swaps_after_preflight() {
+    use std::os::unix::fs::symlink;
+    for component in ["store", "artifacts", "trees"] {
+        let (home, store, artifact, tree) = populated();
+        let outside = home.path().join("outside");
+        let target = if component == "store" {
+            store.root.clone()
+        } else {
+            store.root.join(component)
+        };
+        let saved = home.path().join("original-directory");
+        let outside_artifact = if component == "store" {
+            outside
+                .join("artifacts")
+                .join(artifact.file_name().unwrap())
+        } else {
+            outside.join(artifact.file_name().unwrap())
+        };
+        let outside_tree = if component == "store" {
+            outside.join("trees").join(tree.file_name().unwrap())
+        } else {
+            outside.join(tree.file_name().unwrap())
+        };
+        fs::create_dir_all(outside_artifact.parent().unwrap()).unwrap();
+        fs::create_dir_all(&outside_tree).unwrap();
+        fs::write(&outside_artifact, b"unrelated artifact").unwrap();
+        fs::write(outside_tree.join("keep"), b"unrelated tree").unwrap();
+        let outside_hook = outside.clone();
+        BEFORE_CACHE_REMOVE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&target, &saved).unwrap();
+                symlink(&outside_hook, &target).unwrap();
+            }))
+        });
+        let _ = store.clean_cache();
+        assert_eq!(
+            fs::read(outside_artifact).unwrap(),
+            b"unrelated artifact",
+            "{component}"
+        );
+        assert_eq!(
+            fs::read(outside_tree.join("keep")).unwrap(),
+            b"unrelated tree",
+            "{component}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_cleanup_never_follows_replaced_candidate_or_nested_directory() {
+    use std::os::unix::fs::symlink;
+    for replace_tree in [true, false] {
+        let (home, store, _artifact, tree) = populated();
+        let nested = tree.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("old"), b"cache").unwrap();
+        let outside = home.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), b"unrelated").unwrap();
+        let saved = home.path().join("saved");
+        let target = if replace_tree { tree } else { nested };
+        let outside_hook = outside.clone();
+        BEFORE_CACHE_REMOVE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&target, &saved).unwrap();
+                symlink(&outside_hook, &target).unwrap();
+            }))
+        });
+        let result = store.clean_cache();
+        if replace_tree {
+            assert!(result.is_err());
+        } else {
+            assert!(result.is_ok());
+        }
+        assert_eq!(fs::read(outside.join("keep")).unwrap(), b"unrelated");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn cache_cleanup_pins_root_and_namespaces_against_replacement() {
+    for component in ["store", "artifacts", "trees"] {
+        let (home, store, _artifact, _tree) = populated();
+        let target = if component == "store" {
+            store.root.clone()
+        } else {
+            store.root.join(component)
+        };
+        let saved = home.path().join("saved");
+        BEFORE_CACHE_REMOVE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let result = fs::rename(&target, &saved);
+                if result.is_ok() {
+                    fs::rename(&saved, &target).unwrap();
+                }
+                assert!(
+                    result.is_err(),
+                    "opened cache directory must deny replacement"
+                );
+            }))
+        });
+        assert!(store.clean_cache().is_ok());
+    }
+}
+
+#[test]
+fn cache_cleanup_preserves_a_candidate_replaced_after_preflight() {
+    let (home, store, artifact, _tree) = populated();
+    let saved = home.path().join("saved-artifact");
+    let target = artifact.clone();
+    BEFORE_CACHE_REMOVE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            fs::rename(&target, saved).unwrap();
+            fs::write(target, b"replacement must remain").unwrap();
+        }))
+    });
+    assert!(matches!(
+        store.clean_cache(),
+        Err(IngestError::CacheCleanup(_))
+    ));
+    assert_eq!(fs::read(artifact).unwrap(), b"replacement must remain");
+}

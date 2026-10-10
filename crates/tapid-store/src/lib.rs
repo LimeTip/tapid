@@ -67,6 +67,8 @@ pub enum IngestError {
         actual: String,
     },
     InvalidRoot,
+    /// The selected cache location is symlinked or not a directory.
+    CachePath(io::Error),
     Archive(tapid_archive::ExtractError),
     TreeDigestMismatch {
         expected: ArtifactDigest,
@@ -81,6 +83,7 @@ impl fmt::Display for IngestError {
             Self::DigestMismatch { expected, actual } => {
                 write!(f, "digest mismatch: expected {expected}, got {actual}")
             }
+            Self::CachePath(e) => write!(f, "invalid cache path: {e}"),
             Self::InvalidRoot => f.write_str("store root must not be empty"),
             Self::Archive(e) => write!(f, "archive extraction error: {e}"),
             Self::TreeDigestMismatch { expected, actual } => {
@@ -184,8 +187,7 @@ impl Store {
         let marker = path.join(".tapid-tree");
         let marker_meta = fs::symlink_metadata(&marker)?;
         if !marker_meta.file_type().is_file()
-            || marker_meta.len() != digest.as_str().len() as u64
-            || fs::read_to_string(&marker)? != digest.as_str()
+            || !tree_marker_matches(&mut File::open(&marker)?, digest)?
         {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidData, "store tree is not verified").into(),
@@ -1518,6 +1520,17 @@ fn lock_file(root: &Path, exclusive: bool) -> io::Result<File> {
         let _ = FileExt::unlock(&recovery_lock);
         recovery?;
     }
+}
+
+fn tree_marker_matches(file: &mut File, digest: &ArtifactDigest) -> io::Result<bool> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.len() != digest.as_str().len() as u64 {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    file.take(digest.as_str().len() as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes == digest.as_str().as_bytes())
 }
 
 fn digest_bytes(data: &[u8]) -> String {

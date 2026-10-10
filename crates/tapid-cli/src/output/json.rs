@@ -134,6 +134,12 @@ pub(crate) fn information(operation: &str, data: Value) -> ExitCode {
     emit(result, 0)
 }
 
+pub(crate) fn operation_error(operation: &str, code: &str) -> ExitCode {
+    let mut result = envelope(operation, "failure", None);
+    result["errors"] = json!([{"code": code, "phase": "operation"}]);
+    emit(result, 1)
+}
+
 pub(crate) fn protocol_error(operation: &str, code: &str, status: u8) -> ExitCode {
     let mut result = envelope(operation, "failure", None);
     result["errors"] = json!([{"code": code}]);
@@ -255,8 +261,11 @@ pub(crate) fn cache_result(
         }
         Err(error) => {
             let busy = matches!(&error, tapid_store::IngestError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock);
-            result["errors"] =
-                json!([{"code": if busy { "CACHE_BUSY" } else { "CACHE_MAINTENANCE_FAILED" }}]);
+            let invalid_path = matches!(
+                &error,
+                tapid_store::IngestError::InvalidRoot | tapid_store::IngestError::CachePath(_)
+            );
+            result["errors"] = json!([{"code": if busy { "CACHE_BUSY" } else if invalid_path { "CACHE_PATH_INVALID" } else { "CACHE_MAINTENANCE_FAILED" }, "phase": "operation"}]);
             if busy {
                 result["retry"] = json!("after_contention");
             } else if matches!(error, tapid_store::IngestError::CacheCleanup(_)) {

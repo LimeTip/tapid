@@ -62,7 +62,7 @@ fn execute(
         Ok(root) => root,
         Err(error) => {
             if json {
-                return crate::output::json::protocol_error(operation, "CACHE_PATH_INVALID", 1);
+                return crate::output::json::operation_error(operation, "CACHE_PATH_INVALID");
             }
             eprintln!("error: {error}");
             return ExitCode::from(1);

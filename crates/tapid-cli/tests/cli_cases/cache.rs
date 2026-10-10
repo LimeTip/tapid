@@ -101,6 +101,7 @@ fn cache_clean_refuses_a_store_used_by_another_process() {
     assert!(!output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["errors"][0]["code"], "CACHE_BUSY");
+    assert_eq!(value["errors"][0]["phase"], "operation");
     assert_eq!(value["changes"]["state"], "unchanged");
     assert_eq!(value["retry"], "after_contention");
     assert!(store.artifact_path(&digest).exists());
@@ -158,4 +159,89 @@ fn cache_clean_rejects_conflicting_confirmation_and_preview_flags() {
         assert_eq!(output.status.code(), Some(2));
         assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
     }
+}
+
+#[test]
+fn cache_json_operational_errors_have_a_phase_and_invalid_roots_have_path_codes() {
+    let home = TempHome::new("cache-path-errors").unwrap();
+    let file = home.path().join("file");
+    fs::write(&file, b"preserve").unwrap();
+    for root in [file.as_path()] {
+        for args in [vec!["cache", "info"], vec!["clean", "--yes"]] {
+            let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+                .args(args)
+                .args(["--json", "--store-dir"])
+                .arg(root)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["errors"][0]["code"], "CACHE_PATH_INVALID");
+            assert_eq!(value["errors"][0]["phase"], "operation");
+            assert_eq!(value["changes"]["state"], "unchanged");
+        }
+    }
+    assert_eq!(fs::read(file).unwrap(), b"preserve");
+}
+
+#[test]
+fn cache_empty_explicit_root_remains_an_argument_error() {
+    let home = TempHome::new("cache-empty-root").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(["cache", "info", "--json", "--store-dir", ""])
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["errors"][0]["code"], "ARGUMENT_INVALID");
+    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn cache_invalid_default_location_is_an_operational_path_error() {
+    let home = TempHome::new("cache-bad-home").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+    command
+        .args(["cache", "info", "--json"])
+        .env_clear()
+        .env("HOME", "relative")
+        .env("LOCALAPPDATA", "relative")
+        .current_dir(home.path());
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["errors"][0]["code"], "CACHE_PATH_INVALID");
+    assert_eq!(value["errors"][0]["phase"], "operation");
+    assert_eq!(value["changes"]["state"], "unchanged");
+    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn cache_json_pending_recovery_has_operation_phase() {
+    let home = TempHome::new("cache-error-phase").unwrap();
+    let store = home.path().join("store");
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join(".store.lock"), b"").unwrap();
+    fs::write(store.join(".tapid-transaction.json"), b"pending").unwrap();
+    for args in [vec!["cache", "info"], vec!["clean", "--yes"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .args(args)
+            .args(["--json", "--store-dir"])
+            .arg(&store)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["errors"][0]["code"], "CACHE_MAINTENANCE_FAILED");
+        assert_eq!(value["errors"][0]["phase"], "operation");
+        assert_eq!(value["changes"]["state"], "unchanged");
+    }
+    assert_eq!(
+        fs::read(store.join(".tapid-transaction.json")).unwrap(),
+        b"pending"
+    );
 }

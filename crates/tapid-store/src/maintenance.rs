@@ -1,6 +1,13 @@
 //! Conservative eviction of published data. Staging and recovery belong to
 //! their existing owners and are never swept by cache maintenance.
 use super::*;
+mod directory;
+use directory::{CacheDirectory, Kind};
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_CACHE_REMOVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CacheUsage {
@@ -34,17 +41,28 @@ impl Store {
         if self.root.as_os_str().is_empty() {
             return Err(IngestError::InvalidRoot);
         }
-        if !directory_exists(&self.root)? {
-            return Ok(CacheSummary::default());
-        }
-        // Do not create a lock during inspection. A populated legacy store with
-        // no lock cannot be inspected or evicted with a concurrency guarantee.
-        let file = match open_store_lock(&self.root, false) {
+        let root = match CacheDirectory::open_root(&self.root) {
+            Ok(root) => root,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(CacheSummary::default());
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::InvalidInput
+                    || error.kind() == io::ErrorKind::NotADirectory =>
+            {
+                return Err(IngestError::CachePath(error));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // Inspection neither creates a lock nor recovers a journal. The lock
+        // and all subsequent children are opened through the pinned root.
+        let file = match root.open_file(std::ffi::OsStr::new(".store.lock")) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if !directory_exists(&self.root.join("artifacts"))?
-                    && !directory_exists(&self.root.join("trees"))?
-                    && fs::symlink_metadata(self.root.join(STORE_JOURNAL))
+                if optional_directory(&root, "artifacts")?.is_none()
+                    && optional_directory(&root, "trees")?.is_none()
+                    && root
+                        .metadata(std::ffi::OsStr::new(STORE_JOURNAL))
                         .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
                 {
                     return Ok(CacheSummary::default());
@@ -67,7 +85,7 @@ impl Store {
             ),
             TryLockError::Error(error) => error,
         })?;
-        match fs::symlink_metadata(self.root.join(STORE_JOURNAL)) {
+        match root.metadata(std::ffi::OsStr::new(STORE_JOURNAL)) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
             Ok(_) => {
@@ -77,63 +95,61 @@ impl Store {
             }
         }
         let mut summary = CacheSummary::default();
-        let mut candidates = Vec::new();
-        // Preflight both namespaces before deleting any bytes.
+        let mut namespaces = Vec::new();
+        // Pin both namespaces and preflight every candidate before eviction.
         for (namespace, usage) in [
             ("artifacts", &mut summary.artifacts),
             ("trees", &mut summary.trees),
         ] {
-            let directory = self.root.join(namespace);
-            if !directory_exists(&directory)? {
+            let Some(directory) = optional_directory(&root, namespace)? else {
                 continue;
-            }
-            for entry in fs::read_dir(&directory)? {
-                let entry = entry?;
-                let path = entry.path();
-                let metadata = fs::symlink_metadata(&path)?;
-                let digest = entry
-                    .file_name()
-                    .to_str()
-                    .and_then(|s| s.parse::<ArtifactDigest>().ok());
-                let recognized = match (namespace, digest) {
-                    ("artifacts", Some(_)) => metadata.file_type().is_file(),
-                    ("trees", Some(digest)) if metadata.file_type().is_dir() => {
-                        match self.marked_tree_path(&digest) {
-                            Ok(_) => true,
-                            Err(IngestError::Io(error))
-                                if matches!(
-                                    error.kind(),
-                                    io::ErrorKind::NotFound | io::ErrorKind::InvalidData
-                                ) =>
-                            {
-                                false
-                            }
-                            Err(error) => return Err(error),
+            };
+            let mut candidates = Vec::new();
+            for name in directory.entries()? {
+                let metadata = directory.metadata(&name)?;
+                let digest = name.to_str().and_then(|s| s.parse::<ArtifactDigest>().ok());
+                let bytes = match (namespace, digest, metadata.kind) {
+                    ("artifacts", Some(_), Kind::File) => Some(metadata.bytes),
+                    ("trees", Some(digest), Kind::Directory) => {
+                        let child = directory.directory(&name)?;
+                        if child.identity()? != metadata.identity {
+                            return Err(invalid_cache("cache tree changed during inspection"));
+                        }
+                        if marked_tree(&child, &digest)? {
+                            Some(child.logical_bytes()?)
+                        } else {
+                            None
                         }
                     }
-                    _ => false,
+                    _ => None,
                 };
-                if !recognized {
+                let Some(bytes) = bytes else {
                     summary.preserved_entries += 1;
                     continue;
-                }
+                };
                 usage.entries += 1;
                 usage.bytes = usage
                     .bytes
-                    .checked_add(logical_bytes(&path)?)
+                    .checked_add(bytes)
                     .ok_or_else(|| invalid_cache("cache byte count overflow"))?;
-                candidates.push((path, metadata.is_dir()));
+                candidates.push((name, metadata));
             }
+            namespaces.push((directory, candidates));
         }
         if remove {
-            for (path, directory) in candidates {
-                if directory {
-                    fs::remove_dir_all(&path).map_err(IngestError::CacheCleanup)?;
-                } else {
-                    fs::remove_file(&path).map_err(IngestError::CacheCleanup)?;
+            #[cfg(test)]
+            BEFORE_CACHE_REMOVE.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().take() {
+                    hook();
                 }
-                sync_directory(path.parent().expect("cache entry has a parent"))
-                    .map_err(IngestError::CacheCleanup)?;
+            });
+            for (directory, candidates) in &namespaces {
+                for (name, metadata) in candidates {
+                    directory
+                        .remove(name, *metadata)
+                        .map_err(IngestError::CacheCleanup)?;
+                    directory.sync().map_err(IngestError::CacheCleanup)?;
+                }
             }
         }
         Ok(summary)
@@ -144,35 +160,28 @@ fn invalid_cache(message: &str) -> IngestError {
     io::Error::new(io::ErrorKind::InvalidData, message).into()
 }
 
-fn directory_exists(path: &Path) -> Result<bool, IngestError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
-        Ok(_) => Err(invalid_cache(
-            "cache path must be a directory, not a symlink or file",
-        )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+fn optional_directory(
+    root: &CacheDirectory,
+    name: &str,
+) -> Result<Option<CacheDirectory>, IngestError> {
+    match root.directory(std::ffi::OsStr::new(name)) {
+        Ok(directory) => Ok(Some(directory)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
 
-fn logical_bytes(root: &Path) -> Result<u64, IngestError> {
-    let mut pending = vec![root.to_path_buf()];
-    let mut bytes = 0u64;
-    while let Some(path) = pending.pop() {
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_dir() {
-            for entry in fs::read_dir(path)? {
-                pending.push(entry?.path());
-            }
-        } else if metadata.file_type().is_file() {
-            bytes = bytes
-                .checked_add(metadata.len())
-                .ok_or_else(|| invalid_cache("cache byte count overflow"))?;
-        } else if !metadata.file_type().is_symlink() {
-            return Err(invalid_cache("cache contains a special file"));
-        }
+fn marked_tree(directory: &CacheDirectory, digest: &ArtifactDigest) -> Result<bool, IngestError> {
+    let marker = std::ffi::OsStr::new(".tapid-tree");
+    match directory.metadata(marker) {
+        Ok(metadata) if metadata.kind == Kind::File => Ok(tree_marker_matches(
+            &mut directory.open_file(marker)?,
+            digest,
+        )?),
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
-    Ok(bytes)
 }
 
 #[cfg(test)]
