@@ -594,15 +594,7 @@ fn run_hook(
         .envs(approval.environment().iter());
     let mut search_paths = Vec::new();
     if without_containment {
-        for tool in approval.tools() {
-            let parent = Path::new(tool.path())
-                .parent()
-                .ok_or_else(|| error("lifecycle tool has no parent directory"))?;
-            let canonical = fs::canonicalize(parent).map_err(error)?;
-            if !search_paths.contains(&canonical) {
-                search_paths.push(canonical);
-            }
-        }
+        search_paths = uncontained_search_paths(approval.tools())?;
     } else {
         search_paths.push(fs::canonicalize(&tools).map_err(error)?);
     }
@@ -667,6 +659,25 @@ fn run_hook(
     }
     Ok(())
 }
+fn uncontained_search_paths(
+    tools: &[tapid_runner::LifecycleTool],
+) -> Result<Vec<PathBuf>, OperationalError> {
+    let mut paths = Vec::new();
+    for tool in tools
+        .iter()
+        .filter(|tool| tool.name() == "node")
+        .chain(tools.iter().filter(|tool| tool.name() != "node"))
+    {
+        let parent = Path::new(tool.path())
+            .parent()
+            .ok_or_else(|| error("lifecycle tool has no parent directory"))?;
+        let canonical = fs::canonicalize(parent).map_err(error)?;
+        if !paths.contains(&canonical) {
+            paths.push(canonical);
+        }
+    }
+    Ok(paths)
+}
 fn containment_error(cause: tapid_runner::ExecutionError) -> OperationalError {
     if cause.category() == tapid_runner::ExecutionErrorCategory::UnsupportedContainment {
         error(format!(
@@ -683,6 +694,31 @@ fn validate_output(root: &Path) -> Result<(), OperationalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn uncontained_search_reserves_node_before_the_shell_directory() {
+        let project = tapid_test_support::TempProject::new("uncontained-tool-search").unwrap();
+        project.write("shell/sh", b"shell").unwrap();
+        project.write("runtime/node", b"node").unwrap();
+        let digest = format!("sha256-{}", "0".repeat(64));
+        let document = toml::to_string(&serde_json::json!({"schema":1,"approvals":[{
+            "package":"demo","version":"1.0.0","archive-digest":format!("sha512-{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0u8; 64])),
+            "hook":"install","script-digest":digest,"system-toolchain":true,
+            "read":["."],"write":["."],"network":false,"environment":{},
+            "timeout-seconds":5,"max-output-bytes":1024,"max-processes":32,"max-memory-bytes":134217728,
+            "tools":[
+                {"name":"sh","path":project.path().join("shell/sh"),"digest":digest},
+                {"name":"node","path":project.path().join("runtime/node"),"digest":digest}
+            ]
+        }]})).unwrap();
+        let policy = DependencyLifecyclePolicy::parse(document.as_bytes()).unwrap();
+        assert_eq!(
+            uncontained_search_paths(policy.approvals()[0].tools()).unwrap(),
+            vec![
+                fs::canonicalize(project.path().join("runtime")).unwrap(),
+                fs::canonicalize(project.path().join("shell")).unwrap(),
+            ]
+        );
+    }
     #[test]
     fn lifecycle_discovery_accepts_a_leading_bom_without_changing_script_bytes() {
         let project = tapid_test_support::TempProject::new("lifecycle-discovery-bom").unwrap();

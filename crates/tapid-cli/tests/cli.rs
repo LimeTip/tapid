@@ -5399,7 +5399,6 @@ fn dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations() 
             ])
             .arg(home.path().join("store"))
             .args(flags)
-            .env_remove("PATH")
             .output()
             .unwrap()
     };
