@@ -1,5 +1,6 @@
 use super::*;
 use crate::application::outcome::{ChangeState, ErrorKind, RetryAdvice};
+use base64::Engine as _;
 use tapid_test_support::TempProject;
 
 #[test]
@@ -351,7 +352,7 @@ fn missing_replay_tree_preserves_the_store_error_category() {
         project.path(),
         None,
         Some(&store),
-        InstallMode::Frozen,
+        InstallMode::Offline,
         None,
         false,
         |_| {},
@@ -371,7 +372,11 @@ fn missing_replay_tree_preserves_the_store_error_category() {
 fn materialization_failure_preserves_previous_project_and_store_state() {
     let (project, fixture) = project_with_fixture("typed-materialization", INTEGRITY);
     let original = fs::read(project.path().join("package.json")).unwrap();
-    project.write("tapid.lock", b"prior lock bytes").unwrap();
+    let prior_lock = Lockfile::new(&online::root_digest(project.path()).unwrap())
+        .unwrap()
+        .to_json()
+        .unwrap();
+    project.write("tapid.lock", prior_lock.as_bytes()).unwrap();
     project.write("node_modules/KEEP", b"user data").unwrap();
     let failure = run(
         project.path(),
@@ -392,7 +397,7 @@ fn materialization_failure_preserves_previous_project_and_store_state() {
     );
     assert_eq!(
         fs::read(project.path().join("tapid.lock")).unwrap(),
-        b"prior lock bytes"
+        prior_lock.as_bytes()
     );
     assert_eq!(
         fs::read(project.path().join("node_modules/KEEP")).unwrap(),
@@ -641,6 +646,977 @@ fn invalid_fixture_artifact_preserves_metadata_and_transport_categories() {
         assert!(failure.error.source().is_some());
         assert_eq!(failure.outcome.state, ChangeState::RolledBack);
     }
+}
+
+#[test]
+fn online_platform_fallback_discards_only_incompatible_locked_selections() {
+    for newer in [false, true] {
+        let (project, fixture) = project_with_fixture("online-platform-fallback", INTEGRITY);
+        project
+            .write(
+                "package.json",
+                br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*","stable":"*"}}"#,
+            )
+            .unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+        let base = metadata["packages"][0].clone();
+        let mut stable = base.clone();
+        stable["name"] = "stable".into();
+        metadata["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(stable.clone());
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let store = project.path().join("store");
+        run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        let lock_path = project.path().join("tapid.lock");
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+        let stable_key = lock["rootBindings"]["stable"].as_str().unwrap().to_owned();
+        let stable_pin = lock["packages"][&stable_key].clone();
+        let old_key = lock["rootBindings"]["plugin"].as_str().unwrap().to_owned();
+        let context = "os=unsupported;cpu=;libc=";
+        let new_key = old_key.replace("os=;cpu=;libc=", context);
+        let mut package = lock["packages"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&old_key)
+            .unwrap();
+        package["platformContext"] = context.into();
+        package["treeDigest"] = format!("sha256-{}", "0".repeat(64)).into();
+        package["artifactIntegrity"] = format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode([0; 64])
+        )
+        .into();
+        lock["packages"][&new_key] = package;
+        lock["rootBindings"]["plugin"] = new_key.clone().into();
+        for root in lock["roots"].as_array_mut().unwrap() {
+            if root.as_str() == Some(&old_key) {
+                *root = new_key.clone().into();
+            }
+        }
+        let incompatible_lock = lock.to_string();
+        fs::write(&lock_path, &incompatible_lock).unwrap();
+        if newer {
+            let mut next = base;
+            next["version"] = "2.0.0".into();
+            metadata["packages"].as_array_mut().unwrap().push(next);
+        }
+        stable["version"] = "2.0.0".into();
+        metadata["packages"].as_array_mut().unwrap().push(stable);
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let report = run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        assert!(!report.replayed);
+        let resolved = read_lock(&lock_path).unwrap();
+        let plugin: tapid_lockfile::LockfilePackageKey =
+            resolved.root_bindings()["plugin"].parse().unwrap();
+        assert_eq!(
+            plugin.version.to_string(),
+            if newer { "2.0.0" } else { "1.0.0" }
+        );
+        assert_eq!(resolved.root_bindings()["stable"], stable_key);
+        let resolved_json: serde_json::Value =
+            serde_json::from_str(&resolved.to_json().unwrap()).unwrap();
+        assert_eq!(resolved_json["packages"][&stable_key], stable_pin);
+        fs::write(&lock_path, &incompatible_lock).unwrap();
+        for mode in [
+            InstallMode::Frozen,
+            InstallMode::Offline,
+            InstallMode::Ci,
+            InstallMode::CiOffline,
+        ] {
+            let failure = run(
+                project.path(),
+                None,
+                Some(&store),
+                mode,
+                Some(&fixture),
+                false,
+                |_| {},
+            )
+            .unwrap_err();
+            assert_eq!(failure.error.kind, ErrorKind::Lockfile, "{failure:?}");
+            assert!(failure.error.to_string().contains("different platform"));
+            assert!(failure.error.to_string().contains("tapid update"));
+            assert_eq!(fs::read_to_string(&lock_path).unwrap(), incompatible_lock);
+        }
+        project
+            .write(
+                "tapid.toml",
+                b"[registries.default]\nurl='https://different.example'\n",
+            )
+            .unwrap();
+        let failure = run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            false,
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(failure.error.kind, ErrorKind::RegistryConfiguration);
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), incompatible_lock);
+    }
+}
+
+#[test]
+fn repeated_online_install_preserves_locked_selection() {
+    let (project, fixture) = project_with_fixture("locked-selection", INTEGRITY);
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*"}}"#,
+        )
+        .unwrap();
+    let store = project.path().join("store");
+    run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    let original_lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let mut newer = metadata["packages"][0].clone();
+    newer["version"] = "1.1.0".into();
+    metadata["packages"].as_array_mut().unwrap().push(newer);
+    fs::write(&fixture, metadata.to_string()).unwrap();
+    run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        original_lock
+    );
+    fs::remove_file(&fixture).unwrap();
+    let replay = run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        original_lock
+    );
+}
+
+#[test]
+fn frozen_install_hydrates_exact_artifact_from_cold_store() {
+    let (project, fixture) = project_with_fixture("frozen-hydration", INTEGRITY);
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*"}}"#,
+        )
+        .unwrap();
+    let store = project.path().join("store");
+    run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    let lock_path = project.path().join("tapid.lock");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+    for package in lock["packages"].as_object_mut().unwrap().values_mut() {
+        package["artifactUrl"] = "https://registry.npmjs.org/plugin/-/plugin-1.0.0.tgz".into();
+    }
+    fs::write(&lock_path, lock.to_string()).unwrap();
+    let original_lock = fs::read(&lock_path).unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    metadata["packages"][0]["dependencies"] =
+        serde_json::json!({"ignored":"unsupported registry requirement"});
+    let mut newer = metadata["packages"][0].clone();
+    newer["version"] = "1.1.0".into();
+    newer["artifact"] = "missing-newer-artifact".into();
+    metadata["packages"].as_array_mut().unwrap().push(newer);
+    fs::write(&fixture, metadata.to_string()).unwrap();
+    let cold = project.path().join("cold-store");
+    run(
+        project.path(),
+        None,
+        Some(&cold),
+        InstallMode::Frozen,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(fs::read(&lock_path).unwrap(), original_lock);
+    run(
+        project.path(),
+        None,
+        Some(&cold),
+        InstallMode::Offline,
+        None,
+        false,
+        |_| {},
+    )
+    .unwrap();
+}
+
+#[test]
+fn changed_roots_keep_compatible_locked_versions() {
+    let (project, fixture) = project_with_fixture("changed-roots-locked", INTEGRITY);
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*"}}"#,
+        )
+        .unwrap();
+    let store = project.path().join("store");
+    run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let mut newer = metadata["packages"][0].clone();
+    newer["version"] = "1.1.0".into();
+    metadata["packages"].as_array_mut().unwrap().push(newer);
+    let mut other = metadata["packages"][0].clone();
+    other["name"] = "other".into();
+    metadata["packages"].as_array_mut().unwrap().push(other);
+    fs::write(&fixture, metadata.to_string()).unwrap();
+    run(
+        project.path(),
+        Some("other@*"),
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
+    assert!(
+        lock.packages_typed()
+            .unwrap()
+            .iter()
+            .any(|(key, _)| key.name.as_str() == "plugin" && key.version.to_string() == "1.0.0")
+    );
+    run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Refresh,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
+    assert!(
+        lock.packages_typed()
+            .unwrap()
+            .iter()
+            .any(|(key, _)| key.name.as_str() == "plugin" && key.version.to_string() == "1.1.0")
+    );
+}
+
+fn pinned_fixture_project(label: &str) -> (TempProject, PathBuf, PathBuf) {
+    let (project, fixture) = project_with_fixture(label, INTEGRITY);
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*"}}"#,
+        )
+        .unwrap();
+    let warm = project.path().join("warm-store");
+    run(
+        project.path(),
+        None,
+        Some(&warm),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    let lock_path = project.path().join("tapid.lock");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+    for package in lock["packages"].as_object_mut().unwrap().values_mut() {
+        package["artifactUrl"] = "https://registry.npmjs.org/plugin/-/plugin-1.0.0.tgz".into();
+    }
+    fs::write(&lock_path, lock.to_string()).unwrap();
+    let cold = project.path().join("cold-store");
+    (project, fixture, cold)
+}
+
+#[test]
+fn frozen_hydration_failures_preserve_lock_and_installed_tree() {
+    for fault in [
+        "integrity",
+        "tree",
+        "url",
+        "provenance",
+        "identity",
+        "routing",
+        "platform",
+    ] {
+        let (project, fixture, cold) = pinned_fixture_project(&format!("frozen-failure-{fault}"));
+        let lock_path = project.path().join("tapid.lock");
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+        let package = lock["packages"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        match fault {
+            "integrity" => {
+                package["artifactIntegrity"] = format!(
+                    "sha512-{}",
+                    base64::engine::general_purpose::STANDARD.encode([0; 64])
+                )
+                .into()
+            }
+            "tree" => package["treeDigest"] = format!("sha256-{}", "0".repeat(64)).into(),
+            "url" => {
+                package.as_object_mut().unwrap().remove("artifactUrl");
+            }
+            "provenance" => package["registryIntegrityDeclared"] = false.into(),
+            "identity" => {
+                let mut metadata: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+                metadata["packages"][0]["version"] = "1.1.0".into();
+                fs::write(&fixture, metadata.to_string()).unwrap();
+            }
+            "routing" => {
+                project
+                    .write(
+                        "tapid.toml",
+                        b"[registries.default]\nurl='https://different.example'\n",
+                    )
+                    .unwrap();
+            }
+            "platform" => {
+                let packages = lock["packages"].as_object_mut().unwrap();
+                let old_key = packages.keys().next().unwrap().clone();
+                let mut package = packages.remove(&old_key).unwrap();
+                let context = "os=unsupported;cpu=;libc=";
+                package["platformContext"] = context.into();
+                let new_key = old_key.replace("os=;cpu=;libc=", context);
+                packages.insert(new_key.clone(), package);
+                lock["roots"][0] = new_key.clone().into();
+                lock["rootBindings"]["plugin"] = new_key.into();
+            }
+            _ => unreachable!(),
+        }
+        fs::write(&lock_path, lock.to_string()).unwrap();
+        let before = fs::read(&lock_path).unwrap();
+        let installed = fs::read(project.path().join("node_modules/plugin/package.json")).unwrap();
+        let failure = run(
+            project.path(),
+            None,
+            Some(&cold),
+            InstallMode::Frozen,
+            Some(&fixture),
+            false,
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                failure.outcome.state,
+                ChangeState::Unchanged | ChangeState::RolledBack
+            ),
+            "{fault}: {failure:?}"
+        );
+        assert!(failure.recovery_error.is_none(), "{fault}: {failure:?}");
+        assert_eq!(fs::read(&lock_path).unwrap(), before, "{fault}");
+        assert_eq!(
+            fs::read(project.path().join("node_modules/plugin/package.json")).unwrap(),
+            installed,
+            "{fault}"
+        );
+        assert!(!cold.join("trees").exists(), "{fault}");
+    }
+}
+
+#[test]
+fn frozen_hydration_rejects_missing_private_credentials_before_network() {
+    let (project, _fixture, cold) = pinned_fixture_project("frozen-private-auth");
+    let lock_path = project.path().join("tapid.lock");
+    let bytes = fs::read_to_string(&lock_path)
+        .unwrap()
+        .replace("https://registry.npmjs.org", "https://private.example");
+    fs::write(&lock_path, &bytes).unwrap();
+    project.write("tapid.toml", b"[registries.default]\nurl='https://private.example'\ntoken-env='TAPID_FROZEN_TEST_MISSING_TOKEN_193'\n").unwrap();
+    let failure = run(
+        project.path(),
+        None,
+        Some(&cold),
+        InstallMode::Frozen,
+        None,
+        false,
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::RegistryCredentialMissing);
+    assert_eq!(fs::read_to_string(&lock_path).unwrap(), bytes);
+    assert!(!cold.join("trees").exists());
+}
+
+#[test]
+fn offline_cold_store_never_uses_supplied_artifacts() {
+    let (project, fixture, cold) = pinned_fixture_project("offline-cold");
+    let failure = run(
+        project.path(),
+        None,
+        Some(&cold),
+        InstallMode::Offline,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::StoreUnavailable);
+    assert!(!cold.join("trees").exists());
+}
+
+#[test]
+fn frozen_hydration_rolls_back_publication_when_activation_fails() {
+    let (project, fixture, cold) = pinned_fixture_project("frozen-activation-failure");
+    let before = fs::read(project.path().join("tapid.lock")).unwrap();
+    fs::remove_dir_all(project.path().join("node_modules")).unwrap();
+    fs::remove_file(project.path().join(".tapid-managed")).unwrap();
+    project
+        .write("node_modules/KEEP", b"unmanaged tree")
+        .unwrap();
+    let failure = run(
+        project.path(),
+        None,
+        Some(&cold),
+        InstallMode::Frozen,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Materialization);
+    assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+    assert!(failure.recovery_error.is_none());
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"unmanaged tree"
+    );
+    assert!(!cold.join("trees").exists());
+}
+
+#[test]
+fn adding_a_root_does_not_require_metadata_for_unchanged_locked_packages() {
+    let (project, fixture, _) = pinned_fixture_project("locked-metadata-unavailable");
+    let warm = project.path().join("warm-store");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    metadata["packages"][0]["name"] = "other".into();
+    fs::write(&fixture, metadata.to_string()).unwrap();
+    run(
+        project.path(),
+        Some("other@*"),
+        Some(&warm),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
+    assert_eq!(lock.packages().len(), 2);
+    assert!(
+        lock.packages_typed()
+            .unwrap()
+            .iter()
+            .any(|(key, _)| key.name.as_str() == "plugin" && key.version.to_string() == "1.0.0")
+    );
+}
+
+#[test]
+fn online_compatibility_refetches_unverified_locks_and_preserves_verified_selections() {
+    for mode in [InstallMode::Online, InstallMode::Refresh] {
+        for changed in [false, true] {
+            let (project, fixture) = project_with_fixture("unverified-existing-lock", INTEGRITY);
+            project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*","verified":"*"}}"#).unwrap();
+            let mut metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+            let mut verified = metadata["packages"][0].clone();
+            verified["name"] = "verified".into();
+            metadata["packages"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("integrity");
+            metadata["packages"]
+                .as_array_mut()
+                .unwrap()
+                .push(verified.clone());
+            fs::write(&fixture, metadata.to_string()).unwrap();
+            let store = project.path().join("store");
+            run(
+                project.path(),
+                None,
+                Some(&store),
+                InstallMode::Online,
+                Some(&fixture),
+                true,
+                |_| {},
+            )
+            .unwrap();
+            let before = fs::read(project.path().join("tapid.lock")).unwrap();
+            for strict_mode in [
+                InstallMode::Online,
+                InstallMode::Refresh,
+                InstallMode::Offline,
+                InstallMode::Frozen,
+                InstallMode::Ci,
+                InstallMode::CiOffline,
+            ] {
+                assert!(
+                    run(
+                        project.path(),
+                        None,
+                        Some(&store),
+                        strict_mode,
+                        Some(&fixture),
+                        false,
+                        |_| {}
+                    )
+                    .is_err()
+                );
+                assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+            }
+            let mut newer = metadata["packages"][0].clone();
+            newer["version"] = "2.0.0".into();
+            newer["dependencies"] = serde_json::json!({"fresh":"1.0.0"});
+            verified["version"] = "2.0.0".into();
+            let mut fresh = verified.clone();
+            fresh["name"] = "fresh".into();
+            fresh["version"] = "1.0.0".into();
+            metadata["packages"]
+                .as_array_mut()
+                .unwrap()
+                .extend([newer, verified, fresh]);
+            fs::write(&fixture, metadata.to_string()).unwrap();
+            if changed {
+                project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*","verified":"*","fresh":"1.0.0"}}"#).unwrap();
+            }
+            let report = run(
+                project.path(),
+                None,
+                Some(&store),
+                mode,
+                Some(&fixture),
+                true,
+                |_| {},
+            )
+            .unwrap();
+            assert!(
+                report
+                    .outcome
+                    .warnings
+                    .iter()
+                    .any(|warning| matches!(warning, Warning::UnverifiedRegistryArtifactsAllowed))
+            );
+            let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
+            let plugin: tapid_lockfile::LockfilePackageKey =
+                lock.root_bindings()["plugin"].parse().unwrap();
+            assert_eq!(plugin.version.to_string(), "2.0.0");
+            let verified: tapid_lockfile::LockfilePackageKey =
+                lock.root_bindings()["verified"].parse().unwrap();
+            assert_eq!(
+                verified.version.to_string(),
+                if matches!(mode, InstallMode::Online) {
+                    "1.0.0"
+                } else {
+                    "2.0.0"
+                }
+            );
+            let plugin = lock
+                .packages_typed()
+                .unwrap()
+                .into_iter()
+                .find(|(key, _)| key.name.as_str() == "plugin")
+                .unwrap()
+                .1;
+            assert_eq!(plugin.registry_integrity_declared(), Some(false));
+            assert!(plugin.dependencies().contains_key("fresh"));
+            assert!(lock.validate_replay(lock.root_manifest_digest()).is_err());
+        }
+    }
+}
+
+#[test]
+fn compatibility_checks_fresh_integrity_before_promoting_an_existing_unverified_artifact() {
+    for tampered in [false, true] {
+        let (project, fixture) = project_with_fixture("unverified-promotion", INTEGRITY);
+        project
+            .write(
+                "package.json",
+                br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0"}}"#,
+            )
+            .unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+        metadata["packages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("integrity");
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let store = project.path().join("store");
+        run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            true,
+            |_| {},
+        )
+        .unwrap();
+        let before = fs::read(project.path().join("tapid.lock")).unwrap();
+        project.write("node_modules/KEEP", b"previous").unwrap();
+        metadata["packages"][0]["integrity"] = INTEGRITY.into();
+        if tampered {
+            metadata["packages"][0]["artifact"] = "base64:AA==".into();
+        }
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let result = run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            true,
+            |_| {},
+        );
+        if tampered {
+            assert_eq!(result.unwrap_err().error.kind, ErrorKind::Integrity);
+            assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+            assert_eq!(
+                fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+                b"previous"
+            );
+        } else {
+            result.unwrap();
+            let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
+            assert_eq!(
+                lock.packages_typed().unwrap()[0]
+                    .1
+                    .registry_integrity_declared(),
+                Some(true)
+            );
+            lock.validate_replay(lock.root_manifest_digest()).unwrap();
+        }
+    }
+}
+
+#[test]
+fn fetching_another_version_preserves_locked_dependency_edges() {
+    let (project, fixture) = project_with_fixture("locked-packument-refresh", INTEGRITY);
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let base = metadata["packages"][0].clone();
+    metadata["packages"][0]["dependencies"] = serde_json::json!({"dep":"1.0.0"});
+    let mut dependency = base.clone();
+    dependency["name"] = "dep".into();
+    metadata["packages"]
+        .as_array_mut()
+        .unwrap()
+        .push(dependency.clone());
+    fs::write(&fixture, metadata.to_string()).unwrap();
+    let store = project.path().join("store");
+    run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    let before = read_lock(&project.path().join("tapid.lock")).unwrap();
+    let pinned_key = before.root_bindings()["plugin"].clone();
+    let pinned = before
+        .packages_typed()
+        .unwrap()
+        .into_iter()
+        .find(|(key, _)| key.to_string() == pinned_key)
+        .unwrap()
+        .1;
+    assert_eq!(pinned.dependencies().len(), 1);
+
+    let mut next = base;
+    next["version"] = "2.0.0".into();
+    metadata["packages"].as_array_mut().unwrap().push(next);
+    metadata["packages"][0]["dependencies"] = serde_json::json!({"dep":"2.0.0"});
+    dependency["version"] = "2.0.0".into();
+    metadata["packages"]
+        .as_array_mut()
+        .unwrap()
+        .push(dependency);
+    fs::write(&fixture, metadata.to_string()).unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0","plugin-next":"npm:plugin@2.0.0"}}"#).unwrap();
+    run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    let after = read_lock(&project.path().join("tapid.lock")).unwrap();
+    assert_eq!(after.root_bindings()["plugin"], pinned_key);
+    let preserved = after
+        .packages_typed()
+        .unwrap()
+        .into_iter()
+        .find(|(key, _)| key.to_string() == pinned_key)
+        .unwrap()
+        .1;
+    assert_eq!(preserved, pinned);
+    let next: tapid_lockfile::LockfilePackageKey =
+        after.root_bindings()["plugin-next"].parse().unwrap();
+    assert_eq!(next.version.to_string(), "2.0.0");
+}
+
+#[test]
+fn unrelated_root_changes_preserve_direct_and_transitive_versions_of_one_package() {
+    let (project, fixture) = project_with_fixture("locked-multiple-versions", INTEGRITY);
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*","parent":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let mut parent = metadata["packages"][0].clone();
+    parent["name"] = "parent".into();
+    parent["dependencies"] = serde_json::json!({"plugin":"2.0.0"});
+    // Initially the direct root requires 1.x, while parent requires 2.x.
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"^1","parent":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let mut higher = metadata["packages"][0].clone();
+    higher["version"] = "2.0.0".into();
+    metadata["packages"]
+        .as_array_mut()
+        .unwrap()
+        .extend([parent, higher]);
+    fs::write(&fixture, metadata.to_string()).unwrap();
+    let store = project.path().join("store");
+    run(
+        project.path(),
+        None,
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    // Broadening a requirement does not require changing its valid selection.
+    run(
+        project.path(),
+        Some("plugin@*"),
+        Some(&store),
+        InstallMode::Online,
+        Some(&fixture),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
+    let key: tapid_lockfile::LockfilePackageKey = lock.root_bindings()["plugin"].parse().unwrap();
+    assert_eq!(key.version.to_string(), "1.0.0");
+    assert!(
+        lock.packages_typed()
+            .unwrap()
+            .iter()
+            .any(|(key, _)| key.name.as_str() == "plugin" && key.version.to_string() == "2.0.0")
+    );
+}
+
+#[test]
+fn frozen_rejects_invalid_root_bindings_before_downloading() {
+    let (project, _fixture, cold) = pinned_fixture_project("frozen-invalid-binding");
+    let lock_path = project.path().join("tapid.lock");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+    let target = lock["rootBindings"]["plugin"].clone();
+    lock["rootBindings"] = serde_json::json!({"unknown": target});
+    fs::write(&lock_path, lock.to_string()).unwrap();
+    let failure = run(
+        project.path(),
+        None,
+        Some(&cold),
+        InstallMode::Frozen,
+        Some(&project.path().join("absent-fixture.json")),
+        false,
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Lockfile);
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("not a direct manifest dependency")
+    );
+    assert!(!cold.join("trees").exists());
+}
+
+#[test]
+fn changed_peer_roots_rebind_compatible_ranges_and_release_incompatible_pins() {
+    for (provider, plugin_version) in [("18.3.0", "1.0.0"), ("19.0.0", "2.0.0")] {
+        let (project, fixture) = project_with_fixture("changed-locked-peers", INTEGRITY);
+        project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*","react":"18.2.0"}}"#).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+        let base = metadata["packages"][0].clone();
+        metadata["packages"][0]["peerDependencies"] = serde_json::json!({"react":"^18"});
+        let mut plugin2 = metadata["packages"][0].clone();
+        plugin2["version"] = "2.0.0".into();
+        plugin2["peerDependencies"] = serde_json::json!({"react":"^19"});
+        metadata["packages"].as_array_mut().unwrap().push(plugin2);
+        for version in ["18.2.0", "18.3.0", "19.0.0"] {
+            let mut react = base.clone();
+            react["name"] = "react".into();
+            react["version"] = version.into();
+            metadata["packages"].as_array_mut().unwrap().push(react);
+        }
+        // Select v1 initially; v2 is introduced after the first lock is written.
+        let newer = metadata["packages"].as_array_mut().unwrap().remove(1);
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let store = project.path().join("store");
+        run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        metadata["packages"].as_array_mut().unwrap().push(newer);
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        run(
+            project.path(),
+            Some(&format!("react@{provider}")),
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
+        let key: tapid_lockfile::LockfilePackageKey =
+            lock.root_bindings()["plugin"].parse().unwrap();
+        assert_eq!(key.version.to_string(), plugin_version);
+        assert_eq!(
+            crate::context::parse_peer(&key.peer_context)
+                .unwrap()
+                .entries()[&"react".parse().unwrap()]
+                .to_string(),
+            provider
+        );
+    }
+}
+
+#[test]
+fn frozen_refuses_corrupt_warm_content_without_redownloading() {
+    let (project, _fixture, _) = pinned_fixture_project("frozen-corrupt-warm");
+    let warm = project.path().join("warm-store");
+    let lock_path = project.path().join("tapid.lock");
+    let before = fs::read(&lock_path).unwrap();
+    let lock = read_lock(&lock_path).unwrap();
+    let digest = lock.packages().values().next().unwrap().tree_digest();
+    fs::write(
+        warm.join("trees").join(digest).join("package.json"),
+        b"tampered",
+    )
+    .unwrap();
+    let failure = run(
+        project.path(),
+        None,
+        Some(&warm),
+        InstallMode::Frozen,
+        Some(&project.path().join("absent-fixture.json")),
+        false,
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Integrity);
+    assert_eq!(fs::read(&lock_path).unwrap(), before);
 }
 
 #[test]

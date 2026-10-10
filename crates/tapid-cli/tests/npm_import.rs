@@ -1,5 +1,73 @@
 use std::{fs, process::Command};
-use tapid_test_support::TempProject;
+use tapid_test_support::{TempHome, TempProject};
+
+#[test]
+fn npm_import_update_converts_to_a_native_lock() {
+    let project = TempProject::new("npm-import-update-empty").unwrap();
+    let home = TempHome::new("npm-import-update-empty").unwrap();
+    project
+        .write("package.json", br#"{"name":"example","version":"1.0.0"}"#)
+        .unwrap();
+    project
+        .write(
+            "package-lock.json",
+            br#"{"lockfileVersion":3,"packages":{"":{"name":"example","version":"1.0.0"}}}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "registry.json",
+            include_bytes!("fixtures/npm-import/registry.json"),
+        )
+        .unwrap();
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .args(args)
+            .env("HOME", home.path())
+            .env("XDG_CACHE_HOME", home.path())
+            .env("LOCALAPPDATA", home.path())
+            .env_remove("TAPID_NPM_TOKEN")
+            .current_dir(project.path())
+            .output()
+            .unwrap()
+    };
+    let imported = invoke(&["import-package-lock", "package-lock.json"]);
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let store = project.path().join("store");
+    let updated = invoke(&[
+        "update",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+        store.to_str().unwrap(),
+    ]);
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let lock = tapid_lockfile::Lockfile::from_json(
+        &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+    )
+    .unwrap();
+    assert!(lock.packages().is_empty());
+    let replayed = invoke(&[
+        "install",
+        "--offline",
+        "--frozen",
+        "--store-dir",
+        store.to_str().unwrap(),
+    ]);
+    assert!(
+        replayed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+}
 
 #[test]
 fn npm_import_empty_project_is_offline_and_deterministic() {

@@ -165,7 +165,7 @@ test('Windows support preserves historical release contracts', () => {
   assert.ok(current.nativePlatforms.includes('win32'));
   for (const [tag, contract] of releases) {
     if (tag === currentTag) continue;
-    assert.equal(contract.nativePlatforms.includes('win32'), false, `${tag} must retain its reviewed published contract`);
+    assert.equal(contract.nativePlatforms.includes('win32'), tag === 'v0.0.12', `${tag} must retain its reviewed published contract`);
   }
 });
 

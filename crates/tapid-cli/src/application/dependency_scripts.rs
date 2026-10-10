@@ -88,9 +88,8 @@ pub(super) fn apply(
         paths: Vec::new(),
         retained: BTreeSet::new(),
     };
-    if !online {
-        snapshots.paths.extend(trees.values().cloned());
-    }
+    // The caller owns source snapshots and transaction staging trees.
+    // This guard owns only snapshots acquired while selecting derived outputs.
     let mut system_identity = None;
     for key in order {
         let package = lock.packages()[&key].clone();

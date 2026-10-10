@@ -205,7 +205,7 @@ tapid ci --offline
 
 `tapid ci` requires `tapid.lock` and matching root and workspace manifests. It preserves `package.json` and `tapid.lock`, installs the locked versions and edges, and atomically replaces managed `node_modules`. Missing store trees are downloaded from locked HTTPS artifact URLs, checked against locked SHA-512 integrity and SHA-256 tree digests, and published through the install transaction. Dependency lifecycle scripts do not run. `--offline` requires every verified tree in the store.
 
-`ci` requires download URLs for every registry package, even with a warm cache or `--offline`. Incomplete locks need regeneration with `tapid install` and review of the resulting changes. The explicit `--registry-fixture` option supplies local artifacts for tests and air-gapped development. Tapid uses its own lockfile and supported dependency semantics; this is not complete npm compatibility. An unmanaged `node_modules` is rejected rather than deleted.
+`ci` requires download URLs for every registry package, even with a warm cache or `--offline`. Locks missing download URLs need regeneration with `tapid update` using live registry metadata and review of the resulting changes. The explicit `--registry-fixture` option supplies local artifacts for tests and air-gapped development. Tapid uses its own lockfile and supported dependency semantics; this is not complete npm compatibility. An unmanaged `node_modules` is rejected rather than deleted.
 
 ## Offline and frozen replay
 
@@ -216,7 +216,7 @@ tapid install --offline --project-dir ./example
 tapid install --frozen --project-dir ./example
 ```
 
-Offline and frozen replay do not resolve metadata or fetch archives. The lockfile manifest digest, package identities, tree digests, markers, and managed output are validated before atomic activation. `--store-dir PATH` selects another verified store root.
+Ordinary install reuses a matching lock. Changed manifests preserve compatible locked selections; `tapid update` requests a fresh graph. Frozen installation with a native lock keeps the exact graph and lock bytes, and can download missing pinned archives without resolving metadata. Imported npm locks preserve selections but may record verified tree receipts. Offline installation forbids downloads, including with `--frozen`. Native lock hydration requires a pinned HTTPS URL and registry-declared SHA-512 provenance, then verifies the archive and locked tree digest. Replay validates manifest digests, registry routes, platform contexts, tree markers, and managed output before atomic activation. `--store-dir PATH` selects another verified store root. See [locked installation decisions](docs/adr/0008-locked-install-selection-and-hydration.md).
 
 ## Supported subset and limitations
 
