@@ -21,7 +21,8 @@ test('migrated command-help gate still blocks non-success CI and every missing o
   for (const [index, name] of codeqlNames.entries()) {
     let elapsed = 0;
     await rejects(waitForCi({ sha, readRuns: async () => [run()], readChecks: async () => codeqlChecks().filter((_, i) => i !== index), now: () => elapsed, sleep: async ms => { elapsed += ms; }, timeoutMs: 10 }), /timed out/);
-    await rejects(waitForCi({ sha, readRuns: async () => [run()], readChecks: async () => codeqlChecks().map((check, i) => i === index ? { ...check, conclusion: 'failure' } : check) }), new RegExp(`required check did not succeed.*${name.replace(/[()]/g, '\\$&')}`));
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await rejects(waitForCi({ sha, readRuns: async () => [run()], readChecks: async () => codeqlChecks().map((check, i) => i === index ? { ...check, conclusion: 'failure' } : check) }), new RegExp(`required check did not succeed.*${escapedName}`));
   }
   for (const overrides of [{ head_sha: 'b'.repeat(40) }, { event: 'pull_request' }, { head_branch: 'release/prepare' }]) {
     let elapsed = 0;
