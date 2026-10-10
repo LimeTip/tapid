@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn workspace_materialization_compares_canonical_project_roots() {
+    let project = tapid_test_support::TempProject::new("workspace-root-identity").unwrap();
+    project
+        .write("package.json", br#"{"name":"root","version":"1.0.0"}"#)
+        .unwrap();
+    std::fs::create_dir(project.path().join("child")).unwrap();
+    let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+    let noncanonical = project.path().join("child/..");
+    assert!(workspace_materialization(&noncanonical, &config).is_ok());
+    assert!(workspace_materialization(project.path(), &config).is_ok());
+}
+
+#[test]
 fn fetched_locked_versions_fill_missing_registry_urls_without_changing_pins() {
     for fixture in [false, true] {
         let mut pinned = named_record("plugin", "1.0.0", &[("dep", "1.0.0")]);

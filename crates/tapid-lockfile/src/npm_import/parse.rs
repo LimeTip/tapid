@@ -177,7 +177,7 @@ pub(super) fn lookup<T>(
     let mut base = if peer {
         parent
             .rsplit_once("node_modules/")
-            .map_or("", |(base, _)| base.trim_end_matches('/'))
+            .map_or(parent, |(base, _)| base.trim_end_matches('/'))
     } else {
         parent
     };
@@ -193,9 +193,13 @@ pub(super) fn lookup<T>(
         if base.is_empty() {
             return None;
         }
-        base = base
-            .rsplit_once("/node_modules/")
-            .map_or("", |(ancestor, _)| ancestor);
+        base = if let Some((ancestor, _)) = base.rsplit_once("/node_modules/") {
+            ancestor
+        } else if base.starts_with("node_modules/") {
+            ""
+        } else {
+            base.rsplit_once('/').map_or("", |(ancestor, _)| ancestor)
+        };
     }
 }
 pub(super) fn edge(
@@ -286,19 +290,47 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
         "/packages/",
         "root",
     )?;
-    if let Some(graph) = super::workspace::graph(input)? {
-        return Ok(graph);
+    let workspaces = super::workspace::members(input)?;
+    let mut workspace_links = BTreeMap::new();
+    for (path, entry) in entries.iter().filter(|(_, e)| e.get("link").is_some()) {
+        let target = entry["resolved"].as_str().expect("validated link");
+        let name = workspaces[target]["name"].as_str().expect("name");
+        let parent = path
+            .strip_suffix(&format!("node_modules/{name}"))
+            .and_then(|prefix| {
+                if prefix.is_empty() {
+                    Some("")
+                } else {
+                    prefix.strip_suffix('/')
+                }
+            });
+        if !parent.is_some_and(|parent| parent.is_empty() || workspaces.contains_key(parent)) {
+            return Err(error(
+                &pointer("/packages", path),
+                path,
+                "link",
+                "links must be placed at a root or declared member node_modules",
+            ));
+        }
+        workspace_links.insert(path.clone(), target.to_owned());
     }
     let mut packages = BTreeMap::new();
     for (path, value) in entries.iter().filter(|(path, _)| !path.is_empty()) {
         let at = pointer("/packages", path);
         let entry = object(value, &at, path)?;
-        let local_name = placement_name(path).ok_or_else(|| {
+        if workspaces.contains_key(path) || entry.contains_key("link") {
+            continue;
+        }
+        let placement = workspaces.keys().find_map(|member| {
+            path.strip_prefix(&format!("{member}/node_modules/"))
+                .map(|suffix| format!("node_modules/{suffix}"))
+        });
+        let local_name = placement_name(placement.as_deref().unwrap_or(path)).ok_or_else(|| {
             error(
                 &at,
                 path,
                 "path",
-                "unsupported registry placement; member-local node_modules and unsafe paths are unsupported",
+                "unsupported registry placement or unsafe path",
             )
         })?;
         let raw_name = if entry.contains_key("name") {
@@ -426,9 +458,28 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
             },
         );
     }
+    let placements: BTreeMap<_, _> = packages
+        .keys()
+        .chain(workspace_links.keys())
+        .map(|path| (path.clone(), ()))
+        .collect();
     for path in packages.keys().cloned().collect::<Vec<_>>() {
         let at = pointer("/packages", &path);
         let entry = entries[&path].as_object().expect("validated entry");
+        for field in ["dependencies", "optionalDependencies", "peerDependencies"] {
+            for name in requirements(entry, field, &at, &path)?.keys() {
+                if lookup(&placements, &path, name, field == "peerDependencies")
+                    .is_some_and(|target| workspace_links.contains_key(&target))
+                {
+                    return Err(error(
+                        &pointer(&pointer(&at, field), name),
+                        &path,
+                        field,
+                        "registry edges to local workspace members cannot be represented",
+                    ));
+                }
+            }
+        }
         let mut dependencies = requirements(entry, "dependencies", &at, &path)?;
         let optional = requirements(entry, "optionalDependencies", &at, &path)?;
         dependencies.extend(optional.clone());
@@ -482,12 +533,123 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
         package.peers = peer_edges;
         package.optional_peers = meta;
     }
-    let mut requirements = requirements(root, "dependencies", "/packages/", "root")?;
+    let root_points = entry_roots(root, "", &packages, &workspaces, &workspace_links)?;
+    let mut roots = root_points.dependencies;
+    let mut optional_roots = root_points.optional_dependencies;
+    let mut member_roots = BTreeMap::new();
+    for (path, member) in &workspaces {
+        let selected = entry_roots(
+            member.as_object().expect("member"),
+            path,
+            &packages,
+            &workspaces,
+            &workspace_links,
+        )?;
+        for (name, target) in &selected.dependencies {
+            if target == &format!("node_modules/{name}") {
+                if !roots.contains_key(name) && selected.optional_dependencies.contains(name) {
+                    optional_roots.insert(name.clone());
+                }
+                if !selected.optional_dependencies.contains(name) {
+                    optional_roots.remove(name);
+                }
+                roots.entry(name.clone()).or_insert_with(|| target.clone());
+            }
+        }
+        member_roots.insert(path.clone(), selected);
+    }
+    let graph = ImportedNpmGraph {
+        packages,
+        roots,
+        optional_roots,
+        workspaces,
+        member_roots,
+        workspace_links,
+    };
+    validate_representable(&graph)?;
+    Ok(graph)
+}
+
+fn entry_roots(
+    entry: &Map<String, Value>,
+    parent: &str,
+    packages: &BTreeMap<String, ImportedNpmPackage>,
+    workspaces: &BTreeMap<String, Value>,
+    workspace_links: &BTreeMap<String, String>,
+) -> Result<ImportedNpmEntryPoints, NpmImportError> {
+    let at = pointer("/packages", parent);
+    let original_peers = requirements(entry, "peerDependencies", &at, parent)?;
+    optional_peers(entry, &at, parent, &original_peers)?;
+    let mut root = entry.clone();
+    let placements: BTreeMap<_, _> = packages
+        .keys()
+        .chain(workspace_links.keys())
+        .map(|path| (path.clone(), ()))
+        .collect();
+    for field in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
+        for (name, requirement) in requirements(entry, field, &at, parent)? {
+            if field == "dependencies"
+                && entry
+                    .get("optionalDependencies")
+                    .and_then(Value::as_object)
+                    .is_some_and(|optional| optional.contains_key(&name))
+            {
+                continue;
+            }
+            let selected = lookup(&placements, parent, &name, field == "peerDependencies");
+            if let Some(local) = selected
+                .as_ref()
+                .and_then(|selected| workspace_links.get(selected))
+                .map(|path| &workspaces[path])
+            {
+                let version: PackageVersion = local["version"]
+                    .as_str()
+                    .expect("version")
+                    .parse()
+                    .expect("validated version");
+                let local_name: PackageName = name.parse().expect("name");
+                if requirement.package_name(&local_name) != &local_name
+                    || !requirement.matches(&version)
+                {
+                    return Err(error(
+                        &pointer(&pointer(&at, field), &name),
+                        parent,
+                        field,
+                        "local workspace identity/version does not satisfy requirement",
+                    ));
+                }
+                root.get_mut(field)
+                    .and_then(Value::as_object_mut)
+                    .expect("section")
+                    .remove(&name);
+                if field == "optionalDependencies"
+                    && let Some(dependencies) =
+                        root.get_mut("dependencies").and_then(Value::as_object_mut)
+                {
+                    dependencies.remove(&name);
+                }
+                if field == "peerDependencies"
+                    && let Some(meta) = root
+                        .get_mut("peerDependenciesMeta")
+                        .and_then(Value::as_object_mut)
+                {
+                    meta.remove(&name);
+                }
+            }
+        }
+    }
+    let root = &root;
+    let mut requirements = requirements(root, "dependencies", &at, parent)?;
     // Tapid requires overlapping root sections to agree; npm optional overrides are preserved.
-    for (name, req) in self::requirements(root, "devDependencies", "/packages/", "root")? {
+    for (name, req) in self::requirements(root, "devDependencies", &at, parent)? {
         if let Some(previous) = requirements.get(&name) {
-            let selected = lookup(&packages, "", &name, false)
-                .ok_or_else(|| error("/packages/", "root", &name, "missing direct package"))?;
+            let selected = lookup(packages, parent, &name, false)
+                .ok_or_else(|| error(&at, parent, &name, "missing direct package"))?;
             let selected = &packages[&selected];
             let local_name = name.parse::<PackageName>().expect("validated name");
             if previous.package_name(&local_name) != &selected.name
@@ -496,8 +658,8 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
                 || !req.matches(&selected.version)
             {
                 return Err(error(
-                    "/packages/",
-                    "root",
+                    &at,
+                    parent,
                     &name,
                     "overlapping root requirements disagree with selection",
                 ));
@@ -505,34 +667,34 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
         }
         requirements.insert(name, req);
     }
-    let optional = self::requirements(root, "optionalDependencies", "/packages/", "root")?;
+    let optional = self::requirements(root, "optionalDependencies", &at, parent)?;
     requirements.extend(optional.clone());
     let mut roots = BTreeMap::new();
     for (name, req) in requirements {
         if let Some(target) = edge(
-            &packages,
-            "",
+            packages,
+            parent,
             &name,
             &req,
             false,
             optional.contains_key(&name),
-            "/packages/",
+            &at,
         )? {
             roots.insert(name, target);
         }
     }
-    let peers = self::requirements(root, "peerDependencies", "/packages/", "root")?;
-    let meta = optional_peers(root, "/packages/", "root", &peers)?;
+    let peers = self::requirements(root, "peerDependencies", &at, parent)?;
+    let meta = optional_peers(root, &at, parent, &peers)?;
     let mut optional_roots: BTreeSet<_> = optional.keys().cloned().collect();
     for (name, req) in peers {
         if let Some(target) = edge(
-            &packages,
-            "",
+            packages,
+            parent,
             &name,
             &req,
             true,
             meta.contains(&name),
-            "/packages/peerDependencies",
+            &pointer(&at, "peerDependencies"),
         )? {
             if !roots.contains_key(&name) && meta.contains(&name) {
                 optional_roots.insert(name.clone());
@@ -540,15 +702,12 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
             roots.entry(name.clone()).or_insert(target);
         }
     }
-    let graph = ImportedNpmGraph {
-        packages,
-        roots,
-        optional_roots,
-        workspaces: BTreeMap::new(),
-    };
-    validate_representable(&graph)?;
-    Ok(graph)
+    Ok(ImportedNpmEntryPoints {
+        dependencies: roots,
+        optional_dependencies: optional_roots,
+    })
 }
+
 pub(super) fn optional_peers(
     entry: &Map<String, Value>,
     at: &str,
@@ -599,6 +758,9 @@ fn validate_representable(graph: &ImportedNpmGraph) -> Result<(), NpmImportError
         .collect();
     let mut reachable = BTreeSet::new();
     let mut pending: Vec<_> = graph.roots.values().cloned().collect();
+    for member in graph.member_roots.values() {
+        pending.extend(member.dependencies.values().cloned());
+    }
     while let Some(path) = pending.pop() {
         if !reachable.insert(path.clone()) {
             continue;

@@ -17,6 +17,7 @@ pub use layout::{
     MaterializationEntry, MaterializationInput, MaterializationPlan, NamedDependency,
     NamedDependencyEdge, NamedLayoutInput, PackageInstance, PlanError, StagedActivationPlan,
     VerifiedTreeReference, plan_layout, plan_materialization, plan_named_layout,
+    plan_workspace_layout,
 };
 pub use platform::{Capability, Platform, PlatformCapabilities};
 pub use shims::{

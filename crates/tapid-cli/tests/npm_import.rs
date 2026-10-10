@@ -814,18 +814,25 @@ fn npm_import_ci_rejects_imported_schema_without_mutation() {
     }
 }
 
-#[test]
-fn npm_import_workspace_links_install_and_replay_without_resolution() {
+fn workspace_project() -> (TempProject, TempHome) {
     let project = TempProject::new("npm-import-workspaces").unwrap();
     let home = TempHome::new("npm-import-workspaces").unwrap();
-    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"member":"^1"}});
-    let member = serde_json::json!({"name":"member","version":"1.0.0","main":"index.js","dependencies":{"shared":"1","@scope/helper":"^1"},"optionalDependencies":{"native":"1"}});
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*","apps/*"],"dependencies":{"member":"^1"}});
+    let member = serde_json::json!({"name":"member","version":"1.0.0","main":"index.js","bin":"./index.js","funding":"https://example.com/fund","deprecated":"Use the replacement","dependencies":{"shared":"1","@scope/helper":"^1"},"optionalDependencies":{"native":"1"}});
+    let second = serde_json::json!({"name":"second","version":"1.0.0","dependencies":{"shared":"2","parent":"1","member":"1"}});
     let helper = serde_json::json!({"name":"@scope/helper","version":"1.0.0","peerDependencies":{"shared":"1"}});
     let reference: serde_json::Value =
         serde_json::from_slice(include_bytes!("fixtures/npm-import/package-lock.json")).unwrap();
     let npm = serde_json::json!({"lockfileVersion":3,"packages":{
-        "":root,"packages/member":{"version":"1.0.0","dependencies":{"shared":"1","@scope/helper":"^1"},"optionalDependencies":{"native":"1"}},
+        "":root,"packages/member":{"version":"1.0.0","bin":{"member":"index.js"},"funding":"https://example.com/fund","deprecated":"Use the replacement","dependencies":{"shared":"1","@scope/helper":"^1"},"optionalDependencies":{"native":"1"}},
         "packages/helper":helper,
+        "packages/helper/node_modules/shared":reference["packages"]["node_modules/shared"],
+        "apps/second":second,
+        "node_modules/second":{"resolved":"apps/second","link":true},
+        "apps/second/node_modules/member":{"resolved":"packages/member","link":true},
+        "apps/second/node_modules/shared":reference["packages"]["node_modules/parent/node_modules/shared"],
+        "node_modules/parent":reference["packages"]["node_modules/parent"],
+        "node_modules/parent/node_modules/shared":reference["packages"]["node_modules/parent/node_modules/shared"],
         "node_modules/@scope/helper":{"resolved":"packages/helper","link":true},
         "node_modules/member":{"resolved":"packages/member","link":true},
         "node_modules/shared":reference["packages"]["node_modules/shared"],
@@ -859,6 +866,15 @@ fn npm_import_workspace_links_install_and_replay_without_resolution() {
         )
         .unwrap();
     project
+        .write("apps/second/package.json", second.to_string().as_bytes())
+        .unwrap();
+    project
+        .write(
+            "apps/second/index.js",
+            b"module.exports = [require('shared'), require('parent'), require('member')];",
+        )
+        .unwrap();
+    project
         .write("package-lock.json", npm.to_string().as_bytes())
         .unwrap();
     project
@@ -867,6 +883,21 @@ fn npm_import_workspace_links_install_and_replay_without_resolution() {
             include_bytes!("fixtures/npm-import/registry.json"),
         )
         .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            project.path().join("packages/member/index.js"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    (project, home)
+}
+
+#[test]
+fn npm_import_workspace_links_install_and_replay_without_resolution() {
+    let (project, home) = workspace_project();
     let invoke = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_tapid"))
             .args(args)
@@ -925,10 +956,27 @@ fn npm_import_workspace_links_install_and_replay_without_resolution() {
                 .is_file()
         );
         assert!(!project.path().join("node_modules/native").exists());
+        #[cfg(unix)]
+        assert!(
+            project
+                .path()
+                .join("apps/second/node_modules/.bin/member")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        #[cfg(windows)]
+        assert!(
+            project
+                .path()
+                .join("apps/second/node_modules/.bin/member.cmd")
+                .is_file()
+        );
         let node = Command::new("node")
             .args([
                 "-e",
-                "require('node:assert').equal(require('member'), 'shared@1.0.0')",
+                "const a = require('node:assert'); a.equal(require('member'), 'shared@1.0.0'); a.deepEqual(require('second'), ['shared@2.0.0', 'parent@1.0.0', 'shared@1.0.0']); a.equal(require('node:module').createRequire(require.resolve('parent'))('shared'), 'shared@2.0.0');",
             ])
             .current_dir(project.path())
             .output()
@@ -1081,4 +1129,412 @@ fn npm_import_workspace_rejects_symlink_escape() {
         fs::read(project.path().join("tapid.lock")).unwrap(),
         b"prior lock"
     );
+}
+
+#[test]
+fn npm_import_workspace_crash_recovery_settles_every_managed_tree() {
+    for installed in [false, true] {
+        for point in [
+            "workspace_member_activated",
+            "activation_complete",
+            "commit_decision",
+        ] {
+            let (project, home) = workspace_project();
+            let command = || {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+                command
+                    .current_dir(project.path())
+                    .env("HOME", home.path())
+                    .env("XDG_CACHE_HOME", home.path())
+                    .env("LOCALAPPDATA", home.path());
+                command
+            };
+            assert!(
+                command()
+                    .args(["import-package-lock", "package-lock.json"])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            let store = project.path().join("store");
+            let install = [
+                "install",
+                "--frozen",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                store.to_str().unwrap(),
+            ];
+            if installed {
+                assert!(command().args(install).output().unwrap().status.success());
+                project.write("node_modules/sentinel", b"old root").unwrap();
+                project
+                    .write("apps/second/node_modules/sentinel", b"old member")
+                    .unwrap();
+            }
+            let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+            let output = command()
+                .args(install)
+                .env("TAPID_TEST_CRASH_POINT", point)
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{point}");
+            let output = command()
+                .args(install)
+                .env("TAPID_TEST_RECOVER_ONLY", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{point}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if point == "commit_decision" {
+                assert!(
+                    project
+                        .path()
+                        .join("node_modules/shared/package.json")
+                        .is_file()
+                );
+                assert!(
+                    project
+                        .path()
+                        .join("apps/second/node_modules/shared/package.json")
+                        .is_file()
+                );
+                assert!(!project.path().join("node_modules/sentinel").exists());
+                assert!(
+                    !project
+                        .path()
+                        .join("apps/second/node_modules/sentinel")
+                        .exists()
+                );
+            } else {
+                assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+                for root in [
+                    project.path().to_path_buf(),
+                    project.path().join("apps/second"),
+                ] {
+                    assert_eq!(
+                        root.join("node_modules").exists(),
+                        installed,
+                        "{point}: {}",
+                        root.display()
+                    );
+                    assert_eq!(root.join(".tapid-managed").exists(), installed);
+                }
+                if installed {
+                    assert_eq!(
+                        fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+                        b"old root"
+                    );
+                    assert_eq!(
+                        fs::read(project.path().join("apps/second/node_modules/sentinel")).unwrap(),
+                        b"old member"
+                    );
+                } else {
+                    assert!(!store.join("trees").exists());
+                }
+            }
+            for root in [
+                project.path().to_path_buf(),
+                project.path().join("apps/second"),
+            ] {
+                assert!(!root.join(".tapid-lifecycle-journal.json").exists());
+                for entry in fs::read_dir(root).unwrap() {
+                    let name = entry.unwrap().file_name();
+                    let name = name.to_string_lossy();
+                    assert!(
+                        !name.starts_with(".tapid-install-stage-")
+                            && !name.starts_with(".tapid-node-modules-old-")
+                            && !name.starts_with(".tapid-managed-old-"),
+                        "{name}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn npm_import_workspace_activation_failure_restores_member_and_root() {
+    let (project, home) = workspace_project();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+        command
+            .current_dir(project.path())
+            .env("HOME", home.path())
+            .env("XDG_CACHE_HOME", home.path())
+            .env("LOCALAPPDATA", home.path());
+        command
+    };
+    assert!(
+        command()
+            .args(["import-package-lock", "package-lock.json"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let store = project.path().join("store");
+    let install = [
+        "install",
+        "--frozen",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+        store.to_str().unwrap(),
+    ];
+    assert!(command().args(install).output().unwrap().status.success());
+    project.write("node_modules/sentinel", b"root").unwrap();
+    project
+        .write("apps/second/node_modules/sentinel", b"member")
+        .unwrap();
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    // A malformed root marker fails root activation after the member was activated.
+    project.write(".tapid-managed", b"invalid marker").unwrap();
+    let output = command().args(install).output().unwrap();
+    assert!(!output.status.success());
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+        b"root"
+    );
+    assert_eq!(
+        fs::read(project.path().join("apps/second/node_modules/sentinel")).unwrap(),
+        b"member"
+    );
+    assert_eq!(
+        fs::read(project.path().join(".tapid-managed")).unwrap(),
+        b"invalid marker"
+    );
+    assert!(
+        !project
+            .path()
+            .join(".tapid-lifecycle-journal.json")
+            .exists()
+    );
+}
+
+#[test]
+fn npm_import_native_update_clears_owned_member_selections() {
+    let (project, home) = workspace_project();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+        command
+            .current_dir(project.path())
+            .env("HOME", home.path())
+            .env("XDG_CACHE_HOME", home.path())
+            .env("LOCALAPPDATA", home.path());
+        command
+    };
+    assert!(
+        command()
+            .args(["import-package-lock", "package-lock.json"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let store = project.path().join("store");
+    let output = command()
+        .args([
+            "install",
+            "--frozen",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        project
+            .path()
+            .join("apps/second/node_modules/shared/package.json")
+            .is_file()
+    );
+    let path = project.path().join("apps/second/package.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["dependencies"]["shared"] = serde_json::json!("1");
+    fs::write(path, manifest.to_string()).unwrap();
+    let path = project.path().join("package.json");
+    let mut root: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    root["dependencies"]["shared"] = serde_json::json!("1");
+    fs::write(path, root.to_string()).unwrap();
+    let output = command()
+        .args([
+            "update",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for member in ["apps/second", "packages/helper"] {
+        assert!(
+            !project
+                .path()
+                .join(member)
+                .join("node_modules/shared")
+                .exists()
+        );
+        assert!(project.path().join(member).join(".tapid-managed").is_file());
+    }
+    let output = command()
+        .args([
+            "install",
+            "--offline",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let node = Command::new("node").args(["-e", "require('node:assert').deepEqual(require('second'), ['shared@1.0.0', 'parent@1.0.0', 'shared@1.0.0']);"]).current_dir(project.path()).output().unwrap();
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+}
+
+#[test]
+fn npm_import_workspace_hoisting_preserves_direct_registry_and_local_bindings() {
+    for local in [false, true] {
+        let project = TempProject::new("npm-import-workspace-hoisting").unwrap();
+        let home = TempHome::new("npm-import-workspace-hoisting").unwrap();
+        let reference: serde_json::Value =
+            serde_json::from_slice(include_bytes!("fixtures/npm-import/package-lock.json"))
+                .unwrap();
+        let root = if local {
+            serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/shared"],"dependencies":{"shared":"1","parent":"1"}})
+        } else {
+            serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/member"]})
+        };
+        let member = if local {
+            serde_json::json!({"name":"shared","version":"1.0.0"})
+        } else {
+            serde_json::json!({"name":"member","version":"1.0.0","dependencies":{"shared":"1","parent":"1"}})
+        };
+        let mut npm = serde_json::json!({"lockfileVersion":3,"packages":{"":root}});
+        let source = if local {
+            "packages/shared"
+        } else {
+            "packages/member"
+        };
+        npm["packages"][source] = member.clone();
+        npm["packages"][if local {
+            "node_modules/shared"
+        } else {
+            "node_modules/member"
+        }] = serde_json::json!({"resolved":source,"link":true});
+        let parent = if local {
+            "node_modules/parent"
+        } else {
+            "packages/member/node_modules/parent"
+        };
+        npm["packages"][parent] = reference["packages"]["node_modules/parent"].clone();
+        npm["packages"][format!("{parent}/node_modules/shared")] =
+            reference["packages"]["node_modules/parent/node_modules/shared"].clone();
+        if !local {
+            npm["packages"]["node_modules/shared"] =
+                reference["packages"]["node_modules/shared"].clone();
+        }
+        project
+            .write("package.json", root.to_string().as_bytes())
+            .unwrap();
+        project
+            .write(
+                format!("{source}/package.json"),
+                member.to_string().as_bytes(),
+            )
+            .unwrap();
+        project
+            .write(
+                format!("{source}/index.js"),
+                if local {
+                    b"module.exports = 'local@1.0.0';"
+                } else {
+                    b"module.exports = require('shared');"
+                },
+            )
+            .unwrap();
+        project
+            .write("package-lock.json", npm.to_string().as_bytes())
+            .unwrap();
+        project
+            .write(
+                "registry.json",
+                include_bytes!("fixtures/npm-import/registry.json"),
+            )
+            .unwrap();
+        let command = || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+            command
+                .current_dir(project.path())
+                .env("HOME", home.path())
+                .env("XDG_CACHE_HOME", home.path())
+                .env("LOCALAPPDATA", home.path());
+            command
+        };
+        assert!(
+            command()
+                .args(["import-package-lock", "package-lock.json"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        let store = project.path().join("store");
+        let output = command()
+            .args([
+                "install",
+                "--frozen",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                store.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{local}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let script = if local {
+            "const a = require('node:assert'); a.equal(require('shared'), 'local@1.0.0'); a.equal(require('node:module').createRequire(require.resolve('parent'))('shared'), 'shared@2.0.0');"
+        } else {
+            "const a = require('node:assert'); a.equal(require('member'), 'shared@1.0.0'); const r = require('node:module').createRequire(require.resolve('member')); a.equal(require('node:module').createRequire(r.resolve('parent'))('shared'), 'shared@2.0.0');"
+        };
+        let output = Command::new("node")
+            .args(["-e", script])
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{local}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

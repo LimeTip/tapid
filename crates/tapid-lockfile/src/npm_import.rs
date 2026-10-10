@@ -53,13 +53,23 @@ pub struct ImportedNpmPackage {
     pub libc: Vec<String>,
 }
 
+/// Registry entry points for one project manifest, with npm optional overrides.
+pub struct ImportedNpmEntryPoints {
+    pub dependencies: BTreeMap<String, String>,
+    pub optional_dependencies: BTreeSet<String>,
+}
+
 /// Validated npm placement graph; edges target paths, never newly resolved versions.
 pub struct ImportedNpmGraph {
     /// Root-relative local targets and their selected npm manifest fields.
     pub workspaces: BTreeMap<String, Value>,
+    /// Physical root or member-level links to contained workspace sources.
+    pub workspace_links: BTreeMap<String, String>,
     pub packages: BTreeMap<String, ImportedNpmPackage>,
     pub roots: BTreeMap<String, String>,
     pub optional_roots: BTreeSet<String>,
+    /// Member-relative registry entry points, preserving conflicting local selections.
+    pub member_roots: BTreeMap<String, ImportedNpmEntryPoints>,
 }
 
 impl ImportedNpmLockfile {
@@ -304,6 +314,15 @@ impl ImportedNpmGraph {
             .iter()
             .map(|(name, path)| (path.clone(), self.optional_roots.contains(name)))
             .collect();
+        for member in self.member_roots.values() {
+            let roots = &member.dependencies;
+            let optional = &member.optional_dependencies;
+            pending.extend(
+                roots
+                    .iter()
+                    .map(|(name, path)| (path.clone(), optional.contains(name))),
+            );
+        }
         while let Some((path, optional)) = pending.pop() {
             if !visited.insert((path.clone(), optional)) {
                 continue;
