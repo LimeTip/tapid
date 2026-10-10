@@ -158,7 +158,7 @@ mod write_lifecycle_tests {
             .policy(policy)
             .build()
             .unwrap();
-        assert!(!containment_support(&request).is_supported());
+        assert!(containment_support(&request).is_supported());
         let cancellation_sender = if expected == Termination::Cancelled {
             let marker = overlap.join("nested/ready.txt");
             Some(std::thread::spawn(move || {
@@ -386,10 +386,7 @@ mod write_lifecycle_tests {
             .policy(policy)
             .build()
             .unwrap();
-        assert!(
-            !containment_support(&request).is_supported(),
-            "integrated gate remains closed"
-        );
+        assert!(containment_support(&request).is_supported());
         WindowsFilesystemGrants::fail_next_restore_for_test();
         let error = execute_with_backend(&request, &WriteBackend).unwrap_err();
         let after: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
@@ -505,16 +502,6 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
         None,
     )
     .expect("static backend identity must satisfy the checked contract");
-    if !request.policy().filesystem().write().is_empty() {
-        return ContainmentSupport::unsupported(
-            backend,
-            "windows",
-            "project write policies remain unsupported until declared writes and ACL revocation are natively verified",
-            requested,
-            EnforcementDimensions::none(),
-            EnforcementDimensions::none(),
-        );
-    }
     if request.policy().network() {
         return ContainmentSupport::unsupported(
             backend,
