@@ -26,6 +26,56 @@ fn npm_import_rejects_wrong_name_type() {
     input["packages"]["node_modules/shared"]["name"] = serde_json::json!(42);
     assert!(import(input).is_err());
 }
+
+#[test]
+fn npm_import_root_overlaps_require_matching_identities_and_versions() {
+    let reference: Value = serde_json::from_str(INPUT).unwrap();
+    for (production, development, selected_name, accepted) in [
+        ("npm:a@1", "npm:b@1", "b", false),
+        ("1", "npm:b@1", "b", false),
+        ("npm:b@1", "1", "foo", false),
+        ("npm:b@2", "npm:b@1", "b", false),
+        ("npm:b@1", "npm:b@^1.0.0", "b", true),
+        ("1", "^1.0.0", "foo", true),
+    ] {
+        // A plain range keeps the declared local name; aliases select another identity.
+        let root = serde_json::json!({
+            "name": "root",
+            "version": "1.0.0",
+            "dependencies": {"foo": production},
+            "devDependencies": {"foo": development}
+        });
+        let input = serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": root,
+                "node_modules/foo": {
+                    "name": selected_name,
+                    "version": "1.0.0",
+                    "resolved": format!("https://registry.npmjs.org/{selected_name}/-/{selected_name}-1.0.0.tgz"),
+                    "integrity": reference["packages"]["node_modules/shared"]["integrity"]
+                }
+            }
+        });
+        let result = ImportedNpmLockfile::import(&input.to_string(), &root.to_string(), DIGEST);
+        if accepted {
+            let graph = result.unwrap().graph().unwrap();
+            assert_eq!(
+                graph.packages[&graph.roots["foo"]].name.as_str(),
+                selected_name
+            );
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("overlapping root requirements disagree with selection"),
+                "{production} / {development} / {selected_name}"
+            );
+        }
+    }
+}
+
 #[test]
 fn npm_import_platform_selection_preserves_required_and_optional_edges() {
     let input: Value = serde_json::from_str(INPUT).unwrap();

@@ -492,8 +492,12 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
         if let Some(previous) = requirements.get(&name) {
             let selected = lookup(&packages, "", &name, false)
                 .ok_or_else(|| error("/packages/", "root", &name, "missing direct package"))?;
-            if !previous.matches(&packages[&selected].version)
-                || !req.matches(&packages[&selected].version)
+            let selected = &packages[&selected];
+            let local_name = name.parse::<PackageName>().expect("validated name");
+            if previous.package_name(&local_name) != &selected.name
+                || req.package_name(&local_name) != &selected.name
+                || !previous.matches(&selected.version)
+                || !req.matches(&selected.version)
             {
                 return Err(error(
                     "/packages/",
