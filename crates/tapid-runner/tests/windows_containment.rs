@@ -992,14 +992,13 @@ fn windows_runtime_directory_ace_allows_launching_read_execute_binaries() {
 }
 
 #[test]
-fn windows_write_policy_fails_closed_before_spawn_until_native_acceptance() {
-    let root = temporary_project("write-policy-pending");
+fn windows_missing_write_target_fails_closed_without_materialization() {
+    let root = temporary_project("write-target-missing");
     let writable = root.join("writable");
-    fs::create_dir(&writable).unwrap();
     let marker = writable.join("must-not-spawn.txt");
     let outside = root.join("outside sentinel.txt");
     fs::write(&outside, b"host-positive-control").unwrap();
-    let paths = [&root, &writable, &outside];
+    let paths = [&root, &outside];
     let baselines: Vec<_> = paths.iter().map(|path| project_dacl(path)).collect();
     let command = format!("echo should-not-run>\"{}\"", marker.display());
     let policy = SandboxPolicy::new_with_assurance(
@@ -1014,7 +1013,8 @@ fn windows_write_policy_fails_closed_before_spawn_until_native_acceptance() {
     .unwrap();
     let request = command_request_with_policy(&root, &command, policy);
 
-    let error = execute(&request).expect_err("unverified Windows writes must fail closed");
+    let error = execute(&request).expect_err("missing Windows write target must fail closed");
+    assert!(!writable.exists(), "missing target was materialized");
     assert_eq!(
         error.category(),
         ExecutionErrorCategory::UnsupportedContainment
@@ -1032,26 +1032,12 @@ fn windows_write_policy_fails_closed_before_spawn_until_native_acceptance() {
 }
 
 #[test]
-#[ignore = "re-enable after AppContainer existing-file writes pass on Windows 11"]
 fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
     let root = temporary_project("write-existing-file");
     let writable = root.join("writable");
     fs::create_dir(&writable).unwrap();
     let authorized = writable.join("authorized.txt");
     fs::write(&authorized, "preexisting content").unwrap();
-    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
-    let icacls = fs::canonicalize(PathBuf::from(system_root).join("System32/icacls.exe")).unwrap();
-    let label = Command::new(&icacls)
-        .arg(&writable)
-        .args(["/setintegritylevel", "(OI)(CI)L", "/c"])
-        .output()
-        .unwrap();
-    assert!(
-        label.status.success(),
-        "icacls failed to set the test low-integrity label: {}{}",
-        String::from_utf8_lossy(&label.stdout),
-        String::from_utf8_lossy(&label.stderr)
-    );
     let command = format!("echo TAPID_WRITE_GRANTED>\"{}\"", authorized.display());
     let policy = SandboxPolicy::new_with_assurance(
         SandboxMode::Required,
