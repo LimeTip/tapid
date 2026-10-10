@@ -106,6 +106,8 @@ pub(crate) enum InstallMode {
     Online,
     Offline,
     Frozen,
+    Ci,
+    CiOffline,
 }
 
 fn default_store_root_for<F>(platform: &str, mut environment: F) -> Result<PathBuf, String>
@@ -262,8 +264,9 @@ fn perform_install(
     allow_unverified_registry_artifacts: bool,
     mut report_replay_progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
-    let offline = matches!(mode, InstallMode::Offline);
-    let frozen = matches!(mode, InstallMode::Frozen);
+    let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
+    let ci = matches!(mode, InstallMode::Ci | InstallMode::CiOffline);
+    let frozen = matches!(mode, InstallMode::Frozen) || ci;
     if package.is_some() && (offline || frozen) {
         return Err(OperationalError::new(
             ErrorKind::InvalidRequest,
@@ -520,7 +523,13 @@ fn perform_install(
             ErrorKind::LockfileMissing,
             format!(
                 "{} install requires tapid.lock: {}",
-                if offline { "offline" } else { "frozen" },
+                if ci {
+                    "ci"
+                } else if offline {
+                    "offline"
+                } else {
+                    "frozen"
+                },
                 lock_path.display()
             ),
         ));
@@ -562,6 +571,9 @@ fn perform_install(
         &registry_config,
     )?;
     validate_workspace_dependency_edges(&workspace, &workspace_registry_dependencies, &lock)?;
+    if ci {
+        online::validate_locked_artifact_sources(&lock, registry_fixture)?;
+    }
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")
     })?;
@@ -569,6 +581,53 @@ fn perform_install(
     journal
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+    if ci && !offline {
+        let (mut input, trees, transaction, _cached_snapshots) = online::prepare_locked_install(
+            &lock,
+            &root_manifest,
+            &store,
+            &registry_config,
+            registry_fixture,
+            |completed, total| report_replay_progress(Progress::Replay(completed, total)),
+        )?;
+        session.mutated = true;
+        let publication = transaction
+            .publish_for_lifecycle(&journal.coordinator_path())
+            .map_err(OperationalError::from)?;
+        crate::filesystem::activation::test_crash_at("store_published");
+        let trees = trees
+            .into_iter()
+            .map(|(key, path)| (key, publication.resolve_path(&path)))
+            .collect();
+        for instance in &mut input.instances {
+            instance.tree.root = publication.resolve_path(&instance.tree.root);
+        }
+        session
+            .outcome
+            .changed_files
+            .push(project_dir.join("node_modules"));
+        materialize_install(
+            &project_dir,
+            input,
+            trees,
+            workspace.links,
+            activation_lock,
+            true,
+            &mut report_replay_progress,
+        )?;
+        crate::filesystem::activation::test_crash_at("activation_complete");
+        journal
+            .mark_committed()
+            .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+        session.committed = true;
+        session.outcome.state = ChangeState::Committed;
+        crate::filesystem::activation::test_crash_at("commit_decision");
+        publication.commit().map_err(OperationalError::from)?;
+        journal
+            .finish()
+            .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+        return Ok((lock.packages().len(), true));
+    }
     let (input, trees) = crate::application::replay::replay_input(
         &lock,
         &root_manifest,

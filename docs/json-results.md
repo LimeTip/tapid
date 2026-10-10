@@ -9,7 +9,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `install`, alias `i` | Install or replay result |
 | `add`, `remove`, `update`, `prune` | Dependency operation result |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
-| `init`, `manifest`, `lock`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
+| `ci`, `init`, `manifest`, `lock`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
 | `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
 | Private release helpers, no command | `JSON_UNSUPPORTED_COMMAND`, exit 1 |
 | Invalid arguments | `ARGUMENT_INVALID`, exit 2 |

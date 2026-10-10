@@ -300,6 +300,7 @@ fn json_unsupported_results_preserve_canonical_command_names() {
     let project = TempProject::new("json-unsupported-operation").unwrap();
     for (args, operation) in [
         (vec!["--json", "init"], "init"),
+        (vec!["--json", "ci"], "ci"),
         (vec!["--json", "run", "test"], "run"),
         (vec!["--json", "manifest", "validate"], "manifest"),
         (vec!["--json", "lock", "verify"], "lock"),
