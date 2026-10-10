@@ -1,2 +1,6 @@
 # Keep the release source verifier executable by Bash on Windows runners.
 tools/release/verify-source.sh text eol=lf
+
+# Preserve the npm import snapshot and its manifest byte digest on every platform.
+crates/tapid-cli/tests/fixtures/npm-import/package.json text eol=lf
+crates/tapid-cli/tests/fixtures/npm-import/tapid.lock text eol=lf

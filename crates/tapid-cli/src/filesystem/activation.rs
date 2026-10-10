@@ -283,6 +283,14 @@ pub(crate) struct ActivationLock {
 
 impl ActivationLock {
     pub(crate) fn acquire(project: &Path) -> Result<Self, OperationalError> {
+        Self::acquire_mode(project, true)
+    }
+
+    pub(crate) fn acquire_without_recovery(project: &Path) -> Result<Self, OperationalError> {
+        Self::acquire_mode(project, false)
+    }
+
+    fn acquire_mode(project: &Path, recover: bool) -> Result<Self, OperationalError> {
         let path = project.join(".tapid-activation.lock");
         let mut file =
             open_lock_file(&path).map_err(|e| OperationalError::new(ErrorKind::Transaction, e))?;
@@ -321,6 +329,32 @@ impl ActivationLock {
                 ErrorKind::Recovery,
                 "refusing to recover a malformed node_modules activation lock",
             ));
+        }
+        if !recover {
+            let pending = fs::read_dir(project)
+                .map_err(|e| OperationalError::from_source(ErrorKind::Recovery, e))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| OperationalError::from_source(ErrorKind::Recovery, e))?
+                .iter()
+                .any(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(".tapid-lifecycle-journal")
+                        || name.starts_with(".tapid-install-stage-")
+                        || name.starts_with(".tapid-node-modules-old-")
+                        || name.starts_with(".tapid-managed-old-")
+                });
+            if pending {
+                return Err(OperationalError::new(
+                    ErrorKind::Recovery,
+                    "import refuses interrupted install state; finish recovery with tapid install before importing",
+                ));
+            }
+            return Ok(Self {
+                file,
+                owner: previous_owner,
+                recovered: false,
+            });
         }
         let decision = crate::filesystem::lifecycle_journal::recover(
             project,
