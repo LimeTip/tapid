@@ -397,6 +397,12 @@ test("public installers exercise explicit and latest discovery plus supported up
   const workflow = await text(".github/workflows/release-public-smoke.yml");
   assert(workflow.includes("--limit 100 --json tagName,isDraft,isPrerelease"));
   assert(workflow.includes("(0, 0, 10) <= version(r['tagName']) < latest"));
+  assert(workflow.includes('previous_installer_sh: ${{ steps.release.outputs.previous_installer_sh }}'));
+  assert(workflow.includes('previous_installer_ps1: ${{ steps.release.outputs.previous_installer_ps1 }}'));
+  assert(workflow.includes('gh api "repos/LimeTip/tapid/commits/$previous_tag" --jq .sha'));
+  assert(workflow.includes('version <= (0, 0, 10)'));
+  assert(workflow.includes('raw.githubusercontent.com/LimeTip/tapid/$previous_sha/scripts/install.sh'));
+  assert(workflow.includes('raw.githubusercontent.com/LimeTip/tapid/$previous_sha/scripts/install.ps1'));
   const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
   const windows = workflow.slice(workflow.indexOf("  windows:"));
   for (const job of [unix, windows]) {
