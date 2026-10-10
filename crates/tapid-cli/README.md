@@ -34,6 +34,12 @@ tapid manifest validate [PATH]
 tapid lock verify
 tapid install [OPTIONS]
 tapid ci [OPTIONS]
+tapid add <PACKAGE>... [OPTIONS]
+tapid remove <PACKAGE>... [OPTIONS]
+tapid update [OPTIONS]
+tapid outdated [OPTIONS]
+tapid prune [OPTIONS]
+tapid why <PACKAGE> [OPTIONS]
 tapid upgrade [OPTIONS]
 tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 ```
@@ -63,6 +69,10 @@ tapid install --registry-fixture ./fixture.json --project-dir ./example
 ```
 
 The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 7 locks, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
+
+`tapid why <PACKAGE>` reads the selected project's `package.json` and `tapid.lock` and lists deterministic dependency paths from direct roots to each reachable locked instance of that package. Use `--project-dir PATH` to select a project and `--workspace NAME` for a workspace member. It is strictly read-only and offline: it does not contact registries, recover transactions, inspect or modify the store, or materialize `node_modules`. Direct root edges retain their manifest kind (`dependencies`, `devDependencies`, `optionalDependencies`, or `peerDependencies`); transitive lockfile edges are labeled `dependency` because the current schema does not preserve their original kind. Registry identity, version, and workspace source are shown to disambiguate instances. No reachable match prints an explicit message and exits with status `1`.
+
+`tapid --json why PACKAGE` emits one JSON result with `schemaVersion: 1`, `operation: "why"`, `outcome`, `effectiveProject`, `changes`, `warnings`, `package`, `paths`, and `truncated`. Results are deterministic and bounded to 50 paths, 128 dependency levels, and 10,000 graph visits; `truncated` indicates omitted paths or traversal stopped by a bound. Transitive edge-kind limitations are surfaced in `warnings`.
 
 ## Install and lifecycle outcomes
 

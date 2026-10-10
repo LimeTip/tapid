@@ -10,6 +10,7 @@ mod release_record;
 pub(crate) mod release_verification;
 pub(crate) mod replay;
 pub(crate) mod upgrade;
+pub(crate) mod why;
 
 pub(crate) fn run() -> ExitCode {
     let arguments = std::env::args_os().collect::<Vec<_>>();

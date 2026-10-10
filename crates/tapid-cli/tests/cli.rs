@@ -5550,3 +5550,153 @@ fn lifecycle_workspace_symlink_escape_preserves_external_project() {
         assert!(!external.path().join("member/node_modules").exists());
     }
 }
+
+#[test]
+fn why_reports_a_deterministic_path_from_a_direct_root_without_mutation() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-transitive").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut app = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "app",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let target = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "target",
+        "2.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "b".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    app.add_dependency("target", &target.key()).unwrap();
+    let app_key = app.key();
+    lock.insert_packages([app, target]).unwrap();
+    lock.set_roots([app_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "app".to_owned(),
+        app_key,
+    )]))
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+    let manifest_before = fs::read(project.path().join("package.json")).unwrap();
+    let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+
+    let output = run(&project.path().to_path_buf(), &["why", "target"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("app@1.0.0"), "{stdout}");
+    assert!(stdout.contains("target@2.0.0"), "{stdout}");
+    assert!(stdout.contains("dependencies (app)"), "{stdout}");
+    assert!(stdout.contains("dependency (target)"), "{stdout}");
+
+    let json_output = run(&project.path().to_path_buf(), &["why", "target", "--json"]);
+    assert!(json_output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(result["schemaVersion"], 1);
+    assert_eq!(result["operation"], "why");
+    assert_eq!(result["outcome"], "success");
+    assert_eq!(result["paths"][0]["steps"][0]["edgeKind"], "dependencies");
+    assert_eq!(result["paths"][0]["steps"][1]["edgeKind"], "dependency");
+    assert_eq!(result["changes"], serde_json::json!([]));
+    assert!(
+        result["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("transitive dependency edge kinds")
+    );
+
+    let missing = run(&project.path().to_path_buf(), &["why", "absent", "--json"]);
+    assert_eq!(missing.status.code(), Some(1));
+    let missing_result: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(missing_result["outcome"], "not_found");
+    assert!(missing_result["paths"].as_array().unwrap().is_empty());
+    let incomplete = tapid_test_support::TempProject::new("why-missing-lock").unwrap();
+    incomplete
+        .write("package.json", br#"{"name":"demo","version":"1.0.0"}"#)
+        .unwrap();
+    let failure = run(
+        &incomplete.path().to_path_buf(),
+        &["why", "target", "--json"],
+    );
+    assert_eq!(failure.status.code(), Some(1));
+    let failure_result: serde_json::Value = serde_json::from_slice(&failure.stdout).unwrap();
+    assert_eq!(failure_result["outcome"], "error");
+    assert_eq!(failure_result["errors"][0]["code"], "LOCKFILE_MISSING");
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_before
+    );
+    assert!(!project.path().join("node_modules").exists());
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 2);
+}
+
+#[test]
+fn why_labels_direct_optional_and_peer_dependency_kinds() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-direct-kinds").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","optionalDependencies":{"@scope/optional":"1.0.0"},"peerDependencies":{"peer":"1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let optional = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "@scope/optional",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "c".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let peer = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "peer",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "d".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let optional_key = optional.key();
+    lock.insert_packages([optional, peer]).unwrap();
+    lock.set_roots([optional_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "@scope/optional".to_owned(),
+        optional_key,
+    )]))
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+
+    for (package, expected_kind) in [
+        ("@scope/optional", "optionalDependencies"),
+        ("peer", "peerDependencies"),
+    ] {
+        let output = run(&project.path().to_path_buf(), &["why", package]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains(expected_kind));
+    }
+}
