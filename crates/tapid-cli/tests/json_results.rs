@@ -129,7 +129,7 @@ fn json_lifecycle_results_and_partial_outdated_metadata() {
 }
 
 #[test]
-fn json_early_failures_and_help_are_single_objects() {
+fn json_early_failures_are_single_objects() {
     let project = TempProject::new("json-early").unwrap();
     for args in [
         vec!["add"],
@@ -146,9 +146,6 @@ fn json_early_failures_and_help_are_single_objects() {
         assert_eq!(result["outcome"], "failure");
         assert!(result["errors"][0]["code"].is_string());
     }
-    let (output, result) = invoke(&project, &["--json", "--help"]);
-    assert_eq!(output.status.code(), Some(0));
-    assert_eq!(result["errors"][0]["code"], "JSON_HELP_UNSUPPORTED");
     // A forwarded token belongs to the child and does not select JSON parsing.
     let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
         .current_dir(project.path())
@@ -157,4 +154,43 @@ fn json_early_failures_and_help_are_single_objects() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn json_help_and_version_are_successful_without_project_access() {
+    let project = TempProject::new("json-information").unwrap();
+    project.write("package.json", b"invalid manifest").unwrap();
+    project
+        .write("tapid.toml", b"invalid configuration")
+        .unwrap();
+    for (args, expected) in [
+        (vec!["--json", "--help"], "Install dependencies"),
+        (vec!["--help", "--json"], "Install dependencies"),
+        (vec!["--json", "install", "--help"], "--registry-fixture"),
+        (vec!["i", "--json", "-h"], "--registry-fixture"),
+        (vec!["--json", "help", "run"], "--node-runtime"),
+        (vec!["manifest", "validate", "--json", "--help"], "Usage:"),
+    ] {
+        let (output, result) = invoke(&project, &args);
+        assert!(output.status.success(), "{result}");
+        assert_eq!(result["schema_version"], 1);
+        assert_eq!(result["operation"], "help");
+        assert_eq!(result["outcome"], "success");
+        assert_eq!(result["errors"], serde_json::json!([]));
+        assert!(result["project"].is_null());
+        let help = result["data"]["text"].as_str().unwrap();
+        assert!(help.contains(expected), "{help}");
+        assert!(!help.contains('\u{1b}'));
+    }
+    for args in [["--json", "--version"], ["-V", "--json"]] {
+        let (output, result) = invoke(&project, &args);
+        assert!(output.status.success(), "{result}");
+        assert_eq!(result["operation"], "version");
+        assert_eq!(result["outcome"], "success");
+        assert_eq!(result["errors"], serde_json::json!([]));
+        assert_eq!(result["data"]["name"], "tapid");
+        assert_eq!(result["data"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(result["project"].is_null());
+    }
+    assert_eq!(std::fs::read_dir(project.path()).unwrap().count(), 2);
 }

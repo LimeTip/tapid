@@ -83,6 +83,13 @@ fn emit(result: Value, status: u8) -> ExitCode {
     ExitCode::from(status)
 }
 
+/// Informational data comes from the CLI definition, never from project metadata.
+pub(crate) fn information(operation: &str, data: Value) -> ExitCode {
+    let mut result = envelope(operation, "success", None);
+    result["data"] = data;
+    emit(result, 0)
+}
+
 pub(crate) fn protocol_error(operation: &str, code: &str, status: u8) -> ExitCode {
     let mut result = envelope(operation, "failure", None);
     result["errors"] = json!([{"code": code}]);
