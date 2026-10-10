@@ -1,4 +1,4 @@
-use super::outcome::{ErrorKind, OperationFailure, OperationOutcome, OperationalError, Warning};
+use super::outcome::{ErrorKind, OperationFailure, OperationOutcome, OperationalError};
 use serde::Deserialize;
 use std::{
     collections::BTreeSet,
@@ -228,8 +228,10 @@ pub(crate) fn resolve_workspace(
 }
 
 pub(crate) fn format_outdated_entry(entry: &OutdatedEntry) -> String {
+    let compatible = entry.impact(entry.newest_compatible.as_deref());
+    let available = entry.impact(entry.newest_available.as_deref());
     format!(
-        "{} [{}] declared={} locked={} compatible={} available={}{}",
+        "{} [{}] declared={} locked={} compatible={} available={}{}\n  compatible-change={} compatible-lockfile={}\n  available-change={} available-lockfile={} available-manifest={}",
         entry.identity,
         entry.kind,
         entry.declared,
@@ -240,7 +242,12 @@ pub(crate) fn format_outdated_entry(entry: &OutdatedEntry) -> String {
             .diagnostic
             .as_ref()
             .map(|value| format!(" diagnostic={value}"))
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        compatible.version_change,
+        compatible.lockfile,
+        available.version_change,
+        available.lockfile,
+        available.manifest,
     )
 }
 
@@ -253,6 +260,55 @@ pub(crate) struct OutdatedEntry {
     pub(crate) newest_compatible: Option<String>,
     pub(crate) newest_available: Option<String>,
     pub(crate) diagnostic: Option<OperationalError>,
+}
+
+/// Impact of selecting one metadata version, without resolving its dependencies.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct OutdatedImpact {
+    pub(crate) version_change: &'static str,
+    pub(crate) lockfile: &'static str,
+    pub(crate) manifest: &'static str,
+}
+
+impl OutdatedEntry {
+    pub(crate) fn impact(&self, target: Option<&str>) -> OutdatedImpact {
+        let Some(target) = target.and_then(|value| value.parse::<PackageVersion>().ok()) else {
+            return OutdatedImpact {
+                version_change: "unknown",
+                lockfile: "unknown",
+                manifest: "unknown",
+            };
+        };
+        let locked = self
+            .locked
+            .as_deref()
+            .and_then(|value| value.parse::<PackageVersion>().ok());
+        let version_change = match locked.as_ref() {
+            None if self.locked.is_none() => "unlocked",
+            None => "unknown",
+            Some(locked) if target == *locked => "unchanged",
+            Some(locked) if target < *locked => "downgrade",
+            Some(locked) if target.major() != locked.major() => "major",
+            Some(locked) if target.minor() != locked.minor() => "minor",
+            Some(locked) if target.patch() != locked.patch() => "patch",
+            Some(_) => "prerelease",
+        };
+        let lockfile = match version_change {
+            "unknown" => "unknown",
+            "unchanged" => "unchanged",
+            _ => "changed",
+        };
+        let manifest = match crate::online::workspace_requirement(&self.declared, &target) {
+            Ok(requirement) if requirement.matches(&target) => "unchanged",
+            Ok(_) => "changed",
+            Err(_) => "unknown",
+        };
+        OutdatedImpact {
+            version_change,
+            lockfile,
+            manifest,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -356,12 +412,14 @@ pub(crate) fn outdated_report(
     project_dir: &Path,
     workspace_selector: Option<&str>,
     registry_fixture: Option<&Path>,
+    offline: bool,
 ) -> Result<OutdatedReport, OperationFailure> {
     let mut outcome = OperationOutcome::unchanged(project_dir);
     match outdated_entries(
         project_dir,
         workspace_selector,
         registry_fixture,
+        offline,
         &mut outcome,
     ) {
         Ok(entries) => Ok(OutdatedReport { entries, outcome }),
@@ -378,33 +436,22 @@ fn outdated_entries(
     project_dir: &Path,
     workspace_selector: Option<&str>,
     registry_fixture: Option<&Path>,
+    offline: bool,
     outcome: &mut OperationOutcome,
 ) -> Result<Vec<OutdatedEntry>, OperationalError> {
     let selection = resolve_workspace(project_dir, workspace_selector)?;
     outcome.project_dir = selection.root_dir.clone();
     let project_dir = selection.root_dir.as_path();
-    let mut manifest = selection.manifest;
+    let manifest = selection.manifest;
     let registry_config = crate::registry::RegistryConfig::load(project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-    let recovery_lock = if crate::filesystem::lifecycle_journal::has_pending(project_dir)
+    if crate::filesystem::lifecycle_journal::has_pending(project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::Recovery, error))?
     {
-        Some(crate::filesystem::activation::ActivationLock::acquire(
-            project_dir,
-        )?)
-    } else {
-        None
-    };
-    if recovery_lock.is_some() {
-        let recovered_manifest = fs::read_to_string(&selection.manifest_path).map_err(|error| {
-            OperationalError::from_source(ErrorKind::Recovery, error)
-                .context("cannot read recovered package manifest")
-        })?;
-        manifest = PackageManifest::parse(&recovered_manifest).map_err(|error| {
-            OperationalError::new(ErrorKind::Manifest, error)
-                .context("invalid recovered package manifest")
-        })?;
-        outcome.warnings.push(Warning::PreviousTransactionRecovered);
+        return Err(OperationalError::new(
+            ErrorKind::Recovery,
+            "recovery required: an interrupted transaction is pending; run tapid install to recover before inspecting outdated dependencies",
+        ));
     }
     let lock_path = project_dir.join("tapid.lock");
     let bytes = fs::read_to_string(&lock_path).map_err(|error| {
@@ -428,7 +475,6 @@ fn outdated_entries(
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    drop(recovery_lock);
     let mut transports = std::collections::BTreeMap::new();
     let allowed_origins = registry_config.configured_origins();
     let mut entries = Vec::new();
@@ -503,6 +549,10 @@ fn outdated_entries(
             .max();
         let versions = match registry_fixture {
             Some(path) => versions_from_fixture(path, &origin, &package_name),
+            None if offline => Err(OperationalError::new(
+                ErrorKind::RegistryMetadataUnavailable,
+                "offline: newer registry versions were not checked; use online outdated or --registry-fixture",
+            )),
             None => {
                 let transport = crate::online::metadata_transport_for_package(
                     &mut transports,
@@ -559,12 +609,117 @@ fn outdated_entries(
             diagnostic,
         });
     }
+    entries.sort_by(|a, b| (&a.identity, &a.kind).cmp(&(&b.identity, &b.kind)));
     Ok(entries)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outdated_impact_compares_versions_and_reuses_declared_range_semantics() {
+        for (locked, target, declared, change, lockfile, manifest) in [
+            (
+                Some("1.0.0"),
+                Some("1.0.1"),
+                "^1.0.0",
+                "patch",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("1.0.0"),
+                Some("1.2.0"),
+                "npm:other@^1.0.0",
+                "minor",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("1.0.0"),
+                Some("2.0.0"),
+                "npm:@scope/other@^1.0.0",
+                "major",
+                "changed",
+                "changed",
+            ),
+            (
+                Some("0.1.0"),
+                Some("0.2.0"),
+                "^0.1.0",
+                "minor",
+                "changed",
+                "changed",
+            ),
+            (
+                Some("1.0.0-beta.1"),
+                Some("1.0.0"),
+                "^1.0.0-beta.1",
+                "prerelease",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("1.0.0-beta.1"),
+                Some("1.0.0-beta.2"),
+                "^1.0.0-beta.1",
+                "prerelease",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("2.0.0"),
+                Some("1.0.0"),
+                "*",
+                "downgrade",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("1.0.0"),
+                Some("1.0.0"),
+                "^1.0.0",
+                "unchanged",
+                "unchanged",
+                "unchanged",
+            ),
+            (None, Some("1.0.0"), "*", "unlocked", "changed", "unchanged"),
+            (Some("1.0.0"), None, "*", "unknown", "unknown", "unknown"),
+            (
+                Some("1.0.0"),
+                Some("2.0.0"),
+                "workspace:^",
+                "major",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("1.0.0"),
+                Some("2.0.0"),
+                "git:unsupported",
+                "major",
+                "changed",
+                "unknown",
+            ),
+        ] {
+            let entry = OutdatedEntry {
+                identity: "example".into(),
+                kind: "dependencies".into(),
+                declared: declared.into(),
+                locked: locked.map(str::to_owned),
+                newest_compatible: None,
+                newest_available: target.map(str::to_owned),
+                diagnostic: None,
+            };
+            let impact = entry.impact(target);
+            assert_eq!(
+                (impact.version_change, impact.lockfile, impact.manifest),
+                (change, lockfile, manifest),
+                "{entry:?}"
+            );
+        }
+    }
 
     #[test]
     fn outdated_missing_lock_reports_typed_unchanged_context() {
@@ -574,7 +729,7 @@ mod tests {
             r#"{"name":"app","version":"1.0.0"}"#,
         )
         .unwrap();
-        let failure = outdated_report(project.path(), None, None).unwrap_err();
+        let failure = outdated_report(project.path(), None, None, false).unwrap_err();
         assert_eq!(failure.error.kind, ErrorKind::LockfileMissing);
         assert_eq!(
             failure.outcome.state,

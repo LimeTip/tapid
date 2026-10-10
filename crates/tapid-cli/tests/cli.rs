@@ -882,7 +882,8 @@ fn read_only_lifecycle_commands_fail_closed_without_writing() {
 fn outdated_reports_versions_without_mutating_project_state() {
     use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
 
-    let dir = temp_dir("outdated-read-only");
+    let project = tapid_test_support::TempProject::new("outdated-read-only").unwrap();
+    let dir = project.path().to_path_buf();
     let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"is-char":"^1.0.0"}}"#;
     fs::write(dir.join("package.json"), manifest).unwrap();
     let mut lock = lock_for_manifest(manifest);
@@ -929,6 +930,13 @@ fn outdated_reports_versions_without_mutating_project_state() {
     assert!(stdout.contains(
         "is-char [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.1.0 available=2.0.0"
     ));
+    assert!(stdout.contains("compatible-change=minor compatible-lockfile=changed"));
+    assert!(
+        stdout.contains(
+            "available-change=major available-lockfile=changed available-manifest=changed"
+        )
+    );
+    assert!(stdout.contains("Transitive lockfile changes require resolution"));
     assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest_before);
     assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_before);
     assert_eq!(
@@ -940,7 +948,6 @@ fn outdated_reports_versions_without_mutating_project_state() {
         .map(|entry| entry.unwrap().file_name())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(entries_after, entries_before);
-    cleanup(dir);
 }
 
 #[test]
@@ -990,6 +997,9 @@ fn outdated_reports_local_workspace_versions_without_registry_lookup() {
     assert!(stdout.contains(
         "local-star [dependencies] declared=workspace:* locked=2.0.0 compatible=2.0.0 available=2.0.0"
     ));
+    let offline = run(&dir, &["outdated", "--offline"]);
+    assert!(offline.status.success());
+    assert_eq!(offline.stdout, outdated.stdout);
     assert!(!stdout.contains("registry metadata returned no versions"));
     assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_before);
     cleanup(dir);
@@ -999,7 +1009,8 @@ fn outdated_reports_local_workspace_versions_without_registry_lookup() {
 fn outdated_uses_configured_private_registry_identity() {
     use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
 
-    let dir = temp_dir("outdated-private-registry");
+    let project = tapid_test_support::TempProject::new("outdated-private-registry").unwrap();
+    let dir = project.path().to_path_buf();
     let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"@acme/widget":"^1.0.0"}}"#;
     fs::write(dir.join("package.json"), manifest).unwrap();
     fs::write(
@@ -1041,7 +1052,20 @@ fn outdated_uses_configured_private_registry_identity() {
     assert!(String::from_utf8_lossy(&output.stdout).contains(
         "@acme/widget [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.1.0 available=2.0.0"
     ));
-    cleanup(dir);
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.acme.example'\ntoken-env='TAPID_TEST_OUTDATED_PRIVATE_TOKEN'\n",
+    ).unwrap();
+    let offline = isolated_command(&dir, &["outdated", "--offline"])
+        .env_remove("TAPID_TEST_OUTDATED_PRIVATE_TOKEN")
+        .output()
+        .unwrap();
+    assert!(offline.status.success());
+    let stdout = String::from_utf8_lossy(&offline.stdout);
+    assert!(stdout.contains("locked=1.0.0 compatible=unavailable available=unavailable"));
+    assert!(stdout.contains("offline: newer registry versions were not checked"));
+    assert!(stdout.contains("available-lockfile=unknown"));
+    assert!(!stdout.contains("up to date"));
 }
 
 #[test]
@@ -3715,9 +3739,34 @@ fn run_lifecycle_recovery_crash_case(crash_point: &str) {
         "crash hook did not terminate process"
     );
 
-    let recovery = run(
+    let pending_manifest = fs::read(dir.join("package.json")).unwrap();
+    let pending_lock = fs::read(dir.join("tapid.lock")).unwrap();
+    let pending_journal = fs::read(dir.join(".tapid-lifecycle-journal.json")).unwrap();
+    let inspection = run(
         &dir,
         &["outdated", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+    assert_eq!(inspection.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&inspection.stderr).contains("recovery required"));
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        pending_manifest
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), pending_lock);
+    assert_eq!(
+        fs::read(dir.join(".tapid-lifecycle-journal.json")).unwrap(),
+        pending_journal
+    );
+    let recovery = run_with_env(
+        &dir,
+        &[
+            "install",
+            "--offline",
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ],
+        "TAPID_TEST_RECOVER_ONLY",
+        "1",
     );
     assert!(
         recovery.status.success(),

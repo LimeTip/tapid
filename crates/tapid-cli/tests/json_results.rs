@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{fs, process::Command};
 use tapid_test_support::TempProject;
 
 fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, serde_json::Value) {
@@ -175,12 +175,58 @@ fn json_lifecycle_results_and_partial_outdated_metadata() {
     assert_eq!(result["outcome"], "success");
     assert_eq!(result["data"]["truncated"], false);
     assert_eq!(
+        result["data"]["entries"][0]["compatible_impact"],
+        serde_json::json!({
+            "version_change": "unchanged", "lockfile": "unchanged", "manifest": "unchanged"
+        })
+    );
+    assert_eq!(
+        result["data"]["entries"][0]["available_impact"],
+        serde_json::json!({
+            "version_change": "major", "lockfile": "changed", "manifest": "changed"
+        })
+    );
+    assert_eq!(
         result["data"]["entries"][0]["newest_available"],
         "2.0.1-rc.20"
     );
     project
         .write("missing.json", br#"{"packages":[]}"#)
         .unwrap();
+    let manifest_before = fs::read(project.path().join("package.json")).unwrap();
+    let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let (output, offline) = invoke(&project, &["--json", "outdated", "--offline"]);
+    assert!(output.status.success(), "{offline}");
+    assert_eq!(offline["outcome"], "partial");
+    assert_eq!(
+        offline["data"]["entries"][0]["error"]["code"],
+        "REGISTRY_METADATA_UNAVAILABLE"
+    );
+    assert!(offline["data"]["entries"][0]["newest_available"].is_null());
+    assert_eq!(
+        offline["data"]["entries"][0]["available_impact"]["lockfile"],
+        "unknown"
+    );
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_before
+    );
+    let (output, fixture_offline) = invoke(
+        &project,
+        &[
+            "--json",
+            "outdated",
+            "--offline",
+            "--registry-fixture",
+            "registry.json",
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(fixture_offline, result);
     let (output, result) = invoke(
         &project,
         &["outdated", "--json", "--registry-fixture", "missing.json"],
@@ -190,6 +236,12 @@ fn json_lifecycle_results_and_partial_outdated_metadata() {
     assert_eq!(result["changes"]["state"], "unchanged");
     assert!(result["data"]["entries"][0]["error"]["code"].is_string());
     assert!(result["data"]["entries"][0]["newest_available"].is_null());
+    assert_eq!(
+        result["data"]["entries"][0]["available_impact"],
+        serde_json::json!({
+            "version_change": "unknown", "lockfile": "unknown", "manifest": "unknown"
+        })
+    );
     let (output, result) = invoke(&project, &["prune", "--json", "--store-dir", store]);
     assert!(output.status.success(), "{result}");
     assert_eq!(result["operation"], "prune");
