@@ -258,6 +258,8 @@ pub(crate) enum RetryAdvice {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Warning {
+    UnapprovedDependencyScriptsAllowed,
+    DependencyScriptsWithoutContainment,
     UnverifiedRegistryArtifactsAllowed,
     PreviousTransactionRecovered,
     DependencyLifecycleHookSkipped { package: String, hook: String },
@@ -278,6 +280,8 @@ impl fmt::Display for Warning {
             );
         }
         f.write_str(match self {
+            Self::UnapprovedDependencyScriptsAllowed => "dependency hook approval is bypassed for this invocation; generated outputs will not enter the verified build cache",
+            Self::DependencyScriptsWithoutContainment => "dependency hooks execute without containment; they can access the host and leave surviving descendants; generated outputs will not enter the verified build cache",
             Self::UnverifiedRegistryArtifactsAllowed => "npm artifacts without registry integrity are not authenticated against a registry-declared digest",
             Self::PreviousTransactionRecovered => "recovered an interrupted project transaction before this operation",
             Self::DependencyLifecycleHookSkipped { .. } | Self::DependencyLifecycleDiscoveryFailed { .. } => unreachable!(),

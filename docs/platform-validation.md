@@ -124,6 +124,31 @@ Issue 155 adds a separate managed backend. Local uncommitted-tree tests use Linu
 On a Linux host with the documented namespace privileges and cgroup delegation, require the native assertions with:
 
 ```text
-TAPID_REQUIRE_MANAGED_ASSERTIONS=1 python3 scripts/dev.py test -p tapid-runner --lib --locked
-TAPID_REQUIRE_MANAGED_ASSERTIONS=1 python3 scripts/dev.py test -p tapid --test cli --locked approved_dependency_lifecycle_builds_native_output_and_replays_exactly
+TAPID_REQUIRE_MANAGED_ASSERTIONS=1 node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked
+TAPID_REQUIRE_MANAGED_ASSERTIONS=1 node --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked approved_dependency_lifecycle_builds_native_output_and_replays_exactly
+```
+
+## Dependency execution override development validation
+
+The uncommitted override implementation has native macOS arm64 Darwin 27.0.0
+development coverage. Five CLI lifecycle regressions pass, including independent
+approval/containment overrides, real shell-generated output, JSON risk warnings,
+exclusion from the authenticated cache, source-only reconstruction on a later
+normal install, required implicit native-build rejection, and failed-hook
+rollback. Two runner regressions verify controlled environment/PATH, null stdin,
+root timeout and root output checks without enforcement receipts. These checks
+do not establish ManagedTree containment or descendant cleanup for the unsafe
+path. See [ADR 0009](adr/0009-explicit-dependency-execution-overrides.md).
+
+The runner cross-compiles for `x86_64-pc-windows-msvc`. Full Windows CLI
+cross-compilation is blocked locally by missing Windows C headers required by
+`ring`. Native Windows execution remains an acceptance gate; the unignored CLI
+regressions run in the existing Windows workspace test matrix. Neither
+cross-compilation nor uncontained shell execution establishes contained Windows
+dependency support. Project write containment and secure Windows lifecycle-key
+storage remain unresolved.
+
+```text
+node --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked dependency_lifecycle_
+node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked uncontained
 ```

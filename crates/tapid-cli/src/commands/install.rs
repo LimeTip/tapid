@@ -16,6 +16,12 @@ pub(crate) struct Args {
     /// Permit npm metadata without registry-declared integrity. Not allowed with --offline or --frozen.
     #[arg(long)]
     pub(crate) allow_unverified_registry_artifacts: bool,
+    /// Run unapproved dependency hooks for this invocation. Containment remains required.
+    #[arg(long, conflicts_with_all = ["offline", "frozen", "allow_unverified_registry_artifacts"])]
+    pub(crate) allow_unapproved_dependency_scripts: bool,
+    /// UNSAFE: run dependency hooks without containment. Does not grant hook approval or create reusable verified build outputs.
+    #[arg(long, conflicts_with_all = ["offline", "frozen", "allow_unverified_registry_artifacts"])]
+    pub(crate) unsafe_no_dependency_sandbox: bool,
     /// Project directory containing package.json and tapid.lock.
     #[arg(long, default_value = ".")]
     pub(crate) project_dir: PathBuf,
@@ -47,6 +53,13 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
 
 /// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
 pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
+    let overrides = crate::application::ExecutionOverrides {
+        allow_unapproved: args.allow_unapproved_dependency_scripts,
+        without_containment: args.unsafe_no_dependency_sandbox,
+    };
+    for warning in overrides.warnings() {
+        eprintln!("warning: {warning}");
+    }
     let target_manifest_path = if let Some(name) = args.workspace.as_deref() {
         match crate::application::lifecycle::resolve_workspace(&args.project_dir, Some(name)) {
             Ok(selection) => {
@@ -76,29 +89,18 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     } else {
         crate::application::install::InstallMode::Online
     };
-    let result = if args.workspace.is_some() {
-        crate::application::install::run_with_manifest_target(
-            &args.project_dir,
-            &target_manifest_path,
-            None,
-            args.package.as_deref(),
-            args.store_dir.as_deref(),
-            mode,
-            args.registry_fixture.as_deref(),
-            args.allow_unverified_registry_artifacts,
-            |event| crate::output::report_progress(event, json),
-        )
-    } else {
-        crate::application::install::run(
-            &args.project_dir,
-            args.package.as_deref(),
-            args.store_dir.as_deref(),
-            mode,
-            args.registry_fixture.as_deref(),
-            args.allow_unverified_registry_artifacts,
-            |event| crate::output::report_progress(event, json),
-        )
-    };
+    let result = crate::application::install::run_with_execution(
+        &args.project_dir,
+        &target_manifest_path,
+        None,
+        args.package.as_deref(),
+        args.store_dir.as_deref(),
+        mode,
+        args.registry_fixture.as_deref(),
+        args.allow_unverified_registry_artifacts,
+        overrides,
+        |event| crate::output::report_progress(event, json),
+    );
     match result {
         Ok(report) => {
             if json {

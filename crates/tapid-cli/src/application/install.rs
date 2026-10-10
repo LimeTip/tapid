@@ -31,6 +31,7 @@ pub(crate) struct InstallReport {
 }
 
 struct InstallSession {
+    hook_stages: Vec<super::dependency_scripts::BuildStage>,
     journal: Option<crate::filesystem::lifecycle_journal::LifecycleJournal>,
     lock_backup: Option<PathBuf>,
     // Keep the lock through explicit settlement, including error paths.
@@ -42,6 +43,7 @@ struct InstallSession {
 impl InstallSession {
     fn new(project: &Path) -> Self {
         Self {
+            hook_stages: Vec::new(),
             journal: None,
             lock_backup: None,
             lock: None,
@@ -226,7 +228,35 @@ pub(crate) fn run_with_manifest_target(
     allow_unverified_registry_artifacts: bool,
     report_replay_progress: impl FnMut(Progress),
 ) -> Result<InstallReport, OperationFailure> {
+    run_with_execution(
+        project_dir,
+        target_manifest_path,
+        manifest_override,
+        package,
+        store_root,
+        mode,
+        registry_fixture,
+        allow_unverified_registry_artifacts,
+        super::dependency_scripts::ExecutionOverrides::default(),
+        report_replay_progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_execution(
+    project_dir: &Path,
+    target_manifest_path: &Path,
+    manifest_override: Option<&PackageManifest>,
+    package: Option<&str>,
+    store_root: Option<&Path>,
+    mode: InstallMode,
+    registry_fixture: Option<&Path>,
+    allow_unverified_registry_artifacts: bool,
+    overrides: super::dependency_scripts::ExecutionOverrides,
+    report_replay_progress: impl FnMut(Progress),
+) -> Result<InstallReport, OperationFailure> {
     let mut session = InstallSession::new(project_dir);
+    session.outcome.warnings.extend(overrides.warnings());
     if allow_unverified_registry_artifacts
         && matches!(mode, InstallMode::Online | InstallMode::Refresh)
     {
@@ -244,6 +274,7 @@ pub(crate) fn run_with_manifest_target(
         mode,
         registry_fixture,
         allow_unverified_registry_artifacts,
+        overrides,
         report_replay_progress,
     ) {
         Ok((package_count, replayed)) => Ok(InstallReport {
@@ -265,11 +296,18 @@ fn perform_install(
     mode: InstallMode,
     registry_fixture: Option<&Path>,
     allow_unverified_registry_artifacts: bool,
+    overrides: super::dependency_scripts::ExecutionOverrides,
     mut report_replay_progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
     let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
     let ci = matches!(mode, InstallMode::Ci | InstallMode::CiOffline);
     let frozen = matches!(mode, InstallMode::Frozen) || ci;
+    if overrides.enabled() && (offline || frozen || allow_unverified_registry_artifacts) {
+        return Err(OperationalError::new(
+            ErrorKind::InvalidRequest,
+            "dependency execution overrides require an online install with verified registry artifacts",
+        ));
+    }
     if package.is_some() && (offline || frozen) {
         return Err(OperationalError::new(
             ErrorKind::InvalidRequest,
@@ -355,6 +393,12 @@ fn perform_install(
     } else {
         None
     };
+    if overrides.enabled() && imported.is_some() {
+        return Err(OperationalError::new(
+            ErrorKind::InvalidRequest,
+            "dependency execution overrides are unavailable for imported npm locks; create an ordinary Tapid lock first",
+        ));
+    }
     if ci && imported.is_some() {
         return Err(OperationalError::new(
             ErrorKind::Lockfile,
@@ -494,6 +538,7 @@ fn perform_install(
                 .map(|(k, p)| (k.clone(), p.manifest_digest().to_owned()))
                 .collect::<BTreeMap<_, _>>();
             replayable
+                && !overrides.enabled()
                 && lifecycle_policy.approvals().is_empty()
                 && lock
                     .packages()
@@ -559,6 +604,8 @@ fn perform_install(
                 .extend(super::dependency_scripts::apply(
                     &project_dir,
                     &lifecycle_policy,
+                    overrides,
+                    &mut session.hook_stages,
                     &mut lock,
                     &mut input,
                     &mut trees,
@@ -752,6 +799,8 @@ fn perform_install(
             .extend(super::dependency_scripts::apply(
                 &project_dir,
                 &lifecycle_policy,
+                overrides,
+                &mut session.hook_stages,
                 &mut lock.clone(),
                 &mut input,
                 &mut trees,
@@ -827,6 +876,8 @@ fn perform_install(
     let hook_warnings = super::dependency_scripts::apply(
         &project_dir,
         &lifecycle_policy,
+        overrides,
+        &mut session.hook_stages,
         &mut lock.clone(),
         &mut input,
         &mut trees,

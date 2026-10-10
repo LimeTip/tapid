@@ -400,7 +400,9 @@ impl ActivationLock {
             .owner
             .strip_suffix('\n')
             .expect("activation owner is always newline terminated");
-        let stage = project.join(format!(".tapid-install-stage-{owner}"));
+        static NEXT_STAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let ordinal = NEXT_STAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stage = project.join(format!(".tapid-install-stage-{owner}-{ordinal}"));
         fs::create_dir(&stage)
             .map_err(|error| format!("cannot create install staging directory: {error}"))?;
         if let Err(error) = create_stage_owner_marker(&stage, &self.owner) {
@@ -723,7 +725,13 @@ pub(crate) fn recover_owned_stages(project: &Path, owner: &str) -> Result<(), St
             Ok(metadata) if metadata.file_type().is_file() => metadata,
             Ok(_) => continue,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if name == ownerless_stage_name {
+                if name == ownerless_stage_name
+                    || name
+                        .strip_prefix(&format!("{ownerless_stage_name}-"))
+                        .is_some_and(|suffix| {
+                            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                        })
+                {
                     fs::remove_dir_all(entry.path()).map_err(|error| {
                         format!("cannot remove ownerless stale install stage: {error}")
                     })?;
@@ -949,13 +957,19 @@ mod activation_tests {
         let project = temp_project("ownerless-stage-recovery");
         let stale = project.join(".tapid-install-stage-123-deadbeef");
         let unrelated = project.join(".tapid-install-stage-456-cafebabe");
+        let numbered = project.join(".tapid-install-stage-123-deadbeef-42");
+        let malformed = project.join(".tapid-install-stage-123-deadbeef-unrelated");
         fs::create_dir_all(&stale).unwrap();
         fs::create_dir_all(&unrelated).unwrap();
+        fs::create_dir_all(&numbered).unwrap();
+        fs::create_dir_all(&malformed).unwrap();
         fs::write(project.join(".tapid-activation.lock"), b"123-deadbeef\n").unwrap();
 
         let lock = ActivationLock::acquire(&project).unwrap();
 
         assert!(!stale.exists());
+        assert!(!numbered.exists());
+        assert!(malformed.is_dir());
         assert!(unrelated.is_dir());
         drop(lock);
         let _ = fs::remove_dir_all(project);
@@ -967,6 +981,8 @@ mod activation_tests {
         fs::create_dir_all(&project).unwrap();
         let first = ActivationLock::acquire(&project).unwrap();
         let stage = first.create_stage(&project).unwrap();
+        let second_stage = first.create_stage(&project).unwrap();
+        assert_ne!(stage, second_stage);
 
         let error = match ActivationLock::acquire(&project) {
             Ok(_) => panic!("live lock must be rejected"),
@@ -976,6 +992,10 @@ mod activation_tests {
         assert!(error.to_string().contains("already in progress"));
         assert!(stage.is_dir());
         drop(first);
+        let recovered = ActivationLock::acquire(&project).unwrap();
+        assert!(!stage.exists());
+        assert!(!second_stage.exists());
+        drop(recovered);
         let _ = fs::remove_dir_all(project);
     }
 
