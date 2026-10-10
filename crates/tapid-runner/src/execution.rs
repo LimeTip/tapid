@@ -1718,12 +1718,18 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
 #[cfg(windows)]
 #[path = "windows_execution.rs"]
 mod platform_backend;
+#[cfg(all(windows, test))]
+#[path = "../tests/support/windows_acl.rs"]
+mod windows_acl;
 #[cfg(any(windows, test))]
 #[path = "windows_cancellation.rs"]
 mod windows_cancellation;
 #[cfg(windows)]
 #[path = "windows_job.rs"]
 mod windows_job;
+#[cfg(windows)]
+#[path = "windows_write_validation.rs"]
+mod windows_write_validation;
 
 #[cfg(target_os = "macos")]
 #[path = "macos_restricted.rs"]

@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { strict as assert } from 'node:assert';
-import { readFile, readdir, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { readFile, readdir, mkdtemp, mkdir, writeFile, rm, copyFile, symlink } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 const execFileAsync = promisify(execFile);
 const workflow = (name: string) => readFile(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), 'utf8');
 const source = (path: string) => readFile(new URL(`../../${path}`, import.meta.url), 'utf8');
@@ -154,6 +154,105 @@ test('source-only ownership contract rejects missing, disabled, optional and wid
     ci.replace('  test:\n', '  test:\n    defaults:\n      run:\n        shell: bash {0}\n'),
     ci.replace('        os: [ubuntu-latest, macos-latest, windows-latest]', '        exclude: [{os: ubuntu-latest}]\n        os: [ubuntu-latest, macos-latest, windows-latest]'),
   ]) assert.throws(() => assertSourceOnlyOwners(broken));
+});
+
+const assertWindowsWriteNodeOwner = (ci: string) => {
+  const native = job(ci, 'test');
+  const setup = step(native, 'Install relocatable Node.js for native sandbox tests');
+  const prerequisite = step(native, 'Bind absolute Node for Windows native write tests');
+  assert.match(prerequisite, /if: runner.os == 'Windows'\n        shell: pwsh\n/);
+  assert.doesNotMatch(prerequisite, /continue-on-error:|SilentlyContinue|\|\|/);
+  assert.match(prerequisite, /\$ErrorActionPreference = 'Stop'/);
+  assert.match(prerequisite, /Get-Command node -CommandType Application -ErrorAction Stop \| Select-Object -First 1\)\.Source/);
+  assert.match(prerequisite, /\[IO.Path\]::IsPathFullyQualified\(\$node\)/);
+  assert.match(prerequisite, /Test-Path -LiteralPath \$node -PathType Leaf/);
+  assert.match(prerequisite, /& \$node --version/);
+  assert.match(prerequisite, /\$LASTEXITCODE -ne 0/);
+  assert.match(prerequisite, /"TAPID_TEST_NODE=\$node" >> \$env:GITHUB_ENV/);
+  assert(native.indexOf(setup) < native.indexOf(prerequisite));
+  assert(native.indexOf(prerequisite) < native.indexOf(step(native, 'Run tests')));
+  assertSourceOnlyOwners(ci);
+};
+
+test('Windows native write owner binds a validated absolute Node before workspace tests', async () => {
+  const ci = await workflow('ci');
+  assertWindowsWriteNodeOwner(ci);
+  const owner = job(ci, 'test');
+  const prerequisite = step(owner, 'Bind absolute Node for Windows native write tests');
+  for (const replacement of [
+    '', prerequisite.replace("runner.os == 'Windows'", 'false'),
+    prerequisite.replace('        shell: pwsh', '        continue-on-error: true\n        shell: pwsh'),
+    prerequisite.replace(' -ErrorAction Stop', ' -ErrorAction SilentlyContinue'),
+    prerequisite.replace(' | Select-Object -First 1', ''),
+    prerequisite.replace('Select-Object -First 1', 'Select-Object -Last 1'),
+    prerequisite.replace('[IO.Path]::IsPathFullyQualified($node)', '$true'),
+    prerequisite.replace('Test-Path -LiteralPath $node -PathType Leaf', '$true'),
+    prerequisite.replace('& $node --version', '& node --version'),
+    prerequisite.replace('$LASTEXITCODE -ne 0', '$false'),
+    prerequisite.replace('TAPID_TEST_NODE=$node', 'TAPID_TEST_NODE=node'),
+  ]) assert.throws(() => assertWindowsWriteNodeOwner(ci.replace(owner, owner.replace(prerequisite, replacement))));
+  const late = owner.replace(prerequisite, '').replace(step(owner, 'Run tests'), step(owner, 'Run tests') + prerequisite);
+  assert.throws(() => assertWindowsWriteNodeOwner(ci.replace(owner, late)));
+  const tests = await source('crates/tapid-runner/src/windows_job_tests.rs');
+  for (const name of ['appcontainer_node_ordinary_project_write_mutation_contract', 'appcontainer_node_write_only_grant_denies_read']) {
+    assert.match(tests, new RegExp(`#\\[test\\]\\s*fn ${name}\\(\\)`));
+  }
+  assert.match(tests, /var_os\("TAPID_TEST_NODE"\)\s*\.expect\(/);
+});
+
+test('Windows Node binding executes the first of two spaced PATH candidates in PowerShell', async (context) => {
+  let powershell: string;
+  try {
+    const result = await execFileAsync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '(Get-Process -Id $PID).Path'], { timeout: 30_000 });
+    powershell = result.stdout.trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || process.env.CI === 'true') throw error;
+    context.skip('PowerShell is unavailable locally; CI must execute this regression');
+    return;
+  }
+  const prerequisite = step(job(await workflow('ci'), 'test'), 'Bind absolute Node for Windows native write tests');
+  const script = prerequisite.split('        run: |\n')[1].replace(/^          /gm, '');
+  const directory = await mkdtemp(join(tmpdir(), 'tapid-node-binding-'));
+  try {
+    const candidates = [join(directory, 'first Node runtime'), join(directory, 'second Node runtime')];
+    const executable = process.platform === 'win32' ? 'node.exe' : 'node';
+    for (const candidate of candidates) {
+      await mkdir(candidate);
+      if (process.platform === 'win32') await copyFile(process.execPath, join(candidate, executable));
+      else await symlink(process.execPath, join(candidate, executable));
+    }
+    const environment = join(directory, 'github-env');
+    const harness = join(directory, 'bind.ps1');
+    const env = { ...process.env, PATH: candidates.join(delimiter), GITHUB_ENV: environment };
+    const run = () => execFileAsync(powershell, ['-NoProfile', '-NonInteractive', '-File', harness], {
+      env, timeout: 30_000,
+    });
+    // This assertion proves real Get-Command discovery returns both applications,
+    // rather than mocking the collection responsible for the hosted CI failure.
+    await writeFile(harness, "$ErrorActionPreference = 'Stop'\n$candidates = @(Get-Command node -CommandType Application -ErrorAction Stop)\nif ($candidates.Count -ne 2) { throw 'Expected two Node candidates' }\n$candidates.Source\n");
+    const discovery = await run();
+    for (const candidate of candidates) assert(discovery.stdout.includes(join(candidate, executable)));
+    context.diagnostic(`PowerShell discovered two candidates:\n${discovery.stdout.trim()}`);
+    await writeFile(environment, '');
+    await writeFile(harness, script);
+    const result = await run();
+    assert.equal(result.stdout.trim(), process.version, 'the chosen absolute executable must actually run');
+    assert.equal((await readFile(environment, 'utf8')).trim(), `TAPID_TEST_NODE=${join(candidates[0], executable)}`);
+    context.diagnostic(`Exact workflow snippet: ${result.stdout.trim()}; exported first absolute spaced path`);
+
+    // Exercise the retained nonzero-exit guard using the same real Node binary.
+    await writeFile(environment, '');
+    await writeFile(harness, script.replace('& $node --version', '& $node -e "process.exit(23)"'));
+    await assert.rejects(run, (error: { code: number; stderr: string }) => {
+      assert.notEqual(error.code, 0);
+      assert.match(error.stderr, /Native write test Node is not executable/);
+      return true;
+    });
+    assert.equal(await readFile(environment, 'utf8'), '', 'failed execution must not export Node');
+    context.diagnostic('Real Node exit 23 rejected before GITHUB_ENV export');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('main native workspace owns command-help and Windows collision tests without standalone duplicates', async () => {

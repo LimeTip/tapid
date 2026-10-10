@@ -128,10 +128,11 @@ const assertInstallerCache = (ci: string) => {
   assert.equal((ci.match(/CARGO_TARGET_DIR/g) || []).length, 2, 'compiler target must not leak to other steps, jobs, global env or GITHUB_ENV');
   // Normalize only the approved Test bootstrap input, pin migration and two compiler env blocks.
   // All actual install commands, source-ref, fresh destination, help, uninstall,
-  // native tests and documentation ownership remain the pre-Stage-6 snapshot.
+  // native tests and documentation ownership remain the pre-Stage-6 snapshot,
+  // plus the reviewed Windows absolute-Node prerequisite (frozen in this digest).
   assertTestBootstrap(ci);
   const original = native.replace(testCacheInputs, '').replaceAll(compilerEnv, '').replaceAll(pin, 'Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2');
-  assert.equal(digest(original), '8705dbd784cced1b13136ec22278291b4c842231adf22ade3d3c1be5a1dd9ae4');
+  assert.equal(digest(original), '770d185502d7f29333d97348f85be09b9ccbc9f30f5a99d125bb3b82ece59ccd');
 };
 const assertSourceInstallers = (sh: string, ps: string) => {
   const unixStart = sh.indexOf('if [ "$SOURCE_REF_SET" -eq 1 ]; then');

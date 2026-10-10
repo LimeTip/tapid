@@ -127,6 +127,18 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
+      - name: Bind absolute Node for Windows native write tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $node = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          if (-not [IO.Path]::IsPathFullyQualified($node) -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
+            throw 'Native write tests require an absolute existing Node executable'
+          }
+          & $node --version
+          if ($LASTEXITCODE -ne 0) { throw 'Native write test Node is not executable' }
+          "TAPID_TEST_NODE=$node" >> $env:GITHUB_ENV
       - name: Verify pinned node-semver compatibility oracle
         if: matrix.os == 'ubuntu-latest'
         working-directory: tests/node-semver-oracle
