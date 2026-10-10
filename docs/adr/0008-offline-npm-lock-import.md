@@ -17,7 +17,7 @@ The lockfile capability uses the resolver capability's existing `Requirement` va
 
 Frozen installation verifies only pinned artifacts and records actual canonical tree digests after checking tarball integrity, safe extraction, and package identity. Each receipt also binds the tree digest to the imported tarball URL and integrity value, so changing either pin cannot reuse the old tree. Imported selections remain in schema 8 so another platform can select its applicable optional entries. Offline installation uses previously recorded digests and store verification. Publication and activation reuse the existing lifecycle journal and store transaction.
 
-Existing nested peer placements become explicit named linker edges and peer contexts. The importer rejects conflicting graphs that collapse to the same Tapid instance, cross-registry peer contexts, and unsupported links/workspaces. This does not expand ordinary online resolver peer placement behavior.
+Existing nested peer placements become explicit named linker edges and peer contexts. The importer rejects conflicting graphs that collapse to the same Tapid instance, cross-registry peer contexts, and unsupported local layouts. Root links to declared workspace members use existing contained workspace discovery and link planning. Member registry selections must be root-hoisted; member manifest digests bind import and replay to the local sources without claiming registry artifact verification for them. This does not expand ordinary online resolver peer placement behavior.
 
 ## Consequences
 

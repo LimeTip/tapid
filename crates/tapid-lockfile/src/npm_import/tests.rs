@@ -195,3 +195,142 @@ fn npm_import_retains_alias_names_and_distinct_peer_contexts() {
         graph.peer_context("node_modules/parent/node_modules/consumer")
     );
 }
+
+#[test]
+fn npm_import_preserves_workspace_links_and_member_registry_selections() {
+    let reference: Value = serde_json::from_str(INPUT).unwrap();
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"]});
+    let member =
+        serde_json::json!({"name":"member","version":"1.0.0","dependencies":{"shared":"1"}});
+    let input = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":root,"packages/member":member,
+        "node_modules/member":{"resolved":"packages/member","link":true},
+        "node_modules/shared":reference["packages"]["node_modules/shared"]
+    }});
+    let lock = ImportedNpmLockfile::import(&input.to_string(), &root.to_string(), DIGEST).unwrap();
+    let graph = lock.graph().unwrap();
+    assert_eq!(graph.roots["shared"], "node_modules/shared");
+    assert_eq!(graph.packages.len(), 1);
+    assert_eq!(
+        lock.to_json().unwrap(),
+        ImportedNpmLockfile::from_json(&lock.to_json().unwrap())
+            .unwrap()
+            .to_json()
+            .unwrap()
+    );
+}
+
+#[test]
+fn npm_import_workspace_rejects_unsafe_and_unrepresentable_links() {
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"]});
+    let base = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":root,"packages/member":{"name":"member","version":"1.0.0"},
+        "node_modules/member":{"resolved":"packages/member","link":true}
+    }});
+    for (field, value) in [
+        ("resolved", serde_json::json!("../outside")),
+        ("resolved", serde_json::json!("/absolute")),
+        ("resolved", serde_json::json!("missing")),
+        ("link", serde_json::json!(false)),
+        ("link", serde_json::json!("true")),
+        ("integrity", serde_json::json!("unexpected")),
+    ] {
+        let mut input = base.clone();
+        input["packages"]["node_modules/member"][field] = value;
+        assert!(
+            ImportedNpmLockfile::import(&input.to_string(), &root.to_string(), DIGEST).is_err(),
+            "{field}"
+        );
+    }
+    let mut stale = base.clone();
+    stale["packages"][""]["dependencies"] = serde_json::json!({"member":"2"});
+    assert!(
+        ImportedNpmLockfile::import(
+            &stale.to_string(),
+            &stale["packages"][""].to_string(),
+            DIGEST
+        )
+        .is_err()
+    );
+    let mut nested = base;
+    nested["packages"]["packages/member/node_modules/other"] =
+        serde_json::json!({"version":"1.0.0"});
+    assert!(ImportedNpmLockfile::import(&nested.to_string(), &root.to_string(), DIGEST).is_err());
+}
+
+#[test]
+fn npm_import_accepts_empty_workspace_declarations() {
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":[]});
+    let input = serde_json::json!({"lockfileVersion":3,"packages":{"":root}});
+    assert!(ImportedNpmLockfile::import(&input.to_string(), &root.to_string(), DIGEST).is_ok());
+}
+
+#[test]
+fn npm_import_rejects_dangling_workspace_manifest_receipts() {
+    let lock = ImportedNpmLockfile::import(INPUT, MANIFEST, DIGEST).unwrap();
+    let mut wire: Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    wire["workspaceManifestDigests"] = serde_json::json!({"packages/unknown":DIGEST});
+    assert!(ImportedNpmLockfile::from_json(&wire.to_string()).is_err());
+}
+
+#[test]
+fn npm_import_workspace_preserves_optional_dependency_overrides() {
+    let reference: Value = serde_json::from_str(INPUT).unwrap();
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"shared":"2"},"optionalDependencies":{"shared":"1"}});
+    let input = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":root,"packages/member":{"name":"member","version":"1.0.0"},
+        "node_modules/member":{"resolved":"packages/member","link":true},
+        "node_modules/shared":reference["packages"]["node_modules/shared"]
+    }});
+    let graph = ImportedNpmLockfile::import(&input.to_string(), &root.to_string(), DIGEST)
+        .unwrap()
+        .graph()
+        .unwrap();
+    assert!(graph.optional_roots.contains("shared"));
+}
+
+#[test]
+fn npm_import_workspace_rejects_optional_registry_edges_to_local_members() {
+    let reference: Value = serde_json::from_str(INPUT).unwrap();
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"shared":"1"}});
+    let mut shared = reference["packages"]["node_modules/shared"].clone();
+    shared["optionalDependencies"] = serde_json::json!({"member":"1"});
+    let input = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":root,"packages/member":{"name":"member","version":"1.0.0"},
+        "node_modules/member":{"resolved":"packages/member","link":true},
+        "node_modules/shared":shared
+    }});
+    assert!(ImportedNpmLockfile::import(&input.to_string(), &root.to_string(), DIGEST).is_err());
+}
+
+#[test]
+fn npm_import_accepts_workspace_names_omitted_by_npm() {
+    let input = include_str!("../../tests/fixtures/npm-workspace-package-lock.json");
+    let value: Value = serde_json::from_str(input).unwrap();
+    let root = value["packages"][""].to_string();
+    let lock = ImportedNpmLockfile::import(input, &root, DIGEST).unwrap();
+    assert_eq!(
+        lock.graph().unwrap().workspaces["packages/member"]["name"],
+        "member"
+    );
+}
+
+#[test]
+fn npm_import_workspace_keeps_nested_registry_packages_with_local_names() {
+    let reference: Value = serde_json::from_str(INPUT).unwrap();
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"parent":"1"}});
+    let input = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":root,"packages/shared":{"name":"shared","version":"1.0.0"},
+        "node_modules/shared":{"resolved":"packages/shared","link":true},
+        "node_modules/parent":reference["packages"]["node_modules/parent"],
+        "node_modules/parent/node_modules/shared":reference["packages"]["node_modules/parent/node_modules/shared"]
+    }});
+    let graph = ImportedNpmLockfile::import(&input.to_string(), &root.to_string(), DIGEST)
+        .unwrap()
+        .graph()
+        .unwrap();
+    assert_eq!(
+        graph.packages["node_modules/parent"].dependencies["shared"],
+        "node_modules/parent/node_modules/shared"
+    );
+}

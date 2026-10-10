@@ -813,3 +813,272 @@ fn npm_import_ci_rejects_imported_schema_without_mutation() {
         assert!(!project.path().join("node_modules").exists());
     }
 }
+
+#[test]
+fn npm_import_workspace_links_install_and_replay_without_resolution() {
+    let project = TempProject::new("npm-import-workspaces").unwrap();
+    let home = TempHome::new("npm-import-workspaces").unwrap();
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"member":"^1"}});
+    let member = serde_json::json!({"name":"member","version":"1.0.0","main":"index.js","dependencies":{"shared":"1","@scope/helper":"^1"},"optionalDependencies":{"native":"1"}});
+    let helper = serde_json::json!({"name":"@scope/helper","version":"1.0.0","peerDependencies":{"shared":"1"}});
+    let reference: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/npm-import/package-lock.json")).unwrap();
+    let npm = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":root,"packages/member":{"version":"1.0.0","dependencies":{"shared":"1","@scope/helper":"^1"},"optionalDependencies":{"native":"1"}},
+        "packages/helper":helper,
+        "node_modules/@scope/helper":{"resolved":"packages/helper","link":true},
+        "node_modules/member":{"resolved":"packages/member","link":true},
+        "node_modules/shared":reference["packages"]["node_modules/shared"],
+        "node_modules/native":reference["packages"]["node_modules/native"]
+    }});
+    project
+        .write("package.json", root.to_string().as_bytes())
+        .unwrap();
+    project
+        .write(
+            "packages/member/package.json",
+            member.to_string().as_bytes(),
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/helper/package.json",
+            helper.to_string().as_bytes(),
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/helper/index.js",
+            b"module.exports = require('shared');",
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/member/index.js",
+            b"module.exports = require('@scope/helper');",
+        )
+        .unwrap();
+    project
+        .write("package-lock.json", npm.to_string().as_bytes())
+        .unwrap();
+    project
+        .write(
+            "registry.json",
+            include_bytes!("fixtures/npm-import/registry.json"),
+        )
+        .unwrap();
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .args(args)
+            .env("HOME", home.path())
+            .env("XDG_CACHE_HOME", home.path())
+            .env("LOCALAPPDATA", home.path())
+            .current_dir(project.path())
+            .output()
+            .unwrap()
+    };
+    let output = invoke(&["import-package-lock", "package-lock.json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let imported = fs::read(project.path().join("tapid.lock")).unwrap();
+    assert!(
+        invoke(&["import-package-lock", "package-lock.json"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        imported,
+        fs::read(project.path().join("tapid.lock")).unwrap()
+    );
+    let store = project.path().join("store");
+    let store = store.to_str().unwrap();
+    for offline in [false, true] {
+        let args = if offline {
+            vec!["install", "--frozen", "--offline", "--store-dir", store]
+        } else {
+            vec![
+                "install",
+                "--frozen",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                store,
+            ]
+        };
+        let output = invoke(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::canonicalize(project.path().join("node_modules/member")).unwrap(),
+            fs::canonicalize(project.path().join("packages/member")).unwrap()
+        );
+        assert!(
+            project
+                .path()
+                .join("node_modules/shared/package.json")
+                .is_file()
+        );
+        assert!(!project.path().join("node_modules/native").exists());
+        let node = Command::new("node")
+            .args([
+                "-e",
+                "require('node:assert').equal(require('member'), 'shared@1.0.0')",
+            ])
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        assert!(
+            node.status.success(),
+            "{}",
+            String::from_utf8_lossy(&node.stderr)
+        );
+    }
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    project
+        .write(
+            "packages/member/package.json",
+            br#"{"name":"member","version":"1.0.0","dependencies":{"shared":"2"}}"#,
+        )
+        .unwrap();
+    assert!(
+        !invoke(&["install", "--frozen", "--offline", "--store-dir", store])
+            .status
+            .success()
+    );
+    assert_eq!(lock, fs::read(project.path().join("tapid.lock")).unwrap());
+}
+
+#[test]
+fn npm_import_workspace_failures_preserve_existing_project_state() {
+    let project = TempProject::new("npm-import-workspace-failures").unwrap();
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"]});
+    let member = serde_json::json!({"name":"member","version":"1.0.0"});
+    let npm = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":root,"packages/member":member,
+        "node_modules/member":{"resolved":"packages/member","link":true}
+    }});
+    project
+        .write("package.json", root.to_string().as_bytes())
+        .unwrap();
+    project
+        .write(
+            "packages/member/package.json",
+            member.to_string().as_bytes(),
+        )
+        .unwrap();
+    project.write("tapid.lock", b"prior lock").unwrap();
+    project
+        .write("node_modules/keep.txt", b"prior install")
+        .unwrap();
+    project.write("store/keep.txt", b"prior store").unwrap();
+    for case in [
+        "stale",
+        "undeclared",
+        "dangling",
+        "escape",
+        "nested",
+        "member-tree",
+    ] {
+        let mut input = npm.clone();
+        match case {
+            "stale" => input["packages"]["packages/member"]["version"] = serde_json::json!("2.0.0"),
+            "undeclared" => {
+                input["packages"]["outside"] = input["packages"]["packages/member"].take();
+                input["packages"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("packages/member");
+                input["packages"]["node_modules/member"]["resolved"] = serde_json::json!("outside");
+                project
+                    .write("outside/package.json", member.to_string().as_bytes())
+                    .unwrap();
+            }
+            "dangling" => {
+                input["packages"]["node_modules/member"]["resolved"] = serde_json::json!("missing")
+            }
+            "escape" => {
+                input["packages"]["node_modules/member"]["resolved"] =
+                    serde_json::json!("../outside")
+            }
+            "nested" => {
+                input["packages"]["packages/member/node_modules/other"] =
+                    serde_json::json!({"version":"1.0.0"})
+            }
+            "member-tree" => {
+                project
+                    .write(
+                        "packages/member/node_modules/leftover",
+                        b"prior member install",
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        project
+            .write("package-lock.json", input.to_string().as_bytes())
+            .unwrap();
+        let output = invoke(&project, &["import-package-lock", "package-lock.json"]);
+        assert!(!output.status.success(), "{case}");
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            b"prior lock"
+        );
+        assert_eq!(
+            fs::read(project.path().join("node_modules/keep.txt")).unwrap(),
+            b"prior install"
+        );
+        assert_eq!(
+            fs::read(project.path().join("store/keep.txt")).unwrap(),
+            b"prior store"
+        );
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            root.to_string().as_bytes()
+        );
+        assert_eq!(
+            fs::read(project.path().join("packages/member/package.json")).unwrap(),
+            member.to_string().as_bytes()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn npm_import_workspace_rejects_symlink_escape() {
+    let project = TempProject::new("npm-import-workspace-symlink").unwrap();
+    let outside = TempProject::new("npm-import-workspace-outside").unwrap();
+    let root =
+        serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/member"]});
+    let member = serde_json::json!({"name":"member","version":"1.0.0"});
+    outside
+        .write("package.json", member.to_string().as_bytes())
+        .unwrap();
+    project
+        .write("package.json", root.to_string().as_bytes())
+        .unwrap();
+    project.write("packages/keep.txt", b"keep").unwrap();
+    std::os::unix::fs::symlink(outside.path(), project.path().join("packages/member")).unwrap();
+    let npm = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":root,"packages/member":member,
+        "node_modules/member":{"resolved":"packages/member","link":true}
+    }});
+    project
+        .write("package-lock.json", npm.to_string().as_bytes())
+        .unwrap();
+    project.write("tapid.lock", b"prior lock").unwrap();
+    assert!(
+        !invoke(&project, &["import-package-lock", "package-lock.json"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        b"prior lock"
+    );
+}

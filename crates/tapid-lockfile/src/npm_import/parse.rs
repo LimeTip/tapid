@@ -28,7 +28,7 @@ pub(super) fn error(pointer: &str, package: &str, field: &str, reason: &str) -> 
         reason: reason.into(),
     }
 }
-fn pointer(base: &str, field: &str) -> String {
+pub(super) fn pointer(base: &str, field: &str) -> String {
     format!("{base}/{}", field.replace('~', "~0").replace('/', "~1"))
 }
 pub(super) fn json(input: &str) -> Result<Value, NpmImportError> {
@@ -43,7 +43,7 @@ pub(super) fn object<'a>(
         .as_object()
         .ok_or_else(|| error(at, identity, "object", "expected an object"))
 }
-fn text<'a>(
+pub(super) fn text<'a>(
     entry: &'a Map<String, Value>,
     field: &str,
     at: &str,
@@ -54,7 +54,7 @@ fn text<'a>(
         .and_then(Value::as_str)
         .ok_or_else(|| error(&pointer(at, field), identity, field, "expected a string"))
 }
-fn flag(
+pub(super) fn flag(
     entry: &Map<String, Value>,
     field: &str,
     at: &str,
@@ -105,7 +105,7 @@ fn strings(
         })
         .collect()
 }
-fn requirements(
+pub(super) fn requirements(
     entry: &Map<String, Value>,
     field: &str,
     at: &str,
@@ -130,7 +130,7 @@ fn requirements(
         })
         .collect()
 }
-fn check_fields(
+pub(super) fn check_fields(
     entry: &Map<String, Value>,
     allowed: &[&str],
     at: &str,
@@ -148,7 +148,7 @@ fn check_fields(
     }
     Ok(())
 }
-fn placement_name(path: &str) -> Option<&str> {
+pub(super) fn placement_name(path: &str) -> Option<&str> {
     let mut rest = path.strip_prefix("node_modules/")?;
     loop {
         let (name, remaining) = if rest.starts_with('@') {
@@ -168,8 +168,8 @@ fn placement_name(path: &str) -> Option<&str> {
         rest = remaining.strip_prefix("/node_modules/")?;
     }
 }
-fn lookup(
-    packages: &BTreeMap<String, ImportedNpmPackage>,
+pub(super) fn lookup<T>(
+    packages: &BTreeMap<String, T>,
     parent: &str,
     name: &str,
     peer: bool,
@@ -198,7 +198,7 @@ fn lookup(
             .map_or("", |(ancestor, _)| ancestor);
     }
 }
-fn edge(
+pub(super) fn edge(
     packages: &BTreeMap<String, ImportedNpmPackage>,
     parent: &str,
     name: &str,
@@ -276,6 +276,7 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
             "version",
             "license",
             "engines",
+            "workspaces",
             "dependencies",
             "devDependencies",
             "optionalDependencies",
@@ -285,24 +286,19 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
         "/packages/",
         "root",
     )?;
+    if let Some(graph) = super::workspace::graph(input)? {
+        return Ok(graph);
+    }
     let mut packages = BTreeMap::new();
     for (path, value) in entries.iter().filter(|(path, _)| !path.is_empty()) {
         let at = pointer("/packages", path);
         let entry = object(value, &at, path)?;
-        if entry.contains_key("link") {
-            return Err(error(
-                &pointer(&at, "link"),
-                path,
-                "link",
-                "linked/workspace entries cannot be imported yet; keep the npm lock until workspace conversion is supported",
-            ));
-        }
         let local_name = placement_name(path).ok_or_else(|| {
             error(
                 &at,
                 path,
                 "path",
-                "unsupported package placement; links/workspaces and unsafe paths are unsupported",
+                "unsupported registry placement; member-local node_modules and unsafe paths are unsupported",
             )
         })?;
         let raw_name = if entry.contains_key("name") {
@@ -548,11 +544,12 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
         packages,
         roots,
         optional_roots,
+        workspaces: BTreeMap::new(),
     };
     validate_representable(&graph)?;
     Ok(graph)
 }
-fn optional_peers(
+pub(super) fn optional_peers(
     entry: &Map<String, Value>,
     at: &str,
     identity: &str,

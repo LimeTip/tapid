@@ -6,7 +6,7 @@ pub(crate) use locked::{
     validate_locked_routes,
 };
 mod npm_import;
-pub(crate) use npm_import::fetch_imported;
+pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
 mod resolution;
 #[cfg(test)]
 use resolution::{
