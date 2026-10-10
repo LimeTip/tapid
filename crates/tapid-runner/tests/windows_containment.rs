@@ -1090,6 +1090,7 @@ fn windows_private_write_tree_creates_and_reopens_files_without_outside_authorit
         outside.path().join("escaped.txt").display(),
     );
     let request = ExecutionRequest::builder(shell_request.program())
+        .executable_search_path(std::path::Path::new(shell_request.program()).parent().unwrap())
         .args([
             OsString::from("/D"),
             OsString::from("/S"),
