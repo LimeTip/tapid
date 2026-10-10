@@ -152,6 +152,11 @@ impl WindowsPathAcl {
             ));
         }
         let appcontainer_sid = own_sid(sid)?;
+        let selected_write_target = if access == FilesystemAccess::Write {
+            Some(crate::execution::windows_write_validation::PinnedWriteTarget::open(path)?)
+        } else {
+            None
+        };
         let metadata = std::fs::metadata(path).map_err(|error| {
             unsupported_acl(
                 "inspect filesystem grant target",
@@ -188,7 +193,12 @@ impl WindowsPathAcl {
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 null(),
                 OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
+                FILE_FLAG_BACKUP_SEMANTICS
+                    | if selected_write_target.is_some() {
+                        windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT
+                    } else {
+                        0
+                    },
                 0,
             )
         };
@@ -197,6 +207,13 @@ impl WindowsPathAcl {
                 &format!("open filesystem grant for DACL update at {display_path}"),
                 std::io::Error::last_os_error().raw_os_error().unwrap_or(1) as u32,
             ));
+        }
+
+        if let Some(selected) = selected_write_target
+            && let Err(error) = selected.verify(handle, kind)
+        {
+            unsafe { CloseHandle(handle) };
+            return Err(error);
         }
 
         let mut original_dacl: *mut ACL = null_mut();
@@ -755,6 +772,7 @@ impl WindowsFilesystemGrants {
         container: &WindowsAppContainer,
         grants: &[ResolvedFilesystemGrant],
     ) -> Result<Self, ExecutionError> {
+        crate::execution::windows_write_validation::validate_existing_write_grants(grants)?;
         let sid = container.sid();
         let system_root =
             std::env::var_os("SystemRoot").and_then(|path| std::fs::canonicalize(path).ok());
@@ -851,8 +869,7 @@ fn unsupported_acl(operation: &str, code: u32) -> ExecutionError {
 }
 
 #[cfg(test)]
-#[path = "../tests/support/windows_acl.rs"]
-pub(super) mod windows_acl;
+pub(super) use crate::execution::windows_acl;
 
 #[cfg(test)]
 mod tests {
