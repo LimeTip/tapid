@@ -43,10 +43,14 @@ jobs:
           target/debug/tapid --version
       - name: Prepare project-local build and temporary storage
         run: mkdir -p examples/news-site-consumer/.next examples/news-site-consumer/.tmp
+      - name: Verify workspace reference acceptance
+        env:
+          TAPID_REQUIRE_NODE_ASSERTIONS: '1'
+        run: cargo test -p tapid --test cli --locked workspace_acceptance -- --show-output
       - name: Verify pinned news-site resolution inputs and strict graph comparator
         env:
           TAPID_NEWS_FIXTURE_BINARY: ${{ github.workspace }}/target/debug/tapid
-        run: python3 -m unittest discover -s tests -p test_news_site_fixture.py -v
+        run: node --experimental-strip-types --test tests/news_site_fixture_test.ts
       - name: Install npm reference tree
         run: |
           mkdir -p "$RUNNER_TEMP/news-site-npm-reference"
@@ -64,7 +68,7 @@ jobs:
           test "$(sha256sum "$project/tapid.lock" | cut -d' ' -f1)" = "$lock_hash"
       - name: Compare installed dependency graphs
         run: |
-          python3 scripts/compare-news-site-package-graphs.py \
+          node --experimental-strip-types scripts/compare-news-site-package-graphs.ts \
             --npm-root "$RUNNER_TEMP/news-site-npm-reference" \
             --tapid-root examples/news-site-consumer \
             --json "$RUNNER_TEMP/news-site-package-graph.json" \
@@ -141,25 +145,23 @@ jobs:
       - name: Run tests
         # Retain success output so each Node assertion branch has a receipt.
         run: cargo test --workspace --all-features --locked -- --show-output
-      - name: Install Python for development and documentation tests
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: '3.12'
       - name: Verify generated release record end to end (Unix, offline)
         if: runner.os != 'Windows'
         timeout-minutes: 3
         shell: bash
         run: |
           cargo build --locked --bin tapid
-          python3 scripts/check-release-record.py --binary target/debug/tapid
+          node --experimental-strip-types scripts/check-release-record.ts --binary target/debug/tapid
       - name: Test executable documentation runner (Unix)
         if: runner.os != 'Windows'
-        run: python3 -m unittest discover -s tests -p test_doc_examples.py -v
+        run: node --experimental-strip-types --test tests/doc_examples_test.ts
       - name: Test development build cache selection
-        run: python -m unittest discover -s tests -p test_dev.py -v
+        run: node --experimental-strip-types --test tests/dev_test.ts
+      - name: Test offline release fixture signing
+        run: node --experimental-strip-types --test tests/release_record_test.ts
       - name: Verify source documentation artifact (Unix, offline)
         if: runner.os != 'Windows'
-        run: python3 scripts/check-doc-examples.py --lane source --example init --example upgrade-help --report doc-contract-source.json
+        run: node --experimental-strip-types scripts/check-doc-examples.ts --lane source --example init --example upgrade-help --report doc-contract-source.json
       - name: Retain documentation evidence
         if: always() && runner.os != 'Windows'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -580,19 +582,8 @@ jobs:
             $size = (Get-Item -LiteralPath $archive).Length
             $record = "tapid-release-v1`t1.2.3`n$target`t$archiveName`t$size`t$digest`thttps://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName`n"
             Set-Content -Encoding ascii -NoNewline -Path (Join-Path $fixture 'v1.2.3.tsv') -Value $record
-            $signer = Join-Path $fixture 'sign-fixture.py'
-          @'
-          import importlib.util
-          import sys
-          from pathlib import Path
-
-          spec = importlib.util.spec_from_file_location('check_release_record', sys.argv[1])
-          module = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(module)
-          module.sign_record(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
-          '@ | Set-Content -Encoding utf8 -Path $signer
             $keyring = Join-Path $fixture 'keyring.json'
-            & python.exe $signer (Join-Path $PWD 'scripts/check-release-record.py') (Join-Path $fixture 'v1.2.3.tsv') (Join-Path $fixture 'v1.2.3.tsv.sig') $keyring
+            & node --experimental-strip-types scripts/check-release-record.ts --sign-record (Join-Path $fixture 'v1.2.3.tsv') --signature (Join-Path $fixture 'v1.2.3.tsv.sig') --keyring $keyring
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           Write-FixtureReleaseRecord

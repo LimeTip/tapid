@@ -4,6 +4,7 @@
 
 mod error;
 mod model;
+mod npm_import;
 mod validation;
 
 #[cfg(test)]
@@ -20,8 +21,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Current schema with source-qualified registry and workspace package identities.
 pub const LOCKFILE_VERSION: u32 = 7;
 /// Lifecycle-enabled locks require a reader which validates derived-output approvals.
-pub const LIFECYCLE_LOCKFILE_VERSION: u32 = 8;
+pub const LIFECYCLE_LOCKFILE_VERSION: u32 = 9;
 const ROOTS_LEGACY_LOCKFILE_VERSION: u32 = 6;
 const REGISTRY_ONLY_LOCKFILE_VERSION: u32 = ROOTS_LEGACY_LOCKFILE_VERSION;
 const LEGACY_LOCKFILE_VERSION: u32 = 4;
 const PROVENANCE_LEGACY_LOCKFILE_VERSION: u32 = 5;
+
+pub use npm_import::{
+    ImportedNpmArtifactReceipt, ImportedNpmGraph, ImportedNpmLockfile, ImportedNpmPackage,
+    NpmImportError,
+};

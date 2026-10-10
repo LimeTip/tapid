@@ -1552,6 +1552,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tapid-core",
+ "tapid-resolver",
  "url",
 ]
 

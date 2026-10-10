@@ -12,6 +12,7 @@ pub enum ManifestError {
     InvalidPackageName(tapid_core::DomainError),
     InvalidPackageVersion(tapid_core::DomainError),
     InvalidDependencyName(tapid_core::DomainError),
+    DependencyNotDeclared { field: &'static str, name: String },
     InvalidBin { command: String, target: String },
     ExpectedBinString(String),
 }
@@ -29,6 +30,10 @@ impl fmt::Display for ManifestError {
             Self::ExpectedMapValueString { field, key } => write!(
                 f,
                 "package.json field '{field}' entry '{key}' must be a string"
+            ),
+            Self::DependencyNotDeclared { field, name } => write!(
+                f,
+                "dependency '{name}' is not declared in package.json field '{field}'"
             ),
             Self::InvalidPackageName(error)
             | Self::InvalidDependencyName(error)

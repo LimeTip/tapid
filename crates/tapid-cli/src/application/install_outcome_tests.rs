@@ -14,7 +14,7 @@ fn missing_replay_lock_has_a_typed_unchanged_outcome() {
         InstallMode::Frozen,
         None,
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::LockfileMissing);
@@ -61,7 +61,7 @@ fn failed_resolution_reports_rollback_and_preserves_its_category() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::Resolution);
@@ -92,7 +92,7 @@ fn integrity_failure_is_typed_and_rolls_back_the_manifest() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::Integrity);
@@ -163,7 +163,7 @@ fn failure_after_commit_keeps_the_committed_manifest_lock_and_packages() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.outcome.state, ChangeState::Committed);
@@ -213,7 +213,7 @@ fn committed_cleanup_failure_preserves_the_decision_and_requires_no_repeat() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.outcome.state, ChangeState::CommittedCleanupPending);
@@ -252,7 +252,7 @@ fn obstructed_rollback_is_recovery_required_instead_of_rolled_back() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.outcome.state, ChangeState::RecoveryRequired);
@@ -280,7 +280,7 @@ fn replay_preserves_the_lock_mismatch_category() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let mut manifest = fs::read(project.path().join("package.json")).unwrap();
@@ -293,7 +293,7 @@ fn replay_preserves_the_lock_mismatch_category() {
         InstallMode::Frozen,
         None,
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::LockManifestMismatch);
@@ -324,7 +324,7 @@ fn competing_activation_returns_typed_contention_without_changes() {
         InstallMode::Frozen,
         None,
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::ProjectBusy);
@@ -343,7 +343,7 @@ fn missing_replay_tree_preserves_the_store_error_category() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     fs::remove_dir_all(store.join("trees")).unwrap();
@@ -354,7 +354,7 @@ fn missing_replay_tree_preserves_the_store_error_category() {
         InstallMode::Frozen,
         None,
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::StoreUnavailable);
@@ -380,7 +380,7 @@ fn materialization_failure_preserves_previous_project_and_store_state() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::Materialization);
@@ -422,7 +422,7 @@ fn peer_failure_preserves_the_resolver_source() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::PeerDependency);
@@ -461,7 +461,7 @@ fn invalid_archive_is_typed_without_activating_any_packages() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::Archive);
@@ -481,7 +481,7 @@ fn successful_install_and_replay_report_effective_project_changes_and_warnings()
         InstallMode::Online,
         Some(&fixture),
         true,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     assert_eq!(report.outcome.state, ChangeState::Committed);
@@ -503,7 +503,7 @@ fn successful_install_and_replay_report_effective_project_changes_and_warnings()
         InstallMode::Frozen,
         None,
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     assert!(replay.replayed);
@@ -536,7 +536,7 @@ fn failed_previous_recovery_reports_project_outputs_for_install_and_outdated() {
                 InstallMode::Online,
                 None,
                 false,
-                |_, _| {},
+                |_| {},
             )
             .unwrap_err()
         } else {
@@ -587,7 +587,7 @@ fn invalid_fixture_package_fields_preserve_the_registry_metadata_category() {
             InstallMode::Online,
             Some(&fixture),
             false,
-            |_, _| {},
+            |_| {},
         )
         .unwrap_err();
         assert_eq!(
@@ -634,7 +634,7 @@ fn invalid_fixture_artifact_preserves_metadata_and_transport_categories() {
             InstallMode::Online,
             Some(&fixture),
             false,
-            |_, _| {},
+            |_| {},
         )
         .unwrap_err();
         assert_eq!(failure.error.kind, kind);
@@ -704,7 +704,7 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
                 mode,
                 Some(&fixture),
                 false,
-                |_, _| {},
+                |_| {},
             )
             .unwrap();
             assert_eq!(
@@ -744,7 +744,7 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
             mode,
             Some(&fixture),
             false,
-            |_, _| {},
+            |_| {},
         )
         .unwrap_err();
         assert_eq!(failure.error.kind, ErrorKind::InvalidRequest);

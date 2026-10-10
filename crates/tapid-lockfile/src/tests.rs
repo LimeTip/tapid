@@ -2,14 +2,14 @@ use super::{LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfil
 use proptest::prelude::*;
 
 #[test]
-fn lifecycle_derived_outputs_require_schema_8_and_preserve_source_identity() {
+fn lifecycle_derived_outputs_require_schema_9_and_preserve_source_identity() {
     let package = package_fixture();
     let key = package.key();
     let mut lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
     lock.insert_package(package).unwrap();
     lock.set_roots([key.clone()]).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
-    value["lockfileVersion"] = 8.into();
+    value["lockfileVersion"] = 9.into();
     value["packages"][&key]["derivedHooks"] = serde_json::json!([{
         "attestation":format!("hmac-sha256-{}", "e".repeat(64)), "hook":"postinstall", "key":format!("sha256-{}", "c".repeat(64)),
         "treeDigest":format!("sha256-{}", "d".repeat(64))
@@ -24,8 +24,10 @@ fn lifecycle_derived_outputs_require_schema_8_and_preserve_source_identity() {
         roundtrip["packages"][&key]["treeDigest"],
         value["packages"][&key]["treeDigest"]
     );
-    value["lockfileVersion"] = 7.into();
-    assert!(Lockfile::from_json(&value.to_string()).is_err());
+    for version in [7, 8] {
+        value["lockfileVersion"] = version.into();
+        assert!(Lockfile::from_json(&value.to_string()).is_err());
+    }
 }
 
 #[test]
@@ -940,7 +942,7 @@ fn lifecycle_outputs_reject_forged_or_unordered_records() {
         serde_json::json!([{"hook":"install","key":format!("sha256-{}", "b".repeat(64)),"treeDigest":format!("sha256-{}", "c".repeat(64)),"trusted":true}]),
     ] {
         let mut value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
-        value["lockfileVersion"] = 8.into();
+        value["lockfileVersion"] = 9.into();
         value["packages"][&key]["derivedHooks"] = records;
         assert!(Lockfile::from_json(&value.to_string()).is_err());
     }

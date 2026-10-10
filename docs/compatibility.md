@@ -15,12 +15,13 @@ This matrix distinguishes current implemented behavior from accepted target cont
 | JSR registry | Accepts scoped metadata and semver versions; preserves JSR regular and peer metadata separately through registry artifacts; accepts an artifact only with explicit HTTPS `npm.tarball` and valid SHA-512 `npm.integrity` | Live JSR installation and integrity behavior are not verified; no derived or transport-only integrity is accepted |
 | Resolution | Deterministic exact-identity graph selection; simple npm root overrides replace matching transitive regular or optional dependency ranges; range satisfaction is differentially tested against pinned `node-semver` 7.8.5 for exact/partial versions, `x`/`*` wildcards, comparators and intersections, caret/tilde including zero-major bounds, hyphen ranges, OR ranges, prerelease eligibility, and build metadata; distinct parents may select different versions of one transitive package; compatible npm optional dependencies are selected using bounded `os`, `cpu`, and `libc` metadata; registry peer requirements are checked against compatible direct project roots and peer provider versions are retained in peer contexts. Workspace packages have distinct identities, resolve locally without registry fallback, and member registry dependencies are recursively resolved and recorded as member edges. Direct declarations that map one local install name to conflicting registry or workspace identities are rejected before mutation; registry origin remains part of package identity | Direct requirements from multiple workspace members share resolver constraints, so incompatible ranges for the same registry/package fail instead of producing member-specific versions. Glob and `workspace:` compatibility are bounded. Nested/package-specific override selectors and overrides of direct dependencies unless the range is identical are unsupported. Other `node-semver` edge cases beyond the pinned compatibility contract and full npm CLI/package-specifier behavior are not guaranteed; nested/ancestor peer-provider lookup, multiple peer contexts for the same exact package instance, automatic peer placement, and all optional-dependency failure semantics remain incomplete; stable-range selection does not select prerelease candidates. `outdated` recognizes ordinary unaliased workspace dependency specs; aliased or prefixed workspace declarations are not fully reported yet |
 | Online install | Resolves npm metadata, downloads and verifies archives, writes `tapid.lock`, stages verified trees for rollback, and atomically activates `node_modules`; store publication commits only after activation succeeds; durable project/store journals recover pre-commit crashes by rolling back and post-commit crashes by finishing cleanup; schema 7 records separate workspace package identity, registry integrity provenance, and peer contexts. Root workspace installs resolve member registry dependencies recursively, persist member edges, validate peers against local or direct-root providers, and stage local links for activation | Dependency lifecycle scripts require exact checked-in approvals and Linux ManagedTree; `add`, `remove`, `update`, read-only-during-normal-operation `outdated`, and atomic managed-tree `prune` are available. Pre-commit resolution, integrity, archive, peer, workspace, or materialization failures restore prior project/store state when rollback succeeds; typed outcomes distinguish failed recovery and committed changes with cleanup pending. Windows junction behavior and broad cross-platform workspace-link verification remain unverified. The compatibility escape hatch records locally computed integrity and offline/frozen replay rejects it. Static path/symlink escapes are rejected and detected failures roll back, but pathname-based lifecycle recovery can race a concurrent local path substitution; containment is not race-free under concurrent filesystem mutation |
+| Locked CI install | `tapid ci` requires a matching root manifest and workspace graph, preserves the manifest and lockfile bytes, and installs exact locked versions and edges. Missing trees are downloaded from locked HTTPS URLs and verified against locked integrity and tree digests. Store publication and managed activation share the lifecycle transaction; dependency scripts do not run | Uses `tapid.lock`, not npm lockfiles. Download URLs are required for every registry package regardless of cache contents or `--offline`; incomplete locks require deliberate online regeneration. Explicit local registry fixtures can supply artifacts without locked URLs. `--offline` requires all verified trees. Unmanaged `node_modules` is rejected; full npm dependency semantics remain unsupported |
 | Offline and frozen install | Requires a lockfile, matching root manifest digest, verified registry store trees, and valid `.tapid-tree` markers; schema 7 persists exact registry roots, workspace source identities, and integrity provenance; replay rebuilds local links and reconstructs member registry edges and peer providers from current contained manifests, validates them against the lock, and performs no network lookup | Schema 6 remains readable for registry-only locks; schema 5 requires online regeneration because it lacks the schema 6 provenance contract. Frozen uses the same replay path as offline and is not complete npm frozen-lockfile policy |
 | `.bin` | Package `bin` metadata is planned and materialized from verified regular files; Unix symlinks and Windows `.cmd` plus PowerShell wrappers | Other platforms are unsupported; collisions, unsafe targets, and missing targets fail closed |
-| Dependency lifecycle scripts | Default deny and skipped-hook warnings; exact policy approvals can build private derived trees on Linux ManagedTree, with source identities preserved in schema 8 | Preparation hooks, cyclic approved graphs, live workspace inputs, and macOS/Windows execution are unsupported. Offline/frozen replay requires exact verified prerequisites and never executes hooks. See [policy and limits](dependency-lifecycle.md) |
+| Dependency lifecycle scripts | Default deny and skipped-hook warnings; exact policy approvals can build private derived trees on Linux ManagedTree, with source identities preserved in schema 9 | Preparation hooks, cyclic approved graphs, live workspace inputs, and macOS/Windows execution are unsupported. Offline/frozen replay requires exact verified prerequisites and never executes hooks. See [policy and limits](dependency-lifecycle.md) |
 | Root scripts | Default-on fail-closed CLI, explicit `assurance = "restricted"`, and legacy-safe omitted assurance as ManagedTree are implemented. Native macOS Restricted uses sampled native controls; Linux Restricted uses Landlock, `no_new_privs`, seccomp, and explicit environment/descriptor setup. Local `.bin` commands precede runtime tools, while a byte-verified private Node snapshot on a distinct inode preserves runtime selection; runtimes under project write authority are rejected. Human and JSON receipts include authority and completion evidence. Post-separator arguments remain opaque | Linux ManagedTree and all four resource ceilings require delegated cgroup v2 and private namespaces. macOS ManagedTree, narrower network scopes, and `--no-sandbox` remain unsupported. Targeted Ubuntu 24.04.5 x86_64 local-VM consumer and runner tests pass on code commit `3dd67f75c8d6f4187f8f1145f4a615939472e1c4`; the broader common Restricted probe matrix remains incomplete. Scripts can use all granted authority; host writes or races after final validation remain outside Restricted containment |
 | Archive | Bounded hostile-path, duplicate, case-collision, symlink, and special-file validation; materialization accepts a direct package root or exactly one named top-level npm wrapper containing `package.json` | Missing or ambiguous package roots fail closed; malware scanning and executable analysis are outside the crate |
-| Store and lockfile | SHA-256 content-addressed staging, executable-aware tree identity, exact tree replay, advisory replay leases, canonical lockfile schema 7, or schema 8 with approved derived-hook outputs, with exact registry roots, separate root-relative workspace identities, registry-integrity provenance, and peer-context identities; controlled schema 4 and 6 read compatibility, rollback-capable staged tree publication under cross-process locking with durable lifecycle coordination, and recoverable atomic managed activation | Schema 5 requires online regeneration; schemas earlier than 4 are rejected; schema 6 remains registry-only, workspace members are not represented as verified registry artifacts, and no remote cache, garbage collection, or full npm lockfile graph exists |
+| Store and lockfile | SHA-256 content-addressed staging, executable-aware tree identity, exact tree replay, advisory replay leases, canonical lockfile schema 7, or schema 9 with approved derived-hook outputs, with exact registry roots, separate root-relative workspace identities, registry-integrity provenance, and peer-context identities; controlled schema 4 and 6 read compatibility, rollback-capable staged tree publication under cross-process locking with durable lifecycle coordination, and recoverable atomic managed activation | Schema 5 requires online regeneration; schemas earlier than 4 are rejected; schema 6 remains registry-only, workspace members are not represented as verified registry artifacts, and no remote cache, garbage collection, or full npm lockfile graph exists |
 | Platforms | Experimental macOS Restricted uses native Seatbelt APIs and path bindings; Linux Restricted uses Landlock and seccomp; Windows implements read-only AppContainer/Job Object execution and graceful Ctrl+C. Native controls and exact integrated-revision acceptance gate claims | Windows writes and network-enabled policies remain unsupported and fail closed; full Windows support and the broader common Restricted matrix remain pending. Targeted Ubuntu local-VM evidence is recorded at `3dd67f75c8d6f4187f8f1145f4a615939472e1c4`; Windows pre-integration native and hosted results are documented separately. New merged-revision acceptance remains required. See platform-validation.md |
 
 ## Persisted registry identity compatibility
@@ -70,6 +71,73 @@ Schemas 6 and 7 require sorted, unique, canonical roots for every nonempty packa
 
 Local fixtures are runtime-derived and do not imply live registry or cross-platform validation. Existing CI consumer jobs do not establish ADR 0005 containment; platform status requires the exact-commit evidence in [platform-validation.md](platform-validation.md).
 
+## npm workspaces
+
+Run commands from the workspace root, or pass `--project-dir <root>`. Tapid does
+not search ancestor directories for a workspace root. With no `--workspace`,
+commands select the root manifest or root script. `--workspace <name>` selects
+one member by its exact package name, including its scope. Paths, multiple
+selectors, and an implicit selection from the current member directory are not
+supported.
+
+Root `workspaces` accepts a string, an array of strings, or an object whose
+`packages` field is a string or array. Patterns use relative directory paths
+with `/` separators. A whole path component `*` matches one directory level.
+For example, `apps/news`, `packages/*`, and `packages/*/*` are supported.
+Overlapping patterns discover each canonical member once, and members are
+sorted by package name. Directories without a `package.json` entry are ignored;
+existing non-regular entries, including dangling manifest symlinks, are rejected. A
+missing directory traversed to expand `*` produces an error.
+
+Recursive `**`, partial-component wildcards such as `ui*`, `?`, character
+classes, braces, negation, extglobs, and backslash escapes are rejected with a
+diagnostic. Empty patterns and root-only patterns are also rejected. Absolute
+paths and parent-directory components are forbidden. This is a bounded subset
+of npm glob behavior, not full minimatch support.
+
+Every discovered member is linked under root `node_modules`, including members
+not declared as root dependencies. Ordinary semver declarations resolve to a
+matching local member before registry lookup. A local member with an incompatible
+version fails without registry fallback. The separate compatibility syntax
+`workspace:*`, `workspace:^`, and `workspace:~` uses any local version, a caret
+range based on the current local version, and a tilde range based on that version,
+respectively. Other `workspace:` forms and missing protocol targets are rejected.
+Members can depend on each other in cycles. Registry dependencies contributed by
+members are installed too, but incompatible ranges for the same registry package
+across members remain unsupported.
+
+`install --workspace <name>` activates the entire workspace graph. `add`,
+`remove`, and `update` change only the selected manifest, while root overrides
+continue to apply. `prune --workspace <name>` replays the root lock without
+changing the member manifest. The lock, shared-store coordination, and managed
+activation belong to the root; Tapid does not create member locks or member
+`node_modules`. Offline and frozen install revalidate member manifest digests,
+local identities, and dependency edges before rebuilding links from the root
+lock. They require verified registry trees in the store and perform no lookup.
+
+`run <script>` executes the root script, and `run <script> --workspace <name>`
+executes the selected member's script from its directory. Both use the root
+`tapid.toml` policy and containment root. Installation does not run lifecycle
+scripts.
+
+Root and member manifests must be regular files. Root scripts validate this
+before loading run policy. Internal directory symlinks
+are accepted only after canonical containment checks; member manifest symlinks,
+external directory targets, duplicate package names, and members inside
+`node_modules` are rejected before mutation. These checks do not prevent races
+with concurrent filesystem replacement.
+
+The CLI reference fixture in `crates/tapid-cli/tests/fixtures/workspace` has a
+root, `apps/news`, and `packages/ui`. The news app imports `@example/ui` through
+ordinary semver and a verified fixture registry dependency. The
+`workspace_acceptance` tests check Node imports after root/member install,
+offline/frozen rebuilding, and root/member add/remove/update/prune. Failure
+tests compare manifest, lock, store, and activation bytes and link targets.
+These tests run in the native CLI lane and in the existing news-site consumer
+job on Ubuntu 24.04 with Node 22, the reference environment for #150. Both
+require Node assertions. Local execution on another platform does not establish
+Linux or Windows results.
+
 ## npm aliases
 
 Declarations such as `"h3-v2": "npm:h3@2.0.1-rc.20"` install the verified `h3`
@@ -102,3 +170,7 @@ while preserving the target package. Alias-valued overrides remain unsupported.
 The synthetic alias fixture covers scoped routing, distinct versions, the h3
 prerelease declaration, bins, malformed declarations, and frozen/offline replay.
 This does not establish full npm compatibility or support for every arvtree dependency.
+
+## npm lockfile import
+
+`tapid import-package-lock <path>` imports the documented registry-only npm v3 subset offline into schema 8. Imported install/replay preserves selected nested versions, ancestor peer edges, supported distinct peer contexts, and optional/platform constraints without resolution. This is separate from ordinary online resolution and its direct-root peer limits. Links/workspaces and unrepresentable entries fail before writing. First frozen installation can fetch pinned artifacts and record verified tree receipts. See the [migration guide](npm-lockfile-import.md) for supported fields, platform differences, runtime boundaries, and rollback.

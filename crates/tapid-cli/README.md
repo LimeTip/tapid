@@ -32,12 +32,18 @@ tapid init [PATH]
 tapid license
 tapid manifest validate [PATH]
 tapid lock verify
+tapid import-package-lock <PATH>
 tapid install [OPTIONS]
+tapid ci [OPTIONS]
 tapid upgrade [OPTIONS]
 tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
+
+`tapid manifest validate` rejects symlinks and other non-regular files before
+parsing. Root scripts perform the same check before loading run policy or
+executing a script.
 
 `tapid license` prints the complete Apache-2.0 license and LimeTip AB copyright attribution embedded in the executable. It works offline and does not require a project.
 
@@ -61,15 +67,46 @@ tapid install --offline --frozen --project-dir ./example
 tapid install --registry-fixture ./fixture.json --project-dir ./example
 ```
 
-The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 7 locks without derived outputs or schema 8 locks with approved lifecycle outputs, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
+The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 7 locks without derived outputs or schema 9 locks with approved lifecycle outputs, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
 
 ## Install and lifecycle outcomes
 
-`install`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
+`update` preserves declared ranges. `update --latest` replaces each selected declaration's range with `*`, retaining its section and npm alias target. A name declared in multiple sections is updated in every section where it appears. Naming packages leaves other declarations unchanged; omitting names selects all declarations.
+
+`install`, `ci`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
 
 Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result remains unchanged for its own operation and warns if it first recovered an interrupted transaction.
 
-A nonzero exit after commit does not mean the dependency change failed. Tapid reports that the change committed and warns against repeating the operation. Cleanup failures preserve the durable commit decision. If rollback cannot finish, Tapid reports recovery required and retains its journal for the next recovery attempt. Contention errors advise waiting for the competing operation. Diagnostic messages are limited to 4 KiB each, and HTTP URL user information, query values, and fragments are redacted. These results are internal application types; a JSON command protocol is separate work.
+A nonzero exit after commit does not mean the dependency change failed. Tapid reports that the change committed and warns against repeating the operation. Cleanup failures preserve the durable commit decision. If rollback cannot finish, Tapid reports recovery required and retains its journal for the next recovery attempt. Contention errors advise waiting for the competing operation. Diagnostic messages are limited to 4 KiB each, and HTTP URL user information, query values, and fragments are redacted. Use global `--json` for versioned machine results from these commands. Use `outdated --json --json-limit 0` to include every direct dependency. See the [JSON protocol](../../docs/json-results.md) for fields, truncation markers, lossless recovery paths, partial results, parsing errors, and command coverage.
+
+## npm workspaces
+
+Declare members with root `workspaces`, for example `["apps/*", "packages/*"]`.
+Literal paths and `*` as a whole directory component are supported; unsupported
+glob syntax fails before mutation. Ordinary semver dependencies on member names
+link locally without registry fallback. `workspace:*`, `workspace:^`, and
+`workspace:~` are also accepted as compatibility syntax.
+
+Run these commands from the workspace root:
+
+```text
+tapid install
+tapid install --workspace news
+tapid add @example/ui@^1.0.0 --workspace news
+tapid update --workspace news
+tapid remove @example/ui --workspace news
+tapid prune --workspace news
+tapid install --offline --workspace news
+tapid install --frozen --workspace news
+tapid run dev --workspace news
+```
+
+Selection uses the exact member package name. Without `--workspace`, mutations
+and scripts select the root. Install and prune activate the full graph using the
+root lock and root `node_modules`; member scripts run from their directory using
+root policy. Pass `--project-dir <root>` when running elsewhere. See the
+[workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces)
+for discovery, replay, selection, and compatibility limits.
 
 ## Private npm registry routing (development feature)
 
@@ -98,6 +135,17 @@ frozen modes. Preserve a separate verified backup of `tapid.lock`, then delibera
 run online `tapid install` and review changed versions, artifacts and edges. The
 online path replaces the lock after re-resolution, not identity migration. See
 [compatibility and recovery](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#persisted-registry-identity-compatibility).
+
+## Install locked dependencies in CI
+
+```text
+tapid ci --project-dir ./example
+tapid ci --offline --store-dir /absolute/path/to/verified-store
+```
+
+`ci` requires an ordinary verified-tree `tapid.lock` and matching root and workspace manifests. Imported npm schema 8 locks use `tapid install --frozen`; `ci` rejects them before mutation because their verification receipts can change during installation. It installs exact locked versions and dependency edges without version resolution or changes to `package.json` and `tapid.lock`. Existing verified store trees are reused; missing trees are downloaded from locked HTTPS URLs and checked against locked SHA-512 integrity and SHA-256 tree digests. Private registry downloads use the configured route and exact-origin credentials. Every registry package must have a locked artifact URL, including with a warm cache or `--offline`. Incomplete locks require regeneration with `tapid install` and review of the resulting changes. Explicit `--registry-fixture` installs can supply local artifacts without locked URLs for tests and air-gapped development. This exception requires a readable fixture containing every URL-less locked registry, name, and version, even with a warm cache or `--offline`.
+
+Installation uses atomic managed `node_modules` replacement and coordinated store publication. Validation or activation failure preserves the previous install when rollback succeeds. An unmanaged `node_modules` is rejected. Dependency lifecycle scripts do not run. `--offline` disables downloads and requires all trees in the store. Package arguments and the unverified-artifact exception are unavailable on `ci`.
 
 ## Offline and frozen
 
@@ -171,3 +219,5 @@ The macOS runner requires the binary's early private-launcher initializer. `sand
 For retained bindings, `executable_resolution.reserved_node.cleanup_observed` is `false`, and `limitations` explicitly describes retention. This field reports removal of the private snapshot, independently of best-effort process-group cleanup in `completion`. Retained directories and snapshots consume temporary storage until OS cleanup or host removal after every descendant exits. Tapid does not schedule deletion or reuse them. OS or host removal while descendants survive ends reserved-node protection. Host writes or races after final validation remain outside Restricted containment; retention provides no ManagedTree ownership or cleanup guarantee.
 
 Npm aliases are supported in manifest dependencies and package arguments such as `tapid add 'h3-v2@npm:h3@2.0.1-rc.20'`. Scoped targets and supported semver ranges retain their actual registry identity and local import names during install and frozen/offline replay. See [alias behavior and limits](../../docs/compatibility.md#npm-aliases).
+
+Existing npm projects can use `tapid import-package-lock <path>` to preserve supported npm v3 selections without resolution. Import is offline; the first frozen install verifies pinned tarballs. See the [migration and rollback guide](../../docs/npm-lockfile-import.md). Tapid manages packages and lockfiles; Node.js, workerd, Wrangler, and deployment tools keep their existing roles.

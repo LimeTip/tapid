@@ -420,6 +420,7 @@ fn run_hook(
             trees,
             false,
             &tapid_linker::WorkspaceLinkPlan::default(),
+            |_, _| {},
         )
         .map_err(error)?;
         read.push("node_modules".into());

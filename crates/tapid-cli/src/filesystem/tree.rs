@@ -49,6 +49,7 @@ pub(crate) fn materialize_stage(
         trees,
         sources_are_verified_snapshots,
         &tapid_linker::WorkspaceLinkPlan::default(),
+        |_, _| {},
     )
 }
 
@@ -59,6 +60,7 @@ pub(crate) fn materialize_stage_with_workspace_links(
     trees: &BTreeMap<String, PathBuf>,
     sources_are_verified_snapshots: bool,
     workspace_links: &tapid_linker::WorkspaceLinkPlan,
+    mut progress: impl FnMut(usize, usize),
 ) -> Result<(), String> {
     fs::create_dir_all(stage.join("node_modules")).map_err(|e| e.to_string())?;
     let mut by_source = BTreeMap::new();
@@ -98,9 +100,7 @@ pub(crate) fn materialize_stage_with_workspace_links(
             index + 1,
             materialization_total,
             || copy_tree(source, &target),
-            |completed, total| {
-                eprintln!("Materialization progress: {completed}/{total}");
-            },
+            &mut progress,
         )?;
     }
     for (tree, expected) in verified_sources {
@@ -113,9 +113,7 @@ pub(crate) fn materialize_stage_with_workspace_links(
     }
     materialize_package_shims(stage, plan, workspace_links)?;
     materialize_workspace_links(stage, workspace_links)?;
-    report_materialization_completion(materialization_total, |completed, total| {
-        eprintln!("Materialization progress: {completed}/{total}");
-    });
+    report_materialization_completion(materialization_total, progress);
     Ok(())
 }
 

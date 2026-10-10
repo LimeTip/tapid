@@ -9,6 +9,10 @@ use std::{
 };
 use tapid_lockfile::Lockfile;
 
+#[path = "cli_cases/ci.rs"]
+mod ci_tests;
+mod workspace_acceptance;
+
 /// Verifies exact license output with no application environment and invalid project files.
 #[test]
 fn license_prints_complete_apache_text_without_accessing_a_project() {
@@ -1112,6 +1116,204 @@ fn remove_resolves_remaining_dependencies_and_cleans_stale_materialization() {
     assert!(dir.join("node_modules/keep/package.json").is_file());
     assert!(!dir.join("node_modules/removed").exists());
     cleanup(dir);
+}
+
+#[test]
+fn update_latest_preserves_overlapping_dependency_sections() {
+    for (first_section, second_section, name, first_range, second_range, latest_range) in [
+        (
+            "devDependencies",
+            "peerDependencies",
+            "h3",
+            "^1.0.0",
+            ">=1.0.0",
+            "*",
+        ),
+        (
+            "dependencies",
+            "optionalDependencies",
+            "h3",
+            "^1.0.0",
+            ">=1.0.0",
+            "*",
+        ),
+        (
+            "devDependencies",
+            "peerDependencies",
+            "local",
+            "npm:h3@^1.0.0",
+            "npm:h3@>=1.0.0",
+            "npm:h3@*",
+        ),
+    ] {
+        for select_all in [false, true] {
+            for latest in [false, true] {
+                let project =
+                    tapid_test_support::TempProject::new("update-overlapping-sections").unwrap();
+                let dir = project.path().to_path_buf();
+                let mut manifest = serde_json::json!({
+                    "name": "demo", "version": "1.0.0",
+                    "peerDependencies": {"unselected": "^4.0.0"},
+                    "scripts": {"test": "node test.js"},
+                    "customMetadata": ["preserved", 42],
+                });
+                manifest[first_section][name] = first_range.into();
+                manifest[second_section][name] = second_range.into();
+                project
+                    .write("package.json", manifest.to_string().as_bytes())
+                    .unwrap();
+                let fixture = project
+                    .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+                    .unwrap();
+                let store = dir.join("store");
+                let mut args = vec!["update"];
+                if !select_all {
+                    args.push(name);
+                }
+                if latest {
+                    args.push("--latest");
+                }
+                args.extend([
+                    "--store-dir",
+                    store.to_str().unwrap(),
+                    "--registry-fixture",
+                    fixture.to_str().unwrap(),
+                ]);
+
+                let output = run(&dir, &args);
+                assert!(
+                    output.status.success(),
+                    "{args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let updated_bytes = fs::read(dir.join("package.json")).unwrap();
+                let updated: serde_json::Value = serde_json::from_slice(&updated_bytes).unwrap();
+                assert_eq!(
+                    updated[first_section][name],
+                    if latest { latest_range } else { first_range }
+                );
+                assert_eq!(
+                    updated[second_section][name],
+                    if latest { latest_range } else { second_range }
+                );
+                assert_eq!(
+                    updated["peerDependencies"]["unselected"],
+                    if latest && select_all { "*" } else { "^4.0.0" }
+                );
+                assert_eq!(updated["scripts"], manifest["scripts"]);
+                assert_eq!(updated["customMetadata"], manifest["customMetadata"]);
+                let installed: serde_json::Value = serde_json::from_slice(
+                    &fs::read(dir.join("node_modules").join(name).join("package.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(installed["version"], if latest { "2.0.0" } else { "1.0.0" });
+
+                fs::remove_dir_all(dir.join("node_modules")).unwrap();
+                let replay = run(
+                    &dir,
+                    &[
+                        "install",
+                        "--offline",
+                        "--frozen",
+                        "--store-dir",
+                        store.to_str().unwrap(),
+                    ],
+                );
+                assert!(
+                    replay.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&replay.stderr)
+                );
+                assert_eq!(fs::read(dir.join("package.json")).unwrap(), updated_bytes);
+            }
+        }
+    }
+}
+
+#[test]
+fn update_latest_restores_overlapping_sections_after_install_failure() {
+    for fail_activation in [false, true] {
+        let project = tapid_test_support::TempProject::new("update-overlap-rollback").unwrap();
+        let dir = project.path().to_path_buf();
+        project.write("package.json", br#"{"name":"demo","version":"1.0.0","devDependencies":{"h3":"^1.0.0"},"peerDependencies":{"h3":">=1.0.0"}}"#).unwrap();
+        let fixture = project
+            .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+            .unwrap();
+        let store = dir.join("store");
+        let installed = run(
+            &dir,
+            &[
+                "install",
+                "--store-dir",
+                store.to_str().unwrap(),
+                "--registry-fixture",
+                fixture.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            installed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&installed.stderr)
+        );
+        project
+            .write("node_modules/KEEP", b"preserved active tree")
+            .unwrap();
+        let original_manifest = fs::read(dir.join("package.json")).unwrap();
+        let original_lock = fs::read(dir.join("tapid.lock")).unwrap();
+        let original_package = fs::read(dir.join("node_modules/h3/package.json")).unwrap();
+        let original_marker = fs::read(dir.join(".tapid-managed")).unwrap();
+        let tree_digests = || {
+            fs::read_dir(store.join("trees"))
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    (
+                        path.file_name().unwrap().to_owned(),
+                        tapid_archive::canonical_tree_digest(&path).unwrap(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let original_trees = tree_digests();
+        if !fail_activation {
+            project
+                .write("registry.json", br#"{"packages":[]}"#)
+                .unwrap();
+        }
+        let args = [
+            "update",
+            "h3",
+            "--latest",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ];
+        let failed = if fail_activation {
+            run_with_env(&dir, &args, "TAPID_TEST_FAIL_ACTIVATION", "1")
+        } else {
+            run(&dir, &args)
+        };
+        assert!(!failed.status.success());
+        assert_eq!(
+            fs::read(dir.join("package.json")).unwrap(),
+            original_manifest
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), original_lock);
+        assert_eq!(
+            fs::read(dir.join("node_modules/h3/package.json")).unwrap(),
+            original_package
+        );
+        assert_eq!(
+            fs::read(dir.join("node_modules/KEEP")).unwrap(),
+            b"preserved active tree"
+        );
+        assert_eq!(
+            fs::read(dir.join(".tapid-managed")).unwrap(),
+            original_marker
+        );
+        assert_eq!(tree_digests(), original_trees);
+    }
 }
 
 #[test]
@@ -5021,12 +5223,13 @@ fn dependency_lifecycle_hooks_are_reported_and_never_run_by_default() {
         .write("registry.json", &serde_json::to_vec(&fixture).unwrap())
         .unwrap();
     for flags in [
-        vec!["--registry-fixture", "registry.json"],
-        vec!["--offline", "--frozen"],
+        vec!["install", "--registry-fixture", "registry.json"],
+        vec!["install", "--offline", "--frozen"],
+        vec!["ci", "--registry-fixture", "registry.json"],
+        vec!["ci", "--offline", "--registry-fixture", "registry.json"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
             .current_dir(project.path())
-            .arg("install")
             .args(flags)
             .arg("--store-dir")
             .arg(home.path().join("store"))
@@ -5085,18 +5288,55 @@ tools = [{{ name = "sh", path = "/bin/sh", digest = "sha256-{}" }}]
         )
         .unwrap();
     let before = fs::read(project.path().join("tapid.lock")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
-        .args(["install", "--offline", "--frozen", "--store-dir"])
-        .arg(home.path().join("store"))
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "mismatched lifecycle approval must reject replay"
-    );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("does not match version/archive"));
-    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+    for args in [
+        vec!["install", "--offline", "--frozen"],
+        vec!["ci", "--registry-fixture", "registry.json"],
+        vec!["ci", "--offline", "--registry-fixture", "registry.json"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .args(args)
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "mismatched lifecycle approval must reject replay"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("does not match version/archive"));
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+    }
+}
+
+#[test]
+fn ci_replaces_managed_modules_without_changing_project_files_or_running_scripts() {
+    let project = tapid_test_support::TempProject::new("ci-empty").unwrap();
+    let dir = project.path().to_path_buf();
+    let manifest =
+        r#"{"name":"demo","version":"1.0.0","scripts":{"preinstall":"touch SHOULD_NOT_EXIST"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let lock = lock_for_manifest(manifest).to_json().unwrap();
+    project.write("tapid.lock", lock.as_bytes()).unwrap();
+    let store = dir.join("store");
+    let args = ["ci", "--store-dir", store.to_str().unwrap()];
+    for _ in 0..2 {
+        let output = run(&dir, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(dir.join("node_modules").is_dir());
+        assert!(!dir.join("node_modules/stale").exists());
+        assert!(!dir.join("SHOULD_NOT_EXIST").exists());
+        assert_eq!(fs::read_to_string(dir.join("tapid.lock")).unwrap(), lock);
+        assert_eq!(
+            fs::read_to_string(dir.join("package.json")).unwrap(),
+            manifest
+        );
+        fs::write(dir.join("node_modules/stale"), "stale").unwrap();
+    }
 }
 
 #[test]
@@ -5536,6 +5776,52 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
     assert!(native.status.success());
     assert_eq!(native.stdout, b"native compiled\n");
     let lock_bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&lock_bytes).unwrap()["lockfileVersion"],
+        9
+    );
+    let verified = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args(["lock", "verify"])
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    for flags in [
+        vec!["--registry-fixture", "registry.json"],
+        vec!["--offline", "--registry-fixture", "registry.json"],
+    ] {
+        let replay = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .arg("ci")
+            .args(flags)
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .output()
+            .unwrap();
+        assert!(
+            replay.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes
+        );
+        assert_eq!(
+            fs::read(package.join("generated.txt")).unwrap(),
+            b"generated"
+        );
+        assert!(
+            fs::read_dir(home.path().join("store/.staging"))
+                .unwrap()
+                .all(|entry| { !entry.unwrap().path().join("tree").exists() }),
+            "ci must release private replay snapshots"
+        );
+    }
     let lock = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
     let source = lock.packages().values().next().unwrap();
     assert_ne!(source.tree_digest(), source.install_tree_digest());

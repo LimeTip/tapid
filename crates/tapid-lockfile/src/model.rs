@@ -877,7 +877,7 @@ impl Lockfile {
                 .any(|package| !package.derived_hooks.is_empty())
         {
             return Err(LockfileError::InvalidDerivedOutput(
-                "derived hooks require schema 8".into(),
+                "derived hooks require schema 9".into(),
             ));
         }
         for package in self.packages.values() {
@@ -1237,6 +1237,10 @@ impl LockedPackage {
         self.derived_hooks
             .last()
             .map_or(&self.tree_digest, |output| output.tree_digest())
+    }
+
+    pub fn artifact_url(&self) -> Option<&str> {
+        self.artifact_url.as_deref()
     }
 
     pub fn dependencies(&self) -> &BTreeMap<String, String> {

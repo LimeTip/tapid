@@ -100,7 +100,7 @@ The consumer workflow exercises deterministic dependency resolution, npm metadat
 
 ### Synthetic news-site compatibility fixture
 
-`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/React/TypeScript application for evaluating package-manager compatibility on a representative news-site workload. The route at `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Its npm-generated `package-lock.json` (lockfile v3) is the reference install. Direct dependencies and every floating transitive dependency are pinned to that reference through exact manifest versions and flat `overrides`; Tapid's native online resolver does not import the npm lock. This prevents later registry publications (including `caniuse-lite`) from changing just the Tapid side. Update those pins and the npm reference together deliberately, not during CI. `tests/test_news_site_fixture.py` verifies the entire locked dependency/optional-dependency closure and proves that the strict comparator rejects version/edge drift. Install that reference in a separate directory with `npm ci`, then run a clean Tapid install and frozen/offline replay in the fixture. `scripts/compare-news-site-package-graphs.py` compares reachable names/versions and dependency/peer edges, source origins, integrity, and platform-optional selections; it also reports physical-only packages even when unreachable. Tapid—not npm or a direct Node command—runs the fixture's `build`, `test`, and `start` scripts. Lockfile generation used Node.js v26.10.0 / npm 11.19.1; CI uses Ubuntu 24.04 / Node.js 22 and records its toolchain versions. The fixture contains no private code, customer information, credentials, or proprietary assets. From the repository root:
+`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/React/TypeScript application for evaluating package-manager compatibility on a representative news-site workload. The route at `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Its npm-generated `package-lock.json` (lockfile v3) is the reference install. Direct dependencies and every floating transitive dependency are pinned to that reference through exact manifest versions and flat `overrides`; Tapid's native online resolver does not import the npm lock. This prevents later registry publications (including `caniuse-lite`) from changing just the Tapid side. Update those pins and the npm reference together deliberately, not during CI. `tests/news_site_fixture_test.ts` verifies the entire locked dependency/optional-dependency closure and proves that the strict comparator rejects version/edge drift. Install that reference in a separate directory with `npm ci`, then run a clean Tapid install and frozen/offline replay in the fixture. `scripts/compare-news-site-package-graphs.ts` compares reachable names/versions and dependency/peer edges, source origins, integrity, and platform-optional selections; it also reports physical-only packages even when unreachable. Tapid—not npm or a direct Node command—runs the fixture's `build`, `test`, and `start` scripts. Lockfile generation used Node.js v26.10.0 / npm 11.19.1; CI uses Ubuntu 24.04 / Node.js 22 and records its toolchain versions. The fixture contains no private code, customer information, credentials, or proprietary assets. From the repository root:
 
 ```bash
 cargo build --locked --bin tapid
@@ -113,7 +113,7 @@ tapid() { ../../target/debug/tapid "$@"; }
 tapid install
 tapid install --frozen
 tapid install --offline --frozen
-python3 ../../scripts/compare-news-site-package-graphs.py \
+node --experimental-strip-types ../../scripts/compare-news-site-package-graphs.ts \
   --npm-root "$npm_reference" \
   --tapid-root "$PWD" \
   --json .tmp/package-graph.json \
@@ -132,6 +132,7 @@ The expected response is `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Next.js production out
 The package-management toolchain also includes:
 
 - `init`, `install`/`i`, `add`, `remove`, and `update` for project manifests and dependencies.
+- `ci` to install the exact graph in `tapid.lock`, downloading missing verified packages without resolving versions again.
 - `outdated` to compare locked versions with registry metadata, and `prune` to remove unreachable managed packages.
 - A content-addressed local store and lockfile replay for offline installs, with transactional activation of managed `node_modules`.
 - Safe archive extraction and integrity checks, plus generated package `bin` shims. Dependency lifecycle scripts are denied by default; [exact checked-in approvals](docs/dependency-lifecycle.md) can produce verified derived trees through Linux ManagedTree.
@@ -195,6 +196,17 @@ Released 0.0.10 clients still use signed discovery followed by GitHub checksum f
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
 
+## Install from the lockfile
+
+```text
+tapid ci
+tapid ci --offline
+```
+
+`tapid ci` requires `tapid.lock` and matching root and workspace manifests. It preserves `package.json` and `tapid.lock`, installs the locked versions and edges, and atomically replaces managed `node_modules`. Missing store trees are downloaded from locked HTTPS artifact URLs, checked against locked SHA-512 integrity and SHA-256 tree digests, and published through the install transaction. Dependency lifecycle scripts do not run. `--offline` requires every verified tree in the store.
+
+`ci` requires download URLs for every registry package, even with a warm cache or `--offline`. Incomplete locks need regeneration with `tapid install` and review of the resulting changes. The explicit `--registry-fixture` option supplies local artifacts for tests and air-gapped development. Tapid uses its own lockfile and supported dependency semantics; this is not complete npm compatibility. An unmanaged `node_modules` is rejected rather than deleted.
+
 ## Offline and frozen replay
 
 Both modes require an existing lockfile and all referenced verified trees:
@@ -233,15 +245,19 @@ Start with the [contributing guide](CONTRIBUTING.md) and [open issues](https://g
 
 ## Development
 
-Use Python 3, Git, Rust with rustfmt and Clippy, and Node.js 22.6.0 or later. Run Cargo through the development wrapper to reuse build artifacts across worktrees. See the [testing guide](docs/testing.md) for focused checks and the full local lane.
+Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later. Run Cargo through the development wrapper to reuse build artifacts across worktrees. See the [testing guide](docs/testing.md) for focused checks and the full local lane.
+
+Rust owns Tapid behavior and security verification. TypeScript owns developer
+scripts, release orchestration, documentation checks, and website/consumer
+fixtures, with tests run by Node. Python and uv are not project prerequisites.
 
 ```text
 node --experimental-strip-types tools/check_architecture.ts
-node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts
-python3 scripts/dev.py fmt --all --check
-python3 scripts/dev.py clippy --workspace --all-targets --all-features --locked -- -D warnings
-python3 scripts/dev.py test --workspace --all-features --locked
-python3 scripts/dev.py test --manifest-path tests/integration/Cargo.toml --tests --locked
+node --experimental-strip-types --test tools/check_architecture_test.ts tests/*_test.ts tools/release/*_test.ts
+node --experimental-strip-types scripts/dev.ts fmt --all --check
+node --experimental-strip-types scripts/dev.ts clippy --workspace --all-targets --all-features --locked -- -D warnings
+node --experimental-strip-types scripts/dev.ts test --workspace --all-features --locked
+node --experimental-strip-types scripts/dev.ts test --manifest-path tests/integration/Cargo.toml --tests --locked
 git diff --check
 ```
 
@@ -258,3 +274,5 @@ The Tapid CLI and its supporting crates in this repository are developed by Lime
 Copyright 2026 LimeTip AB.
 
 Run `tapid license` to print the complete license and copyright attribution embedded in the executable. This command works offline and does not require a project.
+
+Existing npm projects can use `tapid import-package-lock <path>` to preserve supported npm v3 selections without resolution. Import is offline; the first frozen install verifies pinned tarballs. See the [migration and rollback guide](docs/npm-lockfile-import.md). Tapid manages packages and lockfiles; Node.js, workerd, Wrangler, and deployment tools keep their existing roles.

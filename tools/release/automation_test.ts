@@ -4,7 +4,7 @@ import { checkApprovedPlan, evaluateCi, waitForCi } from "./automation.ts";
 
 const sha = "a".repeat(40);
 const run = (overrides: Record<string, unknown> = {}) => ({ id: 10, run_number: 2, head_sha: sha, head_branch: "main", event: "push", status: "completed", conclusion: "success", ...overrides });
-const codeqlNames = ['Analyze (actions)', 'Analyze (rust)', 'Analyze (javascript-typescript)', 'Analyze (python)'];
+const codeqlNames = ['Analyze (actions)', 'Analyze (rust)', 'Analyze (javascript-typescript)'];
 const codeqlChecks = () => codeqlNames.map((name, index) => ({ id: index + 1, name, head_sha: sha, app: { id: 15368 }, status: 'completed', conclusion: 'success' }));
 
 test('exact main CI owns command help without an obsolete standalone check', async () => {
@@ -21,7 +21,8 @@ test('migrated command-help gate still blocks non-success CI and every missing o
   for (const [index, name] of codeqlNames.entries()) {
     let elapsed = 0;
     await rejects(waitForCi({ sha, readRuns: async () => [run()], readChecks: async () => codeqlChecks().filter((_, i) => i !== index), now: () => elapsed, sleep: async ms => { elapsed += ms; }, timeoutMs: 10 }), /timed out/);
-    await rejects(waitForCi({ sha, readRuns: async () => [run()], readChecks: async () => codeqlChecks().map((check, i) => i === index ? { ...check, conclusion: 'failure' } : check) }), new RegExp(`required check did not succeed.*${name.replace(/[()]/g, '\\$&')}`));
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await rejects(waitForCi({ sha, readRuns: async () => [run()], readChecks: async () => codeqlChecks().map((check, i) => i === index ? { ...check, conclusion: 'failure' } : check) }), new RegExp(`required check did not succeed.*${escapedName}`));
   }
   for (const overrides of [{ head_sha: 'b'.repeat(40) }, { event: 'pull_request' }, { head_branch: 'release/prepare' }]) {
     let elapsed = 0;
