@@ -93,16 +93,19 @@ pub(crate) struct CommonArgs {
     pub(crate) allow_unverified_registry_artifacts: bool,
 }
 
-pub(crate) fn add(args: AddArgs) -> ExitCode {
+pub(crate) fn add(args: AddArgs, json: bool) -> ExitCode {
     if args.packages.is_empty() {
-        crate::output::report_failure(&OperationFailure::unchanged(
-            &args.common.project_dir,
-            OperationalError::new(
-                ErrorKind::InvalidRequest,
-                "add requires at least one package",
+        return crate::output::json::failure_or_human(
+            &OperationFailure::unchanged(
+                &args.common.project_dir,
+                OperationalError::new(
+                    ErrorKind::InvalidRequest,
+                    "add requires at least one package",
+                ),
             ),
-        ));
-        return ExitCode::from(1);
+            "add",
+            json,
+        );
     }
     let kind = if args.dev {
         DependencyKind::DevDependencies
@@ -125,31 +128,34 @@ pub(crate) fn add(args: AddArgs) -> ExitCode {
             }
         })
         .collect::<Vec<_>>();
-    let result = mutate_and_install(&args.common, |manifest| {
+    let result = mutate_and_install(&args.common, json, |manifest| {
         crate::application::lifecycle::plan_add(manifest, &mutations)
     });
-    report(result, "Added dependencies")
+    report(result, json, "add", "Added dependencies")
 }
 
-pub(crate) fn remove(args: RemoveArgs) -> ExitCode {
+pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
     if args.packages.is_empty() {
-        crate::output::report_failure(&OperationFailure::unchanged(
-            &args.common.project_dir,
-            OperationalError::new(
-                ErrorKind::InvalidRequest,
-                "remove requires at least one package",
+        return crate::output::json::failure_or_human(
+            &OperationFailure::unchanged(
+                &args.common.project_dir,
+                OperationalError::new(
+                    ErrorKind::InvalidRequest,
+                    "remove requires at least one package",
+                ),
             ),
-        ));
-        return ExitCode::from(1);
+            "remove",
+            json,
+        );
     }
-    let result = mutate_and_install(&args.common, |manifest| {
+    let result = mutate_and_install(&args.common, json, |manifest| {
         crate::application::lifecycle::plan_remove(manifest, &args.packages)
     });
-    report(result, "Removed dependencies")
+    report(result, json, "remove", "Removed dependencies")
 }
 
-pub(crate) fn update(args: UpdateArgs) -> ExitCode {
-    let result = mutate_and_install(&args.common, |manifest| {
+pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
+    let result = mutate_and_install(&args.common, json, |manifest| {
         let plan =
             crate::application::lifecycle::plan_update(manifest, &args.packages, args.latest)?;
         if args.latest {
@@ -158,16 +164,19 @@ pub(crate) fn update(args: UpdateArgs) -> ExitCode {
             Ok(plan)
         }
     });
-    report(result, "Updated dependencies")
+    report(result, json, "update", "Updated dependencies")
 }
 
-pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
+pub(crate) fn outdated(args: ReadOnlyArgs, json: bool) -> ExitCode {
     match crate::application::lifecycle::outdated_report(
         &args.common.project_dir,
         args.common.workspace.as_deref(),
         args.common.registry_fixture.as_deref(),
     ) {
         Ok(report) => {
+            if json {
+                return crate::output::json::outdated(&report, "outdated");
+            }
             crate::output::report_warnings(&report.outcome.warnings);
             for entry in report.entries {
                 println!(
@@ -177,25 +186,22 @@ pub(crate) fn outdated(args: ReadOnlyArgs) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            crate::output::report_failure(&error);
-            ExitCode::from(1)
-        }
+        Err(error) => crate::output::json::failure_or_human(&error, "outdated", json),
     }
 }
 
-pub(crate) fn prune(args: ReadOnlyArgs) -> ExitCode {
+pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
     let selection = match crate::application::lifecycle::resolve_workspace(
         &args.common.project_dir,
         args.common.workspace.as_deref(),
     ) {
         Ok(selection) => selection,
         Err(error) => {
-            crate::output::report_failure(&OperationFailure::unchanged(
-                &args.common.project_dir,
-                error,
-            ));
-            return ExitCode::from(1);
+            return crate::output::json::failure_or_human(
+                &OperationFailure::unchanged(&args.common.project_dir, error),
+                "prune",
+                json,
+            );
         }
     };
     match crate::application::install::run_with_manifest_target(
@@ -207,22 +213,23 @@ pub(crate) fn prune(args: ReadOnlyArgs) -> ExitCode {
         crate::application::install::InstallMode::Frozen,
         None,
         false,
-        |_, _| {},
+        |event| crate::output::report_progress(event, json),
     ) {
         Ok(report) => {
+            if json {
+                return crate::output::json::installed(&report, "prune");
+            }
             crate::output::report_warnings(&report.outcome.warnings);
             println!("Pruned ({} package(s))", report.package_count);
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            crate::output::report_failure(&error);
-            ExitCode::from(1)
-        }
+        Err(error) => crate::output::json::failure_or_human(&error, "prune", json),
     }
 }
 
 fn mutate_and_install(
     common: &CommonArgs,
+    json: bool,
     planner: impl FnOnce(
         &tapid_manifest::PackageManifest,
     ) -> Result<crate::application::lifecycle::LifecyclePlan, OperationalError>,
@@ -243,24 +250,26 @@ fn mutate_and_install(
         crate::application::install::InstallMode::Online,
         common.registry_fixture.as_deref(),
         common.allow_unverified_registry_artifacts,
-        |_, _| {},
+        |event| crate::output::report_progress(event, json),
     )
 }
 
 fn report(
     result: Result<crate::application::install::InstallReport, OperationFailure>,
+    json: bool,
+    operation: &str,
     action: &str,
 ) -> ExitCode {
     match result {
         Ok(report) => {
+            if json {
+                return crate::output::json::installed(&report, operation);
+            }
             crate::output::report_warnings(&report.outcome.warnings);
             println!("{action} ({} package(s))", report.package_count);
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            crate::output::report_failure(&error);
-            ExitCode::from(1)
-        }
+        Err(error) => crate::output::json::failure_or_human(&error, operation, json),
     }
 }
 
@@ -292,19 +301,22 @@ mod tests {
         )
         .unwrap();
 
-        let result = add(AddArgs {
-            packages: vec!["react@^18.0.0".into()],
-            dev: false,
-            optional: false,
-            peer: true,
-            common: CommonArgs {
-                project_dir: project.clone(),
-                workspace: None,
-                store_dir: Some(project.join("store")),
-                registry_fixture: Some(fixture),
-                allow_unverified_registry_artifacts: false,
+        let result = add(
+            AddArgs {
+                packages: vec!["react@^18.0.0".into()],
+                dev: false,
+                optional: false,
+                peer: true,
+                common: CommonArgs {
+                    project_dir: project.clone(),
+                    workspace: None,
+                    store_dir: Some(project.join("store")),
+                    registry_fixture: Some(fixture),
+                    allow_unverified_registry_artifacts: false,
+                },
             },
-        });
+            false,
+        );
 
         assert_eq!(result, ExitCode::SUCCESS);
         let manifest = crate::commands::manifest::read_manifest(&package).unwrap();

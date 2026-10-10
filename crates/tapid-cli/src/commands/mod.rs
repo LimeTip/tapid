@@ -21,6 +21,9 @@ mod documentation;
     about = "A deterministic JavaScript and TypeScript package manager"
 )]
 pub(crate) struct Cli {
+    /// Emit a versioned JSON result for supported package commands.
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
@@ -118,7 +121,22 @@ pub(crate) enum Command {
 }
 
 /// Routes a parsed command to its handler, or prints usage guidance when no command is given.
-pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
+pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
+    if json
+        && !matches!(
+            command,
+            Some(
+                Command::Install(_)
+                    | Command::Add(_)
+                    | Command::Remove(_)
+                    | Command::Update(_)
+                    | Command::Outdated(_)
+                    | Command::Prune(_)
+            )
+        )
+    {
+        return crate::output::json::protocol_error("unsupported", "JSON_UNSUPPORTED_COMMAND", 1);
+    }
     match command {
         Some(Command::License) => license::run(),
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
@@ -132,12 +150,12 @@ pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
         Some(Command::Lock(args)) => lock::run(args),
         Some(Command::Run(args)) => run::run(args),
 
-        Some(Command::Install(args)) => install::run(args),
-        Some(Command::Add(args)) => lifecycle::add(args),
-        Some(Command::Remove(args)) => lifecycle::remove(args),
-        Some(Command::Update(args)) => lifecycle::update(args),
-        Some(Command::Outdated(args)) => lifecycle::outdated(args),
-        Some(Command::Prune(args)) => lifecycle::prune(args),
+        Some(Command::Install(args)) => install::run(args, json),
+        Some(Command::Add(args)) => lifecycle::add(args, json),
+        Some(Command::Remove(args)) => lifecycle::remove(args, json),
+        Some(Command::Update(args)) => lifecycle::update(args, json),
+        Some(Command::Outdated(args)) => lifecycle::outdated(args, json),
+        Some(Command::Prune(args)) => lifecycle::prune(args, json),
         Some(Command::Upgrade(args)) => upgrade::run(args),
     }
 }

@@ -1,3 +1,5 @@
+pub(crate) mod json;
+
 use std::process::ExitCode;
 
 /// Convert a child status to the process status used by the CLI.
@@ -49,5 +51,26 @@ pub(crate) fn report_failure(failure: &crate::application::outcome::OperationFai
     }
     if failure.retry == RetryAdvice::AfterContention {
         eprintln!("retry after the competing operation finishes");
+    }
+}
+
+pub(crate) fn report_progress(event: crate::application::install::Progress, json: bool) {
+    if json {
+        return;
+    }
+    use crate::application::install::Progress;
+    match event {
+        Progress::Metadata(count) => {
+            eprintln!("Registry metadata progress: {count} package(s) fetched")
+        }
+        Progress::Artifact(completed, total) => {
+            eprintln!("Artifact verification progress: {completed}/{total}")
+        }
+        Progress::Materialization(completed, total) => {
+            eprintln!("Materialization progress: {completed}/{total}");
+        }
+        Progress::Replay(completed, total) => {
+            eprintln!("Replay snapshot progress: {completed}/{total}")
+        }
     }
 }

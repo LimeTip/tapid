@@ -1,3 +1,11 @@
+#[derive(Clone, Copy)]
+pub(crate) enum Progress {
+    Metadata(usize),
+    Artifact(usize, usize),
+    Replay(usize, usize),
+    Materialization(usize, usize),
+}
+
 use super::outcome::{
     ChangeState, ErrorKind, OperationFailure, OperationOutcome, OperationalError, Warning,
 };
@@ -165,7 +173,7 @@ pub(crate) fn run(
     mode: InstallMode,
     registry_fixture: Option<&Path>,
     allow_unverified_registry_artifacts: bool,
-    report_replay_progress: impl FnMut(usize, usize),
+    report_replay_progress: impl FnMut(Progress),
 ) -> Result<InstallReport, OperationFailure> {
     run_with_manifest(
         project_dir,
@@ -188,7 +196,7 @@ pub(crate) fn run_with_manifest(
     mode: InstallMode,
     registry_fixture: Option<&Path>,
     allow_unverified_registry_artifacts: bool,
-    report_replay_progress: impl FnMut(usize, usize),
+    report_replay_progress: impl FnMut(Progress),
 ) -> Result<InstallReport, OperationFailure> {
     run_with_manifest_target(
         project_dir,
@@ -213,7 +221,7 @@ pub(crate) fn run_with_manifest_target(
     mode: InstallMode,
     registry_fixture: Option<&Path>,
     allow_unverified_registry_artifacts: bool,
-    report_replay_progress: impl FnMut(usize, usize),
+    report_replay_progress: impl FnMut(Progress),
 ) -> Result<InstallReport, OperationFailure> {
     let mut session = InstallSession::new(project_dir);
     if allow_unverified_registry_artifacts && matches!(mode, InstallMode::Online) {
@@ -252,7 +260,7 @@ fn perform_install(
     mode: InstallMode,
     registry_fixture: Option<&Path>,
     allow_unverified_registry_artifacts: bool,
-    report_replay_progress: impl FnMut(usize, usize),
+    mut report_replay_progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
     let offline = matches!(mode, InstallMode::Offline);
     let frozen = matches!(mode, InstallMode::Frozen);
@@ -415,6 +423,7 @@ fn perform_install(
                 registry_fixture,
                 allow_unverified_registry_artifacts,
                 &registry_config,
+                &mut report_replay_progress,
             )?;
         if session.journal.is_none() {
             session.journal = Some(
@@ -470,6 +479,7 @@ fn perform_install(
             workspace_links,
             activation_lock,
             true,
+            &mut report_replay_progress,
         ) {
             if crate::filesystem::atomic::rollback_lockfile(&lock_path, lock_backup.as_deref())
                 .is_ok()
@@ -564,7 +574,7 @@ fn perform_install(
         &root_manifest,
         &store,
         &registry_config,
-        report_replay_progress,
+        |completed, total| report_replay_progress(Progress::Replay(completed, total)),
     )?;
     session.mutated = true;
     session
@@ -579,6 +589,7 @@ fn perform_install(
         true,
         activation_lock,
         true,
+        &mut report_replay_progress,
     )?;
     journal
         .mark_committed()
@@ -708,6 +719,7 @@ fn materialize_install(
     workspace_links: tapid_linker::WorkspaceLinkPlan,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
+    mut progress: impl FnMut(Progress),
 ) -> Result<(), OperationalError> {
     materialize_with_lock(
         project_dir,
@@ -717,9 +729,11 @@ fn materialize_install(
         false,
         activation_lock,
         preserve_previous,
+        &mut progress,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_with_lock(
     project_dir: &Path,
     input: NamedLayoutInput,
@@ -728,6 +742,7 @@ fn materialize_with_lock(
     replayed: bool,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
+    mut progress: impl FnMut(Progress),
 ) -> Result<(), OperationalError> {
     let root = match ManagedRoot::new(project_dir) {
         Ok(value) => value,
@@ -770,6 +785,7 @@ fn materialize_with_lock(
         &trees,
         replayed,
         &workspace_links,
+        |completed, total| progress(Progress::Materialization(completed, total)),
     )
     .and_then(|_| {
         crate::filesystem::activation::activate_node_modules_with_preflight(
