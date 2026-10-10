@@ -36,6 +36,16 @@ Tapid is a Rust package manager with 18 capability crates. Start with the task m
 - Never commit or push without the user's explicit approval for that action.
 - UI work must not add eyebrow headings, overlines, or decorative labels above titles.
 
+## Reuse before adding code
+
+- Before adding a function, type, module, dependency, or script, use the task map and `rg` to find existing implementations of the behavior. Search by domain terms, error codes, and related operations, not just the proposed function name. Read the owning crate's interface, callers, and relevant tests before deciding that new code is needed.
+- Prefer calling an existing function. If it lacks a required behavior that belongs to the same capability, extend its interface or implementation while preserving existing callers' contracts. Avoid copying a function to add one variation or introducing a wrapper that only renames an existing operation.
+- When repeated code implements the same domain rule, put that rule in one named function or type in its owning capability and migrate the affected callers within the task's scope. Keep implementation helpers private; expose only the interface other crates need. Check existing dependencies and re-exports before adding a crate dependency, and preserve the dependency direction in [docs/architecture.md](docs/architecture.md).
+- Choose ownership by behavior. Manifest semantics belong in `tapid-manifest`, registry parsing and transport in `tapid-registry-client`, and verified storage in `tapid-store`. Reuse `tapid-test-support` for shared fixtures. `tapid-core` is for stable, pure domain values, not miscellaneous shared helpers. Name modules for the capability they implement rather than adding a general `utils` or `helpers` module.
+- Compare contracts before combining similar code. Validation, registry identity, integrity evidence, transaction ordering, recovery, and platform containment may differ even when the code looks alike. Share the common operation only when those guarantees remain explicit. Keep separate implementations when their rules differ; avoid an interface with unrelated mode flags or caller-specific branches.
+- Extract shared behavior for current callers. Do not add traits, configurable frameworks, or public interfaces for hypothetical reuse. A shared function should hide a meaningful operation and make its callers simpler.
+- Before handoff, review newly added code for a second implementation of an existing rule. For code changes, name the existing behavior reused or extended in the change description. If similar code remains separate, briefly explain the different contract. Run the existing callers' tests as well as tests for the new behavior, following the verification lane below.
+
 ## Verification
 
 Use `node --experimental-strip-types scripts/dev.ts <cargo arguments>` from the repository root. It reuses Cargo artifacts across worktrees and respects `CARGO_TARGET_DIR`. The CLI package name is `tapid`, not `tapid-cli`.
