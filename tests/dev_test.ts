@@ -37,7 +37,7 @@ test("worktrees share cache but unrelated repositories do not", () =>
     );
     assert.equal(
       cargoEnvironment(repo, {}).CARGO_TARGET_DIR,
-      join(realpathSync(repo), ".git", "target", "dev"),
+      join(realpathSync.native(join(repo, ".git")), "target", "dev"),
     );
   }));
 test("explicit target and other environment are preserved", () => {
