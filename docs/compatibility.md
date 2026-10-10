@@ -83,7 +83,8 @@ Root `workspaces` accepts a string, an array of strings, or an object whose
 with `/` separators. A whole path component `*` matches one directory level.
 For example, `apps/news`, `packages/*`, and `packages/*/*` are supported.
 Overlapping patterns discover each canonical member once, and members are
-sorted by package name. Directories without `package.json` are ignored. A
+sorted by package name. Directories without a `package.json` entry are ignored;
+existing non-regular entries, including dangling manifest symlinks, are rejected. A
 missing directory traversed to expand `*` produces an error.
 
 Recursive `**`, partial-component wildcards such as `ui*`, `?`, character
@@ -117,7 +118,8 @@ executes the selected member's script from its directory. Both use the root
 `tapid.toml` policy and containment root. Installation does not run lifecycle
 scripts.
 
-Root and member manifests must be regular files. Internal directory symlinks
+Root and member manifests must be regular files. Root scripts validate this
+before loading run policy. Internal directory symlinks
 are accepted only after canonical containment checks; member manifest symlinks,
 external directory targets, duplicate package names, and members inside
 `node_modules` are rejected before mutation. These checks do not prevent races

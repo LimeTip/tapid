@@ -297,11 +297,22 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
             }
         }
     }
-    let mut manifests = paths
-        .into_iter()
-        .map(|path| path.join("package.json"))
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
+    let mut manifests = Vec::new();
+    for path in paths {
+        let manifest = path.join("package.json");
+        match fs::symlink_metadata(&manifest) {
+            // Keep every existing entry for the regular-file validation in discovery.
+            // Following the final component here would hide dangling symlinks.
+            Ok(_) => manifests.push(manifest),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect workspace manifest {}: {error}",
+                    manifest.display()
+                ));
+            }
+        }
+    }
     manifests.sort();
     Ok(manifests)
 }
@@ -310,7 +321,7 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
 mod tests {
     use super::{Workspace, expand_pattern};
     use proptest::prelude::*;
-    use std::path::Path;
+    use std::{fs, path::Path};
     use tapid_test_support::TempProject;
 
     #[test]
@@ -375,6 +386,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_ignores_absent_manifests_but_rejects_directory_manifest_entries() {
+        let project = TempProject::new("workspace-manifest-directory").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        fs::create_dir_all(project.path().join("packages/ui")).unwrap();
+        assert!(
+            Workspace::discover(project.path())
+                .unwrap()
+                .members()
+                .is_empty()
+        );
+        fs::create_dir(project.path().join("packages/ui/package.json")).unwrap();
+        let error = Workspace::discover(project.path()).unwrap_err();
+        assert!(
+            error.contains("workspace manifest must be a regular file"),
+            "{error}"
+        );
+    }
+
     proptest! {
         #[test]
         fn workspace_patterns_with_parent_components_are_always_rejected(components in prop::collection::vec("[a-z]{1,8}", 0..4)) {
@@ -411,6 +446,31 @@ mod containment_tests {
             error.contains("workspace manifest must be a regular file, not a symlink"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn workspace_rejects_dangling_and_directory_target_manifest_symlinks() {
+        for pattern in ["packages/*", "packages/ui"] {
+            for target in ["missing.json", "directory"] {
+                let project = TempProject::new("workspace-nonfile-manifest").unwrap();
+                project
+                    .write(
+                        "package.json",
+                        format!(
+                            r#"{{"name":"root","version":"1.0.0","workspaces":["{pattern}"]}}"#
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                fs::create_dir_all(project.path().join("packages/ui/directory")).unwrap();
+                symlink(target, project.path().join("packages/ui/package.json")).unwrap();
+                let error = Workspace::discover(project.path()).unwrap_err();
+                assert!(
+                    error.contains("workspace manifest must be a regular file, not a symlink"),
+                    "{pattern}, {target}: {error}"
+                );
+            }
+        }
     }
 
     #[test]

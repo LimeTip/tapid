@@ -279,36 +279,77 @@ fn unsupported_workspace_glob_preserves_manifests_lock_store_and_activation() {
 #[test]
 fn symlinked_workspace_manifest_preserves_existing_installation() {
     use std::os::unix::fs::symlink;
-    let fixture = Fixture::new();
-    fixture.succeeds(&["install"], true);
-    let root = fixture.project.path();
-    fs::rename(
-        root.join("packages/ui/package.json"),
-        root.join("packages/ui/real.json"),
-    )
-    .unwrap();
-    symlink("real.json", root.join("packages/ui/package.json")).unwrap();
-    let before = snapshot(root);
-    let store_before = snapshot(&fixture.home.path().join("store"));
-    for args in [
-        vec!["install"],
-        vec!["install", "--frozen"],
-        vec!["install", "--offline"],
-        vec!["add", "@example/ui@^1.0.0", "--workspace", "news"],
-    ] {
-        let output = fixture.command(&args, false);
-        assert!(!output.status.success(), "{args:?}");
+    for target in ["real.json", "directory", "missing.json"] {
+        let fixture = Fixture::new();
+        fixture.succeeds(&["install"], true);
+        let root = fixture.project.path();
+        fs::rename(
+            root.join("packages/ui/package.json"),
+            root.join("packages/ui/real.json"),
+        )
+        .unwrap();
+        fs::create_dir(root.join("packages/ui/directory")).unwrap();
+        symlink(target, root.join("packages/ui/package.json")).unwrap();
+        let before = snapshot(root);
+        let store_before = snapshot(&fixture.home.path().join("store"));
+        for args in [
+            vec!["install"],
+            vec!["install", "--frozen"],
+            vec!["install", "--offline"],
+            vec!["add", "@example/ui@^1.0.0", "--workspace", "news"],
+        ] {
+            let output = fixture.command(&args, false);
+            assert!(!output.status.success(), "{args:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("workspace manifest must be a regular file, not a symlink"),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(snapshot(root), before, "{args:?} changed project state");
+            assert_eq!(
+                snapshot(&fixture.home.path().join("store")),
+                store_before,
+                "{args:?} changed store state"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn root_run_rejects_symlinked_manifest_before_script_or_policy_loading() {
+    use std::os::unix::fs::symlink;
+    for target in ["real.json", "directory", "missing.json"] {
+        let project = TempProject::new("root-run-manifest-symlink").unwrap();
+        let home = TempHome::new("root-run-manifest-symlink").unwrap();
+        project
+            .write(
+                "real.json",
+                br#"{"name":"root","version":"1.0.0","scripts":{"probe":"exit 0"}}"#,
+            )
+            .unwrap();
+        project
+            .write("tapid.toml", b"invalid policy must not be parsed")
+            .unwrap();
+        fs::create_dir(project.path().join("directory")).unwrap();
+        symlink(target, project.path().join("package.json")).unwrap();
+        let before = snapshot(project.path());
+        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .args(["run", "probe"])
+            .current_dir(project.path())
+            .env_clear()
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
         assert!(
             String::from_utf8_lossy(&output.stderr)
-                .contains("workspace manifest must be a regular file, not a symlink"),
-            "{args:?}: {}",
+                .contains("manifest must be a regular file, not a symlink"),
+            "{target}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(snapshot(root), before, "{args:?} changed project state");
-        assert_eq!(
-            snapshot(&fixture.home.path().join("store")),
-            store_before,
-            "{args:?} changed store state"
-        );
+        assert!(output.stdout.is_empty());
+        assert_eq!(snapshot(project.path()), before);
     }
 }
