@@ -168,6 +168,30 @@ fn failure_result(failure: &OperationFailure, operation: &str) -> Value {
     result
 }
 
+pub(crate) fn why_success(
+    report: &crate::application::why::WhyReport,
+    project: &std::path::Path,
+) -> ExitCode {
+    let outcome = OperationOutcome::unchanged(project);
+    let not_found = report.paths.is_empty();
+    let mut result = envelope("why", "success", Some(&outcome));
+    result["data"] = json!({
+        "package": &report.package,
+        "paths": &report.paths,
+        "truncated": report.truncated,
+        "not_found": not_found,
+        "graph_warnings": &report.warnings,
+    });
+    emit(result, if not_found { 1 } else { 0 })
+}
+
+pub(crate) fn why_failure(project: &std::path::Path, code: &str) -> ExitCode {
+    let outcome = OperationOutcome::unchanged(project);
+    let mut result = envelope("why", "failure", Some(&outcome));
+    result["errors"] = json!([{"code": code, "phase": "operation"}]);
+    emit(result, 1)
+}
+
 pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
     let mut result = envelope(operation, "success", Some(&report.outcome));
     result["data"] = json!({"package_count": report.package_count, "replayed": report.replayed});

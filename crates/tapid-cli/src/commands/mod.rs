@@ -12,6 +12,7 @@ mod npm_import;
 mod release_verification;
 pub(crate) mod run;
 pub(crate) mod upgrade;
+pub(crate) mod why;
 
 #[cfg(test)]
 mod documentation;
@@ -138,6 +139,12 @@ pub(crate) enum Command {
   tapid prune --store-dir ./verified-store"
     )]
     Prune(lifecycle::ReadOnlyArgs),
+    /// Explain which dependency paths bring a package into the project.
+    #[command(
+        long_about = "Trace a package through the resolved graph in package.json and tapid.lock. Reads local project files only and does not contact registries or change the manifest, lockfile, store, or node_modules. Direct dependency kinds are read from the selected manifest; the lockfile currently does not preserve kinds for transitive edges.",
+        after_help = "Examples:\n  tapid why react\n  tapid why @scope/package --project-dir ./app\n  tapid --json why lodash --workspace web"
+    )]
+    Why(why::Args),
     /// Download, verify, and install the latest stable Tapid release.
     #[command(
         long_about = "Download and verify the latest stable Tapid release for this platform, then replace the current executable or --destination.\n\nUses the signed release record from tapid.dev by default. If release discovery is unavailable, a cached release may be used for recovery; the command reports when it cannot check the latest version.",
@@ -166,6 +173,7 @@ impl Command {
             Self::Update(_) => "update",
             Self::Outdated(_) => "outdated",
             Self::Prune(_) => "prune",
+            Self::Why(_) => "why",
             Self::Upgrade(_) => "upgrade",
         }
     }
@@ -183,6 +191,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
                     | Command::Update(_)
                     | Command::Outdated(_)
                     | Command::Prune(_)
+                    | Command::Why(_)
             )
         )
     {
@@ -213,6 +222,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::Update(args)) => lifecycle::update(args, json),
         Some(Command::Outdated(args)) => lifecycle::outdated(args, json),
         Some(Command::Prune(args)) => lifecycle::prune(args, json),
+        Some(Command::Why(args)) => why::run(args, json),
         Some(Command::Upgrade(args)) => upgrade::run(args),
     }
 }
