@@ -87,6 +87,7 @@ fn explain_json_retains_integrity_mismatch_and_returns_failure() {
     assert_eq!(result["outcome"], "failure");
     assert_eq!(result["errors"][0]["code"], "INTEGRITY_MISMATCH");
     assert_eq!(result["data"]["byte_integrity"]["status"], "mismatch");
+    assert!(result["data"]["byte_integrity"]["checked_at"].is_string());
     assert_eq!(result["data"]["vulnerabilities"]["status"], "unavailable");
     assert_eq!(result["changes"]["state"], "unchanged");
 }
@@ -102,6 +103,10 @@ fn explain_missing_evidence_is_unknown_in_json() {
     assert!(result["data"]["registry_integrity"]["value"].is_null());
     assert_eq!(result["data"]["provenance"]["status"], "missing");
     assert_eq!(result["data"]["byte_integrity"]["status"], "not_checked");
+    assert!(result["data"]["source_timestamp"].is_null());
+    assert_eq!(result["data"]["source_timestamp_status"], "missing");
+    assert!(result["data"]["published_at"].is_null());
+    assert_eq!(result["data"]["freshness"], "unknown");
     let output = run(&project, &["--json", "--artifact-file", "archive.tgz"]);
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -110,6 +115,47 @@ fn explain_missing_evidence_is_unknown_in_json() {
         "missing_expected_integrity"
     );
     assert!(result["data"]["byte_integrity"]["actual"].is_string());
+}
+
+#[test]
+fn explain_observation_times_do_not_establish_evidence_freshness() {
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+    let project = project();
+    let path = project.path().join("metadata.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    metadata["time"] =
+        serde_json::json!({"1.2.3":"2020-01-01T00:00:00Z", "modified":"2021-02-03T04:05:06Z"});
+    project
+        .write("metadata.json", &serde_json::to_vec(&metadata).unwrap())
+        .unwrap();
+    let before = OffsetDateTime::now_utc();
+    let output = run(&project, &["--json", "--artifact-file", "archive.tgz"]);
+    let after = OffsetDateTime::now_utc();
+    assert!(output.status.success(), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let data = &result["data"];
+    assert!(data["metadata_fetched_at"].is_null());
+    let read_at =
+        OffsetDateTime::parse(data["metadata_read_at"].as_str().unwrap(), &Rfc3339).unwrap();
+    let checked_at = OffsetDateTime::parse(
+        data["byte_integrity"]["checked_at"].as_str().unwrap(),
+        &Rfc3339,
+    )
+    .unwrap();
+    assert!(before <= read_at && read_at <= checked_at && checked_at <= after);
+    assert_eq!(data["source_timestamp"], "2021-02-03T04:05:06Z");
+    assert_eq!(data["source_timestamp_status"], "reported");
+    assert_eq!(data["published_at"], "2020-01-01T00:00:00Z");
+    assert_eq!(data["freshness"], "unknown");
+    let output = run(&project, &[]);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Metadata snapshot read at:"));
+    assert!(text.contains("Registry-reported publication time: 2020-01-01T00:00:00Z"));
+    assert!(text.contains("Evidence freshness: unknown"));
+    let output = run(&project, &["--json"]);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result["data"]["byte_integrity"]["checked_at"].is_null());
 }
 
 #[test]

@@ -177,21 +177,25 @@ pub(crate) fn explain(
         "version": version,
         "registry": registry,
         "source": source,
-        "source_timestamp": null,
+        "metadata_fetched_at": report.metadata_fetched_at,
+        "metadata_read_at": report.metadata_read_at,
+        "source_timestamp": evidence.modified_at,
+        "source_timestamp_status": if evidence.modified_at.is_some() { "reported" } else { "missing" },
+        "published_at": evidence.published_at,
         "freshness": "unknown",
         "artifact": artifact,
         "registry_integrity": {
             "status": if evidence.integrity.is_some() { "reported" } else { "missing" },
             "value": evidence.integrity.as_ref().map(ToString::to_string),
         },
-        "byte_integrity": {"status": report.byte_integrity, "actual": report.actual_integrity, "scope": report.actual_integrity.as_ref().map(|_| "supplied_local_artifact")},
+        "byte_integrity": {"status": report.byte_integrity, "actual": report.actual_integrity, "scope": report.actual_integrity.as_ref().map(|_| "supplied_local_artifact"), "checked_at": report.bytes_checked_at},
         "registry_signatures": {"status": if evidence.signature_count.is_some() { "unverified" } else { "missing" }, "count": evidence.signature_count},
         "provenance": {"status": if evidence.attestation_url.is_some() { "unverified" } else { "missing" }, "reference": attestation, "fetched": false},
         "publisher_identity": {"status": "not_verified"},
         "vulnerabilities": {"status": "unavailable", "reason": "no_provider_queried"},
         "malware_analysis": {"status": "not_performed"},
         "human_review": {"status": "unavailable"},
-        "limitations": ["Digest matches do not establish package safety, publisher identity, or intended content.", "Registry signatures and attestation references are not verified."]
+        "limitations": ["Digest matches do not establish package safety, publisher identity, or intended content.", "Registry signatures and attestation references are not verified.", "Observation times and registry-reported timestamps do not establish evidence freshness."]
     });
     truncated.sort();
     result["truncated_fields"] = json!(truncated);

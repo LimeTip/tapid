@@ -21,6 +21,12 @@ It reports signature counts and attestation references without fetching or
 verifying them. Malformed supplied evidence fails closed. Installation retains
 its stricter artifact and integrity requirements.
 
+Inspection also retains the selected version's `time[version]` publication time
+and the package metadata's `time.modified`. Present timestamps must be valid
+RFC 3339 strings and are normalized to RFC 3339 for display. Missing fields remain
+absent; malformed timestamps fail validation. These registry-reported times are
+unverified and do not establish artifact, provenance, or vulnerability freshness.
+
 ## JSR
 
 `JsrRegistry` accepts scoped names such as `@std/path` and the current `/{scope}/{name}/meta.json` shape. Version keys must be strict semver. It preserves `manifest.dependencies` and `manifest.peerDependencies` as separate metadata maps. An artifact is returned only when metadata explicitly supplies an HTTPS `npm.tarball` and valid SHA-512 `npm.integrity`; integrity is never derived from the package name, version, URL, or response transport. Missing or unusable integrity returns `UnsupportedIntegrity`.

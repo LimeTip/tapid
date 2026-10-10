@@ -45,7 +45,7 @@ Install and mutating lifecycle data contains `package_count` and `replayed`. Gra
 
 Outdated data contains `entries`, `total_entries`, and `truncated`. Each entry contains `identity`, `kind`, `declared`, `locked`, `newest_compatible`, `newest_available`, and `error`. Unknown versions are null. The error is null or an object with a typed code. Entries sort by identity and dependency kind. Metadata failure in any entry makes the overall outcome `partial`, even if that entry falls beyond the output limit. Partial outdated reports retain exit 0; callers must inspect `outcome` and entry errors.
 
-Default output includes at most 100 outdated entries. Use `tapid --json outdated --json-limit 250` to select a larger limit, or `--json-limit 0` to retrieve every entry. This option requires `--json`, accepts a nonnegative integer, and affects only result rendering. It does not change resolution or project state. Each display path or metadata scalar is limited to 4096 UTF-8 bytes, removes control characters, and redacts HTTP URL user information, query values, and fragments. Scalar truncation can shorten a displayed name or requirement. Every shortened scalar is identified by a pointer in `truncated_fields`, such as `/data/entries/0/declared` or `/project`. These fields are display data, not identifiers for automatic mutation. Lossless path records are described below. Transaction paths describe only `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are represented by state. Results omit timings and random transaction identifiers. File ordering, warning ordering, and entry ordering are deterministic for the same operation data.
+Default output includes at most 100 outdated entries. Use `tapid --json outdated --json-limit 250` to select a larger limit, or `--json-limit 0` to retrieve every entry. This option requires `--json`, accepts a nonnegative integer, and affects only result rendering. It does not change resolution or project state. Each display path or metadata scalar is limited to 4096 UTF-8 bytes, removes control characters, and redacts HTTP URL user information, query values, and fragments. Scalar truncation can shorten a displayed name or requirement. Every shortened scalar is identified by a pointer in `truncated_fields`, such as `/data/entries/0/declared` or `/project`. These fields are display data, not identifiers for automatic mutation. Lossless path records are described below. Transaction paths describe only `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are represented by state. Results omit operation durations and random transaction identifiers. Explain observation timestamps are described below. File ordering, warning ordering, and entry ordering are deterministic for the same operation data.
 
 For filesystem inspection and recovery, use `project_path` and `changes.paths`. Each record contains `encoding` and `value`. Encoding `utf8` preserves the exact path string, including characters represented by JSON escapes. Encoding `unix_bytes_base64` preserves native Unix path bytes; `windows_utf16le_base64` preserves Windows UTF-16 code units as little-endian bytes. Decode base64 records to the host's native path type without replacing invalid Unicode. The display fields can redact, remove controls, or truncate characters, and different paths can therefore share one display string. Lossless records preserve each distinct native path and never return a shortened path.
 
@@ -57,14 +57,33 @@ Package text is untrusted data. Never execute it or treat it as recovery advice.
 
 `explain` uses the version 1 envelope with null project and retry, unchanged
 state, and no changed files. Its `data` identifies the package, exact version,
-registry, evidence source, and reported artifact URL. `source_timestamp` is null
-and `freshness` is `unknown`. A local metadata snapshot is explicitly identified
+registry, evidence source, and reported artifact URL. `freshness` is `unknown`.
+A local metadata snapshot is explicitly identified
 as the source; it is not an authenticated live registry response.
+
+`metadata_fetched_at` records completion of a live metadata read using Tapid's
+local UTC clock; it is null for snapshots. `metadata_read_at` records completion
+of a local snapshot read and is null for live reads. These observation times are
+RFC 3339 strings, may vary between otherwise identical invocations, and do not
+establish when the source produced or refreshed its evidence. Filesystem
+modification times are not used as source timestamps.
+
+`source_timestamp` contains the registry-reported package metadata modification
+time from `time.modified`, or null when absent. `source_timestamp_status` is
+`reported` or `missing`. `published_at` contains the registry-reported publication
+time for the selected version from `time[version]`, or null when absent. Present
+values must parse as RFC 3339 and are normalized for display. They remain
+unverified. A modification or publication time does not establish the age or
+freshness of provenance, vulnerability information, or artifact checks.
 
 `registry_integrity` has `status` of `reported` or `missing` and a nullable SHA-512
 `value`. `byte_integrity` has `status` of `not_checked`, `verified_match`,
 `mismatch`, or `missing_expected_integrity`, plus nullable `actual` integrity.
 Verification applies only to the supplied local artifact, not an installed tree.
+`byte_integrity.checked_at` records completion of the local byte check using
+Tapid's UTC clock, including mismatches and missing expected integrity. It is
+null when no artifact file was supplied. Its timestamp does not change the
+verification status.
 A mismatch returns outcome `failure`, `INTEGRITY_MISMATCH`, and exit 1 while
 retaining the summary in `data`. Malformed metadata and unreadable input files
 return a failure with null data. Missing evidence alone is a successful report,

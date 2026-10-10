@@ -46,7 +46,23 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     );
     println!("Registry: {}", evidence.identity.registry);
     println!("Evidence source: {}", text(&report.source).0);
-    println!("Evidence source timestamp: unavailable; freshness is unknown");
+    if let Some(timestamp) = &report.metadata_fetched_at {
+        println!("Metadata fetched at: {timestamp}");
+    }
+    if let Some(timestamp) = &report.metadata_read_at {
+        println!("Metadata snapshot read at: {timestamp}");
+    }
+    match &evidence.modified_at {
+        Some(timestamp) => {
+            println!("Registry-reported metadata modification time: {timestamp}, unverified")
+        }
+        None => println!("Evidence source timestamp: unavailable"),
+    }
+    match &evidence.published_at {
+        Some(timestamp) => println!("Registry-reported publication time: {timestamp}, unverified"),
+        None => println!("Registry-reported publication time: unavailable"),
+    }
+    println!("Evidence freshness: unknown; observation times do not establish source freshness");
     match &evidence.artifact_url {
         Some(url) => println!("Registry-reported artifact: {}", text(url).0),
         None => println!("Registry-reported artifact: missing"),
@@ -67,6 +83,9 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     );
     if let Some(actual) = &report.actual_integrity {
         println!("Observed local artifact integrity: {actual}");
+    }
+    if let Some(timestamp) = &report.bytes_checked_at {
+        println!("Local bytes checked at: {timestamp}");
     }
     match evidence.signature_count {
         Some(count) => println!("Registry signatures: {count} reported, unverified"),

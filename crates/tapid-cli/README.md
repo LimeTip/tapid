@@ -62,8 +62,12 @@ A mismatch exits 1; missing expected integrity remains unknown. Files are
 bounded to 32 MiB for metadata and 512 MiB for artifacts. The command does not
 download artifacts or attestations, verify publisher identity or provenance,
 query vulnerability providers, scan for malware, or obtain human review. It
-marks those checks and missing evidence explicitly. Evidence source timestamps
-and freshness are unknown. A digest match does not establish package safety or
+marks those checks and missing evidence explicitly. It records when Tapid fetched
+live metadata, read a local snapshot, or checked local bytes. Registry-reported
+publication and metadata modification times appear when present, after RFC 3339
+validation, and remain unverified. Missing timestamps stay unavailable. These
+times do not establish evidence freshness, which remains unknown.
+A digest match does not establish package safety or
 intended content. `--json` emits the versioned evidence summary, including on a
 byte mismatch; see the [JSON protocol](../../docs/json-results.md).
 

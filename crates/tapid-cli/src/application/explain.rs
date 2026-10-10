@@ -2,6 +2,7 @@ use super::outcome::{ErrorKind, OperationalError};
 use std::{collections::BTreeMap, path::Path};
 use tapid_core::PackageVersion;
 use tapid_registry_client::{NpmPackageEvidence, NpmRegistry, RegistryClientError};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Clone, Copy, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,6 +18,9 @@ pub(crate) struct ExplainReport {
     pub(crate) source: String,
     pub(crate) byte_integrity: ByteIntegrity,
     pub(crate) actual_integrity: Option<String>,
+    pub(crate) metadata_fetched_at: Option<String>,
+    pub(crate) metadata_read_at: Option<String>,
+    pub(crate) bytes_checked_at: Option<String>,
 }
 
 pub(crate) fn explain(
@@ -43,7 +47,9 @@ pub(crate) fn explain(
     let (origin, name) = config
         .identity_for_spec(package)
         .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
-    let (evidence, source) = if let Some(path) = metadata_file {
+    let (evidence, source, metadata_fetched_at, metadata_read_at) = if let Some(path) =
+        metadata_file
+    {
         let body = crate::commands::run::read_bounded_config_file(path, 32 * 1024 * 1024).map_err(
             |_| {
                 OperationalError::new(
@@ -57,6 +63,8 @@ pub(crate) fn explain(
         (
             evidence,
             format!("local metadata snapshot {}", path.display()),
+            None,
+            Some(observed_at()?),
         )
     } else {
         let mut cache = BTreeMap::new();
@@ -79,6 +87,8 @@ pub(crate) fn explain(
         (
             evidence,
             format!("{}/{}", origin, name.as_str().replace('/', "%2F")),
+            Some(observed_at()?),
+            None,
         )
     };
     let mut report = ExplainReport {
@@ -86,6 +96,9 @@ pub(crate) fn explain(
         source,
         byte_integrity: ByteIntegrity::NotChecked,
         actual_integrity: None,
+        metadata_fetched_at,
+        metadata_read_at,
+        bytes_checked_at: None,
     };
     if let Some(path) = artifact_file {
         let bytes = crate::commands::run::read_bounded_config_file(path, 512 * 1024 * 1024)
@@ -102,6 +115,13 @@ pub(crate) fn explain(
             None => ByteIntegrity::MissingExpectedIntegrity,
         };
         report.actual_integrity = Some(actual.to_string());
+        report.bytes_checked_at = Some(observed_at()?);
     }
     Ok(report)
+}
+
+fn observed_at() -> Result<String, OperationalError> {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))
 }
