@@ -24,16 +24,19 @@ inventory until the website supports native platform rendering. It is not a
 translation performed by the Unix runner.
 
 Capability `verified_releases` lists versions actually checked. Self-upgrade's
-`first_supported_release: "v0.0.10"` and `expected_releases: ["v0.0.10", "v0.0.11", "v0.0.12"]` are
+`first_supported_release: "v0.0.10"` and `expected_releases: ["v0.0.10", "v0.0.11", "v0.0.12", "v0.0.13"]` are
 reviewed implementation expectations, **not published execution evidence**;
 its `verified_releases` remains empty until actual published verification is
 reviewed. v0.0.9 lacks `upgrade` and retains reinstall guidance. `upgrade-help`
 expects exit 2 plus the unrecognized-subcommand message for v0.0.9, and exit 0
-for v0.0.10, v0.0.11 and v0.0.12. The published `upgrade` journey explicitly skips v0.0.9 as unsupported
+for v0.0.10, v0.0.11, v0.0.12 and v0.0.13. The published `upgrade` journey explicitly skips v0.0.9 as unsupported
 without executing it; the negative help probe still runs separately. Only the
-exact v0.0.10, v0.0.11 and v0.0.12 source tags have reviewed expectations for the journey;
+exact v0.0.10, v0.0.11, v0.0.12 and v0.0.13 source tags have reviewed expectations for the journey;
 unknown tags, including newer versions, fail closed pending review.
 Do not interpret `first_supported_release` as an open-ended semver allowlist.
+Release preflight checks the exact intended tag against both upgrade examples and
+the self-upgrade capability before creating a tag or promoting a release. The
+release contract CI tests run the same check against the checked-in intent.
 
 A staged local checkout is development input, not a fabricated published pin.
 A local commit can unblock clean pinned builds without authorizing a push.
