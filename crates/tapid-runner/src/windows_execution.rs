@@ -81,6 +81,9 @@ impl ExecutionBackend for PlatformBackend {
         _request: &ExecutionRequest,
         policy: &ResolvedSandboxPolicy,
     ) -> Result<FilesystemBindings, ExecutionError> {
+        for grant in &policy.write {
+            super::windows_integrity::verify_write_grant(grant)?;
+        }
         FilesystemBindings::canonical_path(policy)
     }
 }
@@ -93,11 +96,24 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
         None,
     )
     .expect("static backend identity must satisfy the checked contract");
-    if !request.policy().filesystem().write().is_empty() {
+    let write_validation = (|| {
+        let root = fs::canonicalize(request.project_root()).map_err(|error| {
+            ExecutionError::new(
+                ExecutionErrorCategory::UnsupportedContainment,
+                error.to_string(),
+            )
+        })?;
+        for path in request.policy().filesystem().write() {
+            let grant = super::resolve_project_grant(&root, path, super::FilesystemAccess::Write)?;
+            super::windows_integrity::verify_write_grant(&grant)?;
+        }
+        Ok::<_, ExecutionError>(())
+    })();
+    if let Err(error) = write_validation {
         return ContainmentSupport::unsupported(
             backend,
             "windows",
-            "project write policies remain unsupported until declared writes and ACL revocation are natively verified",
+            error.to_string(),
             requested,
             EnforcementDimensions::none(),
             EnforcementDimensions::none(),
@@ -115,7 +131,7 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
     }
     let evidence = evidence_for_dimensions(
         &requested,
-        "AppContainer token without network capabilities, explicit path ACL grants, suspended Job Object assignment, and bounded standard-handle capture",
+        "AppContainer token without network capabilities, explicit path ACL grants with validated low-integrity write targets, suspended Job Object assignment, and bounded standard-handle capture",
         &[],
     );
     ContainmentSupport::supported(
@@ -190,7 +206,7 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             add_node_appcontainer_options(&mut child_environment);
         }
         let environment = windows_environment_block_units(&child_environment)?;
-        let working_directory = process_working_directory(&self.preflight.policy.project_root)?;
+        let working_directory = process_working_directory(self.request.working_directory())?;
         let mut pipes = WindowsStdioPipes::new()?;
         trace_windows_stage("prepare: suspended child");
         self.child = Some(WindowsSuspendedChild::create_with_stdio(

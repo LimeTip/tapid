@@ -992,7 +992,7 @@ fn windows_runtime_directory_ace_allows_launching_read_execute_binaries() {
 }
 
 #[test]
-fn windows_write_policy_fails_closed_before_spawn_until_native_acceptance() {
+fn windows_unlabelled_write_policy_fails_closed_before_spawn() {
     let root = temporary_project("write-policy-pending");
     let writable = root.join("writable");
     fs::create_dir(&writable).unwrap();
@@ -1028,19 +1028,7 @@ fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
     fs::create_dir(&writable).unwrap();
     let authorized = writable.join("authorized.txt");
     fs::write(&authorized, "preexisting content").unwrap();
-    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
-    let icacls = fs::canonicalize(PathBuf::from(system_root).join("System32/icacls.exe")).unwrap();
-    let label = Command::new(&icacls)
-        .arg(&writable)
-        .args(["/setintegritylevel", "(OI)(CI)L", "/c"])
-        .output()
-        .unwrap();
-    assert!(
-        label.status.success(),
-        "icacls failed to set the test low-integrity label: {}{}",
-        String::from_utf8_lossy(&label.stdout),
-        String::from_utf8_lossy(&label.stderr)
-    );
+    tapid_runner::prepare_private_dependency_write_tree(&writable).unwrap();
     let baseline_root = project_dacl(&root);
     let baseline_write = project_dacl(&writable);
     let baseline_file = project_dacl(&authorized);
@@ -1076,10 +1064,93 @@ fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
     let request = command_request_with_policy(&root, &command, request.policy().clone());
     let outcome = execute(&request).unwrap();
     assert_eq!(outcome.termination(), &Termination::Exited(0));
-    assert!(fs::read_to_string(&authorized).unwrap().contains("REOPENED"));
+    assert!(
+        fs::read_to_string(&authorized)
+            .unwrap()
+            .contains("REOPENED")
+    );
     assert_eq!(project_dacl(&root), baseline_root);
     assert_eq!(project_dacl(&writable), baseline_write);
     assert_eq!(project_dacl(&authorized), baseline_file);
+}
+
+#[test]
+fn windows_private_write_tree_creates_and_reopens_files_without_outside_authority() {
+    let fixture = tapid_test_support::TempProject::new("private-write-boundary").unwrap();
+    let root = fixture.path().to_path_buf();
+    windows_acl::initialize_inheritance(&root);
+    let writable = root.join("package");
+    fs::create_dir(&writable).unwrap();
+    fixture.write("readonly.txt", b"readonly data").unwrap();
+    let outside = tapid_test_support::TempProject::new("private-write-outside").unwrap();
+    outside.write("secret.txt", b"outside data").unwrap();
+    tapid_runner::prepare_private_dependency_write_tree(&writable).unwrap();
+    let root_acl = project_dacl(&root);
+    let outside_acl = project_dacl(&outside.path().to_path_buf());
+    let policy = SandboxPolicy::new_with_assurance(
+        SandboxMode::Required,
+        AssuranceLevel::ManagedTree,
+        FilesystemPolicy::new(vec![".".into()], vec!["package".into()]).unwrap(),
+        false,
+        vec![],
+        false,
+        ExecutionLimits::new(Some(10), Some(4096), Some(4), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let shell_request = command_request_with_policy(&root, "", policy.clone());
+    let command = format!(
+        "echo denied>..\\readonly.txt & type \"{}\">stolen.txt & echo denied>\"{}\" & echo CREATED>generated.txt & echo REOPENED>>generated.txt",
+        outside.path().join("secret.txt").display(),
+        outside.path().join("escaped.txt").display(),
+    );
+    let request = ExecutionRequest::builder(shell_request.program())
+        .args([
+            OsString::from("/D"),
+            OsString::from("/S"),
+            OsString::from("/C"),
+            command.into(),
+        ])
+        .project_root(&root)
+        .working_directory(&writable)
+        .policy(policy)
+        .windows_verbatim_arguments(true)
+        .build()
+        .unwrap();
+    let outcome = execute(&request).unwrap();
+    assert_eq!(outcome.termination(), &Termination::Exited(0));
+    assert_eq!(
+        fs::read_to_string(writable.join("generated.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "CREATED\nREOPENED\n"
+    );
+    assert_eq!(
+        fs::read(root.join("readonly.txt")).unwrap(),
+        b"readonly data"
+    );
+    assert!(!outside.path().join("escaped.txt").exists());
+    assert!(
+        !fs::read(writable.join("stolen.txt"))
+            .unwrap_or_default()
+            .windows(b"outside data".len())
+            .any(|bytes| bytes == b"outside data")
+    );
+    assert_eq!(project_dacl(&root), root_acl);
+    assert_eq!(project_dacl(&outside.path().to_path_buf()), outside_acl);
+}
+
+#[test]
+fn windows_private_write_preparation_rejects_hardlinks_without_labelling_the_external_file() {
+    let project = tapid_test_support::TempProject::new("private-write-hardlink").unwrap();
+    project.write("outside.txt", b"host data").unwrap();
+    let outside = project.path().join("outside.txt");
+    let private = project.path().join("private");
+    fs::create_dir(&private).unwrap();
+    fs::hard_link(&outside, private.join("linked.txt")).unwrap();
+    let before = project_dacl(&outside);
+    assert!(tapid_runner::prepare_private_dependency_write_tree(&private).is_err());
+    assert_eq!(project_dacl(&outside), before);
+    assert_eq!(fs::read(&outside).unwrap(), b"host data");
 }
 
 #[test]

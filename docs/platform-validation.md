@@ -152,3 +152,7 @@ storage remain unresolved.
 node --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked dependency_lifecycle_
 node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked uncontained
 ```
+
+## Private Windows dependency write and key validation
+
+The issue #155 branch adds protected owner-only Windows lifecycle keys and validates low-integrity write targets. The CLI labels only its private dependency copies; ordinary host-created write targets remain rejected. Native regressions require overwrite and reopen of an existing file, creation and reopen in the requested working directory, denied reads/writes outside authority, exact DACL restoration, hard-link rejection, and key/attestation forgery rejection. Cross-compilation and local Unix tests are development evidence. The focused Windows acceptance step and full native workspace suite must pass at the claimed commit. Toolchain identity and integrated contained dependency acceptance remain outstanding. See [ADR 0010](adr/0010-private-windows-dependency-write-trees.md).

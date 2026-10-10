@@ -2,6 +2,10 @@
 //! ingested package trees, even when a project lockfile has been forged.
 use super::*;
 use hmac::{Hmac, Mac};
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::lifecycle_key;
 
 impl Store {
     pub fn attest_lifecycle_output(
@@ -97,10 +101,10 @@ fn lifecycle_key(root: &Path, create: bool) -> Result<[u8; 32], IngestError> {
     }
     Ok(key)
 }
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn lifecycle_key(_root: &Path, _create: bool) -> Result<[u8; 32], IngestError> {
     Err(invalid(
-        "lifecycle output authentication currently requires a Unix store",
+        "lifecycle output authentication requires a native Unix or Windows store",
     ))
 }
 
@@ -198,6 +202,30 @@ mod tests {
         assert!(store.attest_lifecycle_output(&digest, &digest).is_err());
         fs::write(&path, &original).unwrap();
         fs::hard_link(&path, home.path().join("key-alias")).unwrap();
+        assert!(store.attest_lifecycle_output(&digest, &digest).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn lifecycle_authentication_rejects_a_windows_key_readable_by_everyone() {
+        let home = TempHome::new("windows-key-public-acl").unwrap();
+        let store = Store::new(home.path().join("store"));
+        let digest: ArtifactDigest = format!("sha256-{}", "a".repeat(64)).parse().unwrap();
+        store.attest_lifecycle_output(&digest, &digest).unwrap();
+        let path = store.root().join(".tapid-lifecycle-key");
+        let original = fs::read(&path).unwrap();
+        let system_root = std::env::var_os("SystemRoot").unwrap();
+        let result =
+            std::process::Command::new(PathBuf::from(system_root).join("System32/icacls.exe"))
+                .arg(&path)
+                .args(["/grant", "*S-1-1-0:(R)"])
+                .output()
+                .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         assert!(store.attest_lifecycle_output(&digest, &digest).is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
     }

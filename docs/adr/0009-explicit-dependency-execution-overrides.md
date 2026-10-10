@@ -5,8 +5,10 @@ Status: Accepted
 ## Decision
 
 Keep ManagedTree mandatory for contained dependency builds. Native macOS lacks
-the required complete descendant boundary and tree-wide limits. Windows project
-writes and authenticated lifecycle storage remain unsupported. Do not describe
+the required complete descendant boundary and tree-wide limits. Windows authenticated lifecycle storage and writes to private low-integrity
+dependency copies are under native validation. Integrated contained Windows
+dependency execution remains unavailable until toolchain identity and CLI
+acceptance are complete. Do not describe
 uncontained execution as contained platform compatibility.
 
 Provide separate invocation-only CLI overrides for dependency-hook approval and

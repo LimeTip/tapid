@@ -58,6 +58,8 @@ static TEST_LAUNCHER_INIT_LINUX: extern "C" fn() = {
 pub mod config;
 mod lifecycle;
 pub use execution::dependency_toolchain_identity;
+#[cfg(windows)]
+pub use execution::prepare_private_dependency_write_tree;
 pub use lifecycle::{DependencyLifecycleApproval, DependencyLifecyclePolicy, LifecycleTool};
 pub mod execution;
 

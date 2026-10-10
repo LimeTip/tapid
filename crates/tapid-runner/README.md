@@ -43,6 +43,8 @@ The private Node binding outlives root completion whenever subprocess-enabled ta
 
 Retention consumes temporary storage until OS cleanup or host removal after all descendants exit. Tapid does not schedule later deletion: elapsed time and best-effort process-group cleanup cannot establish safety. OS or host removal while a descendant survives ends reserved-node protection. Host writes or races after final validation remain limitations. None of this provides ManagedTree ownership or complete cleanup.
 
+Private Windows dependency writes now have a separate experimental path described in [ADR 0010](../../docs/adr/0010-private-windows-dependency-write-trees.md). It admits only validated low-integrity targets prepared in private copies. Ordinary unlabelled host writes and network-enabled policies still fail before spawn. The historical Windows write findings below explain this restriction; contained dependency support still requires toolchain identity and native CLI acceptance.
+
 ## Dependency lifecycle execution
 
 `DependencyLifecyclePolicy` validates exact checked-in approvals and derives keys bound to source, policy, script, toolchain, and graph. `dependency_toolchain_identity` fingerprints the Linux backend runtime and Tapid executable. ManagedTree requires all four ceilings and initialized private-launcher dispatch. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md) and [ADR 0008](../../docs/adr/0008-dependency-lifecycle-derived-trees.md) for authority, delegation, accounting, cleanup, and replay limitations.

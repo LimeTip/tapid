@@ -380,26 +380,35 @@ impl Drop for BuildStage {
     }
 }
 fn tool_bytes(tool: &tapid_runner::LifecycleTool) -> Result<Vec<u8>, OperationalError> {
-    let bytes = executable_bytes(Path::new(tool.path()))?;
+    Ok(verified_tool(tool)?.2)
+}
+fn verified_tool(
+    tool: &tapid_runner::LifecycleTool,
+) -> Result<(PathBuf, fs::File, Vec<u8>), OperationalError> {
+    let path = fs::canonicalize(tool.path()).map_err(error)?;
+    let mut file = fs::File::open(&path).map_err(error)?;
+    let bytes = read_executable(&mut file)?;
     if format!("sha256-{:x}", Sha256::digest(&bytes)) != tool.digest() {
         return Err(error(format!(
             "lifecycle tool digest mismatch for {}",
             tool.name()
         )));
     }
-    Ok(bytes)
+    Ok((path, file, bytes))
 }
 fn executable_bytes(path: &Path) -> Result<Vec<u8>, OperationalError> {
-    let path = fs::canonicalize(path).map_err(error)?;
-    let metadata = fs::metadata(&path).map_err(error)?;
+    read_executable(&mut fs::File::open(path).map_err(error)?)
+}
+fn read_executable(file: &mut fs::File) -> Result<Vec<u8>, OperationalError> {
+    let metadata = file.metadata().map_err(error)?;
     if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
         return Err(error(
             "lifecycle tool must be a regular executable no larger than 512 MiB",
         ));
     }
     let mut bytes = Vec::new();
-    fs::File::open(path)
-        .and_then(|f| f.take(512 * 1024 * 1024 + 1).read_to_end(&mut bytes))
+    file.take(512 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
         .map_err(error)?;
     if bytes.len() > 512 * 1024 * 1024 {
         return Err(error("lifecycle tool exceeds 512 MiB"));
@@ -482,19 +491,7 @@ fn run_hook(
         fs::remove_dir_all(&tools).map_err(error)?;
     }
     fs::create_dir(&tools).map_err(error)?;
-    for tool in approval.tools() {
-        if without_containment {
-            tool_bytes(tool)?;
-            continue;
-        }
-        let path = tools.join(tool.executable_name());
-        fs::write(&path, tool_bytes(tool)?).map_err(error)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o500)).map_err(error)?;
-        }
-    }
+    let prepared_tools = prepare_tools(&tools, approval.tools(), without_containment)?;
     let prefix = |s: &str| {
         if s == "." {
             "package".into()
@@ -519,7 +516,11 @@ fn run_hook(
     for path in &write {
         let path = stage.0.join(path);
         if !path.exists() {
-            fs::create_dir_all(path).map_err(error)?;
+            fs::create_dir_all(&path).map_err(error)?;
+        }
+        #[cfg(windows)]
+        if !without_containment {
+            tapid_runner::prepare_private_dependency_write_tree(&path).map_err(error)?;
         }
     }
     if approval.dependencies() {
@@ -579,11 +580,7 @@ fn run_hook(
         .iter()
         .find(|tool| tool.name() == shell)
         .ok_or_else(|| error("lifecycle policy does not pin a shell usable on this platform"))?;
-    let program = if without_containment {
-        PathBuf::from(shell_tool.path())
-    } else {
-        tools.join(shell_tool.executable_name())
-    };
+    let program = prepared_tools.get(shell_tool.name()).unwrap();
     let mut builder = tapid_runner::ExecutionRequest::builder(program)
         .args(shell_args)
         .windows_verbatim_arguments(shell == "cmd")
@@ -594,7 +591,7 @@ fn run_hook(
         .envs(approval.environment().iter());
     let mut search_paths = Vec::new();
     if without_containment {
-        search_paths = uncontained_search_paths(approval.tools())?;
+        search_paths = tool_search_paths(&prepared_tools)?;
     } else {
         search_paths.push(fs::canonicalize(&tools).map_err(error)?);
     }
@@ -619,11 +616,7 @@ fn run_hook(
     }
     builder = builder.executable_search_paths(search_paths);
     if let Some(node) = approval.tools().iter().find(|tool| tool.name() == "node") {
-        builder = builder.trusted_node_runtime(if without_containment {
-            PathBuf::from(node.path())
-        } else {
-            tools.join(node.executable_name())
-        });
+        builder = builder.trusted_node_runtime(prepared_tools.get(node.name()).unwrap());
     }
     let request = builder.build().map_err(error)?;
     if without_containment {
@@ -659,16 +652,67 @@ fn run_hook(
     }
     Ok(())
 }
-fn uncontained_search_paths(
+fn prepare_tools(
+    destination: &Path,
     tools: &[tapid_runner::LifecycleTool],
-) -> Result<Vec<PathBuf>, OperationalError> {
+    without_containment: bool,
+) -> Result<BTreeMap<String, PathBuf>, OperationalError> {
+    let mut paths = BTreeMap::new();
+    for tool in tools {
+        let (source, file, bytes) = verified_tool(tool)?;
+        // macOS system executables cannot always be relocated without changing
+        // their signature. A canonical source on a kernel read-only volume is
+        // immutable to the caller. Administrators remounting/replacing host
+        // volumes remain outside the documented trusted-host boundary.
+        #[cfg(target_os = "macos")]
+        let retain_source = without_containment && readonly_tool_volume(&file)?;
+        #[cfg(not(target_os = "macos"))]
+        let retain_source = {
+            let _ = (&file, without_containment);
+            false
+        };
+        let path = if retain_source {
+            source
+        } else {
+            let path = destination.join(tool.executable_name());
+            use std::io::Write;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut file| file.write_all(&bytes))
+                .map_err(error)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o500)).map_err(error)?;
+            }
+            path
+        };
+        paths.insert(tool.name().to_owned(), path);
+    }
+    Ok(paths)
+}
+#[cfg(target_os = "macos")]
+fn readonly_tool_volume(file: &fs::File) -> Result<bool, OperationalError> {
+    use std::os::fd::AsRawFd;
+    let mut status = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+    // SAFETY: the source file keeps the descriptor alive and status is writable.
+    if unsafe { libc::fstatfs(file.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(error(std::io::Error::last_os_error()));
+    }
+    // SAFETY: successful fstatfs initialized status.
+    Ok(unsafe { status.assume_init() }.f_flags & libc::MNT_RDONLY as u32 != 0)
+}
+fn tool_search_paths(tools: &BTreeMap<String, PathBuf>) -> Result<Vec<PathBuf>, OperationalError> {
     let mut paths = Vec::new();
     for tool in tools
         .iter()
-        .filter(|tool| tool.name() == "node")
-        .chain(tools.iter().filter(|tool| tool.name() != "node"))
+        .filter(|(name, _)| *name == "node")
+        .chain(tools.iter().filter(|(name, _)| *name != "node"))
     {
-        let parent = Path::new(tool.path())
+        let parent = tool
+            .1
             .parent()
             .ok_or_else(|| error("lifecycle tool has no parent directory"))?;
         let canonical = fs::canonicalize(parent).map_err(error)?;
@@ -712,11 +756,58 @@ mod tests {
         }]})).unwrap();
         let policy = DependencyLifecyclePolicy::parse(document.as_bytes()).unwrap();
         assert_eq!(
-            uncontained_search_paths(policy.approvals()[0].tools()).unwrap(),
+            tool_search_paths(
+                &policy.approvals()[0]
+                    .tools()
+                    .iter()
+                    .map(|tool| (tool.name().to_owned(), PathBuf::from(tool.path())))
+                    .collect()
+            )
+            .unwrap(),
             vec![
                 fs::canonicalize(project.path().join("runtime")).unwrap(),
                 fs::canonicalize(project.path().join("shell")).unwrap(),
             ]
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn uncontained_tools_execute_verified_bytes_after_source_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = tapid_test_support::TempProject::new("uncontained-tool-replacement").unwrap();
+        let bytes = b"#!/bin/sh\nprintf original";
+        project.write("sh", bytes).unwrap();
+        fs::set_permissions(project.path().join("sh"), fs::Permissions::from_mode(0o700)).unwrap();
+        let digest = format!("sha256-{:x}", Sha256::digest(bytes));
+        let document = toml::to_string(&serde_json::json!({"schema":1,"approvals":[{
+            "package":"demo","version":"1.0.0","archive-digest":format!("sha512-{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0u8; 64])),
+            "hook":"install","script-digest":digest,"system-toolchain":true,
+            "read":["."],"write":["."],"network":false,"environment":{},
+            "timeout-seconds":5,"max-output-bytes":1024,"max-processes":32,"max-memory-bytes":134217728,
+            "tools":[{"name":"sh","path":project.path().join("sh"),"digest":digest}]
+        }]})).unwrap();
+        let policy = DependencyLifecyclePolicy::parse(document.as_bytes()).unwrap();
+        let directory = project.path().join("private-tools");
+        fs::create_dir(&directory).unwrap();
+        let prepared = prepare_tools(&directory, policy.approvals()[0].tools(), true).unwrap();
+        fs::rename(project.path().join("sh"), project.path().join("old-sh")).unwrap();
+        project.write("sh", b"#!/bin/sh\nprintf replaced").unwrap();
+        fs::set_permissions(project.path().join("sh"), fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new(&prepared["sh"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"original");
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_tool_source_must_be_on_a_readonly_volume() {
+        let shell = fs::File::open("/bin/sh").unwrap();
+        assert!(readonly_tool_volume(&shell).unwrap());
+        let project = tapid_test_support::TempProject::new("mutable-tool-volume").unwrap();
+        project.write("tool", b"mutable").unwrap();
+        assert!(
+            !readonly_tool_volume(&fs::File::open(project.path().join("tool")).unwrap()).unwrap()
         );
     }
     #[test]

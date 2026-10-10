@@ -1739,8 +1739,13 @@ mod platform_backend;
 #[path = "windows_cancellation.rs"]
 mod windows_cancellation;
 #[cfg(windows)]
+#[path = "windows_integrity.rs"]
+mod windows_integrity;
+#[cfg(windows)]
 #[path = "windows_job.rs"]
 mod windows_job;
+#[cfg(windows)]
+pub use windows_integrity::prepare_private_dependency_write_tree;
 
 #[cfg(target_os = "macos")]
 #[path = "macos_restricted.rs"]
