@@ -701,7 +701,7 @@ catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('WRITE_O
     };
     // Prove the identical nontruncating, write-only open succeeds before revocation.
     let script = format!(
-        "const probeFs=require('node:fs'); probeFs.closeSync(probeFs.openSync('writable/existing.txt',probeFs.constants.O_WRONLY)); console.log('WRITE_OPEN_BEFORE_REVOCATION');\n{script}"
+        "const probeFs=require('node:fs'); probeFs.closeSync(probeFs.openSync('writable/existing.txt',probeFs.constants.O_WRONLY)); probeFs.mkdirSync('writable/retained'); probeFs.writeFileSync('writable/retained/created.txt','created'); probeFs.closeSync(probeFs.openSync('writable/retained/created.txt',probeFs.constants.O_WRONLY)); console.log('EXISTING_AND_CREATED_WRITE_OPEN_BEFORE_REVOCATION'); console.log('WRITE_OPEN_BEFORE_REVOCATION');\n{script}"
     );
     let (termination, stdout, stderr) = run_node(&container, &node, &root, &script);
     eprintln!(
@@ -730,7 +730,7 @@ catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('WRITE_O
     } else {
         None
     };
-    let revoked = r#"const fs=require('node:fs'); fs.statSync('writable/existing.txt'); fs.readFileSync('writable/existing.txt'); console.log('SAME_SID_METADATA_RETAINED'); try {fs.closeSync(fs.openSync('writable/existing.txt',fs.constants.O_WRONLY)); throw Error('revoked write succeeded');} catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('SAME_SID_REVOKED');}"#;
+    let revoked = r#"const fs=require('node:fs'); for(const path of ['writable/existing.txt','writable/retained/created.txt']) {fs.statSync(path); fs.readFileSync(path); console.log('SAME_SID_METADATA_RETAINED:'+path); try {fs.closeSync(fs.openSync(path,fs.constants.O_WRONLY)); throw Error('revoked write succeeded:'+path);} catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('SAME_SID_REVOKED:'+path);}}"#;
     let (revoked_status, revoked_out, revoked_err) = run_node(&container, &node, &root, revoked);
     if let Some(grant) = &mut revocation_read {
         grant.restore().unwrap();
@@ -754,6 +754,16 @@ catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('WRITE_O
             path.display()
         );
     }
+    assert_eq!(
+        read_acl(&writable.join("retained")),
+        before[1],
+        "new directory full DACL/control revocation"
+    );
+    assert_eq!(
+        read_acl(&writable.join("retained/created.txt")),
+        before[2],
+        "new file full DACL/control revocation"
+    );
     container.cleanup().unwrap();
     eprintln!(
         "exact DACL/control restoration verified; same-SID result={revoked_status:?}; stdout={}; stderr={}",

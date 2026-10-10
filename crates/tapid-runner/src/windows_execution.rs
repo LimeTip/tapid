@@ -24,6 +24,407 @@ use std::time::Duration;
 const INTERNAL_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+#[cfg(test)]
+std::thread_local! {
+    static EMPTY_JOB_BEFORE_RESTORE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod write_lifecycle_tests {
+    use super::*;
+    use crate::config::{AssuranceLevel, FilesystemPolicy, SandboxMode, SandboxPolicy};
+    use crate::execution::{
+        execute_with_backend,
+        windows_acl::{initialize_inheritance, read_acl},
+    };
+
+    // Test-only backend seam invokes the real lifecycle without opening the integrated gate.
+    struct WriteBackend;
+    impl ExecutionBackend for WriteBackend {
+        fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
+            assert!(!request.policy().network());
+            let requested = EnforcementDimensions::requested_by(request.policy());
+            let identity =
+                BackendIdentity::new("tapid-runner/native-write-lifecycle-test", "1", None)
+                    .unwrap();
+            let evidence = evidence_for_dimensions(
+                &requested,
+                "direct native write lifecycle acceptance seam",
+                &[],
+            );
+            ContainmentSupport::supported(
+                identity,
+                requested.clone(),
+                requested.clone(),
+                requested,
+                evidence.clone(),
+                evidence,
+            )
+        }
+        fn bind_filesystem(
+            &self,
+            request: &ExecutionRequest,
+            policy: &ResolvedSandboxPolicy,
+        ) -> Result<FilesystemBindings, ExecutionError> {
+            PlatformBackend.bind_filesystem(request, policy)
+        }
+        fn prepare<'a>(
+            &'a self,
+            request: &ExecutionRequest,
+            preflight: &'a ValidatedPreflight,
+        ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+            PlatformBackend.prepare(request, preflight)
+        }
+    }
+
+    fn run_write_completion(tail: &str, expected: Termination, assurance: AssuranceLevel) {
+        let owner = tapid_test_support::TempProject::new("write-completion").unwrap();
+        let runtime_owner =
+            tapid_test_support::TempProject::new("write-completion-runtime").unwrap();
+        let root = fs::canonicalize(owner.path()).unwrap();
+        let runtime = fs::canonicalize(runtime_owner.path()).unwrap();
+        let node = runtime.join("node.exe");
+        fs::copy(
+            std::env::var_os("TAPID_TEST_NODE").expect("real standalone Node is mandatory"),
+            &node,
+        )
+        .unwrap();
+        let writable = root.join("writable");
+        let overlap = writable.join("overlap");
+        let control = root.join("readonly control");
+        fs::create_dir(&writable).unwrap();
+        fs::create_dir(&overlap).unwrap();
+        fs::create_dir(&control).unwrap();
+        let existing = writable.join("existing.txt");
+        fs::write(&existing, b"host-existing").unwrap();
+        let control_dir = control.join("nested");
+        fs::create_dir(&control_dir).unwrap();
+        let control_file = control_dir.join("created.txt");
+        fs::write(&control_file, b"control").unwrap();
+        initialize_inheritance(&root);
+        initialize_inheritance(&runtime);
+        let paths = [
+            &root,
+            &writable,
+            &overlap,
+            &existing,
+            &control,
+            &control_dir,
+            &control_file,
+            &runtime,
+            &node,
+        ];
+        let before: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            assurance,
+            FilesystemPolicy::new(
+                vec![".".into()],
+                vec![
+                    "writable".into(),
+                    "writable/overlap".into(),
+                    "writable".into(),
+                ],
+            )
+            .unwrap(),
+            false,
+            vec![],
+            false,
+            ExecutionLimits::new(
+                Some(if expected == Termination::Cancelled {
+                    15
+                } else {
+                    2
+                }),
+                Some(4096),
+                Some(8),
+                Some(512 * 1024 * 1024),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let script = format!(
+            r#"const fs=require('node:fs');fs.writeFileSync('writable/existing.txt','updated');fs.mkdirSync('writable/overlap/nested');fs.writeFileSync('writable/overlap/nested/created.txt','created');fs.closeSync(fs.openSync('writable/overlap/nested/created.txt',fs.constants.O_WRONLY));process.stdout.write('CREATED_AND_REOPENED\\n',()=>fs.writeFileSync('writable/overlap/nested/ready.txt','ready'));{tail}"#
+        );
+        let request = ExecutionRequest::builder(node.as_os_str())
+            .args([
+                OsString::from("--preserve-symlinks"),
+                "--preserve-symlinks-main".into(),
+                "-e".into(),
+                script.into(),
+            ])
+            .project_root(&root)
+            .executable_search_path(&runtime)
+            .policy(policy)
+            .build()
+            .unwrap();
+        assert!(!containment_support(&request).is_supported());
+        let cancellation_sender = if expected == Termination::Cancelled {
+            let marker = overlap.join("nested/ready.txt");
+            Some(std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(8);
+                while !marker.exists() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "child never reached write marker before cancellation"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // This runs only inside the isolated CREATE_NEW_CONSOLE helper.
+                assert_ne!(
+                    unsafe {
+                        windows_sys::Win32::System::Console::GenerateConsoleCtrlEvent(
+                            windows_sys::Win32::System::Console::CTRL_C_EVENT,
+                            0,
+                        )
+                    },
+                    0
+                );
+            }))
+        } else {
+            None
+        };
+        EMPTY_JOB_BEFORE_RESTORE.with(|count| count.set(0));
+        let result = execute_with_backend(&request, &WriteBackend);
+        if let Some(sender) = cancellation_sender {
+            sender.join().unwrap();
+        }
+        let outcome = result.unwrap();
+        assert_eq!(
+            EMPTY_JOB_BEFORE_RESTORE.with(|count| count.get()),
+            1,
+            "native kernel empty-Job check must be observed before grant revocation"
+        );
+        let after: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        for ((path, before), after) in paths.iter().zip(&before).zip(&after) {
+            eprintln!(
+                "WRITE_LIFECYCLE_DACL_RECEIPT path={} before={before:02x?} after={after:02x?}",
+                path.display()
+            );
+        }
+        eprintln!(
+            "CREATED_OBJECT_DACL_RECEIPT directory={:02x?} file={:02x?}",
+            read_acl(&overlap.join("nested")),
+            read_acl(&overlap.join("nested/created.txt"))
+        );
+        assert_eq!(
+            after, before,
+            "existing/control/runtime full raw DACL/control restoration"
+        );
+        assert_eq!(
+            read_acl(&overlap.join("nested")),
+            read_acl(&control_dir),
+            "child-created directory revocation"
+        );
+        assert_eq!(
+            read_acl(&overlap.join("nested/created.txt")),
+            read_acl(&control_file),
+            "child-created file revocation"
+        );
+        if overlap.join("nested/ready.txt").exists() {
+            let ready_acl = read_acl(&overlap.join("nested/ready.txt"));
+            eprintln!("READY_OBJECT_DACL_RECEIPT {ready_acl:02x?}");
+            assert_eq!(ready_acl, read_acl(&control_file));
+        }
+        assert_eq!(fs::read(&existing).unwrap(), b"updated");
+        assert_eq!(outcome.termination(), &expected);
+        assert!(String::from_utf8_lossy(outcome.stdout()).contains("CREATED_AND_REOPENED"));
+        let completion = outcome.completion();
+        if assurance == AssuranceLevel::ManagedTree {
+            assert_eq!(
+                completion.cleanup_confidence(),
+                CleanupConfidence::KernelOwnedComplete
+            );
+            assert!(completion.confirmed().process_tree_membership());
+            assert!(completion.confirmed().descendant_lifecycle());
+        } else {
+            assert_eq!(
+                completion.cleanup_confidence(),
+                CleanupConfidence::BestEffortObserved
+            );
+            assert!(!completion.confirmed().process_tree_membership());
+            assert!(!completion.confirmed().descendant_lifecycle());
+        }
+    }
+
+    #[test]
+    fn write_normal_zero_revokes_existing_and_created_objects() {
+        run_write_completion(
+            "process.exit(0)",
+            Termination::Exited(0),
+            AssuranceLevel::ManagedTree,
+        );
+    }
+
+    #[test]
+    fn write_normal_nonzero_revokes_existing_and_created_objects() {
+        run_write_completion(
+            "process.exit(7)",
+            Termination::Exited(7),
+            AssuranceLevel::ManagedTree,
+        );
+    }
+
+    #[test]
+    fn write_timeout_revokes_existing_and_created_objects() {
+        run_write_completion(
+            "setInterval(()=>{},1000)",
+            Termination::TimedOut,
+            AssuranceLevel::ManagedTree,
+        );
+    }
+
+    #[test]
+    fn write_output_limit_revokes_existing_and_created_objects() {
+        run_write_completion(
+            "while(true)process.stdout.write('x'.repeat(4096))",
+            Termination::OutputLimitExceeded,
+            AssuranceLevel::ManagedTree,
+        );
+    }
+
+    #[test]
+    fn restricted_write_completion_does_not_claim_managed_tree_dimensions() {
+        run_write_completion(
+            "process.exit(0)",
+            Termination::Exited(0),
+            AssuranceLevel::Restricted,
+        );
+    }
+
+    #[test]
+    fn write_ctrl_c_revokes_existing_and_created_objects() {
+        use std::io::Read;
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        const ENV: &str = "TAPID_NATIVE_WRITE_CTRL_C_HELPER";
+        if std::env::var_os(ENV).is_some() {
+            run_write_completion(
+                "setInterval(()=>{},1000)",
+                Termination::Cancelled,
+                AssuranceLevel::ManagedTree,
+            );
+            println!("WRITE_CTRL_C_SUCCESS");
+            return;
+        }
+        let mut helper = Command::new(std::env::current_exe().unwrap()).args([
+            "--exact", "execution::platform_backend::write_lifecycle_tests::write_ctrl_c_revokes_existing_and_created_objects", "--nocapture", "--test-threads=1"
+        ]).env(ENV, "1").creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE)
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let drain = |mut pipe: Box<dyn Read + Send>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                pipe.read_to_end(&mut bytes).unwrap();
+                bytes
+            })
+        };
+        let stdout = drain(Box::new(helper.stdout.take().unwrap()));
+        let stderr = drain(Box::new(helper.stderr.take().unwrap()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(40);
+        let status = loop {
+            if let Some(status) = helper.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = Command::new("taskkill.exe")
+                    .args(["/PID", &helper.id().to_string(), "/T", "/F"])
+                    .output();
+                let _ = helper.wait();
+                panic!("isolated write cancellation helper timed out");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        let out = stdout.join().unwrap();
+        let err = stderr.join().unwrap();
+        println!("{}", String::from_utf8_lossy(&out));
+        eprintln!("{}", String::from_utf8_lossy(&err));
+        assert!(
+            status.success(),
+            "isolated write cancellation failed: {status}"
+        );
+        assert!(String::from_utf8_lossy(&out).contains("WRITE_CTRL_C_SUCCESS"));
+    }
+
+    #[test]
+    fn actual_spawn_failure_surfaces_write_cleanup_failure() {
+        preparation_failure(false);
+    }
+
+    #[test]
+    fn missing_executable_revokes_write_grants() {
+        preparation_failure(true);
+    }
+
+    fn preparation_failure(missing: bool) {
+        let owner = tapid_test_support::TempProject::new("spawn-write-cleanup").unwrap();
+        let root = fs::canonicalize(owner.path()).unwrap();
+        let writable = root.join("writable");
+        fs::create_dir(&writable).unwrap();
+        let invalid = root.join("invalid.exe");
+        fs::write(&invalid, b"not a Windows executable").unwrap();
+        initialize_inheritance(&root);
+        let paths = [&root, &writable, &invalid];
+        let before: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::ManagedTree,
+            FilesystemPolicy::new(vec![".".into()], vec!["writable".into()]).unwrap(),
+            false,
+            vec![],
+            false,
+            ExecutionLimits::new(Some(5), Some(4096), Some(8), Some(512 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap();
+        let program = if missing {
+            root.join("missing.exe")
+        } else {
+            invalid.clone()
+        };
+        let request = ExecutionRequest::builder(program.as_os_str())
+            .project_root(&root)
+            .executable_search_path(&root)
+            .policy(policy)
+            .build()
+            .unwrap();
+        assert!(
+            !containment_support(&request).is_supported(),
+            "integrated gate remains closed"
+        );
+        WindowsFilesystemGrants::fail_next_restore_for_test();
+        let error = execute_with_backend(&request, &WriteBackend).unwrap_err();
+        let after: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        assert_eq!(
+            after, before,
+            "exact raw DACL/control cleanup before return"
+        );
+        if missing {
+            assert_eq!(error.category(), ExecutionErrorCategory::Spawn);
+            assert!(
+                error.to_string().contains("not found"),
+                "missing executable was not rejected: {error}"
+            );
+            assert!(
+                !program.exists(),
+                "missing target must never be materialized"
+            );
+        } else {
+            assert_eq!(
+                error.category(),
+                ExecutionErrorCategory::UnsupportedContainment
+            );
+            assert!(
+                error.to_string().contains("create suspended child")
+                    && (error.to_string().contains("193") || error.to_string().contains("216")),
+                "must reach real CreateProcess invalid-image failure: {error}"
+            );
+        }
+        assert!(
+            error.to_string().contains("injected rollback denial"),
+            "cleanup failure swallowed: {error}"
+        );
+    }
+}
+
 // Opt-in host-side diagnostics only: never log arguments, environment values, or child output.
 pub(super) fn trace_windows_stage(stage: &str) {
     if std::env::var_os("TAPID_WINDOWS_STAGE_TRACE").as_deref() == Some(OsStr::new("1")) {
@@ -72,7 +473,18 @@ impl ExecutionBackend for PlatformBackend {
         preflight: &'a ValidatedPreflight,
     ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
         let mut lifecycle = WindowsExecutionLifecycle::new(request.clone(), preflight);
-        lifecycle.prepare()?;
+        if let Err(mut error) = lifecycle.prepare() {
+            // Preparation owns grants even when no child is created. Explicit cleanup is
+            // observable; Drop is only a final retry for resources whose restoration failed.
+            lifecycle.cleanup_resources();
+            if let Some(cleanup) = lifecycle.cleanup_error.as_ref() {
+                error
+                    .0
+                    .message
+                    .push_str(&format!("; Windows preparation cleanup failed: {cleanup}"));
+            }
+            return Err(error);
+        }
         Ok(OwnedExecutionAttempt::new(preflight, Box::new(lifecycle)))
     }
 
@@ -243,6 +655,17 @@ impl<'a> WindowsExecutionLifecycle<'a> {
                 }
                 std::thread::sleep(CLEANUP_POLL_INTERVAL);
             }
+        }
+        #[cfg(test)]
+        if self.grants.is_some()
+            && let Some(job) = self.job.as_ref()
+        {
+            assert_eq!(
+                job.active_process_count().unwrap(),
+                0,
+                "ACL restoration must never precede kernel-confirmed empty Job"
+            );
+            EMPTY_JOB_BEFORE_RESTORE.with(|count| count.set(count.get() + 1));
         }
         self.child.take();
         self.job.take(); // The tree is confirmed empty before the final kernel-owned handle closes.
