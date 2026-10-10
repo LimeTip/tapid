@@ -104,7 +104,7 @@ fn lifecycle_key(_root: &Path, _create: bool) -> Result<[u8; 32], IngestError> {
     ))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use tapid_test_support::{TempHome, TempProject};
@@ -168,6 +168,7 @@ mod tests {
         assert!(!store.root().join(".tapid-lifecycle-key").exists());
     }
     #[test]
+    #[cfg(unix)]
     fn lifecycle_authentication_refuses_symlinked_or_readable_keys() {
         use std::os::unix::fs::PermissionsExt;
         let home = TempHome::new("lifecycle-auth-key").unwrap();
@@ -183,5 +184,21 @@ mod tests {
         std::os::unix::fs::symlink(&external, &key).unwrap();
         assert!(store.attest_lifecycle_output(&digest, &digest).is_err());
         assert_eq!(fs::read(external).unwrap(), vec![1u8; 32]);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn lifecycle_authentication_rejects_corrupt_and_hardlinked_windows_keys() {
+        let home = TempHome::new("windows-lifecycle-key").unwrap();
+        let store = Store::new(home.path().join("store"));
+        let digest: ArtifactDigest = format!("sha256-{}", "a".repeat(64)).parse().unwrap();
+        store.attest_lifecycle_output(&digest, &digest).unwrap();
+        let path = store.root().join(".tapid-lifecycle-key");
+        let original = fs::read(&path).unwrap();
+        fs::write(&path, b"invalid protected key").unwrap();
+        assert!(store.attest_lifecycle_output(&digest, &digest).is_err());
+        fs::write(&path, &original).unwrap();
+        fs::hard_link(&path, home.path().join("key-alias")).unwrap();
+        assert!(store.attest_lifecycle_output(&digest, &digest).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
     }
 }
