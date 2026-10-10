@@ -134,7 +134,7 @@ fn hydrate_with_fetch(
         let url = package.artifact_url().ok_or_else(|| {
             OperationalError::new(
                 ErrorKind::Lockfile,
-                "locked artifact has no pinned archive URL",
+                "locked artifact has no pinned archive URL; regenerate tapid.lock with tapid update and review the resulting changes",
             )
         })?;
         let bytes = fetch(&key, url)?;
@@ -317,7 +317,7 @@ pub(crate) fn validate_locked_artifact_sources(
     }
     let path = registry_fixture.ok_or_else(|| OperationalError::new(
         ErrorKind::Lockfile,
-        "ci requires download URLs for every locked registry package, including with --offline; regenerate tapid.lock with tapid install and review the resulting changes",
+        "ci requires download URLs for every locked registry package, including with --offline; regenerate tapid.lock with tapid update and review the resulting changes",
     ))?;
     let fixture =
         fixture(path).map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))?;
@@ -438,7 +438,7 @@ pub(crate) fn prepare_locked_install(
                     })?
                 }
             } else {
-                let url = package.artifact_url().ok_or_else(|| OperationalError::new(ErrorKind::Lockfile, "locked artifact URL is missing; regenerate tapid.lock with tapid install before using an empty store"))?;
+                let url = package.artifact_url().ok_or_else(|| OperationalError::new(ErrorKind::Lockfile, "locked artifact URL is missing; regenerate tapid.lock with tapid update before using an empty store"))?;
                 let transport = artifact_transport_for_package(
                     &mut transports,
                     registry_config,

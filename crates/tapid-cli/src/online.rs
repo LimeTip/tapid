@@ -990,8 +990,10 @@ pub(crate) fn resolve_and_fetch_with_lock(
                     .parse()
                     .map_err(|error: tapid_core::DomainError| error.to_string())?,
             );
-            if !record.fixture {
-                record.artifact = package.artifact_url().unwrap_or_default().to_owned();
+            if !record.fixture
+                && let Some(url) = package.artifact_url()
+            {
+                record.artifact = url.to_owned();
             }
         }
         let platform_context = selected_platform_context_for(
@@ -1027,10 +1029,9 @@ pub(crate) fn resolve_and_fetch_with_lock(
             integrity_provenance,
         )
         .map_err(OperationalError::from)?;
-        if let Some(url) = pinned
-            .and_then(LockedPackage::artifact_url)
-            .or_else(|| (pinned.is_none() && !record.fixture).then_some(record.artifact.as_str()))
-        {
+        if let Some(url) = pinned.and_then(LockedPackage::artifact_url).or_else(|| {
+            (!record.fixture && !record.artifact.is_empty()).then_some(record.artifact.as_str())
+        }) {
             locked
                 .set_artifact_url(url)
                 .map_err(OperationalError::from)?;

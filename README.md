@@ -205,7 +205,7 @@ tapid ci --offline
 
 `tapid ci` requires `tapid.lock` and matching root and workspace manifests. It preserves `package.json` and `tapid.lock`, installs the locked versions and edges, and atomically replaces managed `node_modules`. Missing store trees are downloaded from locked HTTPS artifact URLs, checked against locked SHA-512 integrity and SHA-256 tree digests, and published through the install transaction. Dependency lifecycle scripts do not run. `--offline` requires every verified tree in the store.
 
-`ci` requires download URLs for every registry package, even with a warm cache or `--offline`. Incomplete locks need regeneration with `tapid install` and review of the resulting changes. The explicit `--registry-fixture` option supplies local artifacts for tests and air-gapped development. Tapid uses its own lockfile and supported dependency semantics; this is not complete npm compatibility. An unmanaged `node_modules` is rejected rather than deleted.
+`ci` requires download URLs for every registry package, even with a warm cache or `--offline`. Locks missing download URLs need regeneration with `tapid update` using live registry metadata and review of the resulting changes. The explicit `--registry-fixture` option supplies local artifacts for tests and air-gapped development. Tapid uses its own lockfile and supported dependency semantics; this is not complete npm compatibility. An unmanaged `node_modules` is rejected rather than deleted.
 
 ## Offline and frozen replay
 

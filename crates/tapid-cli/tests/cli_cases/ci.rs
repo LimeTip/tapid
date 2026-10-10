@@ -218,7 +218,14 @@ fn ci_requires_complete_lockfiles_with_warm_and_cold_stores_including_offline() 
             );
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(stderr.contains("LOCKFILE_INVALID"), "{stderr}");
-            assert!(stderr.contains("tapid install"), "{stderr}");
+            assert!(stderr.contains("tapid update"), "{stderr}");
+            if cold && !offline {
+                let install = run(&dir, &["install", "--store-dir", store.to_str().unwrap()]);
+                assert_eq!(install.status.code(), Some(1), "{install:?}");
+                let stderr = String::from_utf8_lossy(&install.stderr);
+                assert!(stderr.contains("no pinned archive URL"), "{stderr}");
+                assert!(stderr.contains("tapid update"), "{stderr}");
+            }
             assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), before_lock);
             assert_eq!(
                 fs::read(dir.join("node_modules/KEEP")).unwrap(),

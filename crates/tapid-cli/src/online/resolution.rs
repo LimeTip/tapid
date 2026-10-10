@@ -441,9 +441,12 @@ where
                         package.version.to_string(),
                     );
                     if let Some(pinned) = pinned_records.get(&key) {
-                        // The lock owns exact edges, platform constraints, and artifacts.
-                        // Only peer ranges are recovered from metadata for rebinding.
+                        // Preserve exact edges, platform constraints, and artifact pins.
+                        // Metadata may fill an absent registry URL and recover peer ranges.
                         let mut preserved = pinned.clone();
+                        if preserved.artifact.is_empty() && !package.fixture {
+                            preserved.artifact = package.artifact;
+                        }
                         preserved.peer_dependencies = package.peer_dependencies;
                         preserved.optional_peer_dependencies = package.optional_peer_dependencies;
                         preserved

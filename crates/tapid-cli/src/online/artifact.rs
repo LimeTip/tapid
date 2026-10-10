@@ -54,7 +54,7 @@ impl ArtifactFetcher<'_> {
         if pinned.is_some() && !record.fixture && record.artifact.is_empty() {
             return Err(OperationalError::new(
                 ErrorKind::Lockfile,
-                "locked artifact has no pinned archive URL",
+                "locked artifact has no pinned archive URL; regenerate tapid.lock with tapid update and review the resulting changes",
             ));
         }
         let bytes = if record.fixture {
