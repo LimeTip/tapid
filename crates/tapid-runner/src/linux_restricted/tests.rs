@@ -511,6 +511,41 @@ fn managed_tree_rejects_kernel_control_filesystem_write_grants() {
 }
 
 #[test]
+fn managed_tree_memory_stats_opt_in_uses_read_only_private_procfs() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-memory-stats").unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::new(Some(5), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let script = format!(
+        "cat /proc/self/statm || exit 41; if [ -r /proc/{}/statm ]; then exit 42; fi; if printf x > /proc/self/comm 2>/dev/null; then exit 43; fi",
+        std::process::id()
+    );
+    let req = ExecutionRequest::builder("/bin/sh")
+        .args(["-c", &script])
+        .project_root(project.path())
+        .executable_search_paths(["/usr/bin"])
+        .policy(policy)
+        .allow_process_memory_stats(true)
+        .build()
+        .unwrap();
+    let outcome = execute(&req).unwrap();
+    assert_eq!(outcome.termination(), &Termination::Exited(0));
+    assert_eq!(
+        outcome.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+}
+
+#[test]
 fn managed_tree_caller_crash_kills_double_forked_descendants() {
     if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
         return;
@@ -527,12 +562,12 @@ fn managed_tree_caller_crash_kills_double_forked_descendants() {
             ExecutionLimits::new(Some(20), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
         )
         .unwrap();
-        let result = execute(&request(
+        let _ = execute(&request(
             &root,
             "setsid sh -c 'sh -c \"echo started > started; sleep 3; echo escaped > escaped\" & exit 0' & sleep 15",
             policy,
         ));
-        panic!("crash fixture unexpectedly returned: {result:?}");
+        panic!("crash fixture unexpectedly returned");
     }
     let project = tapid_test_support::TempProject::new("managed-caller-crash").unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())

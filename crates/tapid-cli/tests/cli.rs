@@ -5488,6 +5488,7 @@ archive-digest = "sha512-{}"
 hook = "install"
 script-digest = "sha256-{:x}"
 system-toolchain = true
+process-memory-stats = true
 read = ["."]
 write = ["."]
 network = false
