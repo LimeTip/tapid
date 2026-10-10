@@ -142,6 +142,17 @@ jobs:
         run: cargo fmt --all --check
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Run native Windows dependency acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo test -p tapid-store --lib --locked lifecycle_authentication_ -- --show-output
+          $keyStatus = $LASTEXITCODE
+          cargo test -p tapid-runner --test windows_containment --locked windows_appcontainer_can_modify_existing_file_in_declared_subtree -- --show-output
+          $writeStatus = $LASTEXITCODE
+          if ($keyStatus -ne 0 -or $writeStatus -ne 0) {
+            throw "Native dependency acceptance failed: key=$keyStatus write=$writeStatus"
+          }
       - name: Run tests
         # Retain success output so each Node assertion branch has a receipt.
         run: cargo test --workspace --all-features --locked -- --show-output
