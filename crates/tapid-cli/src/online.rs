@@ -956,7 +956,10 @@ pub fn resolve_and_fetch(
         {
             return Err(OperationalError::new(
                 ErrorKind::Integrity,
-                format!("integrity mismatch for {id}"),
+                format!(
+                    "integrity mismatch for {}@{} from {}",
+                    id.name, id.version, id.registry
+                ),
             ));
         }
         let temp_id = NEXT_TEMP_TREE_ID.fetch_add(1, Ordering::Relaxed);
@@ -973,8 +976,10 @@ pub fn resolve_and_fetch(
             ArchiveLimits::default(),
         )
         .map_err(|e| {
-            OperationalError::from_source(ErrorKind::Archive, e)
-                .context(format!("cannot extract {id}"))
+            OperationalError::from_source(ErrorKind::Archive, e).context(format!(
+                "cannot extract {}@{} from {}",
+                id.name, id.version, id.registry
+            ))
         })?;
         let tree_digest: ArtifactDigest = canonical_tree_digest(&temp)
             .map_err(|e| OperationalError::from_source(ErrorKind::Archive, e))?
