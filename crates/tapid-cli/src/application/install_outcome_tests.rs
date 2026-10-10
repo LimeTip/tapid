@@ -1055,6 +1055,184 @@ fn adding_a_root_does_not_require_metadata_for_unchanged_locked_packages() {
 }
 
 #[test]
+fn online_compatibility_refetches_unverified_locks_and_preserves_verified_selections() {
+    for mode in [InstallMode::Online, InstallMode::Refresh] {
+        for changed in [false, true] {
+            let (project, fixture) = project_with_fixture("unverified-existing-lock", INTEGRITY);
+            project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*","verified":"*"}}"#).unwrap();
+            let mut metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+            let mut verified = metadata["packages"][0].clone();
+            verified["name"] = "verified".into();
+            metadata["packages"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("integrity");
+            metadata["packages"]
+                .as_array_mut()
+                .unwrap()
+                .push(verified.clone());
+            fs::write(&fixture, metadata.to_string()).unwrap();
+            let store = project.path().join("store");
+            run(
+                project.path(),
+                None,
+                Some(&store),
+                InstallMode::Online,
+                Some(&fixture),
+                true,
+                |_| {},
+            )
+            .unwrap();
+            let before = fs::read(project.path().join("tapid.lock")).unwrap();
+            for strict_mode in [
+                InstallMode::Online,
+                InstallMode::Refresh,
+                InstallMode::Offline,
+                InstallMode::Frozen,
+                InstallMode::Ci,
+                InstallMode::CiOffline,
+            ] {
+                assert!(
+                    run(
+                        project.path(),
+                        None,
+                        Some(&store),
+                        strict_mode,
+                        Some(&fixture),
+                        false,
+                        |_| {}
+                    )
+                    .is_err()
+                );
+                assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+            }
+            let mut newer = metadata["packages"][0].clone();
+            newer["version"] = "2.0.0".into();
+            newer["dependencies"] = serde_json::json!({"fresh":"1.0.0"});
+            verified["version"] = "2.0.0".into();
+            let mut fresh = verified.clone();
+            fresh["name"] = "fresh".into();
+            fresh["version"] = "1.0.0".into();
+            metadata["packages"]
+                .as_array_mut()
+                .unwrap()
+                .extend([newer, verified, fresh]);
+            fs::write(&fixture, metadata.to_string()).unwrap();
+            if changed {
+                project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*","verified":"*","fresh":"1.0.0"}}"#).unwrap();
+            }
+            let report = run(
+                project.path(),
+                None,
+                Some(&store),
+                mode,
+                Some(&fixture),
+                true,
+                |_| {},
+            )
+            .unwrap();
+            assert!(
+                report
+                    .outcome
+                    .warnings
+                    .iter()
+                    .any(|warning| matches!(warning, Warning::UnverifiedRegistryArtifactsAllowed))
+            );
+            let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
+            let plugin: tapid_lockfile::LockfilePackageKey =
+                lock.root_bindings()["plugin"].parse().unwrap();
+            assert_eq!(plugin.version.to_string(), "2.0.0");
+            let verified: tapid_lockfile::LockfilePackageKey =
+                lock.root_bindings()["verified"].parse().unwrap();
+            assert_eq!(
+                verified.version.to_string(),
+                if matches!(mode, InstallMode::Online) {
+                    "1.0.0"
+                } else {
+                    "2.0.0"
+                }
+            );
+            let plugin = lock
+                .packages_typed()
+                .unwrap()
+                .into_iter()
+                .find(|(key, _)| key.name.as_str() == "plugin")
+                .unwrap()
+                .1;
+            assert_eq!(plugin.registry_integrity_declared(), Some(false));
+            assert!(plugin.dependencies().contains_key("fresh"));
+            assert!(lock.validate_replay(lock.root_manifest_digest()).is_err());
+        }
+    }
+}
+
+#[test]
+fn compatibility_checks_fresh_integrity_before_promoting_an_existing_unverified_artifact() {
+    for tampered in [false, true] {
+        let (project, fixture) = project_with_fixture("unverified-promotion", INTEGRITY);
+        project
+            .write(
+                "package.json",
+                br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0"}}"#,
+            )
+            .unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+        metadata["packages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("integrity");
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let store = project.path().join("store");
+        run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            true,
+            |_| {},
+        )
+        .unwrap();
+        let before = fs::read(project.path().join("tapid.lock")).unwrap();
+        project.write("node_modules/KEEP", b"previous").unwrap();
+        metadata["packages"][0]["integrity"] = INTEGRITY.into();
+        if tampered {
+            metadata["packages"][0]["artifact"] = "base64:AA==".into();
+        }
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let result = run(
+            project.path(),
+            None,
+            Some(&store),
+            InstallMode::Online,
+            Some(&fixture),
+            true,
+            |_| {},
+        );
+        if tampered {
+            assert_eq!(result.unwrap_err().error.kind, ErrorKind::Integrity);
+            assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+            assert_eq!(
+                fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+                b"previous"
+            );
+        } else {
+            result.unwrap();
+            let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
+            assert_eq!(
+                lock.packages_typed().unwrap()[0]
+                    .1
+                    .registry_integrity_declared(),
+                Some(true)
+            );
+            lock.validate_replay(lock.root_manifest_digest()).unwrap();
+        }
+    }
+}
+
+#[test]
 fn fetching_another_version_preserves_locked_dependency_edges() {
     let (project, fixture) = project_with_fixture("locked-packument-refresh", INTEGRITY);
     project

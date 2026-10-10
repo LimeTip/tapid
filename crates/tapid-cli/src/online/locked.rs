@@ -188,6 +188,7 @@ pub(super) fn locked_records(
     let mut identities = BTreeSet::new();
     lock.packages_typed()?
         .into_iter()
+        .filter(|(_, package)| package.registry_integrity_declared() != Some(false))
         .map(|(key, package)| {
             let registry = key
                 .source

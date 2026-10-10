@@ -423,9 +423,19 @@ fn perform_install(
     } else {
         None
     };
+    let mut replayable = true;
     if let Some(lock) = &previous_lock {
-        lock.validate_replay(lock.root_manifest_digest())
-            .map_err(OperationalError::from)?;
+        match lock.validate_replay(lock.root_manifest_digest()) {
+            Ok(()) => {}
+            Err(tapid_lockfile::LockfileError::UnverifiedRegistryArtifact(_))
+                if allow_unverified_registry_artifacts
+                    && matches!(mode, InstallMode::Online | InstallMode::Refresh) =>
+            {
+                // Compatibility installs must resolve these entries again, never replay them.
+                replayable = false;
+            }
+            Err(error) => return Err(OperationalError::from(error)),
+        }
     }
     let preserve = matches!(mode, InstallMode::Online);
     let replay_existing = if preserve {
@@ -444,7 +454,9 @@ fn perform_install(
                 .iter()
                 .map(|(k, p)| (k.clone(), p.manifest_digest().to_owned()))
                 .collect::<BTreeMap<_, _>>();
-            lock.root_manifest_digest() == online::root_digest(&project_dir)? && current == locked
+            replayable
+                && lock.root_manifest_digest() == online::root_digest(&project_dir)?
+                && current == locked
         } else {
             false
         }

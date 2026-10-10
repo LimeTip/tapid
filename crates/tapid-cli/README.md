@@ -64,6 +64,11 @@ tapid install --registry-fixture ./fixture.json --project-dir ./example
 
 The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 7 locks, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
 
+When that option is enabled, existing lock entries with locally computed integrity
+are resolved and fetched again. Ordinary online installs still preserve compatible
+registry-verified selections. Offline, frozen, and CI replay reject locally computed
+integrity even when the artifact is cached.
+
 ## Install and lifecycle outcomes
 
 `update` preserves declared ranges. `update --latest` replaces each selected declaration's range with `*`, retaining its section and npm alias target. A name declared in multiple sections is updated in every section where it appears. Naming packages leaves other declarations unchanged; omitting names selects all declarations.

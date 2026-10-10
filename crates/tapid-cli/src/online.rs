@@ -818,6 +818,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
             lock.packages_typed().map(|packages| {
                 packages
                     .into_iter()
+                    .filter(|(_, package)| package.registry_integrity_declared() != Some(false))
                     .filter_map(|(key, _)| {
                         key.source
                             .registry()
@@ -849,7 +850,13 @@ pub(crate) fn resolve_and_fetch_with_lock(
                 .collect::<Result<Vec<_>, OperationalError>>()?
         };
         for (local, key) in bindings {
-            if let Some(registry) = key.source.registry() {
+            if let Some(registry) = key.source.registry()
+                && preferred.versions.contains(&(
+                    registry.clone(),
+                    key.name.clone(),
+                    key.version.clone(),
+                ))
+            {
                 preferred.roots.insert(
                     (
                         registry.clone(),
@@ -931,6 +938,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         .transpose()?
         .unwrap_or_default()
         .into_iter()
+        .filter(|(_, package)| package.registry_integrity_declared() != Some(false))
         .map(|(key, package)| {
             Ok((
                 (
