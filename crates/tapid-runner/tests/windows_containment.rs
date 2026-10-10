@@ -997,6 +997,10 @@ fn windows_write_policy_fails_closed_before_spawn_until_native_acceptance() {
     let writable = root.join("writable");
     fs::create_dir(&writable).unwrap();
     let marker = writable.join("must-not-spawn.txt");
+    let outside = root.join("outside sentinel.txt");
+    fs::write(&outside, b"host-positive-control").unwrap();
+    let paths = [&root, &writable, &outside];
+    let baselines: Vec<_> = paths.iter().map(|path| project_dacl(path)).collect();
     let command = format!("echo should-not-run>\"{}\"", marker.display());
     let policy = SandboxPolicy::new_with_assurance(
         SandboxMode::Required,
@@ -1016,6 +1020,14 @@ fn windows_write_policy_fails_closed_before_spawn_until_native_acceptance() {
         ExecutionErrorCategory::UnsupportedContainment
     );
     assert!(!marker.exists(), "unsupported write policy started a child");
+    assert_eq!(fs::read(&outside).unwrap(), b"host-positive-control");
+    for (path, before) in paths.iter().zip(baselines) {
+        assert_eq!(
+            project_dacl(path),
+            before,
+            "prelaunch rejection changed ACLs"
+        );
+    }
     fs::remove_dir_all(root).unwrap();
 }
 
