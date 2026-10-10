@@ -19,7 +19,8 @@ Frozen and offline installs never execute overridden hooks.
 Reuse the checked lifecycle policy parser for invocation-local approvals and the
 runner's validated request/environment construction for explicit uncontained
 execution. That execution returns termination only, without an enforcement
-receipt or descendant-cleanup claim. Warn before execution, including JSON mode.
+receipt or descendant-cleanup claim. Warn once before execution in human mode. JSON mode records the risk in the
+structured result and keeps stderr empty.
 
 Keep every bypassed output out of the authenticated derived cache. Retain private
 build stages through transactional materialization, then attempt to remove them. Existing

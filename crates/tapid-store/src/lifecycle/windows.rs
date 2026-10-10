@@ -260,7 +260,7 @@ fn validate_key(file: &File, sid: PSID) -> io::Result<()> {
         return Err(failure());
     }
     let mut ace = null_mut();
-    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 {
+    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 || ace.is_null() {
         return Err(io::Error::last_os_error());
     }
     let header = unsafe { &*ace.cast::<ACE_HEADER>() };

@@ -87,7 +87,7 @@ impl LowLabel {
     fn sid(&self) -> Result<*mut c_void, ExecutionError> {
         let mut ace = null_mut();
         // SAFETY: this SACL comes from the fixed, validated SDDL above.
-        if unsafe { GetAce(self.sacl, 0, &mut ace) } == 0 {
+        if unsafe { GetAce(self.sacl, 0, &mut ace) } == 0 || ace.is_null() {
             return Err(failure(std::io::Error::last_os_error()));
         }
         let ace = unsafe { &*ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>() };
@@ -190,7 +190,7 @@ fn verify_label(file: &File, inherits: bool) -> Result<(), ExecutionError> {
         ));
     }
     let mut pointer = null_mut();
-    if unsafe { GetAce(sacl, 0, &mut pointer) } == 0 {
+    if unsafe { GetAce(sacl, 0, &mut pointer) } == 0 || pointer.is_null() {
         return Err(failure(std::io::Error::last_os_error()));
     }
     let header = unsafe { &*pointer.cast::<windows_sys::Win32::Security::ACE_HEADER>() };

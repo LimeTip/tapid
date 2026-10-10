@@ -661,7 +661,7 @@ fn prepare_tools(
     for tool in tools {
         let (source, file, bytes) = verified_tool(tool)?;
         // macOS system executables cannot always be relocated without changing
-        // their signature. A canonical source on a kernel read-only volume is
+        // their signature. A canonical source on the kernel read-only root is
         // immutable to the caller. Administrators remounting/replacing host
         // volumes remain outside the documented trusted-host boundary.
         #[cfg(target_os = "macos")]
@@ -702,7 +702,14 @@ fn readonly_tool_volume(file: &fs::File) -> Result<bool, OperationalError> {
         return Err(error(std::io::Error::last_os_error()));
     }
     // SAFETY: successful fstatfs initialized status.
-    Ok(unsafe { status.assume_init() }.f_flags & libc::MNT_RDONLY as u32 != 0)
+    Ok(immutable_system_tool_mount(
+        unsafe { status.assume_init() }.f_flags,
+    ))
+}
+#[cfg(target_os = "macos")]
+fn immutable_system_tool_mount(flags: u32) -> bool {
+    let required = (libc::MNT_RDONLY | libc::MNT_ROOTFS) as u32;
+    flags & required == required
 }
 fn tool_search_paths(tools: &BTreeMap<String, PathBuf>) -> Result<Vec<PathBuf>, OperationalError> {
     let mut paths = Vec::new();
@@ -798,6 +805,15 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"original");
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn readonly_removable_mount_does_not_qualify_as_an_immutable_system_tool() {
+        assert!(!immutable_system_tool_mount(libc::MNT_RDONLY as u32));
+        assert!(!immutable_system_tool_mount(libc::MNT_ROOTFS as u32));
+        assert!(immutable_system_tool_mount(
+            (libc::MNT_RDONLY | libc::MNT_ROOTFS) as u32
+        ));
     }
     #[cfg(target_os = "macos")]
     #[test]

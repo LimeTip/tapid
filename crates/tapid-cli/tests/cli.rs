@@ -4878,7 +4878,7 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
     )
     .unwrap();
     let policy = "[run.scripts.dev]\nenvironment = [\"SECRET_TOKEN\"]\n";
-    // Windows supports read-only profiles. Request a specifically unsupported
+    // Windows admits writes only to validated low-integrity targets. Request an unsupported
     // write grant so this remains a pre-spawn containment rejection, not a
     // failure caused by executing the stand-in Node binary.
     #[cfg(windows)]
@@ -4911,10 +4911,7 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
         "{stderr}"
     );
     #[cfg(windows)]
-    assert!(
-        stderr.contains("project write policies remain unsupported until declared writes and ACL revocation are natively verified"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("Windows writable tree:"), "{stderr}");
     assert!(stderr.contains("no process was started"));
     assert!(stderr.contains("no enforcement receipt was issued"));
     assert!(!stderr.contains(secret));
@@ -5524,6 +5521,71 @@ fn dependency_lifecycle_failed_unsafe_hook_preserves_previous_install() {
 }
 
 #[test]
+fn dependency_override_warnings_preserve_json_and_human_output_contracts() {
+    let project = tapid_test_support::TempProject::new("override-warning-output").unwrap();
+    let home = tapid_test_support::TempHome::new("override-warning-output").unwrap();
+    project
+        .write("package.json", br#"{"name":"demo","version":"1.0.0"}"#)
+        .unwrap();
+    let install = |json: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+        command
+            .current_dir(project.path())
+            .args([
+                "install",
+                "--allow-unapproved-dependency-scripts",
+                "--unsafe-no-dependency-sandbox",
+                "--store-dir",
+            ])
+            .arg(home.path().join("store"));
+        if json {
+            command.arg("--json");
+        }
+        command.output().unwrap()
+    };
+    for json in [true, false] {
+        let output = install(json);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if json {
+            assert!(
+                output.stderr.is_empty(),
+                "JSON commands must keep stderr empty"
+            );
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                result
+                    .to_string()
+                    .contains("DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT")
+            );
+        } else {
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr)
+                    .matches("warning:")
+                    .count(),
+                2
+            );
+        }
+    }
+    fs::remove_file(project.path().join("package.json")).unwrap();
+    let failed = install(false);
+    assert!(!failed.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&failed.stderr)
+            .matches("warning:")
+            .count(),
+        2
+    );
+    let failed = install(true);
+    assert!(!failed.status.success());
+    assert!(failed.stderr.is_empty());
+    serde_json::from_slice::<serde_json::Value>(&failed.stdout).unwrap();
+}
+
+#[test]
 fn dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations() {
     let project = tapid_test_support::TempProject::new("dependency-hooks-override").unwrap();
     let home = tapid_test_support::TempHome::new("dependency-hooks-override").unwrap();
@@ -5561,7 +5623,7 @@ fn dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations() 
             .join("node_modules/native-demo/SHOULD_NOT_EXIST")
             .exists()
     );
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
         let output = install(&["--allow-unapproved-dependency-scripts"]);
@@ -5579,6 +5641,23 @@ fn dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations() 
                 .join("node_modules/native-demo/SHOULD_NOT_EXIST")
                 .exists()
         );
+    }
+    #[cfg(windows)]
+    {
+        let output = install(&["--allow-unapproved-dependency-scripts"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("without containment"));
+        assert!(
+            project
+                .path()
+                .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+                .is_file()
+        );
+        assert!(!home.path().join("store/.tapid-lifecycle-key").exists());
     }
     let output = install(&[
         "--allow-unapproved-dependency-scripts",

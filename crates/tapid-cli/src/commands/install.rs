@@ -58,9 +58,7 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
         allow_unapproved: args.allow_unapproved_dependency_scripts,
         without_containment: args.unsafe_no_dependency_sandbox,
     };
-    for warning in overrides.warnings() {
-        eprintln!("warning: {warning}");
-    }
+    reporter.warnings_before_execution(overrides.warnings());
     let target_manifest_path = if let Some(name) = args.workspace.as_deref() {
         match crate::application::lifecycle::resolve_workspace(&args.project_dir, Some(name)) {
             Ok(selection) => {
@@ -72,7 +70,7 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
                 if json {
                     return crate::output::json::failure_or_human(&failure, "install", true);
                 }
-                reporter.failure(&failure);
+                reporter.failure(failure);
                 return ExitCode::from(1);
             }
         }
@@ -113,7 +111,7 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
         }
         Err(error) if json => crate::output::json::failure_or_human(&error, "install", true),
         Err(error) => {
-            reporter.failure(&error);
+            reporter.failure(error);
             ExitCode::from(1)
         }
     }

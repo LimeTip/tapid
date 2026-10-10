@@ -1140,6 +1140,58 @@ fn windows_private_write_tree_creates_and_reopens_files_without_outside_authorit
 }
 
 #[test]
+fn windows_private_write_preparation_rejects_junctions_without_lowering_host_integrity() {
+    let project = tapid_test_support::TempProject::new("private-write-junction").unwrap();
+    let root = project.path().to_path_buf();
+    windows_acl::initialize_inheritance(&root);
+    project.write("outside/host.txt", b"host data").unwrap();
+    let outside = root.join("outside");
+    let private = root.join("private");
+    fs::create_dir(&private).unwrap();
+    let shell = command_request_with_policy(&root, "", managed_policy());
+    let junction = private.join("junction");
+    let output = Command::new(shell.program())
+        .args(["/D", "/S", "/C"])
+        .arg(format!(
+            "mklink /J \"{}\" \"{}\"",
+            junction.display(),
+            outside.display()
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let before = project_dacl(&outside);
+    assert!(tapid_runner::prepare_private_dependency_write_tree(&private).is_err());
+    assert_eq!(project_dacl(&outside), before);
+    assert_eq!(fs::read(outside.join("host.txt")).unwrap(), b"host data");
+    let policy = SandboxPolicy::new_with_assurance(
+        SandboxMode::Required,
+        AssuranceLevel::ManagedTree,
+        FilesystemPolicy::new(vec![".".into()], vec!["outside".into()]).unwrap(),
+        false,
+        vec![],
+        false,
+        ExecutionLimits::new(Some(10), Some(4096), Some(4), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let error = execute(&command_request_with_policy(
+        &root,
+        "echo unexpected",
+        policy,
+    ))
+    .expect_err("host integrity must remain unlabelled");
+    assert_eq!(
+        error.category(),
+        ExecutionErrorCategory::UnsupportedContainment
+    );
+    fs::remove_dir(junction).unwrap();
+}
+
+#[test]
 fn windows_private_write_preparation_rejects_hardlinks_without_labelling_the_external_file() {
     let project = tapid_test_support::TempProject::new("private-write-hardlink").unwrap();
     project.write("outside.txt", b"host data").unwrap();
