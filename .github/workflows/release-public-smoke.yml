@@ -53,6 +53,9 @@ jobs:
       record_aware: ${{ steps.release.outputs.record_aware }}
       unix_matrix: ${{ steps.release.outputs.unix_matrix }}
     steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - id: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -83,35 +86,31 @@ jobs:
           printf 'latest_tag=%s\nrunner_sha=%s\n' "$latest_tag" "$runner_sha" >> "$GITHUB_OUTPUT"
           # Bound discovery to the latest 100 releases. Never select 0.0.9, which has no upgrader.
           gh release list --repo LimeTip/tapid --limit 100 --json tagName,isDraft,isPrerelease > "$RUNNER_TEMP/releases.json"
-          SELECTED_TAG="$tag" SELECTED_SHA="$sha" LATEST_TAG="$latest_tag" LATEST_SHA="$latest_sha" python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
-          import json, os, re
-          def version(tag):
-              return tuple(map(int, tag[1:].split('.')))
-          latest = version(os.environ['LATEST_TAG'])
-          releases = json.load(open(os.path.join(os.environ['RUNNER_TEMP'], 'releases.json')))
-          candidates = [r['tagName'] for r in releases if not r['isDraft'] and not r['isPrerelease']
-                        and re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', r['tagName'])
-                        and (0, 0, 10) <= version(r['tagName']) < latest]
-          print('previous_tag=' + (max(candidates, key=version) if candidates else ''))
-          print('record_aware=' + str(latest > (0, 0, 10)).lower())
-          def installer_url(tag, sha, extension):
-              if version(tag) <= (0, 0, 10):
-                  return f'https://raw.githubusercontent.com/LimeTip/tapid/{sha}/scripts/install.{extension}'
-              return f'https://github.com/LimeTip/tapid/releases/download/{tag}/install.{extension}'
-          for kind in ('selected', 'latest'):
-              tag, sha = os.environ[kind.upper() + '_TAG'], os.environ[kind.upper() + '_SHA']
-              for extension in ('sh', 'ps1'):
-                  print(f'{kind}_installer_{extension}=' + installer_url(tag, sha, extension))
-          PYTHON
+          SELECTED_TAG="$tag" SELECTED_SHA="$sha" LATEST_TAG="$latest_tag" LATEST_SHA="$latest_sha" node - <<'JAVASCRIPT' >> "$GITHUB_OUTPUT"
+          const fs = require('node:fs'), path = require('node:path');
+          const version = tag => tag.slice(1).split('.').map(BigInt);
+          const compare = (a, b) => { for (let i = 0; i < 3; i++) { if (a[i] < b[i]) return -1; if (a[i] > b[i]) return 1; } return 0; };
+          const latest = version(process.env.LATEST_TAG), minimum = [0n, 0n, 10n];
+          const releases = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'releases.json'), 'utf8'));
+          const candidates = releases.filter(r => !r.isDraft && !r.isPrerelease && /^v[0-9]+\.[0-9]+\.[0-9]+$/.test(r.tagName) && compare(version(r.tagName), minimum) >= 0 && compare(version(r.tagName), latest) < 0).map(r => r.tagName).sort((a, b) => compare(version(a), version(b)));
+          console.log('previous_tag=' + (candidates.at(-1) || ''));
+          console.log('record_aware=' + (compare(latest, minimum) > 0));
+          const installerUrl = (tag, sha, extension) => compare(version(tag), minimum) <= 0
+            ? `https://raw.githubusercontent.com/LimeTip/tapid/${sha}/scripts/install.${extension}`
+            : `https://github.com/LimeTip/tapid/releases/download/${tag}/install.${extension}`;
+          for (const kind of ['selected', 'latest']) {
+            const tag = process.env[kind.toUpperCase() + '_TAG'], sha = process.env[kind.toUpperCase() + '_SHA'];
+            for (const extension of ['sh', 'ps1']) console.log(`${kind}_installer_${extension}=` + installerUrl(tag, sha, extension));
+          }
+          JAVASCRIPT
           previous_tag="$(sed -n 's/^previous_tag=//p' "$GITHUB_OUTPUT" | tail -n 1)"
           if [ -n "$previous_tag" ]; then
             previous_sha="$(gh api "repos/LimeTip/tapid/commits/$previous_tag" --jq .sha)"
             [[ "$previous_sha" =~ ^[a-f0-9]{40}$ ]]
-            if python3 - "$previous_tag" <<'PYTHON'
-          import sys
-          version = tuple(map(int, sys.argv[1][1:].split('.')))
-          raise SystemExit(0 if version <= (0, 0, 10) else 1)
-          PYTHON
+            if node - "$previous_tag" <<'JAVASCRIPT'
+          const [major, minor, patch] = process.argv[2].slice(1).split('.').map(BigInt);
+          process.exit(major === 0n && minor === 0n && patch <= 10n ? 0 : 1);
+          JAVASCRIPT
             then
               previous_installer_sh="https://raw.githubusercontent.com/LimeTip/tapid/$previous_sha/scripts/install.sh"
               previous_installer_ps1="https://raw.githubusercontent.com/LimeTip/tapid/$previous_sha/scripts/install.ps1"
@@ -148,9 +147,9 @@ jobs:
           # but must not control a privileged checkout ref.
           ref: main
           fetch-depth: 0
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          python-version: '3.12'
+          node-version: 22
       - name: Verify trusted runner revision
         shell: bash
         env:
@@ -194,13 +193,10 @@ jobs:
           set -euo pipefail
           binary="$RUNNER_TEMP/tapid/tapid"
           digest="$(shasum -a 256 "$binary" | cut -d ' ' -f 1)"
-          python3 scripts/check-doc-examples.py --lane published --example quickstart --example upgrade-help \
+          node --experimental-strip-types scripts/check-doc-examples.ts --lane published --example quickstart --example upgrade-help \
             --allow-network --binary "$binary" --expected-sha256 "$digest" \
             --expected-version "tapid ${RELEASE_TAG#v}" --release-tag "$RELEASE_TAG" --release-source-sha "$RELEASE_SHA" \
             --report "$RUNNER_TEMP/doc-contract-published.json"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22
       - name: Create supplemental root-script fixture (not package evidence)
         run: node tests/fixtures/create_consumer_project.js
       - name: Check published root-script containment contract
@@ -278,7 +274,7 @@ jobs:
           # Exact reviewed source tags only; v0.0.9 records an unsupported skip.
           # Matching tags test same-release replacement, not a previous-version upgrade.
           # A latest-release race must fail the destination digest/version checks.
-          python3 scripts/check-doc-examples.py --lane published --example upgrade \
+          node --experimental-strip-types scripts/check-doc-examples.ts --lane published --example upgrade \
             --allow-network --binary "$binary" --expected-sha256 "$digest" \
             --expected-version "tapid ${RELEASE_TAG#v}" --release-tag "$RELEASE_TAG" --release-source-sha "$RELEASE_SHA" \
             --upgrade-target-sha256 "$target_digest" --upgrade-target-version "tapid ${LATEST_TAG#v}" \

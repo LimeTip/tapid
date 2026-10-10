@@ -1,4 +1,4 @@
 # Both Cargo workspaces use the root target directory for direct Cargo commands.
-# scripts/dev.py additionally shares artifacts across Git worktrees.
+# scripts/dev.ts additionally shares artifacts across Git worktrees.
 [build]
 target-dir = "target"
