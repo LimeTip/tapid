@@ -36,6 +36,12 @@ tapid lock verify
 tapid import-package-lock <PATH>
 tapid install [OPTIONS]
 tapid ci [OPTIONS]
+tapid add <PACKAGE>... [OPTIONS]
+tapid remove <PACKAGE>... [OPTIONS]
+tapid update [OPTIONS]
+tapid outdated [OPTIONS]
+tapid prune [OPTIONS]
+tapid why <PACKAGE> [OPTIONS]
 tapid upgrade [OPTIONS]
 tapid cache info [--store-dir <PATH>]
 tapid cache clean [--dry-run | --yes] [--store-dir <PATH>]
@@ -110,6 +116,10 @@ When that option is enabled, existing lock entries with locally computed integri
 are resolved and fetched again. Ordinary online installs still preserve compatible
 registry-verified selections. Offline, frozen, and CI replay reject locally computed
 integrity even when the artifact is cached.
+
+`tapid why <PACKAGE>` reads the selected project's `package.json` and `tapid.lock` and lists deterministic dependency paths from direct roots to each reachable locked instance of that package. Use `--project-dir PATH` to select a project and `--workspace NAME` for a workspace member. It is strictly read-only and offline: it does not contact registries, recover transactions, inspect or modify the store, or materialize `node_modules`. Direct root edges retain their manifest kind (`dependencies`, `devDependencies`, `optionalDependencies`, or `peerDependencies`); transitive lockfile edges are labeled `dependency` because the current schema does not preserve their original kind. Registry identity, version, and workspace source are shown to disambiguate instances. No reachable match prints an explicit message and exits with status `1`.
+
+`tapid --json why PACKAGE` emits one JSON result with `schemaVersion: 1`, `operation: "why"`, `outcome`, `effectiveProject`, `changes`, `warnings`, `package`, `paths`, and `truncated`. Results are deterministic and bounded to 50 paths, 128 dependency levels, and 10,000 graph visits; `truncated` indicates omitted paths or traversal stopped by a bound. Transitive edge-kind limitations are surfaced in `warnings`.
 
 ## Install and lifecycle outcomes
 
