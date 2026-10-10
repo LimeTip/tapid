@@ -571,7 +571,7 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
 /// Direct manifests take precedence. Wrapped archives must expose exactly one
 /// top-level directory with a regular `package.json`, keeping ambiguous layouts
 /// fail-closed before project activation.
-fn package_content_root(source: &Path) -> Result<PathBuf, String> {
+pub(crate) fn package_content_root(source: &Path) -> Result<PathBuf, String> {
     let direct_manifest = source.join("package.json");
     match fs::symlink_metadata(&direct_manifest) {
         Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
@@ -640,7 +640,7 @@ fn package_content_root(source: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
+pub(crate) fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
     copy_tree_contents_inner(source, target, true)
 }
 

@@ -2,6 +2,33 @@ use super::{LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfil
 use proptest::prelude::*;
 
 #[test]
+fn lifecycle_derived_outputs_require_schema_8_and_preserve_source_identity() {
+    let package = package_fixture();
+    let key = package.key();
+    let mut lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    value["lockfileVersion"] = 8.into();
+    value["packages"][&key]["derivedHooks"] = serde_json::json!([{
+        "attestation":format!("hmac-sha256-{}", "e".repeat(64)), "hook":"postinstall", "key":format!("sha256-{}", "c".repeat(64)),
+        "treeDigest":format!("sha256-{}", "d".repeat(64))
+    }]);
+    let parsed = Lockfile::from_json(&value.to_string()).unwrap();
+    let roundtrip: serde_json::Value = serde_json::from_str(&parsed.to_json().unwrap()).unwrap();
+    assert_eq!(
+        roundtrip["packages"][&key]["derivedHooks"],
+        value["packages"][&key]["derivedHooks"]
+    );
+    assert_eq!(
+        roundtrip["packages"][&key]["treeDigest"],
+        value["packages"][&key]["treeDigest"]
+    );
+    value["lockfileVersion"] = 7.into();
+    assert!(Lockfile::from_json(&value.to_string()).is_err());
+}
+
+#[test]
 fn local_workspace_source_has_a_canonical_identity_and_rejects_escape_paths() {
     let source = LocalWorkspaceSource::new("packages/web", "@tapid/web", "1.2.3").unwrap();
 
@@ -895,4 +922,26 @@ proptest! {
 fn lockfile_v1_is_not_implicitly_accepted() {
     let input = r#"{"lockfileVersion":1,"rootManifestDigest":"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resolverVersion":"0","linkerVersion":"0","packages":{}}"#;
     assert!(Lockfile::from_json(input).is_err());
+}
+
+#[test]
+fn lifecycle_outputs_reject_forged_or_unordered_records() {
+    let package = package_fixture();
+    let key = package.key();
+    let mut lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    let output = |hook: &str| serde_json::json!({"attestation":format!("hmac-sha256-{}", "e".repeat(64)),"hook":hook,"key":format!("sha256-{}", "b".repeat(64)),"treeDigest":format!("sha256-{}", "c".repeat(64))});
+    for records in [
+        serde_json::json!([output("prepare")]),
+        serde_json::json!([output("install"), output("install")]),
+        serde_json::json!([output("postinstall"), output("preinstall")]),
+        serde_json::json!([{"hook":"install","key":"sha256-INVALID","treeDigest":"sha256-INVALID"}]),
+        serde_json::json!([{"hook":"install","key":format!("sha256-{}", "b".repeat(64)),"treeDigest":format!("sha256-{}", "c".repeat(64)),"trusted":true}]),
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+        value["lockfileVersion"] = 8.into();
+        value["packages"][&key]["derivedHooks"] = records;
+        assert!(Lockfile::from_json(&value.to_string()).is_err());
+    }
 }

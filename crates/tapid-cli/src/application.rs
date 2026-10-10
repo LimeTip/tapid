@@ -2,6 +2,7 @@ use crate::commands::{self, Cli};
 use clap::Parser;
 use std::process::ExitCode;
 
+mod dependency_scripts;
 pub(crate) mod install;
 pub(crate) mod installer;
 pub(crate) mod lifecycle;

@@ -256,16 +256,24 @@ pub(crate) enum RetryAdvice {
     RecoverFirst,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Warning {
     UnverifiedRegistryArtifactsAllowed,
     PreviousTransactionRecovered,
+    DependencyLifecycleHookSkipped { package: String, hook: String },
 }
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::DependencyLifecycleHookSkipped { package, hook } = self {
+            return write!(
+                f,
+                "skipped dependency lifecycle hook {hook} for {package}; dependency scripts are denied by default; generated files or native builds may be missing"
+            );
+        }
         f.write_str(match self {
             Self::UnverifiedRegistryArtifactsAllowed => "npm artifacts without registry integrity are not authenticated against a registry-declared digest",
             Self::PreviousTransactionRecovered => "recovered an interrupted project transaction before this operation",
+            Self::DependencyLifecycleHookSkipped { .. } => unreachable!(),
         })
     }
 }

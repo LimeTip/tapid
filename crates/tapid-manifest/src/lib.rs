@@ -3,11 +3,13 @@
 #![deny(unsafe_code)]
 
 mod error;
+mod lifecycle;
 mod model;
 mod parse;
 mod workspace;
 
 pub use error::ManifestError;
+pub use lifecycle::{dependency_lifecycle_commands, dependency_lifecycle_hooks};
 pub use model::{BinTarget, DependencyKind, PackageBin, PackageManifest};
 pub use workspace::{Workspace, WorkspaceMember};
 

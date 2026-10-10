@@ -7,8 +7,9 @@ use tapid_core::{
 };
 
 use crate::{
-    LEGACY_LOCKFILE_VERSION, LOCKFILE_VERSION, LockfileError, PROVENANCE_LEGACY_LOCKFILE_VERSION,
-    REGISTRY_ONLY_LOCKFILE_VERSION, ROOTS_LEGACY_LOCKFILE_VERSION, validation,
+    LEGACY_LOCKFILE_VERSION, LIFECYCLE_LOCKFILE_VERSION, LOCKFILE_VERSION, LockfileError,
+    PROVENANCE_LEGACY_LOCKFILE_VERSION, REGISTRY_ONLY_LOCKFILE_VERSION,
+    ROOTS_LEGACY_LOCKFILE_VERSION, validation,
 };
 
 fn encode(value: &str) -> String {
@@ -621,6 +622,36 @@ impl Lockfile {
         self.insert_packages(std::iter::once(package))
     }
 
+    /// Records outputs produced by exact approved hooks without changing source identity.
+    pub fn set_derived_hooks(
+        &mut self,
+        key: &str,
+        outputs: Vec<DerivedHookOutput>,
+    ) -> Result<(), LockfileError> {
+        validate_derived_hooks(&outputs)?;
+        let package = self
+            .packages
+            .get_mut(key)
+            .ok_or_else(|| LockfileError::InvalidPackageKey(key.to_owned()))?;
+        package.derived_hooks = outputs;
+        if !package.derived_hooks.is_empty() {
+            self.lockfile_version = LIFECYCLE_LOCKFILE_VERSION;
+        }
+        Ok(())
+    }
+
+    /// Canonical source graph used to bind lifecycle recipes independently of outputs.
+    pub fn source_graph(&self) -> Self {
+        let mut source = self.clone();
+        if source.lockfile_version == LIFECYCLE_LOCKFILE_VERSION {
+            source.lockfile_version = LOCKFILE_VERSION;
+        }
+        for package in source.packages.values_mut() {
+            package.derived_hooks.clear();
+        }
+        source
+    }
+
     pub fn insert_workspace_package(
         &mut self,
         package: LockedWorkspacePackage,
@@ -839,6 +870,19 @@ impl Lockfile {
     }
 
     fn validate_alias_schema(&self) -> Result<(), LockfileError> {
+        if self.lockfile_version < LIFECYCLE_LOCKFILE_VERSION
+            && self
+                .packages
+                .values()
+                .any(|package| !package.derived_hooks.is_empty())
+        {
+            return Err(LockfileError::InvalidDerivedOutput(
+                "derived hooks require schema 8".into(),
+            ));
+        }
+        for package in self.packages.values() {
+            validate_derived_hooks(&package.derived_hooks)?;
+        }
         if self.lockfile_version < LOCKFILE_VERSION
             && (!self.root_bindings.is_empty()
                 || self
@@ -880,6 +924,7 @@ impl Lockfile {
         let mut lockfile: Self =
             serde_json::from_str(input).map_err(LockfileError::Serialization)?;
         if lockfile.lockfile_version != LOCKFILE_VERSION
+            && lockfile.lockfile_version != LIFECYCLE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LEGACY_LOCKFILE_VERSION
             && lockfile.lockfile_version != PROVENANCE_LEGACY_LOCKFILE_VERSION
             && lockfile.lockfile_version != REGISTRY_ONLY_LOCKFILE_VERSION
@@ -909,8 +954,7 @@ impl Lockfile {
         if canonical_roots != lockfile.roots {
             return Err(LockfileError::NonCanonicalRoots);
         }
-        if lockfile.lockfile_version != LOCKFILE_VERSION && !lockfile.workspace_packages.is_empty()
-        {
+        if lockfile.lockfile_version < LOCKFILE_VERSION && !lockfile.workspace_packages.is_empty() {
             return Err(LockfileError::WorkspaceIdentityRequiresCurrentVersion);
         }
         for root in &lockfile.roots {
@@ -976,6 +1020,8 @@ pub struct LockedPackage {
     unpacked_digest: String,
     /// Explicit replay identity for the verified unpacked store tree.
     tree_digest: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    derived_hooks: Vec<DerivedHookOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_url: Option<String>,
     #[serde(skip_serializing_if = "String::is_empty", default)]
@@ -985,6 +1031,91 @@ pub struct LockedPackage {
     dependencies: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     dependency_aliases: BTreeMap<String, String>,
+}
+
+/// A generated verified tree bound to one hook's complete derivation identity.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DerivedHookOutput {
+    attestation: String,
+    hook: String,
+    key: String,
+    tree_digest: String,
+}
+impl DerivedHookOutput {
+    pub fn new(
+        hook: &str,
+        key: &str,
+        tree_digest: &str,
+        attestation: &str,
+    ) -> Result<Self, LockfileError> {
+        let output = Self {
+            attestation: attestation.into(),
+            hook: hook.into(),
+            key: key.into(),
+            tree_digest: tree_digest.into(),
+        };
+        validate_derived_hooks(std::slice::from_ref(&output))?;
+        Ok(output)
+    }
+    pub fn attestation(&self) -> &str {
+        &self.attestation
+    }
+    pub fn hook(&self) -> &str {
+        &self.hook
+    }
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+    pub fn tree_digest(&self) -> &str {
+        &self.tree_digest
+    }
+}
+fn validate_derived_hooks(outputs: &[DerivedHookOutput]) -> Result<(), LockfileError> {
+    let mut previous = None;
+    for output in outputs {
+        let tag = output
+            .attestation
+            .strip_prefix("hmac-sha256-")
+            .ok_or_else(|| {
+                LockfileError::InvalidDerivedOutput(
+                    "missing lifecycle output authentication".into(),
+                )
+            })?;
+        if tag.len() != 64
+            || !tag
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(LockfileError::InvalidDerivedOutput(
+                "invalid lifecycle output authentication".into(),
+            ));
+        }
+        let rank = match output.hook.as_str() {
+            "preinstall" => 0,
+            "install" => 1,
+            "postinstall" => 2,
+            _ => {
+                return Err(LockfileError::InvalidDerivedOutput(
+                    "unsupported hook".into(),
+                ));
+            }
+        };
+        if previous.is_some_and(|previous| previous >= rank) {
+            return Err(LockfileError::InvalidDerivedOutput(
+                "duplicate or unordered hooks".into(),
+            ));
+        }
+        previous = Some(rank);
+        for digest in [&output.key, &output.tree_digest] {
+            if canonical_artifact_digest(digest)? != *digest || !digest.starts_with("sha256-") {
+                return Err(LockfileError::InvalidDerivedOutput(
+                    "noncanonical digest".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Identifies the source of a package artifact integrity value.
@@ -1054,6 +1185,7 @@ impl LockedPackage {
                 .map_err(LockfileError::Domain)?
                 .to_string(),
             tree_digest: unpacked_digest.to_owned(),
+            derived_hooks: Vec::new(),
             artifact_url: None,
             peer_context: canonical_peer_context(contexts.0),
             platform_context: canonical_platform_context(contexts.1),
@@ -1080,6 +1212,31 @@ impl LockedPackage {
 
     pub fn tree_digest(&self) -> &str {
         &self.tree_digest
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+    pub fn registry(&self) -> &str {
+        &self.registry
+    }
+    pub fn has_declared_registry_integrity(&self) -> bool {
+        self.registry_integrity_declared == Some(true)
+    }
+    pub fn artifact_integrity(&self) -> &str {
+        &self.artifact_integrity
+    }
+    pub fn derived_hooks(&self) -> &[DerivedHookOutput] {
+        &self.derived_hooks
+    }
+    /// Tree activated for installation after policy validation by the caller.
+    pub fn install_tree_digest(&self) -> &str {
+        self.derived_hooks
+            .last()
+            .map_or(&self.tree_digest, |output| output.tree_digest())
     }
 
     pub fn dependencies(&self) -> &BTreeMap<String, String> {

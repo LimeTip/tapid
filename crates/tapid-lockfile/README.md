@@ -11,7 +11,7 @@ Deterministic lockfile models and canonical JSON serialization for Tapid.
 
 The current contract provides:
 
-- Schema version `7`, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
+- Schema version `7`, or `8` when approved dependency hooks produce derived trees, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
 - Exact package name and version keys, registry origin, canonical padded SHA-512 SRI, required schema 6 registry-integrity provenance, SHA-256 unpacked digest, and explicit `treeDigest` replay identity.
 - Deterministic package ordering through `BTreeMap` serialization.
 - HTTPS registry and artifact URL validation.
@@ -38,3 +38,5 @@ Consumer replay uses `STORE/trees/<digest>/` and a regular `.tapid-tree` marker 
 This is a lockfile model and replay contract, not a complete npm lockfile implementation or dependency resolver. Rich peer, optional, platform, lifecycle, provenance, audit, and complete dependency-edge semantics remain limited to the tested subset.
 
 Schema 7 preserves alias names separately from actual package identities. `rootBindings` maps local direct names to exact package keys. `dependencyAliases` records each renamed transitive dependency and its actual target name; it must agree with the exact dependency key. Alias metadata in older schemas, unsafe names, inconsistent targets, and dangling bindings are rejected. Schema 6 locks without alias metadata retain their existing replay support. Older clients reject schema 7.
+
+Schema 8 adds ordered `derivedHooks` records with exact recipe keys, verified output tree digests, and store-local HMAC attestations. Source archive integrity and `treeDigest` retain their original meanings. Replay validates every recipe and output before selecting the final installed tree. Older schemas cannot contain derived-hook records. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md).

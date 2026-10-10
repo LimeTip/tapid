@@ -4,7 +4,7 @@
 
 <p align="center">
   A JavaScript and TypeScript package manager written in Rust,<br>
-  with verified downloads, reproducible installs, and dependency lifecycle scripts disabled during installation.
+  with verified downloads, reproducible installs, and dependency lifecycle scripts denied by default.
 </p>
 
 <p align="center">
@@ -134,7 +134,7 @@ The package-management toolchain also includes:
 - `init`, `install`/`i`, `add`, `remove`, and `update` for project manifests and dependencies.
 - `outdated` to compare locked versions with registry metadata, and `prune` to remove unreachable managed packages.
 - A content-addressed local store and lockfile replay for offline installs, with transactional activation of managed `node_modules`.
-- Safe archive extraction and integrity checks, plus generated package `bin` shims. Dependency lifecycle scripts are suppressed during installation.
+- Safe archive extraction and integrity checks, plus generated package `bin` shims. Dependency lifecycle scripts are denied by default; [exact checked-in approvals](docs/dependency-lifecycle.md) can produce verified derived trees through Linux ManagedTree.
 
 These controls improve repeatability and reject certain mismatches, but they do not currently detect vulnerable or malicious packages or authenticate publishers. See [Supported subset and limitations](#supported-subset-and-limitations) for exact behavior. Experimental root-script execution is separate and not the product focus; see [ADR 0005](docs/adr/0005-default-on-root-script-sandbox.md) for its status and limitations.
 
@@ -218,7 +218,7 @@ Offline and frozen replay do not resolve metadata or fetch archives. The lockfil
 - Lifecycle scripts from dependencies never run during install. There is no approval workflow yet.
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
-- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock and seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. ManagedTree, configured resource-limit profiles, Windows native containment, and the broader Linux Restricted probe matrix remain unsupported or pending. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
+- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock and seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. Linux ManagedTree and resource-limit profiles require delegated cgroup v2 and private namespaces. macOS ManagedTree, Windows native containment, and the broader platform probe matrix remain unsupported or pending. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
 
 ## Contributing
 

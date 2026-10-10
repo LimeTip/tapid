@@ -290,6 +290,7 @@ fn perform_install(
         ));
     }
     session.outcome.project_dir = project_dir.clone();
+    let lifecycle_policy = super::dependency_scripts::load_policy(&project_dir)?;
     let target_candidate = if target_manifest_path.is_absolute() {
         target_manifest_path.to_path_buf()
     } else {
@@ -407,7 +408,7 @@ fn perform_install(
     if !offline && !frozen {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-        let (lock, mut input, trees, store_transaction, workspace_links) =
+        let (mut lock, mut input, mut trees, mut store_transaction, workspace_links) =
             online::resolve_and_fetch(
                 &project_dir,
                 &root_manifest,
@@ -416,6 +417,7 @@ fn perform_install(
                 allow_unverified_registry_artifacts,
                 &registry_config,
             )?;
+
         if session.journal.is_none() {
             session.journal = Some(
                 crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
@@ -432,6 +434,19 @@ fn perform_install(
         journal
             .set_store_root(store.root())
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+        session
+            .outcome
+            .warnings
+            .extend(super::dependency_scripts::apply(
+                &project_dir,
+                &lifecycle_policy,
+                &mut lock,
+                &mut input,
+                &mut trees,
+                &store,
+                Some(&mut store_transaction),
+                activation_lock,
+            )?);
         let lock_json = lock
             .to_json()
             .map_err(|error| OperationalError::from(error).context("cannot serialize lockfile"))?;
@@ -559,13 +574,27 @@ fn perform_install(
     journal
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-    let (input, trees) = crate::application::replay::replay_input(
+    let (mut input, mut trees) = crate::application::replay::replay_input(
         &lock,
         &root_manifest,
         &store,
         &registry_config,
         report_replay_progress,
     )?;
+    let hook_warnings = super::dependency_scripts::apply(
+        &project_dir,
+        &lifecycle_policy,
+        &mut lock.clone(),
+        &mut input,
+        &mut trees,
+        &store,
+        None,
+        activation_lock,
+    );
+    if hook_warnings.is_err() {
+        crate::application::replay::cleanup_replay_snapshots(&trees);
+    }
+    session.outcome.warnings.extend(hook_warnings?);
     session.mutated = true;
     session
         .outcome
