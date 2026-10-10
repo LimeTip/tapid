@@ -1,0 +1,11 @@
+{
+  "packages": [
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "external",
+      "version": "1.0.0",
+      "integrity": "sha512-nh1c6/1fzq+k+BXjpvjq4k8TFBwEIHQNExqP1neu92kndGwT2/T6KhtP1oBtycbzVC3L9rCIEya0a+ckV4i4DA==",
+      "artifact": "base64:H4sIAAAAAAAC/+3TvW7CMBSGYc9cheWFpQ1OlYJUxMVY5AiFEieyQxVU9d5x+BESS5cWgXif5Vjfcgafr3XLT7eSSXuc2To2Xv0xm0yL4jCT62ntrLi8hzzPp28zpa26gW3sXEjr1XP6Nt7VYj60kb6T4N3GvGjzJSFWjR/iPLOZHbLaVYeg8qX06U7Mj8LDO/V+cv7V/9jxa//f7XX/h0H/b6Buyu1GMunbJnRRL/Q4yKqKXdi9ltJKugq/3I3nI5oCAAAAAAAAAAAAAABwn/bgwSvCACgAAA=="
+    }
+  ]
+}

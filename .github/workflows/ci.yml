@@ -43,6 +43,10 @@ jobs:
           target/debug/tapid --version
       - name: Prepare project-local build and temporary storage
         run: mkdir -p examples/news-site-consumer/.next examples/news-site-consumer/.tmp
+      - name: Verify workspace reference acceptance
+        env:
+          TAPID_REQUIRE_NODE_ASSERTIONS: '1'
+        run: cargo test -p tapid --test cli --locked workspace_acceptance -- --show-output
       - name: Verify pinned news-site resolution inputs and strict graph comparator
         env:
           TAPID_NEWS_FIXTURE_BINARY: ${{ github.workspace }}/target/debug/tapid
