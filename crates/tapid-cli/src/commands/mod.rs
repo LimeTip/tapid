@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+mod ci;
 pub(crate) mod init;
 pub(crate) mod install;
 mod license;
@@ -71,6 +72,11 @@ pub(crate) enum Command {
   tapid install --offline --store-dir ./verified-store"
     )]
     Install(install::Args),
+    /// Install exact locked dependencies without changing package.json or tapid.lock.
+    #[command(
+        long_about = "Install the exact dependency graph in tapid.lock. Requires matching project and workspace manifests and download URLs for every registry package, including with --offline. Explicit local registry fixtures can supply artifacts without URLs. Missing verified trees are downloaded and verified without version resolution. Atomically replaces managed node_modules. Dependency lifecycle scripts do not run."
+    )]
+    Ci(ci::Args),
     /// Add packages to package.json and install dependencies.
     #[command(
         long_about = "Add one or more packages to dependencies in package.json, then resolve and install the dependency graph and write tapid.lock.\n\nUse --dev, --optional, or --peer to select another dependency section. A package without a version requirement uses *.",
@@ -140,6 +146,7 @@ pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
         Some(Command::Run(args)) => run::run(args),
 
         Some(Command::Install(args)) => install::run(args),
+        Some(Command::Ci(args)) => ci::run(args),
         Some(Command::Add(args)) => lifecycle::add(args),
         Some(Command::Remove(args)) => lifecycle::remove(args),
         Some(Command::Update(args)) => lifecycle::update(args),

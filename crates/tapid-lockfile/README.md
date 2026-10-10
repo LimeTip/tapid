@@ -9,6 +9,8 @@
 
 Deterministic lockfile models and canonical JSON serialization for Tapid.
 
+`LockedPackage::artifact_url()` and `artifact_integrity()` expose the pinned download URL and SHA-512 integrity. The model permits omitted URLs for older or fixture-generated locks; `tapid ci` requires every registry URL regardless of cache contents, except when an explicit local registry fixture supplies artifacts. `tapid ci` uses these fields to fetch missing artifacts without resolving versions, and also verifies the extracted tree against `tree_digest()`.
+
 The current contract provides:
 
 - Schema version `7`, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.

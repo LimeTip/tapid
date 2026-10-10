@@ -525,3 +525,44 @@ fn npm_import_replay_revalidates_root_declarations() {
     assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
     assert!(!project.path().join("node_modules").exists());
 }
+
+#[test]
+fn npm_import_ci_rejects_imported_schema_without_mutation() {
+    let project = reference_project("npm-import-ci");
+    assert!(
+        invoke(&project, &["import-package-lock", "package-lock.json"])
+            .status
+            .success()
+    );
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
+    let store = project.path().join("store");
+    let fixture = project.path().join("registry.json");
+    for offline in [false, true] {
+        let mut args = vec![
+            "ci",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ];
+        if offline {
+            args.push("--offline");
+        }
+        let output = invoke(&project, &args);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("ci requires an ordinary verified-tree lock"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert!(!store.exists());
+        assert!(!project.path().join("node_modules").exists());
+    }
+}

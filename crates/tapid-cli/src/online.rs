@@ -1,6 +1,8 @@
 use crate::application::outcome::{ErrorKind, OperationalError};
+mod locked;
 mod npm_import;
 mod resolution;
+pub(crate) use locked::{prepare_locked_install, validate_locked_artifact_sources};
 pub(crate) use npm_import::fetch_imported;
 use resolution::resolve_with_fetch_routed_and_overrides;
 #[cfg(test)]
@@ -733,6 +735,10 @@ pub fn resolve_and_fetch(
         registry_dependencies: workspace_registry_dependencies,
         overrides,
     } = workspace_root_resolution(manifest, &workspace, registry_config)?;
+    let direct_local_names = manifest_roots(manifest)?
+        .into_iter()
+        .map(|dependency| dependency.name)
+        .collect::<BTreeSet<_>>();
     let WorkspaceMaterialization {
         links: workspace_links,
         locked: mut workspace_locked,
@@ -1140,8 +1146,9 @@ pub fn resolve_and_fetch(
         resolution
             .root_bindings
             .iter()
-            .filter(|((registry, _), id)| {
-                root_registry_identities.contains(&(registry.clone(), id.name.clone()))
+            .filter(|((registry, name), id)| {
+                direct_local_names.contains(name)
+                    && root_registry_identities.contains(&(registry.clone(), id.name.clone()))
             })
             .map(|((_, name), id)| {
                 let platform = platform_contexts
@@ -1222,7 +1229,9 @@ pub fn resolve_and_fetch(
         });
     }
     for ((registry, name), id) in &resolution.root_bindings {
-        if !root_registry_identities.contains(&(registry.clone(), id.name.clone())) {
+        if !direct_local_names.contains(name)
+            || !root_registry_identities.contains(&(registry.clone(), id.name.clone()))
+        {
             continue;
         }
         let instance = instance_keys
