@@ -1196,6 +1196,20 @@ pub enum Termination {
     MemoryLimitExceeded,
     Cancelled,
 }
+impl Termination {
+    fn from_process_status(status: std::process::ExitStatus) -> Self {
+        if let Some(code) = status.code() {
+            return Self::Exited(code);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            Self::Signaled(status.signal().unwrap_or(0))
+        }
+        #[cfg(not(unix))]
+        Self::Exited(1)
+    }
+}
 
 /// Captured execution result paired with an enforcement receipt.
 ///

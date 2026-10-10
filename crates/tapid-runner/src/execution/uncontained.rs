@@ -97,7 +97,7 @@ pub fn execute_uncontained(
             Ok(None) => {}
         }
         match child.try_wait() {
-            Ok(Some(status)) => return Ok(Termination::Exited(status.code().unwrap_or(1))),
+            Ok(Some(status)) => return Ok(Termination::from_process_status(status)),
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(error) => {
                 let _ = child.kill();
@@ -149,6 +149,19 @@ mod tests {
         assert_eq!(
             std::fs::read(project.path().join("stdout")).unwrap(),
             b"unset\n/usr/bin\n"
+        );
+    }
+
+    #[test]
+    fn uncontained_signal_termination_preserves_the_actual_signal() {
+        let project = TempProject::new("uncontained-signal").unwrap();
+        assert_eq!(
+            execute_uncontained(
+                &request(project.path(), "kill -TERM $$", ExecutionLimits::default()),
+                project.path()
+            )
+            .unwrap(),
+            Termination::Signaled(15)
         );
     }
 
