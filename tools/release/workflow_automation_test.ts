@@ -384,3 +384,15 @@ test('Windows handoff contract rejects ownership, stale-attempt, bypass and fixt
     assert.throws(() => assertWindowsHandoff(ci.replace(verifier, verifier.replace(text, 'disabled'))));
   }
 });
+test('public installer discovery runs independently and requires its downloaded installer', async () => {
+  const smoke = await workflow('release-public-smoke');
+  for (const name of ['unix', 'windows']) {
+    const section = job(smoke, name);
+    const publicInstall = step(section, 'Check the public website installer with an explicit version');
+    const discovery = step(section, 'Install latest release through discovery');
+    assert.match(publicInstall, /id: install_public\n/);
+    assert(publicInstall.includes("if: ${{ !cancelled() && steps.install_published.outcome == 'success' }}"));
+    assert(discovery.includes("if: ${{ !cancelled() && steps.install_public.outcome == 'success' }}"));
+    assert(section.indexOf(publicInstall) < section.indexOf(discovery));
+  }
+});

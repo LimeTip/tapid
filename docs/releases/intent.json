@@ -1,0 +1,81 @@
+{
+  "schema": "tapid-release-intent-v1",
+  "version": "0.0.12",
+  "baseline": "v0.0.11",
+  "prepared_from": "58cd976ec7234e0ba0c2120a3a354a854a2826b2",
+  "notes": "docs/releases/0.0.12.md",
+  "packages": [
+    {
+      "name": "tapid-archive",
+      "version": "0.0.5"
+    },
+    {
+      "name": "tapid-signatures",
+      "version": "0.0.4"
+    },
+    {
+      "name": "tapid-attestations",
+      "version": "0.0.4"
+    },
+    {
+      "name": "tapid-core",
+      "version": "0.0.7"
+    },
+    {
+      "name": "tapid-manifest",
+      "version": "0.0.9"
+    },
+    {
+      "name": "tapid-linker",
+      "version": "0.0.7"
+    },
+    {
+      "name": "tapid-lockfile",
+      "version": "0.0.11"
+    },
+    {
+      "name": "tapid-policy",
+      "version": "0.0.4"
+    },
+    {
+      "name": "tapid-protocol",
+      "version": "0.0.5"
+    },
+    {
+      "name": "tapid-publish",
+      "version": "0.0.5"
+    },
+    {
+      "name": "tapid-registry-client",
+      "version": "0.0.7"
+    },
+    {
+      "name": "tapid-release-client",
+      "version": "0.0.5"
+    },
+    {
+      "name": "tapid-resolver",
+      "version": "0.0.7"
+    },
+    {
+      "name": "tapid-runner",
+      "version": "0.0.6"
+    },
+    {
+      "name": "tapid-store",
+      "version": "0.0.7"
+    },
+    {
+      "name": "tapid-test-support",
+      "version": "0.0.3"
+    },
+    {
+      "name": "tapid-transparency",
+      "version": "0.0.4"
+    },
+    {
+      "name": "tapid",
+      "version": "0.0.12"
+    }
+  ]
+}

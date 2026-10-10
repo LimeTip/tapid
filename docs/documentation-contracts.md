@@ -24,14 +24,14 @@ inventory until the website supports native platform rendering. It is not a
 translation performed by the Unix runner.
 
 Capability `verified_releases` lists versions actually checked. Self-upgrade's
-`first_supported_release: "v0.0.10"` and `expected_releases: ["v0.0.10", "v0.0.11"]` are
+`first_supported_release: "v0.0.10"` and `expected_releases: ["v0.0.10", "v0.0.11", "v0.0.12"]` are
 reviewed implementation expectations, **not published execution evidence**;
 its `verified_releases` remains empty until actual published verification is
 reviewed. v0.0.9 lacks `upgrade` and retains reinstall guidance. `upgrade-help`
 expects exit 2 plus the unrecognized-subcommand message for v0.0.9, and exit 0
-for v0.0.10 and v0.0.11. The published `upgrade` journey explicitly skips v0.0.9 as unsupported
+for v0.0.10, v0.0.11 and v0.0.12. The published `upgrade` journey explicitly skips v0.0.9 as unsupported
 without executing it; the negative help probe still runs separately. Only the
-exact v0.0.10 and v0.0.11 source tags have reviewed expectations for the journey;
+exact v0.0.10, v0.0.11 and v0.0.12 source tags have reviewed expectations for the journey;
 unknown tags, including newer versions, fail closed pending review.
 Do not interpret `first_supported_release` as an open-ended semver allowlist.
 
@@ -93,8 +93,8 @@ discovery also runs through the public scripts. The canonical documentation
 upgrade runner remains Unix-only. Windows has separate native workflow upgrade
 checks and its native quickstart.
 
-These configuration changes do not prove published execution of v0.0.10 or
-v0.0.11. Self-upgrade's verified-release list remains empty.
+These configuration changes do not prove published execution of v0.0.10,
+v0.0.11 or v0.0.12. Self-upgrade's verified-release list remains empty.
 
 ## Execution and evidence boundaries
 

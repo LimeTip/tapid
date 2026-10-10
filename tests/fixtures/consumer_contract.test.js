@@ -1,6 +1,12 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { reviewedContracts } = require('./consumer_contract.js');
+const { reviewedContracts, loadConsumerContracts } = require('./consumer_contract.js');
+
+test('v0.0.12 expects native execution on Windows while v0.0.11 retains its reviewed boundary', () => {
+  const { releases } = loadConsumerContracts();
+  assert.deepEqual(releases.get('v0.0.12'), { legacy: false, nativePlatforms: ['darwin', 'linux', 'win32'] });
+  assert.deepEqual(releases.get('v0.0.11'), { legacy: false, nativePlatforms: ['darwin', 'linux'] });
+});
 
 const contract = { legacy: false, nativePlatforms: ['darwin', 'linux'] };
 const historical = { legacy: true, nativePlatforms: [] };
