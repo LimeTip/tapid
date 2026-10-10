@@ -462,7 +462,11 @@ fn perform_install(
                 registry_fixture,
                 allow_unverified_registry_artifacts,
                 &registry_config,
-                if preserve { previous_lock.as_ref() } else { None },
+                if preserve {
+                    previous_lock.as_ref()
+                } else {
+                    None
+                },
                 &mut report_replay_progress,
             )?;
         if session.journal.is_none() {
@@ -609,7 +613,9 @@ fn perform_install(
     )?;
     validate_workspace_dependency_edges(&workspace, &workspace_registry_dependencies, &lock)?;
     crate::application::replay::validate_root_bindings(&lock, &root_manifest, &registry_config)?;
-    if ci { online::validate_locked_artifact_sources(&lock, registry_fixture)?; }
+    if ci {
+        online::validate_locked_artifact_sources(&lock, registry_fixture)?;
+    }
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")
     })?;
@@ -678,9 +684,16 @@ fn perform_install(
         return Ok((lock.packages().len(), true));
     }
     let mut publication = None;
-    if !offline && let Some(transaction) = online::hydrate_locked(&lock, &store, &registry_config, registry_fixture)? {
+    if !offline
+        && let Some(transaction) =
+            online::hydrate_locked(&lock, &store, &registry_config, registry_fixture)?
+    {
         session.mutated = true;
-        publication = Some(transaction.publish_for_lifecycle(&journal.coordinator_path()).map_err(OperationalError::from)?);
+        publication = Some(
+            transaction
+                .publish_for_lifecycle(&journal.coordinator_path())
+                .map_err(OperationalError::from)?,
+        );
         crate::filesystem::activation::test_crash_at("store_published");
     }
     let (input, trees) = crate::application::replay::replay_input_with_publication(

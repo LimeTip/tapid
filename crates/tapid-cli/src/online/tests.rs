@@ -44,6 +44,7 @@ fn fetched_locked_versions_refresh_only_peer_metadata() {
             named_record("dep", "1.0.0", &[]),
             named_record("react", "18.3.0", &[]),
         ],
+        |_| {},
     )
     .unwrap();
     let preserved = &records[&(NPM.into(), "plugin".into(), "1.0.0".into())];

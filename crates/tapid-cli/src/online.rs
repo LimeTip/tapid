@@ -1,7 +1,10 @@
 mod artifact;
 mod locked;
 use crate::application::outcome::{ErrorKind, OperationalError};
-pub(crate) use locked::{hydrate_locked, validate_locked_routes, prepare_locked_install, validate_locked_artifact_sources};
+pub(crate) use locked::{
+    hydrate_locked, prepare_locked_install, validate_locked_artifact_sources,
+    validate_locked_routes,
+};
 mod resolution;
 #[cfg(test)]
 use resolution::{
@@ -719,6 +722,7 @@ fn workspace_root_resolution(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_and_fetch_with_lock(
     project: &Path,
     manifest: &PackageManifest,

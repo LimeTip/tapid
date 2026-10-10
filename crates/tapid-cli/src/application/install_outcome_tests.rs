@@ -665,7 +665,7 @@ fn repeated_online_install_preserves_locked_selection() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let original_lock = fs::read(project.path().join("tapid.lock")).unwrap();
@@ -682,7 +682,7 @@ fn repeated_online_install_preserves_locked_selection() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     assert_eq!(
@@ -697,7 +697,7 @@ fn repeated_online_install_preserves_locked_selection() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     assert!(replay.replayed);
@@ -724,7 +724,7 @@ fn frozen_install_hydrates_exact_artifact_from_cold_store() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let lock_path = project.path().join("tapid.lock");
@@ -752,7 +752,7 @@ fn frozen_install_hydrates_exact_artifact_from_cold_store() {
         InstallMode::Frozen,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     assert_eq!(fs::read(&lock_path).unwrap(), original_lock);
@@ -763,7 +763,7 @@ fn frozen_install_hydrates_exact_artifact_from_cold_store() {
         InstallMode::Offline,
         None,
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
 }
@@ -785,7 +785,7 @@ fn changed_roots_keep_compatible_locked_versions() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let mut metadata: serde_json::Value =
@@ -804,7 +804,7 @@ fn changed_roots_keep_compatible_locked_versions() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
@@ -821,7 +821,7 @@ fn changed_roots_keep_compatible_locked_versions() {
         InstallMode::Refresh,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
@@ -849,7 +849,7 @@ fn pinned_fixture_project(label: &str) -> (TempProject, PathBuf, PathBuf) {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let lock_path = project.path().join("tapid.lock");
@@ -934,7 +934,7 @@ fn frozen_hydration_failures_preserve_lock_and_installed_tree() {
             InstallMode::Frozen,
             Some(&fixture),
             false,
-            |_, _| {},
+            |_| {},
         )
         .unwrap_err();
         assert!(
@@ -971,7 +971,7 @@ fn frozen_hydration_rejects_missing_private_credentials_before_network() {
         InstallMode::Frozen,
         None,
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::RegistryCredentialMissing);
@@ -989,7 +989,7 @@ fn offline_cold_store_never_uses_supplied_artifacts() {
         InstallMode::Offline,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::StoreUnavailable);
@@ -1012,7 +1012,7 @@ fn frozen_hydration_rolls_back_publication_when_activation_fails() {
         InstallMode::Frozen,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::Materialization);
@@ -1041,7 +1041,7 @@ fn adding_a_root_does_not_require_metadata_for_unchanged_locked_packages() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
@@ -1082,7 +1082,7 @@ fn fetching_another_version_preserves_locked_dependency_edges() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let before = read_lock(&project.path().join("tapid.lock")).unwrap();
@@ -1114,7 +1114,7 @@ fn fetching_another_version_preserves_locked_dependency_edges() {
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let after = read_lock(&project.path().join("tapid.lock")).unwrap();
@@ -1168,7 +1168,7 @@ fn unrelated_root_changes_preserve_direct_and_transitive_versions_of_one_package
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     // Broadening a requirement does not require changing its valid selection.
@@ -1179,7 +1179,7 @@ fn unrelated_root_changes_preserve_direct_and_transitive_versions_of_one_package
         InstallMode::Online,
         Some(&fixture),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap();
     let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
@@ -1209,7 +1209,7 @@ fn frozen_rejects_invalid_root_bindings_before_downloading() {
         InstallMode::Frozen,
         Some(&project.path().join("absent-fixture.json")),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::Lockfile);
@@ -1252,7 +1252,7 @@ fn changed_peer_roots_rebind_compatible_ranges_and_release_incompatible_pins() {
             InstallMode::Online,
             Some(&fixture),
             false,
-            |_, _| {},
+            |_| {},
         )
         .unwrap();
         metadata["packages"].as_array_mut().unwrap().push(newer);
@@ -1264,7 +1264,7 @@ fn changed_peer_roots_rebind_compatible_ranges_and_release_incompatible_pins() {
             InstallMode::Online,
             Some(&fixture),
             false,
-            |_, _| {},
+            |_| {},
         )
         .unwrap();
         let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
@@ -1301,7 +1301,7 @@ fn frozen_refuses_corrupt_warm_content_without_redownloading() {
         InstallMode::Frozen,
         Some(&project.path().join("absent-fixture.json")),
         false,
-        |_, _| {},
+        |_| {},
     )
     .unwrap_err();
     assert_eq!(failure.error.kind, ErrorKind::Integrity);

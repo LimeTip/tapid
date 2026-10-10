@@ -19,7 +19,7 @@ fn locked_project() -> tapid_test_support::TempProject {
         .write("registry.json", fixture.to_string().as_bytes())
         .unwrap();
     let output = run(
-        &project.path().to_path_buf(),
+        project.path(),
         &[
             "install",
             "--registry-fixture",
@@ -140,10 +140,11 @@ fn ci_fixture_exception_requires_every_url_less_transitive_identity() {
         project
             .write("registry.json", fixture.to_string().as_bytes())
             .unwrap();
+        // Refresh deliberately so the CI test lock contains the new transitive edge.
         let output = run(
             &dir,
             &[
-                "install",
+                "update",
                 "--registry-fixture",
                 "registry.json",
                 "--store-dir",

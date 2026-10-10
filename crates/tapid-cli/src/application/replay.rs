@@ -93,7 +93,8 @@ pub(crate) fn replay_input_with_publication(
             match publication {
                 Some(publication) => publication.verified_tree_snapshot(&digest),
                 None => store.verified_tree_snapshot(&digest),
-            }.map_err(OperationalError::from)
+            }
+            .map_err(OperationalError::from)
         },
     )
 }
