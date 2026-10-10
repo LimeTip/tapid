@@ -278,6 +278,24 @@ mod tests {
                 outside,
             }
         }
+        fn denied_write_dac_file(&self) -> PathBuf {
+            let file = self.target.join("denied.txt");
+            std::fs::write(&file, b"existing").unwrap();
+            let icacls = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32")
+                .join("icacls.exe");
+            let output = std::process::Command::new(icacls)
+                .arg(&file)
+                .args(["/grant", "*S-1-3-4:R", "/deny", "*S-1-1-0:(WDAC)"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "WRITE_DAC fixture setup: {output:?}"
+            );
+            file
+        }
+
         fn rejects(&self, path: &Path, kind: FilesystemGrantKind) {
             let mut paths: Vec<_> = self.root.ancestors().map(Path::to_path_buf).collect();
             let mut pending = vec![self.root.clone()];
@@ -360,8 +378,49 @@ mod tests {
         assert_eq!(status, 0);
     }
 
-    #[test]
-    fn null_dacl_is_rejected_as_ambiguous() {
+    fn snapshot_dacl(object: &Object) -> (u16, Option<Vec<u8>>) {
+        use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+        use windows_sys::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl,
+        };
+        let mut dacl = null_mut();
+        let mut descriptor = null_mut();
+        let mut control = 0;
+        let mut revision = 0;
+        // SAFETY: the held handle pins this disposable file; outputs are writable,
+        // and the allocated descriptor stays alive until its complete ACL is copied.
+        unsafe {
+            assert_eq!(
+                GetSecurityInfo(
+                    object.0,
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    &mut dacl,
+                    null_mut(),
+                    &mut descriptor,
+                ),
+                0
+            );
+            let status = GetSecurityDescriptorControl(descriptor, &mut control, &mut revision);
+            let bytes = if dacl.is_null() {
+                None
+            } else {
+                Some(
+                    std::slice::from_raw_parts(dacl.cast::<u8>(), (*dacl).AclSize as usize)
+                        .to_vec(),
+                )
+            };
+            windows_sys::Win32::Foundation::LocalFree(descriptor);
+            assert_ne!(status, 0);
+            (control, bytes)
+        }
+    }
+
+    fn assert_null_dacl_rejection_unchanged(
+        validate: impl FnOnce(&Path, &Object) -> Result<(), ExecutionError>,
+    ) {
         use windows_sys::Win32::Security::Authorization::{
             GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
         };
@@ -403,8 +462,17 @@ mod tests {
                 0
             );
         }
-        let result =
-            validate_existing_write_grants(&[write_grant(&file, FilesystemGrantKind::ExactFile)]);
+        // Compare the live rejection state before cleanup can conceal a mutation.
+        // Catch assertions only to restore the original descriptor, then propagate them.
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let installed = snapshot_dacl(&object);
+            assert!(installed.1.is_none(), "fixture must install a NULL DACL");
+            let result = validate(&file, &object);
+            let after = snapshot_dacl(&object);
+            println!("NULL_DACL_RECEIPT before={installed:?} after={after:?}");
+            assert_eq!(installed, after, "validation changed installed NULL DACL");
+            result
+        }));
         unsafe {
             assert_eq!(
                 SetSecurityInfo(
@@ -420,33 +488,87 @@ mod tests {
             );
             windows_sys::Win32::Foundation::LocalFree(descriptor);
         }
+        let restored = read_acl(&file);
+        println!(
+            "DACL_RECEIPT path={} before_control={} before_acl={:?} after_control={} after_acl={:?}",
+            file.display(),
+            before.0,
+            before.1,
+            restored.0,
+            restored.1
+        );
         assert_eq!(
-            read_acl(&file),
-            before,
+            restored, before,
             "NULL DACL fixture restoration must be exact"
         );
+        let result = match checked {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
         assert!(result.is_err(), "NULL DACL accepted");
         assert!(result.unwrap_err().to_string().contains("NULL DACL"));
         assert!(!fixture.target.join("child-marker").exists());
     }
 
     #[test]
+    fn null_dacl_is_rejected_as_ambiguous() {
+        assert_null_dacl_rejection_unchanged(|file, _| {
+            validate_existing_write_grants(&[write_grant(file, FilesystemGrantKind::ExactFile)])
+        });
+    }
+
+    #[test]
+    fn null_dacl_rejection_assertion_catches_mutation_before_cleanup() {
+        let caught = std::panic::catch_unwind(|| {
+            assert_null_dacl_rejection_unchanged(|file, object| {
+                let result = validate_existing_write_grants(&[write_grant(
+                    file,
+                    FilesystemGrantKind::ExactFile,
+                )]);
+                // Deliberately corrupt the live rejection state, not production validation:
+                // replace the installed NULL DACL with a valid empty DACL on this file only.
+                let mut empty = [0u32; 2];
+                unsafe {
+                    assert_ne!(
+                        windows_sys::Win32::Security::InitializeAcl(
+                            empty.as_mut_ptr().cast(),
+                            std::mem::size_of_val(&empty) as u32,
+                            windows_sys::Win32::Security::ACL_REVISION,
+                        ),
+                        0
+                    );
+                    assert_eq!(
+                        windows_sys::Win32::Security::Authorization::SetSecurityInfo(
+                            object.0,
+                            windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT,
+                            windows_sys::Win32::Security::DACL_SECURITY_INFORMATION,
+                            null_mut(),
+                            null_mut(),
+                            empty.as_ptr().cast(),
+                            null(),
+                        ),
+                        0
+                    );
+                }
+                result
+            });
+        });
+        let panic = caught.expect_err("rejection-state mutation was hidden by fixture cleanup");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            message.contains("validation changed installed NULL DACL"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn host_write_dac_denial_is_fatal() {
         let fixture = Fixture::new();
-        let file = fixture.target.join("denied.txt");
-        std::fs::write(&file, b"existing").unwrap();
-        let icacls = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join("System32")
-            .join("icacls.exe");
-        let output = std::process::Command::new(icacls)
-            .arg(&file)
-            .args(["/grant", "*S-1-3-4:R", "/deny", "*S-1-1-0:(WDAC)"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "WRITE_DAC fixture setup: {output:?}"
-        );
+        let file = fixture.denied_write_dac_file();
         let before = read_acl(&file);
         fixture.rejects(&file, FilesystemGrantKind::ExactFile);
         assert_eq!(read_acl(&file), before);
@@ -455,20 +577,7 @@ mod tests {
     #[test]
     fn denied_descendant_authority_is_rejected() {
         let fixture = Fixture::new();
-        let file = fixture.target.join("denied.txt");
-        std::fs::write(&file, b"existing").unwrap();
-        let icacls = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join("System32")
-            .join("icacls.exe");
-        let output = std::process::Command::new(icacls)
-            .arg(&file)
-            .args(["/grant", "*S-1-3-4:R", "/deny", "*S-1-1-0:(WDAC)"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "WRITE_DAC fixture setup: {output:?}"
-        );
+        fixture.denied_write_dac_file();
         fixture.rejects(&fixture.target, FilesystemGrantKind::DirectorySubtree);
     }
 
