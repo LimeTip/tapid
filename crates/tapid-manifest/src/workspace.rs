@@ -238,7 +238,8 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
     if !relative
         .components()
         .any(|component| matches!(component, std::path::Component::Normal(_)))
-        || pattern.contains(['?', '[', ']', '{', '}', '!', '(', ')', '\\', ':'])
+        || pattern.contains(['?', '[', ']', '{', '}', '!', '(', ')', '\\'])
+        || (cfg!(windows) && pattern.contains(':'))
         || relative.components().any(|component| {
             let name = component.as_os_str().to_string_lossy();
             name.contains('*') && name != "*"
@@ -384,6 +385,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["news", "tools", "ui"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_patterns_allow_colons_in_literal_paths() {
+        let project = TempProject::new("colon-workspace-pattern").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/foo:bar"]}"#,
+            )
+            .unwrap();
+        project
+            .write(
+                "packages/foo:bar/package.json",
+                br#"{"name":"foo-bar","version":"1.0.0"}"#,
+            )
+            .unwrap();
+
+        let workspace = Workspace::discover(project.path()).unwrap();
+
+        assert_eq!(workspace.members().len(), 1);
+        assert_eq!(workspace.members()[0].name(), "foo-bar");
     }
 
     #[test]
