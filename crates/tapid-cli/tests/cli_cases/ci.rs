@@ -45,6 +45,147 @@ fn locked_project() -> tapid_test_support::TempProject {
 }
 
 #[test]
+fn ci_validates_fixture_exceptions_on_warm_and_offline_paths() {
+    for offline in [false, true] {
+        for fixture_case in [
+            "missing",
+            "malformed",
+            "wrong-name",
+            "wrong-version",
+            "wrong-registry",
+            "valid",
+        ] {
+            let project = locked_project();
+            let dir = project.path().to_path_buf();
+            let store = dir.join("store");
+            let mut lock: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+            for package in lock["packages"].as_object_mut().unwrap().values_mut() {
+                package.as_object_mut().unwrap().remove("artifactUrl");
+            }
+            project
+                .write("tapid.lock", lock.to_string().as_bytes())
+                .unwrap();
+            project.write("node_modules/KEEP", b"previous").unwrap();
+            let fixture_path = if fixture_case == "missing" {
+                "missing.json"
+            } else {
+                "registry.json"
+            };
+            if fixture_case == "malformed" {
+                project.write("registry.json", b"invalid fixture").unwrap();
+            } else if fixture_case.starts_with("wrong-") {
+                let mut fixture: serde_json::Value =
+                    serde_json::from_slice(&fs::read(dir.join("registry.json")).unwrap()).unwrap();
+                let (field, value) = match fixture_case {
+                    "wrong-name" => ("name", "other"),
+                    "wrong-version" => ("version", "2.0.0"),
+                    "wrong-registry" => ("registry", "https://other.example"),
+                    _ => unreachable!(),
+                };
+                fixture["packages"][0][field] = value.into();
+                project
+                    .write("registry.json", fixture.to_string().as_bytes())
+                    .unwrap();
+            }
+            let before_lock = fs::read(dir.join("tapid.lock")).unwrap();
+            let before_manifest = fs::read(dir.join("package.json")).unwrap();
+            let mut args = vec![
+                "ci",
+                "--registry-fixture",
+                fixture_path,
+                "--store-dir",
+                store.to_str().unwrap(),
+            ];
+            if offline {
+                args.push("--offline");
+            }
+            let output = run(&dir, &args);
+            if fixture_case == "valid" {
+                assert!(output.status.success(), "offline={offline}: {output:?}");
+                assert!(!dir.join("node_modules/KEEP").exists());
+            } else {
+                assert_eq!(
+                    output.status.code(),
+                    Some(1),
+                    "{fixture_case} offline={offline}: {output:?}"
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("REGISTRY_METADATA_INVALID"),
+                    "{output:?}"
+                );
+                assert_eq!(
+                    fs::read(dir.join("node_modules/KEEP")).unwrap(),
+                    b"previous"
+                );
+            }
+            assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), before_lock);
+            assert_eq!(fs::read(dir.join("package.json")).unwrap(), before_manifest);
+        }
+    }
+}
+
+#[test]
+fn ci_fixture_exception_requires_every_url_less_transitive_identity() {
+    for offline in [false, true] {
+        let project = locked_project();
+        let dir = project.path().to_path_buf();
+        let store = dir.join("store");
+        let mut fixture: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("registry.json")).unwrap()).unwrap();
+        let mut transitive = fixture["packages"][0].clone();
+        transitive["name"] = "bar".into();
+        fixture["packages"][0]["dependencies"] = serde_json::json!({"bar": "1.0.0"});
+        fixture["packages"].as_array_mut().unwrap().push(transitive);
+        project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let output = run(
+            &dir,
+            &[
+                "install",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                store.to_str().unwrap(),
+            ],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let before_lock = fs::read(dir.join("tapid.lock")).unwrap();
+        fixture["packages"].as_array_mut().unwrap().pop();
+        project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        project.write("node_modules/KEEP", b"previous").unwrap();
+        let mut args = vec![
+            "ci",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ];
+        if offline {
+            args.push("--offline");
+        }
+        let output = run(&dir, &args);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "offline={offline}: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("REGISTRY_METADATA_INVALID"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), before_lock);
+        assert_eq!(
+            fs::read(dir.join("node_modules/KEEP")).unwrap(),
+            b"previous"
+        );
+    }
+}
+
+#[test]
 fn ci_requires_complete_lockfiles_with_warm_and_cold_stores_including_offline() {
     for cold in [false, true] {
         for offline in [false, true] {

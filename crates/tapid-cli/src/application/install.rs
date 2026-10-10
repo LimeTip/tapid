@@ -536,18 +536,6 @@ fn perform_install(
             OperationalError::from(error)
                 .context(format!("invalid lockfile {}", lock_path.display()))
         })?;
-    if ci
-        && registry_fixture.is_none()
-        && lock
-            .packages()
-            .values()
-            .any(|package| package.artifact_url().is_none())
-    {
-        return Err(OperationalError::new(
-            ErrorKind::Lockfile,
-            "ci requires download URLs for every locked registry package, including with --offline; regenerate tapid.lock with tapid install and review the resulting changes",
-        ));
-    }
     let registry_config = crate::registry::RegistryConfig::load(&project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
@@ -573,6 +561,9 @@ fn perform_install(
         &registry_config,
     )?;
     validate_workspace_dependency_edges(&workspace, &workspace_registry_dependencies, &lock)?;
+    if ci {
+        online::validate_locked_artifact_sources(&lock, registry_fixture)?;
+    }
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")
     })?;
@@ -581,7 +572,7 @@ fn perform_install(
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
     if ci && !offline {
-        let (mut input, trees, transaction) = online::prepare_locked_install(
+        let (mut input, trees, transaction, _cached_snapshots) = online::prepare_locked_install(
             &lock,
             &root_manifest,
             &store,

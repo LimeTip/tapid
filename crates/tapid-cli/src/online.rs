@@ -1,7 +1,7 @@
 use crate::application::outcome::{ErrorKind, OperationalError};
 mod locked;
 mod resolution;
-pub(crate) use locked::prepare_locked_install;
+pub(crate) use locked::{prepare_locked_install, validate_locked_artifact_sources};
 use resolution::resolve_with_fetch_routed_and_overrides;
 #[cfg(test)]
 use resolution::{
