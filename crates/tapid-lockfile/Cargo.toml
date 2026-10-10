@@ -15,6 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
 url = "2"
+tapid-resolver = { version = "0.0.8", path = "../tapid-resolver" }
 
 [dev-dependencies]
 proptest = "1"

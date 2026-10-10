@@ -337,7 +337,34 @@ fn perform_install(
             .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
     }
     let lock_path = project_dir.join("tapid.lock");
-    if lock_path.is_file() {
+    let mut imported = if lock_path.is_file() {
+        let bytes = fs::read_to_string(&lock_path)
+            .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
+        if serde_json::from_str::<serde_json::Value>(&bytes)
+            .ok()
+            .is_some_and(|v| v["lockfileVersion"] == 8)
+        {
+            Some(
+                tapid_lockfile::ImportedNpmLockfile::from_json(&bytes)
+                    .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if ci && imported.is_some() {
+        return Err(OperationalError::new(
+            ErrorKind::Lockfile,
+            "ci requires an ordinary verified-tree lock; use install --frozen to install imported npm locks",
+        ));
+    }
+    let has_imported_lock = imported.is_some();
+    if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
+        imported = None;
+    }
+    if lock_path.is_file() && !has_imported_lock {
         read_lock(&lock_path)?;
     }
     session.lock = Some(ActivationLock::acquire(&project_dir)?);
@@ -364,6 +391,17 @@ fn perform_install(
                 .context("cannot preserve tapid.lock for recovery"));
         }
     };
+    if imported.is_some() {
+        imported = original_lock
+            .as_deref()
+            .map(|bytes| {
+                let input = std::str::from_utf8(bytes)
+                    .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
+                tapid_lockfile::ImportedNpmLockfile::from_json(input)
+                    .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))
+            })
+            .transpose()?;
+    }
     if offline || frozen || manifest_override.is_some() || package.is_some() {
         session.journal = Some(
             crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
@@ -418,7 +456,7 @@ fn perform_install(
             default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
         }
     });
-    let previous_lock = if lock_path.is_file() {
+    let previous_lock = if lock_path.is_file() && !has_imported_lock {
         Some(read_lock(&lock_path)?)
     } else {
         None
@@ -463,24 +501,35 @@ fn perform_install(
     } else {
         false
     };
-    if !offline && !frozen && !replay_existing {
+    if imported.is_some() || !offline && !frozen && !replay_existing {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let (lock, mut input, trees, store_transaction, workspace_links) =
-            online::resolve_and_fetch_with_lock(
-                &project_dir,
-                &root_manifest,
-                &store,
-                registry_fixture,
-                allow_unverified_registry_artifacts,
-                &registry_config,
-                if preserve {
-                    previous_lock.as_ref()
-                } else {
-                    None
-                },
-                &mut report_replay_progress,
-            )?;
+            if let Some(imported) = imported.as_mut() {
+                online::fetch_imported(
+                    imported,
+                    &project_dir,
+                    &store,
+                    offline,
+                    registry_fixture,
+                    &registry_config,
+                )?
+            } else {
+                online::resolve_and_fetch_with_lock(
+                    &project_dir,
+                    &root_manifest,
+                    &store,
+                    registry_fixture,
+                    allow_unverified_registry_artifacts,
+                    &registry_config,
+                    if preserve {
+                        previous_lock.as_ref()
+                    } else {
+                        None
+                    },
+                    &mut report_replay_progress,
+                )?
+            };
         if session.journal.is_none() {
             session.journal = Some(
                 crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
@@ -497,9 +546,15 @@ fn perform_install(
         journal
             .set_store_root(store.root())
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-        let lock_json = lock
-            .to_json()
-            .map_err(|error| OperationalError::from(error).context("cannot serialize lockfile"))?;
+        let lock_json = if let Some(imported) = imported.as_ref() {
+            imported
+                .to_json()
+                .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?
+        } else {
+            lock.to_json().map_err(|error| {
+                OperationalError::from(error).context("cannot serialize lockfile")
+            })?
+        };
         session.mutated = true;
         let publication = store_transaction
             .publish_for_lifecycle(&journal.coordinator_path())
@@ -569,7 +624,7 @@ fn perform_install(
         journal
             .finish()
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-        return Ok((lock.packages().len(), false));
+        return Ok((lock.packages().len(), imported.is_some()));
     }
     if !lock_path.is_file() {
         return Err(OperationalError::new(

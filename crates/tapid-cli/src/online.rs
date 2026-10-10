@@ -5,6 +5,8 @@ pub(crate) use locked::{
     hydrate_locked, prepare_locked_install, validate_locked_artifact_sources,
     validate_locked_routes,
 };
+mod npm_import;
+pub(crate) use npm_import::fetch_imported;
 mod resolution;
 #[cfg(test)]
 use resolution::{

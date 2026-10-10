@@ -216,7 +216,7 @@ tapid install --offline --project-dir ./example
 tapid install --frozen --project-dir ./example
 ```
 
-Ordinary install reuses a matching lock. Changed manifests preserve compatible locked selections; `tapid update` requests a fresh graph. Frozen installation keeps the exact graph and lock bytes, and can download missing pinned archives without resolving metadata. Offline installation forbids downloads, including with `--frozen`. Hydration requires a pinned HTTPS URL and registry-declared SHA-512 provenance, then verifies the archive and locked tree digest. Replay validates manifest digests, registry routes, platform contexts, tree markers, and managed output before atomic activation. `--store-dir PATH` selects another verified store root. See [locked installation decisions](docs/adr/0008-locked-install-selection-and-hydration.md).
+Ordinary install reuses a matching lock. Changed manifests preserve compatible locked selections; `tapid update` requests a fresh graph. Frozen installation with a native lock keeps the exact graph and lock bytes, and can download missing pinned archives without resolving metadata. Imported npm locks preserve selections but may record verified tree receipts. Offline installation forbids downloads, including with `--frozen`. Native lock hydration requires a pinned HTTPS URL and registry-declared SHA-512 provenance, then verifies the archive and locked tree digest. Replay validates manifest digests, registry routes, platform contexts, tree markers, and managed output before atomic activation. `--store-dir PATH` selects another verified store root. See [locked installation decisions](docs/adr/0008-locked-install-selection-and-hydration.md).
 
 ## Supported subset and limitations
 
@@ -274,3 +274,5 @@ The Tapid CLI and its supporting crates in this repository are developed by Lime
 Copyright 2026 LimeTip AB.
 
 Run `tapid license` to print the complete license and copyright attribution embedded in the executable. This command works offline and does not require a project.
+
+Existing npm projects can use `tapid import-package-lock <path>` to preserve supported npm v3 selections without resolution. Import is offline; the first frozen install verifies pinned tarballs. See the [migration and rollback guide](docs/npm-lockfile-import.md). Tapid manages packages and lockfiles; Node.js, workerd, Wrangler, and deployment tools keep their existing roles.

@@ -71,6 +71,73 @@ Schemas 6 and 7 require sorted, unique, canonical roots for every nonempty packa
 
 Local fixtures are runtime-derived and do not imply live registry or cross-platform validation. Existing CI consumer jobs do not establish ADR 0005 containment; platform status requires the exact-commit evidence in [platform-validation.md](platform-validation.md).
 
+## npm workspaces
+
+Run commands from the workspace root, or pass `--project-dir <root>`. Tapid does
+not search ancestor directories for a workspace root. With no `--workspace`,
+commands select the root manifest or root script. `--workspace <name>` selects
+one member by its exact package name, including its scope. Paths, multiple
+selectors, and an implicit selection from the current member directory are not
+supported.
+
+Root `workspaces` accepts a string, an array of strings, or an object whose
+`packages` field is a string or array. Patterns use relative directory paths
+with `/` separators. A whole path component `*` matches one directory level.
+For example, `apps/news`, `packages/*`, and `packages/*/*` are supported.
+Overlapping patterns discover each canonical member once, and members are
+sorted by package name. Directories without a `package.json` entry are ignored;
+existing non-regular entries, including dangling manifest symlinks, are rejected. A
+missing directory traversed to expand `*` produces an error.
+
+Recursive `**`, partial-component wildcards such as `ui*`, `?`, character
+classes, braces, negation, extglobs, and backslash escapes are rejected with a
+diagnostic. Empty patterns and root-only patterns are also rejected. Absolute
+paths and parent-directory components are forbidden. This is a bounded subset
+of npm glob behavior, not full minimatch support.
+
+Every discovered member is linked under root `node_modules`, including members
+not declared as root dependencies. Ordinary semver declarations resolve to a
+matching local member before registry lookup. A local member with an incompatible
+version fails without registry fallback. The separate compatibility syntax
+`workspace:*`, `workspace:^`, and `workspace:~` uses any local version, a caret
+range based on the current local version, and a tilde range based on that version,
+respectively. Other `workspace:` forms and missing protocol targets are rejected.
+Members can depend on each other in cycles. Registry dependencies contributed by
+members are installed too, but incompatible ranges for the same registry package
+across members remain unsupported.
+
+`install --workspace <name>` activates the entire workspace graph. `add`,
+`remove`, and `update` change only the selected manifest, while root overrides
+continue to apply. `prune --workspace <name>` replays the root lock without
+changing the member manifest. The lock, shared-store coordination, and managed
+activation belong to the root; Tapid does not create member locks or member
+`node_modules`. Offline and frozen install revalidate member manifest digests,
+local identities, and dependency edges before rebuilding links from the root
+lock. They require verified registry trees in the store and perform no lookup.
+
+`run <script>` executes the root script, and `run <script> --workspace <name>`
+executes the selected member's script from its directory. Both use the root
+`tapid.toml` policy and containment root. Installation does not run lifecycle
+scripts.
+
+Root and member manifests must be regular files. Root scripts validate this
+before loading run policy. Internal directory symlinks
+are accepted only after canonical containment checks; member manifest symlinks,
+external directory targets, duplicate package names, and members inside
+`node_modules` are rejected before mutation. These checks do not prevent races
+with concurrent filesystem replacement.
+
+The CLI reference fixture in `crates/tapid-cli/tests/fixtures/workspace` has a
+root, `apps/news`, and `packages/ui`. The news app imports `@example/ui` through
+ordinary semver and a verified fixture registry dependency. The
+`workspace_acceptance` tests check Node imports after root/member install,
+offline/frozen rebuilding, and root/member add/remove/update/prune. Failure
+tests compare manifest, lock, store, and activation bytes and link targets.
+These tests run in the native CLI lane and in the existing news-site consumer
+job on Ubuntu 24.04 with Node 22, the reference environment for #150. Both
+require Node assertions. Local execution on another platform does not establish
+Linux or Windows results.
+
 ## npm aliases
 
 Declarations such as `"h3-v2": "npm:h3@2.0.1-rc.20"` install the verified `h3`
@@ -103,3 +170,7 @@ while preserving the target package. Alias-valued overrides remain unsupported.
 The synthetic alias fixture covers scoped routing, distinct versions, the h3
 prerelease declaration, bins, malformed declarations, and frozen/offline replay.
 This does not establish full npm compatibility or support for every arvtree dependency.
+
+## npm lockfile import
+
+`tapid import-package-lock <path>` imports the documented registry-only npm v3 subset offline into schema 8. Imported install/replay preserves selected nested versions, ancestor peer edges, supported distinct peer contexts, and optional/platform constraints without resolution. This is separate from ordinary online resolution and its direct-root peer limits. Links/workspaces and unrepresentable entries fail before writing. First frozen installation can fetch pinned artifacts and record verified tree receipts. See the [migration guide](npm-lockfile-import.md) for supported fields, platform differences, runtime boundaries, and rollback.

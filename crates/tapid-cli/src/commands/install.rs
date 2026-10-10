@@ -10,7 +10,7 @@ pub(crate) struct Args {
     /// Replay tapid.lock without network access. Requires a matching manifest and all verified trees in the store.
     #[arg(long)]
     pub(crate) offline: bool,
-    /// Keep the exact locked graph and lockfile. Downloads missing pinned artifacts unless --offline is also set.
+    /// Require pinned lockfile selections without re-resolution. Downloads missing artifacts unless --offline is set; imported locks may record verified tree receipts.
     #[arg(long)]
     pub(crate) frozen: bool,
     /// Permit npm metadata without registry-declared integrity. Not allowed with --offline or --frozen.
