@@ -21,6 +21,21 @@ pub(crate) fn fetch_imported(
     let selected = graph
         .selected_paths(std::env::consts::OS, std::env::consts::ARCH, current_libc())
         .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?;
+    for path in &selected {
+        let package = &graph.packages[path];
+        let origin = registry_config
+            .origin_for_name(&package.name)
+            .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
+        if origin != package.registry {
+            return Err(OperationalError::new(
+                ErrorKind::RegistryConfiguration,
+                format!(
+                    "registry identity mismatch for package {} at {path}: selected {origin}, imported {}",
+                    package.name, package.registry
+                ),
+            ));
+        }
+    }
     let fixture: Option<Fixture> = fixture_path
         .map(|path| {
             fs::read(path)

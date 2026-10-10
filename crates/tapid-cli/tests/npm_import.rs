@@ -145,6 +145,84 @@ fn npm_import_rejects_symlinked_manifest_without_mutation() {
 }
 
 #[test]
+fn npm_import_revalidates_routing_before_cached_or_fixture_artifacts() {
+    for cached in [false, true] {
+        let project = reference_project("npm-import-routing");
+        assert!(
+            invoke(&project, &["import-package-lock", "package-lock.json"])
+                .status
+                .success()
+        );
+        let store = project.path().join("store");
+        let install = |offline| {
+            let mut args = vec![
+                "install",
+                "--frozen",
+                "--store-dir",
+                store.to_str().unwrap(),
+            ];
+            if offline {
+                args.push("--offline");
+            } else {
+                args.extend(["--registry-fixture", "registry.json"]);
+            }
+            invoke(&project, &args)
+        };
+        if cached {
+            let output = install(false);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+        let manifest = fs::read(project.path().join("package.json")).unwrap();
+        project
+            .write("node_modules/keep.txt", b"prior active tree")
+            .unwrap();
+        project
+            .write(".tapid-managed", b"tapid-managed-v1\n")
+            .unwrap();
+        project.write("store/keep.txt", b"prior store").unwrap();
+        project.write("tapid.toml", b"[registries.default]\nurl = \"https://packages.example.invalid\"\ntoken-env = \"TAPID_IMPORT_ROUTE_TEST_TOKEN\"\n").unwrap();
+        for offline in [false, true] {
+            let output = install(offline);
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("registry identity mismatch"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                manifest
+            );
+            assert_eq!(
+                fs::read(project.path().join("node_modules/keep.txt")).unwrap(),
+                b"prior active tree"
+            );
+            assert_eq!(
+                fs::read(project.path().join("store/keep.txt")).unwrap(),
+                b"prior store"
+            );
+        }
+        if cached {
+            // Routing validation does not require credentials for store-only replay.
+            project.write("tapid.toml", b"[registries.default]\nurl = \"https://registry.npmjs.org\"\ntoken-env = \"TAPID_IMPORT_ROUTE_TEST_TOKEN\"\n").unwrap();
+            let output = install(true);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+        }
+    }
+}
+
+#[test]
 fn npm_import_preserves_nested_versions_peers_sources_and_optional_constraints() {
     let project = reference_project("npm-import-reference");
     let manifest = fs::read(project.path().join("package.json")).unwrap();
