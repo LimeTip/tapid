@@ -1,4 +1,5 @@
 mod request;
+mod uncontained;
 #[cfg(target_os = "macos")]
 use request::TrustedNodeRuntime;
 #[cfg(any(windows, test))]
@@ -16,6 +17,7 @@ use request::{
 };
 #[cfg(any(windows, test))]
 use request::{serialize_windows_command_line_units, windows_environment_block_units};
+pub use uncontained::execute_uncontained;
 
 mod supervision;
 #[cfg(any(target_os = "macos", target_os = "linux", windows, test))]

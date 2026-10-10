@@ -88,6 +88,12 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
             .warnings
             .iter()
             .map(|warning| match warning {
+                Warning::UnapprovedDependencyScriptsAllowed => {
+                    "UNAPPROVED_DEPENDENCY_SCRIPTS_ALLOWED"
+                }
+                Warning::DependencyScriptsWithoutContainment => {
+                    "DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT"
+                }
                 Warning::UnverifiedRegistryArtifactsAllowed => {
                     "UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED"
                 }

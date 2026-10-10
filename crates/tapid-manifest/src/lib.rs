@@ -9,7 +9,10 @@ mod parse;
 mod workspace;
 
 pub use error::ManifestError;
-pub use lifecycle::{dependency_lifecycle_commands, dependency_lifecycle_hooks};
+pub use lifecycle::{
+    DependencyLifecyclePlan, dependency_lifecycle_commands, dependency_lifecycle_hooks,
+    dependency_lifecycle_plan,
+};
 pub use model::{BinTarget, DependencyKind, PackageBin, PackageManifest};
 pub use workspace::{Workspace, WorkspaceMember};
 
