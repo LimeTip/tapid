@@ -48,6 +48,19 @@ pub(crate) fn read_manifest(path: &std::path::Path) -> Result<PackageManifest, S
 pub(crate) fn read_manifest_typed(
     path: &std::path::Path,
 ) -> Result<PackageManifest, OperationalError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|source| {
+        OperationalError::from_source(ErrorKind::Manifest, source)
+            .context(format!("cannot read manifest {}", path.display()))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(OperationalError::new(
+            ErrorKind::Manifest,
+            format!(
+                "manifest must be a regular file, not a symlink: {}",
+                path.display()
+            ),
+        ));
+    }
     let file = File::open(path).map_err(|source| {
         OperationalError::from_source(ErrorKind::Manifest, source)
             .context(format!("cannot read manifest {}", path.display()))
