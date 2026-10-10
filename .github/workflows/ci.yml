@@ -132,7 +132,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $node = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+          $node = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
           if (-not [IO.Path]::IsPathFullyQualified($node) -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
             throw 'Native write tests require an absolute existing Node executable'
           }

@@ -132,7 +132,7 @@ const assertInstallerCache = (ci: string) => {
   // plus the reviewed Windows absolute-Node prerequisite (frozen in this digest).
   assertTestBootstrap(ci);
   const original = native.replace(testCacheInputs, '').replaceAll(compilerEnv, '').replaceAll(pin, 'Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2');
-  assert.equal(digest(original), 'b923c74829b86d40bfb30fb3799d2202671867185bc49a44b71af0fa13fc59da');
+  assert.equal(digest(original), '770d185502d7f29333d97348f85be09b9ccbc9f30f5a99d125bb3b82ece59ccd');
 };
 const assertSourceInstallers = (sh: string, ps: string) => {
   const unixStart = sh.indexOf('if [ "$SOURCE_REF_SET" -eq 1 ]; then');
