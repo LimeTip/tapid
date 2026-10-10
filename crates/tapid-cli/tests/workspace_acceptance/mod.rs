@@ -335,13 +335,17 @@ fn root_run_rejects_symlinked_manifest_before_script_or_policy_loading() {
         fs::create_dir(project.path().join("directory")).unwrap();
         symlink(target, project.path().join("package.json")).unwrap();
         let before = snapshot(project.path());
-        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+        command
             .args(["run", "probe"])
             .current_dir(project.path())
             .env_clear()
-            .env("HOME", home.path())
-            .output()
-            .unwrap();
+            .env("HOME", home.path());
+        // Coverage profiles belong outside the project whose state is asserted below.
+        if let Some(profile_file) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile_file);
+        }
+        let output = command.output().unwrap();
         assert_eq!(output.status.code(), Some(1));
         assert!(
             String::from_utf8_lossy(&output.stderr)
