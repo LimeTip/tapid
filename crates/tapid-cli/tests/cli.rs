@@ -9,6 +9,9 @@ use std::{
 };
 use tapid_lockfile::Lockfile;
 
+#[path = "cli_cases/ci.rs"]
+mod ci_tests;
+
 /// Verifies exact license output with no application environment and invalid project files.
 #[test]
 fn license_prints_complete_apache_text_without_accessing_a_project() {
@@ -5156,6 +5159,36 @@ fn install_supports_an_explicit_dynamic_project_directory() {
     );
     assert!(project.join("node_modules").is_dir());
     cleanup(parent);
+}
+
+#[test]
+fn ci_replaces_managed_modules_without_changing_project_files_or_running_scripts() {
+    let project = tapid_test_support::TempProject::new("ci-empty").unwrap();
+    let dir = project.path().to_path_buf();
+    let manifest =
+        r#"{"name":"demo","version":"1.0.0","scripts":{"preinstall":"touch SHOULD_NOT_EXIST"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let lock = lock_for_manifest(manifest).to_json().unwrap();
+    project.write("tapid.lock", lock.as_bytes()).unwrap();
+    let store = dir.join("store");
+    let args = ["ci", "--store-dir", store.to_str().unwrap()];
+    for _ in 0..2 {
+        let output = run(&dir, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(dir.join("node_modules").is_dir());
+        assert!(!dir.join("node_modules/stale").exists());
+        assert!(!dir.join("SHOULD_NOT_EXIST").exists());
+        assert_eq!(fs::read_to_string(dir.join("tapid.lock")).unwrap(), lock);
+        assert_eq!(
+            fs::read_to_string(dir.join("package.json")).unwrap(),
+            manifest
+        );
+        fs::write(dir.join("node_modules/stale"), "stale").unwrap();
+    }
 }
 
 #[test]
