@@ -432,6 +432,330 @@ fn appcontainer_actual_token_file_access_probe() {
 }
 
 #[test]
+fn appcontainer_node_ordinary_project_write_mutation_contract() {
+    ordinary_project_write_contract(false);
+}
+
+#[test]
+fn appcontainer_node_write_only_grant_denies_read() {
+    ordinary_project_write_contract(true);
+}
+
+fn ordinary_project_write_contract(write_only: bool) {
+    use super::super::windows_environment_block_units;
+    use super::filesystem::windows_acl::{initialize_inheritance, read_acl};
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, TOKEN_MANDATORY_LABEL, TokenIntegrityLevel,
+    };
+
+    fn run_node(
+        container: &WindowsAppContainer,
+        node: &std::path::Path,
+        root: &std::path::Path,
+        script: &str,
+    ) -> (WindowsChildTermination, Vec<u8>, Vec<u8>) {
+        let program: Vec<u16> = node.as_os_str().encode_wide().collect();
+        let arguments: Vec<Vec<u16>> = [
+            "--preserve-symlinks",
+            "--preserve-symlinks-main",
+            "-e",
+            script,
+        ]
+        .iter()
+        .map(|arg| arg.encode_utf16().collect())
+        .collect();
+        let command =
+            super::super::serialize_windows_command_line_units(&program, &arguments, false)
+                .unwrap();
+        let environment =
+            windows_environment_block_units(&std::collections::BTreeMap::new()).unwrap();
+        let application: Vec<u16> = program.into_iter().chain(Some(0)).collect();
+        let cwd: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+        let limits =
+            ExecutionLimits::new(Some(10), Some(16384), Some(8), Some(512 * 1024 * 1024)).unwrap();
+        let job = WindowsJob::new(&limits, false).unwrap();
+        let mut pipes = WindowsStdioPipes::new().unwrap();
+        let mut child = WindowsSuspendedChild::create_with_stdio(
+            container,
+            &application,
+            &command,
+            &environment,
+            &cwd,
+            &mut pipes,
+        )
+        .unwrap();
+        job.assign_suspended_process(child.process_handle())
+            .unwrap();
+        let mut token = 0;
+        assert_ne!(
+            unsafe { OpenProcessToken(child.process_handle(), TOKEN_QUERY, &mut token) },
+            0
+        );
+        let mut required = 0;
+        unsafe { GetTokenInformation(token, TokenIntegrityLevel, null_mut(), 0, &mut required) };
+        // usize storage gives TOKEN_MANDATORY_LABEL proper native alignment.
+        let mut storage = vec![0usize; (required as usize).div_ceil(size_of::<usize>())];
+        assert_ne!(
+            unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenIntegrityLevel,
+                    storage.as_mut_ptr().cast(),
+                    required,
+                    &mut required,
+                )
+            },
+            0
+        );
+        let label = unsafe { &*storage.as_ptr().cast::<TOKEN_MANDATORY_LABEL>() };
+        let sid = label.Label.Sid;
+        let rid = unsafe { *GetSidSubAuthority(sid, u32::from(*GetSidSubAuthorityCount(sid)) - 1) };
+        unsafe { CloseHandle(token) };
+        eprintln!("actual verified AppContainer token integrity RID={rid}");
+        assert_eq!(rid, 4096, "expected low-integrity AppContainer token");
+        let capture =
+            WindowsOutputCapture::start(pipes.into_parent_readers().unwrap(), Some(16384));
+        let termination = child
+            .resume_and_wait_for_status(&job, 10000, capture.output_limit_exceeded(), None)
+            .unwrap();
+        let (stdout, stderr) = capture.finish().unwrap();
+        job.wait_for_active_process_zero_notification(5000).unwrap();
+        drop(child);
+        drop(job);
+        (termination, stdout, stderr)
+    }
+
+    let node_source = std::env::var_os("TAPID_TEST_NODE")
+        .expect("native write acceptance requires TAPID_TEST_NODE");
+    let project = tapid_test_support::TempProject::new("ordinary-write-contract").unwrap();
+    let runtime = tapid_test_support::TempProject::new("ordinary-write-runtime").unwrap();
+    let root = std::fs::canonicalize(project.path()).unwrap();
+    let runtime_root = std::fs::canonicalize(runtime.path()).unwrap();
+    let node = runtime_root.join("node.exe");
+    std::fs::copy(node_source, &node).unwrap();
+    let writable = root.join("writable");
+    let sibling = root.join("sibling");
+    std::fs::create_dir(&writable).unwrap();
+    std::fs::create_dir(&sibling).unwrap();
+    let existing = writable.join("existing.txt");
+    std::fs::write(&existing, b"preexisting content").unwrap();
+    let exact = sibling.join("exact.txt");
+    std::fs::write(&exact, b"exact before").unwrap();
+    // Only disposable inheritance bookkeeping is initialized; mandatory labels stay untouched.
+    initialize_inheritance(&root);
+    initialize_inheritance(&runtime_root);
+    let paths = [
+        root.clone(),
+        writable.clone(),
+        existing.clone(),
+        sibling.clone(),
+        root.parent().unwrap().to_path_buf(),
+        runtime_root.clone(),
+        node.clone(),
+        exact.clone(),
+    ];
+    let before: Vec<_> = paths.iter().map(|p| read_acl(p)).collect();
+    let mut container = WindowsAppContainer::create().unwrap();
+    let mut runtime_grant = WindowsFilesystemGrants::apply(
+        &container,
+        &[ResolvedFilesystemGrant {
+            path: runtime_root.clone(),
+            access: FilesystemAccess::Read,
+            kind: FilesystemGrantKind::DirectorySubtree,
+            source: super::super::FilesystemGrantSource::BackendRuntime,
+            binding: super::super::FilesystemBindingMode::CanonicalPath,
+        }],
+    )
+    .unwrap();
+    // Explicit metadata/traversal grant is independent of file-content authority.
+    let mut read_grant = WindowsPathAcl::grant(
+        &root,
+        container.sid(),
+        if write_only {
+            FilesystemAccess::ReadMetadata
+        } else {
+            FilesystemAccess::Read
+        },
+        FilesystemGrantKind::DirectorySubtree,
+    )
+    .unwrap();
+    let sibling_read_acl = read_acl(&sibling);
+    let mut write_grant = WindowsPathAcl::grant(
+        &writable,
+        container.sid(),
+        FilesystemAccess::Write,
+        FilesystemGrantKind::DirectorySubtree,
+    )
+    .unwrap();
+    assert_eq!(
+        read_acl(&sibling),
+        sibling_read_acl,
+        "write grant changed sibling"
+    );
+    assert_eq!(
+        read_acl(root.parent().unwrap()),
+        before[4],
+        "shared ancestor changed"
+    );
+    let icacls = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("icacls.exe");
+    for path in [&writable, &existing] {
+        let listing = std::process::Command::new(&icacls)
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        eprintln!(
+            "ordinary target (no label changes) {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&listing.stdout)
+        );
+    }
+    let mut exact_grant = WindowsPathAcl::grant(
+        &exact,
+        container.sid(),
+        FilesystemAccess::Write,
+        FilesystemGrantKind::ExactFile,
+    )
+    .unwrap();
+    // Inspect only this execution's allow ACEs, not the owner's preexisting full-control ACE.
+    let sid_length =
+        unsafe { windows_sys::Win32::Security::GetLengthSid(container.sid()) } as usize;
+    let sid_bytes = unsafe { std::slice::from_raw_parts(container.sid().cast::<u8>(), sid_length) };
+    for (path, expect_delete) in [(&writable, false), (&existing, true), (&exact, false)] {
+        let (_, acl) = read_acl(path);
+        let count = u16::from_le_bytes([acl[4], acl[5]]);
+        let mut offset = 8;
+        let mut effective = 0u32;
+        for _ in 0..count {
+            let size = u16::from_le_bytes([acl[offset + 2], acl[offset + 3]]) as usize;
+            let ace = &acl[offset..offset + size];
+            if ace[0] == 0 && ace.len() == 8 + sid_length && &ace[8..] == sid_bytes {
+                let mask = u32::from_le_bytes(ace[4..8].try_into().unwrap());
+                assert_eq!(
+                    mask & (0x00040000 | 0x00080000 | 0x40),
+                    0,
+                    "grant must not add WRITE_DAC, WRITE_OWNER or FILE_DELETE_CHILD"
+                );
+                if u32::from(ace[1]) & windows_sys::Win32::Security::INHERIT_ONLY_ACE == 0 {
+                    effective |= mask;
+                }
+            }
+            offset += size;
+        }
+        assert_eq!(
+            effective & windows_sys::Win32::Storage::FileSystem::DELETE != 0,
+            expect_delete,
+            "DELETE scope: {}",
+            path.display()
+        );
+        if write_only && path != &writable {
+            assert_eq!(
+                effective & windows_sys::Win32::Storage::FileSystem::FILE_READ_DATA,
+                0
+            );
+        }
+    }
+    eprintln!(
+        "native ACE masks verified: descendant DELETE only; ExactFile/root/authority bits unchanged"
+    );
+    let mutation_script = r#"
+const fs = require('node:fs');
+function denied(f) {try {f();} catch(e) {if(['EPERM','EACCES'].includes(e.code)) return; throw e;} throw Error('outside authority succeeded');}
+denied(()=>fs.writeFileSync('sibling/outside.txt','forbidden'));
+denied(()=>fs.renameSync('writable','moved-root'));
+fs.writeFileSync('sibling/exact.txt', 'exact overwrite');
+denied(()=>fs.renameSync('sibling/exact.txt','writable/exact-moved.txt'));
+fs.writeFileSync('writable/exact-replacement.txt','forbidden replacement');
+denied(()=>fs.renameSync('writable/exact-replacement.txt','sibling/exact.txt'));
+fs.unlinkSync('writable/exact-replacement.txt');
+console.log('ROOT_AND_SIBLING_DENIED');
+console.log('BEFORE_EXISTING_OVERWRITE');
+fs.writeFileSync('writable/existing.txt', 'overwrite');
+console.log('AFTER_EXISTING_OVERWRITE');
+fs.appendFileSync('writable/existing.txt', '+append');
+fs.truncateSync('writable/existing.txt', 4);
+fs.mkdirSync('writable/nested');
+fs.writeFileSync('writable/nested/new.txt', 'created');
+if (fs.readFileSync('writable/nested/new.txt', 'utf8') !== 'created') throw Error('reopen');
+fs.renameSync('writable/nested/new.txt', 'writable/nested/renamed.txt');
+fs.writeFileSync('writable/replacement.txt', 'replacement');
+fs.renameSync('writable/replacement.txt', 'writable/existing.txt');
+fs.unlinkSync('writable/nested/renamed.txt');
+fs.rmdirSync('writable/nested');
+console.log('MUTATION_CONTRACT_COMPLETE');
+"#;
+    let write_only_script = r#"
+const fs = require('node:fs');
+fs.writeFileSync('writable/existing.txt', 'write-only');
+fs.appendFileSync('writable/existing.txt', '+append');
+try {fs.readFileSync('writable/existing.txt'); throw Error('write-only read succeeded');}
+catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('WRITE_ONLY_READ_DENIED');}
+"#;
+    let script = if write_only {
+        write_only_script
+    } else {
+        mutation_script
+    };
+    let (termination, stdout, stderr) = run_node(&container, &node, &root, script);
+    eprintln!(
+        "ordinary Node result={termination:?}; stdout={}; stderr={}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    write_grant.restore().unwrap();
+    exact_grant.restore().unwrap();
+    read_grant.restore().unwrap();
+    // Reuse exactly the same AppContainer SID while keeping ONLY its runtime grant alive.
+    let revoked = r#"const fs=require('node:fs'); try {fs.openSync('writable/existing.txt','r+'); throw Error('revoked write succeeded');} catch(e) {if(!['EPERM','EACCES'].includes(e.code)) throw e; console.log('SAME_SID_REVOKED');}"#;
+    let (revoked_status, revoked_out, revoked_err) = run_node(&container, &node, &root, revoked);
+    runtime_grant.restore().unwrap();
+    for (path, baseline) in paths.iter().zip(&before) {
+        let restored = read_acl(path);
+        eprintln!(
+            "DACL_RECEIPT path={} before_control={:#06x} before_acl={:02x?} after_control={:#06x} after_acl={:02x?}",
+            path.display(),
+            baseline.0,
+            baseline.1,
+            restored.0,
+            restored.1
+        );
+        assert_eq!(
+            &restored,
+            baseline,
+            "exact DACL/control restoration: {}",
+            path.display()
+        );
+    }
+    container.cleanup().unwrap();
+    eprintln!(
+        "exact DACL/control restoration verified; same-SID result={revoked_status:?}; stdout={}; stderr={}",
+        String::from_utf8_lossy(&revoked_out),
+        String::from_utf8_lossy(&revoked_err)
+    );
+    assert_eq!(revoked_status, WindowsChildTermination::Exited(0));
+    assert!(String::from_utf8_lossy(&revoked_out).contains("SAME_SID_REVOKED"));
+    assert_eq!(
+        termination,
+        WindowsChildTermination::Exited(0),
+        "ordinary write/mutation contract failed; do not lower integrity labels to satisfy acceptance"
+    );
+    if write_only {
+        assert_eq!(std::fs::read(&existing).unwrap(), b"write-only+append");
+        assert!(String::from_utf8_lossy(&stdout).contains("WRITE_ONLY_READ_DENIED"));
+    } else {
+        assert_eq!(std::fs::read(&existing).unwrap(), b"replacement");
+        assert!(String::from_utf8_lossy(&stdout).contains("MUTATION_CONTRACT_COMPLETE"));
+        assert!(String::from_utf8_lossy(&stdout).contains("ROOT_AND_SIBLING_DENIED"));
+        assert!(!sibling.join("outside.txt").exists());
+        assert!(!root.join("moved-root").exists());
+        assert!(!writable.join("nested").exists());
+    }
+}
+
+#[test]
 fn appcontainer_child_is_verified_and_assigned_before_resume() {
     let (mut container, job, mut child) = create_appcontainer_child("exit 0");
     assert_eq!(child.resume_and_wait_for_exit(&job, 5_000).unwrap(), 0);
