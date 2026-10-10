@@ -1,7 +1,9 @@
 use crate::application::outcome::{ErrorKind, OperationalError};
 mod locked;
+mod npm_import;
 mod resolution;
 pub(crate) use locked::{prepare_locked_install, validate_locked_artifact_sources};
+pub(crate) use npm_import::fetch_imported;
 use resolution::resolve_with_fetch_routed_and_overrides;
 #[cfg(test)]
 use resolution::{

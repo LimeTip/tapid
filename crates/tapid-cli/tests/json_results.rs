@@ -80,6 +80,65 @@ fn json_parse_errors_and_unsupported_commands_do_not_echo_input() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(result["errors"][0]["code"], "JSON_UNSUPPORTED_COMMAND");
     assert!(!project.path().join("package.json").exists());
+    let (output, result) = invoke(
+        &project,
+        &["--json", "import-package-lock", "package-lock.json"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(result["operation"], "import-package-lock");
+    assert_eq!(result["errors"][0]["code"], "JSON_UNSUPPORTED_COMMAND");
+    assert!(!project.path().join("tapid.lock").exists());
+}
+
+#[test]
+fn json_install_replays_imported_npm_selections() {
+    let project = TempProject::new("json-npm-import").unwrap();
+    for (path, bytes) in [
+        (
+            "package.json",
+            include_bytes!("fixtures/npm-import/package.json").as_slice(),
+        ),
+        (
+            "package-lock.json",
+            include_bytes!("fixtures/npm-import/package-lock.json").as_slice(),
+        ),
+        (
+            "registry.json",
+            include_bytes!("fixtures/npm-import/registry.json").as_slice(),
+        ),
+    ] {
+        project.write(path, bytes).unwrap();
+    }
+    let import = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args(["import-package-lock", "package-lock.json"])
+        .output()
+        .unwrap();
+    assert!(
+        import.status.success(),
+        "{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let store = project.path().join("store");
+    for offline in [false, true] {
+        let mut args = vec![
+            "install",
+            "--json",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ];
+        if offline {
+            args.push("--offline");
+        } else {
+            args.extend(["--registry-fixture", "registry.json"]);
+        }
+        let (output, result) = invoke(&project, &args);
+        assert!(output.status.success(), "{result}");
+        assert_eq!(result["operation"], "install");
+        assert_eq!(result["data"]["package_count"], 4);
+        assert_eq!(result["outcome"], "success");
+    }
 }
 
 #[test]
