@@ -16,7 +16,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `--help`, `-h`, or `help` with `--json` | Successful `help` result, exit 0 |
 | `--version` or `-V` with `--json` | Successful `version` result, exit 0 |
 
-The exact `--json` token before the first `--` selects machine-readable parsing errors, even if Clap cannot parse the command. Values after `--` never select JSON mode. Parsing errors use operation `parse`; unsupported commands use operation `unsupported`. Neither echoes command-line values. Human help remains available without `--json`.
+The exact `--json` token before the first `--` selects machine-readable parsing errors, even if Clap cannot parse the command. Values after `--` never select JSON mode. Parsing errors use operation `parse`; unsupported commands retain their canonical top-level command name. A missing command uses operation `none`. Neither echoes command-line values. Human help remains available without `--json`.
 
 ## Schema version 1
 
@@ -25,11 +25,14 @@ Every object contains these fields:
 | Field | Meaning |
 | --- | --- |
 | `schema_version` | Integer `1` |
-| `operation` | Canonical command name, `help`, `version`, `parse`, or `unsupported` |
+| `operation` | Canonical top-level command name, `help`, `version`, `parse`, or `none` |
 | `outcome` | `success`, `failure`, or `partial` |
-| `project` | Effective project directory; null before command execution |
+| `project` | Bounded display of the effective project directory; null before command execution |
+| `project_path` | Lossless native project path record; null before command execution |
 | `changes.state` | `unchanged`, `rolled_back`, `committed`, `committed_cleanup_pending`, or `recovery_required` |
-| `changes.files` | Sorted, deduplicated affected project paths |
+| `changes.files` | Sorted, deduplicated display paths for affected project outputs |
+| `changes.paths` | Sorted, deduplicated lossless native path records for affected project outputs |
+| `truncated_fields` | Sorted JSON pointers to display or metadata scalars shortened by the byte limit |
 | `warnings` | Sorted, deduplicated warning codes |
 | `errors` | Error objects with a stable `code`; operational errors also have `phase` of `operation` or `recovery` |
 | `retry` | null or typed retry advice |
@@ -41,7 +44,11 @@ Install and mutating lifecycle data contains `package_count` and `replayed`. Gra
 
 Outdated data contains `entries`, `total_entries`, and `truncated`. Each entry contains `identity`, `kind`, `declared`, `locked`, `newest_compatible`, `newest_available`, and `error`. Unknown versions are null. The error is null or an object with a typed code. Entries sort by identity and dependency kind. Metadata failure in any entry makes the overall outcome `partial`, even if that entry falls beyond the output limit. Partial outdated reports retain exit 0; callers must inspect `outcome` and entry errors.
 
-Default output includes at most 100 outdated entries. Each path or metadata scalar is limited to 4096 UTF-8 bytes, removes control characters, and redacts HTTP URL user information, query values, and fragments. Scalar truncation can shorten a displayed name or requirement; these fields are display data, not identifiers for automatic mutation. Transaction paths describe only `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are represented by state. Results omit timings and random transaction identifiers. File ordering, warning ordering, and entry ordering are deterministic for the same operation data.
+Default output includes at most 100 outdated entries. Use `tapid --json outdated --json-limit 250` to select a larger limit, or `--json-limit 0` to retrieve every entry. This option requires `--json`, accepts a nonnegative integer, and affects only result rendering. It does not change resolution or project state. Each display path or metadata scalar is limited to 4096 UTF-8 bytes, removes control characters, and redacts HTTP URL user information, query values, and fragments. Scalar truncation can shorten a displayed name or requirement. Every shortened scalar is identified by a pointer in `truncated_fields`, such as `/data/entries/0/declared` or `/project`. These fields are display data, not identifiers for automatic mutation. Lossless path records are described below. Transaction paths describe only `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are represented by state. Results omit timings and random transaction identifiers. File ordering, warning ordering, and entry ordering are deterministic for the same operation data.
+
+For filesystem inspection and recovery, use `project_path` and `changes.paths`. Each record contains `encoding` and `value`. Encoding `utf8` preserves the exact path string, including characters represented by JSON escapes. Encoding `unix_bytes_base64` preserves native Unix path bytes; `windows_utf16le_base64` preserves Windows UTF-16 code units as little-endian bytes. Decode base64 records to the host's native path type without replacing invalid Unicode. The display fields can redact, remove controls, or truncate characters, and different paths can therefore share one display string. Lossless records preserve each distinct native path and never return a shortened path.
+
+Each lossless record permits at most 128 KiB of UTF-8 or native path bytes before base64 encoding. A record beyond that capacity has null `value` and `unavailable: "capacity_exceeded"`. Consumers must stop automatic recovery if a required path is unavailable or its encoding is unknown. The lossless values are filesystem data; render their control characters safely when displaying them. They contain no raw ANSI bytes in the serialized JSON stream.
 
 Package text is untrusted data. Never execute it or treat it as recovery advice. Only `changes.state` and `retry` describe the transaction decision. `after_correction` means correct the failure before retrying. `after_contention` means wait for the competing operation. `do_not_repeat` means the change committed; retrying may repeat a mutation. `recover_first` means inspect the affected paths and recover the interrupted operation first. Handled operational failures exit 1, including failures after a durable commit.
 

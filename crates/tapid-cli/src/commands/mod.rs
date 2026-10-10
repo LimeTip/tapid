@@ -28,6 +28,22 @@ pub(crate) struct Cli {
     pub(crate) command: Option<Command>,
 }
 
+impl Cli {
+    // Check after Clap propagates global arguments. A subcommand's `requires`
+    // check cannot see --json when it appears before the subcommand.
+    pub(crate) fn validate_json_options(&self) -> Result<(), clap::Error> {
+        if !self.json
+            && matches!(&self.command, Some(Command::Outdated(args)) if args.json_limit.is_some())
+        {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "--json-limit requires --json",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     /// Print the Apache-2.0 license and copyright attribution.
@@ -101,7 +117,7 @@ pub(crate) enum Command {
   tapid outdated
   tapid outdated --workspace web"
     )]
-    Outdated(lifecycle::ReadOnlyArgs),
+    Outdated(lifecycle::OutdatedArgs),
     /// Rebuild node_modules from tapid.lock to remove stale packages.
     #[command(
         long_about = "Replay tapid.lock from the verified store to replace managed node_modules and remove stale packages.\n\nRequires a matching package.json, a valid lockfile, and all referenced verified trees. Uses frozen replay without network access. Does not delete cached trees from the store.\n\n--registry-fixture and --allow-unverified-registry-artifacts have no effect on this command.",
@@ -120,6 +136,27 @@ pub(crate) enum Command {
     Upgrade(upgrade::Args),
 }
 
+impl Command {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::License => "license",
+            Self::VerifyReleaseRecord(_) => "__verify-release-record",
+            Self::PrepareReleaseInstall(_) => "__prepare-release-install",
+            Self::Init(_) => "init",
+            Self::Manifest(_) => "manifest",
+            Self::Lock(_) => "lock",
+            Self::Run(_) => "run",
+            Self::Install(_) => "install",
+            Self::Add(_) => "add",
+            Self::Remove(_) => "remove",
+            Self::Update(_) => "update",
+            Self::Outdated(_) => "outdated",
+            Self::Prune(_) => "prune",
+            Self::Upgrade(_) => "upgrade",
+        }
+    }
+}
+
 /// Routes a parsed command to its handler, or prints usage guidance when no command is given.
 pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
     if json
@@ -135,7 +172,11 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
             )
         )
     {
-        return crate::output::json::protocol_error("unsupported", "JSON_UNSUPPORTED_COMMAND", 1);
+        return crate::output::json::protocol_error(
+            command.as_ref().map_or("none", Command::operation),
+            "JSON_UNSUPPORTED_COMMAND",
+            1,
+        );
     }
     match command {
         Some(Command::License) => license::run(),

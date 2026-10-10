@@ -36,6 +36,28 @@ fn json_install_success_and_handled_failure() {
     assert_eq!(result["outcome"], "success");
     assert_eq!(result["data"]["package_count"], 0);
     assert_eq!(result["changes"]["state"], "committed");
+    assert_eq!(result["project_path"]["encoding"], "utf8");
+    assert_eq!(
+        result["project_path"]["value"],
+        std::fs::canonicalize(project.path())
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(result["truncated_fields"], serde_json::json!([]));
+    let native_files = result["changes"]["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|path| {
+            assert_eq!(path["encoding"], "utf8");
+            path["value"].clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        native_files,
+        *result["changes"]["files"].as_array().unwrap()
+    );
     std::fs::remove_file(project.path().join("tapid.lock")).unwrap();
     let (output, result) = invoke(
         &project,
@@ -193,4 +215,102 @@ fn json_help_and_version_are_successful_without_project_access() {
         assert!(result["project"].is_null());
     }
     assert_eq!(std::fs::read_dir(project.path()).unwrap().count(), 2);
+}
+
+#[test]
+fn json_workspace_selection_errors_have_consistent_codes() {
+    let project = TempProject::new("json-workspace-codes").unwrap();
+    project
+        .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+        .unwrap();
+    for operation in ["install", "update", "outdated", "prune"] {
+        let (output, result) = invoke(&project, &["--json", operation, "--workspace", "missing"]);
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(result["errors"][0]["code"], "INVALID_REQUEST", "{result}");
+    }
+}
+
+#[test]
+fn json_outdated_limit_can_retrieve_entries_beyond_the_default() {
+    use sha2::{Digest, Sha256};
+    let project = TempProject::new("json-outdated-limit").unwrap();
+    let dependencies = (0..105)
+        .map(|index| (format!("package-{index:03}"), serde_json::json!("^1.0.0")))
+        .collect::<serde_json::Map<_, _>>();
+    let manifest =
+        serde_json::json!({"name":"app", "version":"1.0.0", "dependencies": dependencies})
+            .to_string();
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let digest = format!(
+        "sha256-{}",
+        hex::encode(Sha256::digest(manifest.as_bytes()))
+    );
+    let lock = tapid_lockfile::Lockfile::new(&digest).unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+    project
+        .write("registry.json", br#"{"packages":[]}"#)
+        .unwrap();
+    for (limit, expected, truncated) in [
+        (None, 100, true),
+        (Some("103"), 103, true),
+        (Some("0"), 105, false),
+    ] {
+        let mut args = vec!["--json", "outdated", "--registry-fixture", "registry.json"];
+        if let Some(limit) = limit {
+            args.extend(["--json-limit", limit]);
+        }
+        let (output, result) = invoke(&project, &args);
+        assert!(output.status.success(), "{result}");
+        assert_eq!(
+            result["data"]["entries"].as_array().unwrap().len(),
+            expected
+        );
+        assert_eq!(result["data"]["truncated"], truncated);
+        assert_eq!(result["data"]["total_entries"], 105);
+        assert_eq!(result["outcome"], "partial");
+    }
+    let (output, result) = invoke(
+        &project,
+        &[
+            "outdated",
+            "--json-limit",
+            "0",
+            "--json",
+            "--registry-fixture",
+            "registry.json",
+        ],
+    );
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["data"]["entries"].as_array().unwrap().len(), 105);
+    let (output, result) = invoke(&project, &["--json", "outdated", "--json-limit", "-1"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(result["errors"][0]["code"], "ARGUMENT_INVALID");
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args(["outdated", "--json-limit", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn json_unsupported_results_preserve_canonical_command_names() {
+    let project = TempProject::new("json-unsupported-operation").unwrap();
+    for (args, operation) in [
+        (vec!["--json", "init"], "init"),
+        (vec!["--json", "run", "test"], "run"),
+        (vec!["--json", "manifest", "validate"], "manifest"),
+        (vec!["--json", "lock", "verify"], "lock"),
+        (vec!["--json", "license"], "license"),
+        (vec!["--json", "upgrade"], "upgrade"),
+        (vec!["--json"], "none"),
+    ] {
+        let (output, result) = invoke(&project, &args);
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(result["operation"], operation);
+        assert_eq!(result["errors"][0]["code"], "JSON_UNSUPPORTED_COMMAND");
+    }
+    assert_eq!(std::fs::read_dir(project.path()).unwrap().count(), 0);
 }

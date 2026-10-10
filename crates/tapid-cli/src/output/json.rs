@@ -4,24 +4,37 @@ use crate::application::{
     lifecycle::OutdatedReport,
     outcome::{ChangeState, OperationFailure, OperationOutcome, RetryAdvice, Warning},
 };
+mod paths;
+
 use serde_json::{Value, json};
 use std::{io::Write, process::ExitCode};
 
-const MAX_ENTRIES: usize = 100;
 const MAX_TEXT_BYTES: usize = 4096;
 
 // Metadata is data, never a diagnostic or recovery instruction. Remove terminal
 // controls and redact credential-bearing URLs before bounding each scalar.
-fn text(value: impl std::fmt::Display) -> String {
+fn text(value: impl std::fmt::Display) -> (String, bool) {
     let value = crate::application::outcome::sanitize(&value.to_string());
     let mut result = String::new();
     for character in value.chars().filter(|c| !c.is_control()) {
         if result.len() + character.len_utf8() > MAX_TEXT_BYTES {
-            break;
+            return (result, true);
         }
         result.push(character);
     }
-    result
+    (result, false)
+}
+
+fn recorded_text(
+    value: impl std::fmt::Display,
+    pointer: &str,
+    truncated_fields: &mut Vec<String>,
+) -> String {
+    let (value, truncated) = text(value);
+    if truncated {
+        truncated_fields.push(pointer.to_owned());
+    }
+    value
 }
 
 fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) -> Value {
@@ -32,15 +45,44 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
         ChangeState::CommittedCleanupPending => "committed_cleanup_pending",
         ChangeState::RecoveryRequired => "recovery_required",
     });
-    let mut files = changes.map_or_else(Vec::new, |changes| {
-        changes
-            .changed_files
-            .iter()
-            .map(|path| text(path.display()))
-            .collect::<Vec<_>>()
+    let mut truncated_fields = Vec::new();
+    let project_path = changes.map(|changes| {
+        std::fs::canonicalize(&changes.project_dir).unwrap_or_else(|_| {
+            if changes.project_dir.is_absolute() {
+                changes.project_dir.clone()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_default()
+                    .join(&changes.project_dir)
+            }
+        })
     });
-    files.sort();
-    files.dedup();
+    let project = project_path
+        .as_ref()
+        .map(|path| recorded_text(path.display(), "/project", &mut truncated_fields));
+    let mut native_files = changes.map_or_else(Vec::new, |changes| changes.changed_files.clone());
+    native_files.sort();
+    native_files.dedup();
+    let mut display_files = std::collections::BTreeMap::<String, bool>::new();
+    for path in &native_files {
+        let (value, truncated) = text(path.display());
+        *display_files.entry(value).or_default() |= truncated;
+    }
+    let files = display_files
+        .into_iter()
+        .enumerate()
+        .map(|(index, (value, truncated))| {
+            if truncated {
+                truncated_fields.push(format!("/changes/files/{index}"));
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    let native_files = native_files
+        .iter()
+        .map(|path| paths::encode(path))
+        .collect::<Vec<_>>();
+    truncated_fields.sort_unstable();
     let mut warnings = changes.map_or_else(Vec::new, |changes| {
         changes
             .warnings
@@ -59,14 +101,10 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
         "schema_version": 1,
         "operation": operation,
         "outcome": outcome,
-        "project": changes.map(|changes| {
-            let path = std::fs::canonicalize(&changes.project_dir).unwrap_or_else(|_| {
-                if changes.project_dir.is_absolute() { changes.project_dir.clone() }
-                else { std::env::current_dir().unwrap_or_default().join(&changes.project_dir) }
-            });
-            text(path.display())
-        }),
-        "changes": {"state": state, "files": files},
+        "project": project,
+        "project_path": project_path.as_ref().map(|path| paths::encode(path)),
+        "changes": {"state": state, "files": files, "paths": native_files},
+        "truncated_fields": truncated_fields,
         "warnings": warnings,
         "errors": [],
         "retry": null,
@@ -130,11 +168,11 @@ pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
     emit(result, 0)
 }
 
-pub(crate) fn outdated(report: &OutdatedReport, operation: &str) -> ExitCode {
-    emit(outdated_result(report, operation), 0)
+pub(crate) fn outdated(report: &OutdatedReport, operation: &str, limit: usize) -> ExitCode {
+    emit(outdated_result(report, operation, limit), 0)
 }
 
-fn outdated_result(report: &OutdatedReport, operation: &str) -> Value {
+fn outdated_result(report: &OutdatedReport, operation: &str, limit: usize) -> Value {
     let partial = report
         .entries
         .iter()
@@ -144,24 +182,35 @@ fn outdated_result(report: &OutdatedReport, operation: &str) -> Value {
         if partial { "partial" } else { "success" },
         Some(&report.outcome),
     );
+    let mut truncated_fields = result["truncated_fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let mut entries = report.entries.iter().collect::<Vec<_>>();
     entries.sort_by(|a, b| (&a.identity, &a.kind).cmp(&(&b.identity, &b.kind)));
     let entries = entries
         .into_iter()
-        .take(MAX_ENTRIES)
-        .map(|entry| {
+        .take(if limit == 0 { usize::MAX } else { limit })
+        .enumerate()
+        .map(|(index, entry)| {
+            let mut field = |value: &str, key: &str| recorded_text(value, &format!("/data/entries/{index}/{key}"), &mut truncated_fields);
             json!({
-                "identity": text(&entry.identity),
-                "kind": text(&entry.kind),
-                "declared": text(&entry.declared),
-                "locked": entry.locked.as_ref().map(text),
-                "newest_compatible": entry.newest_compatible.as_ref().map(text),
-                "newest_available": entry.newest_available.as_ref().map(text),
+                "identity": field(&entry.identity, "identity"),
+                "kind": field(&entry.kind, "kind"),
+                "declared": field(&entry.declared, "declared"),
+                "locked": entry.locked.as_ref().map(|value| field(value, "locked")),
+                "newest_compatible": entry.newest_compatible.as_ref().map(|value| field(value, "newest_compatible")),
+                "newest_available": entry.newest_available.as_ref().map(|value| field(value, "newest_available")),
                 "error": entry.diagnostic.as_ref().map(|error| json!({"code": error.kind.code()})),
             })
         })
         .collect::<Vec<_>>();
-    result["data"] = json!({"entries": entries, "total_entries": report.entries.len(), "truncated": report.entries.len() > MAX_ENTRIES});
+    truncated_fields.sort_unstable();
+    result["truncated_fields"] = json!(truncated_fields);
+    result["data"] = json!({"entries": entries, "total_entries": report.entries.len(), "truncated": limit != 0 && report.entries.len() > limit});
     result
 }
 
@@ -231,7 +280,7 @@ mod tests {
             entries,
             outcome: OperationOutcome::unchanged(Path::new("project")),
         };
-        let result = outdated_result(&report, "outdated");
+        let result = outdated_result(&report, "outdated", 100);
         assert_eq!(result["outcome"], "partial");
         assert_eq!(result["data"]["truncated"], true);
         assert_eq!(result["data"]["total_entries"], 101);
@@ -240,7 +289,47 @@ mod tests {
         assert!(!result.to_string().contains("secret"));
         assert!(!result.to_string().contains("hidden"));
         assert!(!result.to_string().contains("fragment"));
-        assert!(text("界".repeat(4096)).len() <= MAX_TEXT_BYTES);
-        assert!(!text("a\u{1b}[31m\n").contains('\u{1b}'));
+        assert!(text("界".repeat(4096)).0.len() <= MAX_TEXT_BYTES);
+        assert!(!text("x".repeat(MAX_TEXT_BYTES)).1);
+        assert!(!text("a\u{1b}[31m\n").0.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn shortened_scalars_are_marked_and_recovery_paths_remain_complete() {
+        let project = tapid_test_support::TempProject::new("json-path-display").unwrap();
+        let long_path = project.path().join("界".repeat(2000));
+        let mut outcome = OperationOutcome::unchanged(&long_path);
+        for name in ["node_modules", "package.json", "tapid.lock"] {
+            outcome.changed_files.push(long_path.join(name));
+        }
+        let result = envelope("install", "failure", Some(&outcome));
+        assert_eq!(result["project_path"]["encoding"], "utf8");
+        assert_eq!(result["project_path"]["value"], long_path.to_str().unwrap());
+        assert_eq!(
+            result["changes"]["paths"][0]["value"],
+            long_path.join("node_modules").to_str().unwrap()
+        );
+        assert_eq!(result["changes"]["paths"].as_array().unwrap().len(), 3);
+        let shortened = result["truncated_fields"].as_array().unwrap();
+        assert!(shortened.contains(&json!("/project")));
+        assert!(shortened.contains(&json!("/changes/files/0")));
+        assert!(result["project"].as_str().unwrap().len() <= MAX_TEXT_BYTES);
+
+        let report = OutdatedReport {
+            entries: vec![crate::application::lifecycle::OutdatedEntry {
+                identity: "x".repeat(5000),
+                kind: "dependencies".into(),
+                declared: "*".into(),
+                locked: None,
+                newest_compatible: None,
+                newest_available: None,
+                diagnostic: None,
+            }],
+            outcome,
+        };
+        let result = outdated_result(&report, "outdated", 100);
+        let shortened = result["truncated_fields"].as_array().unwrap();
+        assert!(shortened.contains(&json!("/project")));
+        assert!(shortened.contains(&json!("/data/entries/0/identity")));
     }
 }

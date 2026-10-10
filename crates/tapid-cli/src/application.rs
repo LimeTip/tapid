@@ -26,6 +26,10 @@ pub(crate) fn run() -> ExitCode {
     } else {
         Cli::try_parse_from(arguments)
     };
+    let parsed = parsed.and_then(|cli| {
+        cli.validate_json_options()?;
+        Ok(cli)
+    });
     match parsed {
         Ok(cli) => commands::dispatch(cli.command, cli.json),
         Err(error) if json_requested => match error.kind() {

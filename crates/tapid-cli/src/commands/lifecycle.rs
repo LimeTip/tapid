@@ -54,6 +54,15 @@ pub(crate) struct UpdateArgs {
 }
 
 #[derive(Debug, ClapArgs)]
+pub(crate) struct OutdatedArgs {
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+    /// Maximum JSON entries, default 100. Use 0 to include all entries. Requires --json.
+    #[arg(long)]
+    pub(crate) json_limit: Option<usize>,
+}
+
+#[derive(Debug, ClapArgs)]
 pub(crate) struct ReadOnlyArgs {
     #[command(flatten)]
     pub(crate) common: CommonArgs,
@@ -167,7 +176,7 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
     report(result, json, "update", "Updated dependencies")
 }
 
-pub(crate) fn outdated(args: ReadOnlyArgs, json: bool) -> ExitCode {
+pub(crate) fn outdated(args: OutdatedArgs, json: bool) -> ExitCode {
     match crate::application::lifecycle::outdated_report(
         &args.common.project_dir,
         args.common.workspace.as_deref(),
@@ -175,7 +184,11 @@ pub(crate) fn outdated(args: ReadOnlyArgs, json: bool) -> ExitCode {
     ) {
         Ok(report) => {
             if json {
-                return crate::output::json::outdated(&report, "outdated");
+                return crate::output::json::outdated(
+                    &report,
+                    "outdated",
+                    args.json_limit.unwrap_or(100),
+                );
             }
             crate::output::report_warnings(&report.outcome.warnings);
             for entry in report.entries {

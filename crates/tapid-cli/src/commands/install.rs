@@ -1,4 +1,4 @@
-use crate::application::outcome::{ErrorKind, OperationFailure, OperationalError};
+use crate::application::outcome::OperationFailure;
 use clap::Args as ClapArgs;
 use std::{path::PathBuf, process::ExitCode};
 
@@ -46,29 +46,16 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
 }
 
 /// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
-pub(crate) fn run(args: Args, json: bool) -> ExitCode {
+pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     let target_manifest_path = if let Some(name) = args.workspace.as_deref() {
-        let workspace = match tapid_manifest::Workspace::discover(&args.project_dir) {
-            Ok(workspace) => workspace,
-            Err(error) => {
-                return crate::output::json::failure_or_human(
-                    &OperationFailure::unchanged(
-                        &args.project_dir,
-                        OperationalError::new(ErrorKind::Manifest, error),
-                    ),
-                    "install",
-                    json,
-                );
+        match crate::application::lifecycle::resolve_workspace(&args.project_dir, Some(name)) {
+            Ok(selection) => {
+                args.project_dir = selection.root_dir;
+                selection.manifest_path
             }
-        };
-        match workspace.select_path(Some(name)) {
-            Ok(path) => path.to_path_buf(),
             Err(error) => {
                 return crate::output::json::failure_or_human(
-                    &OperationFailure::unchanged(
-                        &args.project_dir,
-                        OperationalError::new(ErrorKind::Manifest, error),
-                    ),
+                    &OperationFailure::unchanged(&args.project_dir, error),
                     "install",
                     json,
                 );
