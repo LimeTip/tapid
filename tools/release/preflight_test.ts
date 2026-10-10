@@ -23,6 +23,13 @@ test('actual source preflight accepts a new release without a tag and rejects ve
     await writeFile(join(remote, 'Cargo.lock'), 'version = 3\n\n[[package]]\nname = "tapid"\nversion = "0.0.12"\n');
     await mkdir(join(remote, 'tools'));
     await cp(fileURLToPath(new URL('.', import.meta.url)), join(remote, 'tools/release'), { recursive: true });
+    await mkdir(join(remote, 'docs/examples'), { recursive: true });
+    // This release is an isolated fixture, independent of the real release inventory.
+    await writeFile(join(remote, 'docs/examples/contracts.json'), JSON.stringify({
+      schema_version: 1,
+      examples: ['upgrade', 'upgrade-help'].map(id => ({ id, release_expectations: { 'v0.0.12': { exit_code: 0 } } })),
+      capabilities: [{ id: 'self-upgrade', expected_releases: ['v0.0.12'] }],
+    }));
     await git(remote, 'add', '.');
     await git(remote, 'commit', '-m', 'baseline');
     const base = await git(remote, 'rev-parse', 'HEAD');
@@ -60,6 +67,18 @@ console.log(JSON.stringify({packages: [{name: 'tapid', version}]}));
     await assert.rejects(git(checkout, 'rev-parse', '--verify', 'refs/tags/v0.0.12'), 'preflight must not create a tag');
     await git(remote, 'tag', '-a', 'v0.0.12', source, '-m', 'release');
     assert.match(await check('recovery', 'v0.0.12'), /version=0.0.12/);
+    await git(remote, 'checkout', '-b', 'missing-contract', source);
+    const contractPath = join(remote, 'docs/examples/contracts.json');
+    const contracts = JSON.parse(await readFile(contractPath, 'utf8'));
+    delete contracts.examples.find(example => example.id === 'upgrade-help').release_expectations['v0.0.12'];
+    await writeFile(contractPath, JSON.stringify(contracts));
+    await writeFile(join(remote, 'docs/releases/intent.json'), JSON.stringify({ ...intent, prepared_from: source }));
+    await git(remote, 'add', '.');
+    await git(remote, 'commit', '-m', 'omit release smoke expectation');
+    const missing = await git(remote, 'rev-parse', 'HEAD');
+    await git(remote, 'branch', '-f', 'main', missing);
+    await git(checkout, 'fetch', '--force', 'origin', 'refs/heads/main:refs/remotes/origin/main');
+    await assert.rejects(check('missing-contract', '', missing), /upgrade-help.*v0.0.12/);
     await git(remote, 'checkout', '-b', 'drift', base);
     await mkdir(join(remote, 'docs/releases'), { recursive: true });
     await writeFile(join(remote, 'docs/releases/intent.json'), JSON.stringify({ ...intent, version: '0.0.13', notes: 'docs/releases/0.0.13.md', packages: [{ name: 'tapid', version: '0.0.13' }] }));

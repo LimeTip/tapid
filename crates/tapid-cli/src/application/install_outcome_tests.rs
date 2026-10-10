@@ -501,6 +501,18 @@ fn successful_install_and_replay_report_effective_project_changes_and_warnings()
     assert_eq!(report.outcome.changed_files.len(), 3);
     let manifest = fs::read(project.path().join("package.json")).unwrap();
     let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    // An ordinary install now preserves pinned archive metadata. Compare
+    // different valid snapshots directly to cover changed lock records.
+    let current = Lockfile::from_json(std::str::from_utf8(&lock).unwrap()).unwrap();
+    let mut previous: serde_json::Value = serde_json::from_slice(&lock).unwrap();
+    for package in previous["packages"].as_object_mut().unwrap().values_mut() {
+        package["artifactUrl"] =
+            serde_json::json!("https://registry.npmjs.org/plugin/-/plugin-1.0.0.tgz");
+    }
+    let previous = serde_json::to_vec(&previous).unwrap();
+    let changes = PackageChanges::between(Some(&previous), &current).unwrap();
+    assert_eq!(changes.changed, 1);
+    assert_eq!(changes.added + changes.reused + changes.removed, 0);
     let replay = run(
         project.path(),
         None,
