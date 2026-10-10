@@ -35,6 +35,7 @@ tapid lock verify
 tapid import-package-lock <PATH>
 tapid install [OPTIONS]
 tapid ci [OPTIONS]
+tapid outdated [OPTIONS]
 tapid upgrade [OPTIONS]
 tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 ```
@@ -76,11 +77,15 @@ integrity even when the artifact is cached.
 
 ## Install and lifecycle outcomes
 
+`outdated` compares each direct dependency's declared range and locked version with registry metadata. It reports the newest compatible version and newest available version, with SemVer change labels and direct lockfile pin impact for each. `available-manifest=changed` means the available version requires a different declared range. Peer declarations do not select direct lockfile pins, so their lockfile impact is unchanged even when metadata is unavailable. Missing metadata leaves other impact fields unknown. The command never recovers interrupted transactions or changes the manifest, lockfile, store, or node_modules. A pending transaction stops inspection with recovery guidance. Live registry access is the default. Use `--offline` to forbid registry access; without a fixture, registry versions and impact are unknown, while local workspace versions remain available.
+
+Lockfile impact describes selecting the shown direct version. An unchanged direct pin does not establish that the whole lockfile would stay unchanged after `update`, which re-resolves the entire graph. Transitive changes and resolution failures require full resolution. Major, minor, patch, and prerelease labels compare version numbers; they do not establish API compatibility. Registry "available" means the highest published SemVer version, including prereleases, rather than npm's `latest` tag.
+
 `update` preserves declared ranges. `update --latest` replaces each selected declaration's range with `*`, retaining its section and npm alias target. A name declared in multiple sections is updated in every section where it appears. Naming packages leaves other declarations unchanged; omitting names selects all declarations.
 
 `install`, `ci`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
 
-Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result remains unchanged for its own operation and warns if it first recovered an interrupted transaction.
+Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result is unchanged unless a pending transaction requires recovery. In that case it reports `recovery_required` and the paths to inspect without attempting recovery.
 
 Human `install` output reports resolving, verification, store replay, and linking progress on terminal stderr, at most once per second within a phase plus phase transitions and completion. Redirected stderr and `--json` suppress progress. Successful installs report elapsed time, changed project paths, and added, changed, reused, and removed registry lock selections when a valid comparison is available. Counts compare exact lock records, including version and peer/platform context. A version replacement counts as an addition and removal; reused selections do not imply cache hits or skipped filesystem work. Missing prior locks count as empty. Invalid native locks fail installation. Imported locks omit the comparison because their records are not directly comparable to verified-tree lock records. Failures identify the operation phase, retain the diagnostic and safe error context, describe unchanged or rolled-back project files, and give known next steps without suggesting a repeat after commit.
 

@@ -210,6 +210,8 @@ fn outdated_result(report: &OutdatedReport, operation: &str, limit: usize) -> Va
                 "locked": entry.locked.as_ref().map(|value| field(value, "locked")),
                 "newest_compatible": entry.newest_compatible.as_ref().map(|value| field(value, "newest_compatible")),
                 "newest_available": entry.newest_available.as_ref().map(|value| field(value, "newest_available")),
+                "compatible_impact": entry.impact(entry.newest_compatible.as_deref()),
+                "available_impact": entry.impact(entry.newest_available.as_deref()),
                 "error": entry.diagnostic.as_ref().map(|error| json!({"code": error.kind.code()})),
             })
         })

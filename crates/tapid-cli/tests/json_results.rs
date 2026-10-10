@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{fs, process::Command};
 use tapid_test_support::TempProject;
 
 fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, serde_json::Value) {
@@ -142,6 +142,106 @@ fn json_install_replays_imported_npm_selections() {
 }
 
 #[test]
+fn outdated_peer_declarations_do_not_claim_direct_lockfile_changes() {
+    let project = TempProject::new("outdated-peer-only").unwrap();
+    project
+        .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+        .unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let store = project.path().join("store");
+    let (output, added) = invoke(
+        &project,
+        &[
+            "--json",
+            "add",
+            "h3@^1.0.0",
+            "--peer",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{added}");
+    assert_eq!(added["data"]["package_count"], 0);
+    let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let (output, report) = invoke(
+        &project,
+        &["--json", "outdated", "--registry-fixture", "registry.json"],
+    );
+    assert!(output.status.success(), "{report}");
+    let entry = &report["data"]["entries"][0];
+    assert_eq!(entry["kind"], "peerDependencies");
+    assert!(entry["locked"].is_null());
+    assert_eq!(
+        entry["compatible_impact"],
+        serde_json::json!({"version_change":"unlocked", "lockfile":"unchanged", "manifest":"unchanged"})
+    );
+    assert_eq!(
+        entry["available_impact"],
+        serde_json::json!({"version_change":"unlocked", "lockfile":"unchanged", "manifest":"changed"})
+    );
+    let human = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args(["outdated", "--registry-fixture", "registry.json"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let stdout = String::from_utf8(human.stdout).unwrap();
+    assert!(stdout.contains("compatible-change=unlocked compatible-lockfile=unchanged"));
+    assert!(stdout.contains(
+        "available-change=unlocked available-lockfile=unchanged available-manifest=changed"
+    ));
+    let (output, offline) = invoke(&project, &["--json", "outdated", "--offline"]);
+    assert!(output.status.success(), "{offline}");
+    assert_eq!(offline["outcome"], "partial");
+    assert_eq!(
+        offline["data"]["entries"][0]["available_impact"],
+        serde_json::json!({"version_change":"unknown", "lockfile":"unchanged", "manifest":"unknown"})
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_before
+    );
+    // A provider installed by another section still is not selected by its peer range.
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"^1.0.0"},"peerDependencies":{"h3":"^1.0.0"}}"#).unwrap();
+    let (output, added) = invoke(
+        &project,
+        &[
+            "--json",
+            "install",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{added}");
+    let (output, overlapping) = invoke(
+        &project,
+        &["--json", "outdated", "--registry-fixture", "registry.json"],
+    );
+    assert!(output.status.success(), "{overlapping}");
+    let entries = overlapping["data"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        assert_eq!(entry["locked"], "1.0.0");
+        assert_eq!(entry["available_impact"]["version_change"], "major");
+        assert_eq!(entry["available_impact"]["manifest"], "changed");
+        assert_eq!(
+            entry["available_impact"]["lockfile"],
+            if entry["kind"] == "peerDependencies" {
+                "unchanged"
+            } else {
+                "changed"
+            }
+        );
+    }
+}
+
+#[test]
 fn json_lifecycle_results_and_partial_outdated_metadata() {
     let project = TempProject::new("json-lifecycle").unwrap();
     project
@@ -175,12 +275,58 @@ fn json_lifecycle_results_and_partial_outdated_metadata() {
     assert_eq!(result["outcome"], "success");
     assert_eq!(result["data"]["truncated"], false);
     assert_eq!(
+        result["data"]["entries"][0]["compatible_impact"],
+        serde_json::json!({
+            "version_change": "unchanged", "lockfile": "unchanged", "manifest": "unchanged"
+        })
+    );
+    assert_eq!(
+        result["data"]["entries"][0]["available_impact"],
+        serde_json::json!({
+            "version_change": "major", "lockfile": "changed", "manifest": "changed"
+        })
+    );
+    assert_eq!(
         result["data"]["entries"][0]["newest_available"],
         "2.0.1-rc.20"
     );
     project
         .write("missing.json", br#"{"packages":[]}"#)
         .unwrap();
+    let manifest_before = fs::read(project.path().join("package.json")).unwrap();
+    let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let (output, offline) = invoke(&project, &["--json", "outdated", "--offline"]);
+    assert!(output.status.success(), "{offline}");
+    assert_eq!(offline["outcome"], "partial");
+    assert_eq!(
+        offline["data"]["entries"][0]["error"]["code"],
+        "REGISTRY_METADATA_UNAVAILABLE"
+    );
+    assert!(offline["data"]["entries"][0]["newest_available"].is_null());
+    assert_eq!(
+        offline["data"]["entries"][0]["available_impact"]["lockfile"],
+        "unknown"
+    );
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_before
+    );
+    let (output, fixture_offline) = invoke(
+        &project,
+        &[
+            "--json",
+            "outdated",
+            "--offline",
+            "--registry-fixture",
+            "registry.json",
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(fixture_offline, result);
     let (output, result) = invoke(
         &project,
         &["outdated", "--json", "--registry-fixture", "missing.json"],
@@ -190,6 +336,12 @@ fn json_lifecycle_results_and_partial_outdated_metadata() {
     assert_eq!(result["changes"]["state"], "unchanged");
     assert!(result["data"]["entries"][0]["error"]["code"].is_string());
     assert!(result["data"]["entries"][0]["newest_available"].is_null());
+    assert_eq!(
+        result["data"]["entries"][0]["available_impact"],
+        serde_json::json!({
+            "version_change": "unknown", "lockfile": "unknown", "manifest": "unknown"
+        })
+    );
     let (output, result) = invoke(&project, &["prune", "--json", "--store-dir", store]);
     assert!(output.status.success(), "{result}");
     assert_eq!(result["operation"], "prune");

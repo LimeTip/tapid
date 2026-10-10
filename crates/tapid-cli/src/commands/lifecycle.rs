@@ -55,6 +55,9 @@ pub(crate) struct UpdateArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct OutdatedArgs {
+    /// Forbid registry access. Without a fixture, registry versions and impact are unknown.
+    #[arg(long)]
+    pub(crate) offline: bool,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
     /// Maximum JSON entries, default 100. Use 0 to include all entries. Requires --json.
@@ -175,6 +178,7 @@ pub(crate) fn outdated(args: OutdatedArgs, json: bool) -> ExitCode {
         &args.common.project_dir,
         args.common.workspace.as_deref(),
         args.common.registry_fixture.as_deref(),
+        args.offline,
     ) {
         Ok(report) => {
             if json {
@@ -185,6 +189,18 @@ pub(crate) fn outdated(args: OutdatedArgs, json: bool) -> ExitCode {
                 );
             }
             crate::output::report_warnings(&report.outcome.warnings);
+            println!(
+                "Direct dependencies. Available is the highest published version, including prereleases, not the latest dist-tag."
+            );
+            println!(
+                "Lockfile impact compares direct dependency pins if the shown version is selected."
+            );
+            println!(
+                "Transitive lockfile changes require resolution. This report does not update dependencies."
+            );
+            if report.entries.is_empty() {
+                println!("No direct dependencies.");
+            }
             for entry in report.entries {
                 println!(
                     "{}",
@@ -357,7 +373,7 @@ mod tests {
         };
         assert_eq!(
             crate::application::lifecycle::format_outdated_entry(&entry),
-            "npm:foo [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.4.0 available=unavailable diagnostic=registry metadata unavailable"
+            "npm:foo [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.4.0 available=unavailable diagnostic=registry metadata unavailable\n  compatible-change=minor compatible-lockfile=changed\n  available-change=unknown available-lockfile=unknown available-manifest=unknown"
         );
     }
 }
