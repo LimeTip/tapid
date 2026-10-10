@@ -2,7 +2,7 @@
 name = "tapid-resolver"
 readme = "README.md"
 description = "Deterministic dependency resolution foundations for Tapid"
-version = "0.0.7"
+version = "0.0.8"
 edition.workspace = true
 license.workspace = true
 license-file.workspace = true

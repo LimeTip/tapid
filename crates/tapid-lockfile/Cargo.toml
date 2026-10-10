@@ -2,7 +2,7 @@
 name = "tapid-lockfile"
 readme = "README.md"
 description = "Deterministic lockfile models and serialization for Tapid"
-version = "0.0.11"
+version = "0.0.12"
 edition.workspace = true
 license.workspace = true
 license-file.workspace = true
@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
 url = "2"
-tapid-resolver = { version = "0.0.7", path = "../tapid-resolver" }
+tapid-resolver = { version = "0.0.8", path = "../tapid-resolver" }
 
 [dev-dependencies]
 proptest = "1"

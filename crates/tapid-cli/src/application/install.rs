@@ -142,6 +142,7 @@ impl InstallSession {
 #[derive(Clone, Copy)]
 pub(crate) enum InstallMode {
     Online,
+    Refresh,
     Offline,
     Frozen,
     Ci,
@@ -264,7 +265,9 @@ pub(crate) fn run_with_manifest_target(
     report_replay_progress: impl FnMut(Progress),
 ) -> Result<InstallReport, OperationFailure> {
     let mut session = InstallSession::new(project_dir);
-    if allow_unverified_registry_artifacts && matches!(mode, InstallMode::Online) {
+    if allow_unverified_registry_artifacts
+        && matches!(mode, InstallMode::Online | InstallMode::Refresh)
+    {
         session
             .outcome
             .warnings
@@ -374,7 +377,7 @@ fn perform_install(
             .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
     }
     let lock_path = project_dir.join("tapid.lock");
-    let mut imported = if lock_path.is_file() && package.is_none() && manifest_override.is_none() {
+    let mut imported = if lock_path.is_file() {
         let bytes = fs::read_to_string(&lock_path)
             .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
         if serde_json::from_str::<serde_json::Value>(&bytes)
@@ -397,7 +400,11 @@ fn perform_install(
             "ci requires an ordinary verified-tree lock; use install --frozen to install imported npm locks",
         ));
     }
-    if (offline || frozen) && lock_path.is_file() && imported.is_none() {
+    let has_imported_lock = imported.is_some();
+    if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
+        imported = None;
+    }
+    if lock_path.is_file() && !has_imported_lock {
         read_lock(&lock_path)?;
     }
     session.lock = Some(ActivationLock::acquire(&project_dir)?);
@@ -489,7 +496,57 @@ fn perform_install(
             default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
         }
     });
-    if imported.is_some() || !offline && !frozen {
+    let previous_lock = if lock_path.is_file() && !has_imported_lock {
+        Some(read_lock(&lock_path)?)
+    } else {
+        None
+    };
+    let mut replayable = true;
+    if let Some(lock) = &previous_lock {
+        match lock.validate_replay(lock.root_manifest_digest()) {
+            Ok(()) => {}
+            Err(tapid_lockfile::LockfileError::UnverifiedRegistryArtifact(_))
+                if allow_unverified_registry_artifacts
+                    && matches!(mode, InstallMode::Online | InstallMode::Refresh) =>
+            {
+                // Compatibility installs must resolve these entries again, never replay them.
+                replayable = false;
+            }
+            Err(error) => return Err(OperationalError::from(error)),
+        }
+    }
+    let preserve = matches!(mode, InstallMode::Online);
+    let replay_existing = if preserve {
+        if let Some(lock) = &previous_lock {
+            let registry_config = crate::registry::RegistryConfig::load(&project_dir)
+                .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+            replayable &= online::validate_locked_routes(lock, &registry_config)?;
+            let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
+            let current = workspace
+                .locked
+                .iter()
+                .map(|p| (p.key(), p.manifest_digest().to_owned()))
+                .collect::<BTreeMap<_, _>>();
+            let locked = lock
+                .workspace_packages()
+                .iter()
+                .map(|(k, p)| (k.clone(), p.manifest_digest().to_owned()))
+                .collect::<BTreeMap<_, _>>();
+            replayable
+                && lifecycle_policy.approvals().is_empty()
+                && lock
+                    .packages()
+                    .values()
+                    .all(|p| p.derived_hooks().is_empty())
+                && lock.root_manifest_digest() == online::root_digest(&project_dir)?
+                && current == locked
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if imported.is_some() || !offline && !frozen && !replay_existing {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let (mut lock, mut input, mut trees, mut store_transaction, workspace_links) =
@@ -503,13 +560,18 @@ fn perform_install(
                     &registry_config,
                 )?
             } else {
-                online::resolve_and_fetch(
+                online::resolve_and_fetch_with_lock(
                     &project_dir,
                     &root_manifest,
                     &store,
                     registry_fixture,
                     allow_unverified_registry_artifacts,
                     &registry_config,
+                    if preserve {
+                        previous_lock.as_ref()
+                    } else {
+                        None
+                    },
                     &mut report_replay_progress,
                 )?
             };
@@ -679,17 +741,42 @@ fn perform_install(
         &registry_config,
     )?;
     validate_workspace_dependency_edges(&workspace, &workspace_registry_dependencies, &lock)?;
+    crate::application::replay::validate_root_bindings(&lock, &root_manifest, &registry_config)?;
     if ci {
         online::validate_locked_artifact_sources(&lock, registry_fixture)?;
     }
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")
     })?;
+    if session.journal.is_none() {
+        session.journal = Some(
+            crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
+                &project_dir,
+                &manifest_path,
+                activation_lock.owner_line(),
+                &original_manifest,
+                original_lock.as_deref(),
+            )
+            .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?,
+        );
+    }
     let journal = session.journal.as_mut().expect("replay journal created");
     journal
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-    if ci && !offline {
+    if !online::validate_locked_routes(&lock, &registry_config)? {
+        return Err(OperationalError::new(
+            ErrorKind::Lockfile,
+            "locked packages target a different platform; regenerate tapid.lock with tapid update and review the resulting changes",
+        ));
+    }
+    if !offline
+        && (ci
+            || lock
+                .packages()
+                .values()
+                .any(|p| !p.derived_hooks().is_empty()))
+    {
         let (mut input, mut trees, transaction, mut cached_snapshots) =
             online::prepare_locked_install(
                 &lock,
@@ -756,13 +843,28 @@ fn perform_install(
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
         return Ok((lock.packages().len(), true));
     }
-    let (mut input, mut trees) = crate::application::replay::replay_input(
+    let mut publication = None;
+    if !offline
+        && let Some(transaction) =
+            online::hydrate_locked(&lock, &store, &registry_config, registry_fixture)?
+    {
+        session.mutated = true;
+        publication = Some(
+            transaction
+                .publish_for_lifecycle(&journal.coordinator_path())
+                .map_err(OperationalError::from)?,
+        );
+        crate::filesystem::activation::test_crash_at("store_published");
+    }
+    let (mut input, mut trees) = crate::application::replay::replay_input_with_publication(
         &lock,
         &root_manifest,
         &store,
         &registry_config,
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
+        publication.as_ref(),
     )?;
+    let source_trees = trees.clone();
     let hook_warnings = super::dependency_scripts::apply(
         &project_dir,
         &lifecycle_policy,
@@ -774,7 +876,14 @@ fn perform_install(
         activation_lock,
     );
     if hook_warnings.is_err() {
+        crate::application::replay::cleanup_replay_snapshots(&source_trees);
         crate::application::replay::cleanup_replay_snapshots(&trees);
+    } else {
+        let replaced = source_trees
+            .into_iter()
+            .filter(|(key, path)| trees.get(key) != Some(path))
+            .collect();
+        crate::application::replay::cleanup_replay_snapshots(&replaced);
     }
     session.outcome.warnings.extend(hook_warnings?);
     session.mutated = true;
@@ -792,11 +901,16 @@ fn perform_install(
         true,
         &mut report_replay_progress,
     )?;
+    crate::filesystem::activation::test_crash_at("activation_complete");
     journal
         .mark_committed()
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
     session.committed = true;
     session.outcome.state = ChangeState::Committed;
+    crate::filesystem::activation::test_crash_at("commit_decision");
+    if let Some(publication) = publication {
+        publication.commit().map_err(OperationalError::from)?;
+    }
     journal
         .finish()
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;

@@ -9,7 +9,8 @@ The CLI supports bounded live npm metadata and artifact retrieval in addition to
 - Normal npm candidates require HTTPS tarball URLs and registry-declared SHA-512 integrity.
 - Historical versions with unsupported dependency syntax or missing integrity are excluded without hiding otherwise usable versions.
 - Exact package metadata HTTP 404 and narrowly validated unpublished tombstones produce no candidates. Other malformed or unsuccessful responses fail closed.
-- Metadata is fetched incrementally for packages reached by the selected graph.
+- Ordinary install replays matching locks without metadata requests. Changed manifests start with locked selections and exact edges, fetching metadata when necessary; `update` requests a fresh graph.
+- Frozen installation hydrates missing trees from pinned HTTPS archives without metadata resolution or lock rewrites. Offline requires all verified content locally. Both modes retain archive, provenance, registry-route, target, and tree-digest verification.
 - Verified npm trees materialize from either a direct package root or exactly one named top-level wrapper containing `package.json`; missing and ambiguous roots are rejected before activation.
 - Metadata and immutable artifact GETs retry a bounded set of transient failures, with three total attempts and deterministic 100 ms and 200 ms delays.
 - Distinct parents can select different exact versions of one transitive package.
