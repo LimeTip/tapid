@@ -309,8 +309,11 @@ impl WindowsPathAcl {
         let mut entries = Vec::with_capacity(4);
         if access == FilesystemAccess::Write && is_directory && subtree {
             entries.push(make_entry(root_permissions, 0));
+            // Internal rename/unlink requires DELETE on descendants, never on the declared
+            // root. Do not grant FILE_DELETE_CHILD (which could override child denial),
+            // WRITE_DAC, ownership, or parent-entry replacement for ExactFile grants.
             entries.push(make_entry(
-                FILE_GENERIC_WRITE,
+                FILE_GENERIC_WRITE | windows_sys::Win32::Storage::FileSystem::DELETE,
                 inheritance | windows_sys::Win32::Security::INHERIT_ONLY_ACE,
             ));
         } else {
@@ -849,7 +852,7 @@ fn unsupported_acl(operation: &str, code: u32) -> ExecutionError {
 
 #[cfg(test)]
 #[path = "../tests/support/windows_acl.rs"]
-mod windows_acl;
+pub(super) mod windows_acl;
 
 #[cfg(test)]
 mod tests {
