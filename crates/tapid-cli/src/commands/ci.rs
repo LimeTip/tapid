@@ -29,7 +29,12 @@ pub(crate) fn run(args: Args) -> ExitCode {
         },
         args.registry_fixture.as_deref(),
         false,
-        |completed, total| eprintln!("Locked install progress: {completed}/{total}"),
+        |event| match event {
+            crate::application::install::Progress::Replay(completed, total) => {
+                eprintln!("Locked install progress: {completed}/{total}")
+            }
+            event => crate::output::report_progress(event, false),
+        },
     );
     match result {
         Ok(report) => {
