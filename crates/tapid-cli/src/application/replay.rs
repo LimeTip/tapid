@@ -242,7 +242,7 @@ fn replay_root_keys(
     )
 }
 
-fn replay_root_keys_with_config(
+pub(crate) fn replay_root_keys_with_config(
     lock: &Lockfile,
     manifest: &PackageManifest,
     typed_keys: &[tapid_lockfile::LockfilePackageKey],

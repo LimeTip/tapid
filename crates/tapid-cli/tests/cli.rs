@@ -5607,14 +5607,21 @@ fn why_reports_a_deterministic_path_from_a_direct_root_without_mutation() {
     let json_output = run(&project.path().to_path_buf(), &["why", "target", "--json"]);
     assert!(json_output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
-    assert_eq!(result["schemaVersion"], 1);
+    assert_eq!(result["schema_version"], 1);
     assert_eq!(result["operation"], "why");
     assert_eq!(result["outcome"], "success");
-    assert_eq!(result["paths"][0]["steps"][0]["edgeKind"], "dependencies");
-    assert_eq!(result["paths"][0]["steps"][1]["edgeKind"], "dependency");
-    assert_eq!(result["changes"], serde_json::json!([]));
+    assert_eq!(
+        result["data"]["paths"][0]["steps"][0]["edgeKind"],
+        "dependencies"
+    );
+    assert_eq!(
+        result["data"]["paths"][0]["steps"][1]["edgeKind"],
+        "dependency"
+    );
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert!(result["errors"].as_array().unwrap().is_empty());
     assert!(
-        result["warnings"][0]
+        result["data"]["graph_warnings"][0]
             .as_str()
             .unwrap()
             .contains("transitive dependency edge kinds")
@@ -5623,8 +5630,14 @@ fn why_reports_a_deterministic_path_from_a_direct_root_without_mutation() {
     let missing = run(&project.path().to_path_buf(), &["why", "absent", "--json"]);
     assert_eq!(missing.status.code(), Some(1));
     let missing_result: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
-    assert_eq!(missing_result["outcome"], "not_found");
-    assert!(missing_result["paths"].as_array().unwrap().is_empty());
+    assert_eq!(missing_result["outcome"], "success");
+    assert_eq!(missing_result["data"]["not_found"], true);
+    assert!(
+        missing_result["data"]["paths"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let incomplete = tapid_test_support::TempProject::new("why-missing-lock").unwrap();
     incomplete
         .write("package.json", br#"{"name":"demo","version":"1.0.0"}"#)
@@ -5635,8 +5648,10 @@ fn why_reports_a_deterministic_path_from_a_direct_root_without_mutation() {
     );
     assert_eq!(failure.status.code(), Some(1));
     let failure_result: serde_json::Value = serde_json::from_slice(&failure.stdout).unwrap();
-    assert_eq!(failure_result["outcome"], "error");
+    assert_eq!(failure_result["outcome"], "failure");
     assert_eq!(failure_result["errors"][0]["code"], "LOCKFILE_MISSING");
+    assert_eq!(failure_result["errors"][0]["phase"], "operation");
+    assert_eq!(failure_result["changes"]["state"], "unchanged");
     assert_eq!(
         fs::read(project.path().join("package.json")).unwrap(),
         manifest_before
@@ -5650,11 +5665,88 @@ fn why_reports_a_deterministic_path_from_a_direct_root_without_mutation() {
 }
 
 #[test]
+fn why_reconstructs_only_manifest_matching_roots_and_reports_nested_instances() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-legacy-roots").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"foo":"^1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut foo_one = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "foo",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "1".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let mut foo_two = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "foo",
+        "2.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "2".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let mut bar = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "bar",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "3".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let foo_one_key = foo_one.key();
+    let foo_two_key = foo_two.key();
+    let bar_key = bar.key();
+    foo_one.add_dependency("bar", &bar_key).unwrap();
+    bar.add_dependency("foo", &foo_two_key).unwrap();
+    foo_two.add_dependency("bar", &bar_key).unwrap();
+    lock.insert_packages([foo_one, foo_two, bar]).unwrap();
+    lock.set_roots([foo_one_key]).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("rootBindings");
+    value.as_object_mut().unwrap().remove("roots");
+    value["lockfileVersion"] = 4.into();
+    project
+        .write("tapid.lock", serde_json::to_vec(&value).unwrap().as_slice())
+        .unwrap();
+
+    let output = run(&project.path().to_path_buf(), &["--json", "why", "foo"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let paths = result["data"]["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 2);
+    assert_eq!(paths[0]["steps"].as_array().unwrap().len(), 1);
+    assert!(
+        paths[0]["steps"][0]["key"]
+            .as_str()
+            .unwrap()
+            .contains("|foo@1.0.0|")
+    );
+    assert_eq!(paths[1]["steps"].as_array().unwrap().len(), 3);
+    assert!(
+        paths[1]["steps"][2]["key"]
+            .as_str()
+            .unwrap()
+            .contains("|foo@2.0.0|")
+    );
+    assert_eq!(paths[1]["steps"][0]["edgeKind"], "dependencies");
+}
+
+#[test]
 fn why_labels_direct_optional_and_peer_dependency_kinds() {
     use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
 
     let project = tapid_test_support::TempProject::new("why-direct-kinds").unwrap();
-    let manifest = r#"{"name":"demo","version":"1.0.0","optionalDependencies":{"@scope/optional":"1.0.0"},"peerDependencies":{"peer":"1.0.0"}}"#;
+    let manifest = r#"{"name":"demo","version":"1.0.0","optionalDependencies":{"@scope/optional":"1.0.0"},"devDependencies":{"jsr:@scope/dev":"1.0.0"},"peerDependencies":{"peer":"1.0.0"}}"#;
     project.write("package.json", manifest.as_bytes()).unwrap();
     let mut lock = lock_for_manifest(manifest);
     let optional = LockedPackage::new_with_provenance(
@@ -5675,28 +5767,41 @@ fn why_labels_direct_optional_and_peer_dependency_kinds() {
         RegistryIntegrityProvenance::RegistryDeclared,
     )
     .unwrap();
+    let prefixed = LockedPackage::new_with_provenance(
+        "https://jsr.io",
+        "@scope/dev",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "e".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
     let optional_key = optional.key();
-    lock.insert_packages([optional, peer]).unwrap();
-    lock.set_roots([optional_key.clone()]).unwrap();
-    lock.set_root_bindings(std::collections::BTreeMap::from([(
-        "@scope/optional".to_owned(),
-        optional_key,
-    )]))
+    let prefixed_key = prefixed.key();
+    lock.insert_packages([optional, peer, prefixed]).unwrap();
+    lock.set_roots([optional_key.clone(), prefixed_key.clone()])
+        .unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([
+        ("@scope/optional".to_owned(), optional_key),
+        ("@scope/dev".to_owned(), prefixed_key),
+    ]))
     .unwrap();
     project
         .write("tapid.lock", lock.to_json().unwrap().as_bytes())
         .unwrap();
 
-    for (package, expected_kind) in [
-        ("@scope/optional", "optionalDependencies"),
-        ("peer", "peerDependencies"),
-    ] {
-        let output = run(&project.path().to_path_buf(), &["why", package]);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(String::from_utf8_lossy(&output.stdout).contains(expected_kind));
-    }
+    let output = run(&project.path().to_path_buf(), &["why", "@scope/optional"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("optionalDependencies"));
+    let prefixed_output = run(&project.path().to_path_buf(), &["why", "@scope/dev"]);
+    assert!(prefixed_output.status.success());
+    assert!(String::from_utf8_lossy(&prefixed_output.stdout).contains("devDependencies"));
+    let peer_output = run(&project.path().to_path_buf(), &["why", "peer"]);
+    assert_eq!(peer_output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&peer_output.stdout).contains("No path to 'peer'"));
+    assert!(!String::from_utf8_lossy(&peer_output.stdout).contains("peerDependencies"));
 }

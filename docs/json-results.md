@@ -9,6 +9,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `install`, alias `i` | Install or replay result |
 | `add`, `remove`, `update`, `prune` | Dependency operation result |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
+| `why` | Dependency explanation paths under `data.paths`; an empty match returns `data.not_found: true` and exit 1 |
 | `ci`, `init`, `manifest`, `lock`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
 | `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
 | Private release helpers, no command | `JSON_UNSUPPORTED_COMMAND`, exit 1 |
@@ -39,6 +40,8 @@ Every object contains these fields:
 | `data` | Command-specific object, or null on failure |
 
 Help results contain `data.text`, the selected command's help text with no ANSI formatting. For example, `tapid --json help run` returns run help without launching a child. Both short and long help forms preserve their usual content. Version results contain `data.name` of `tapid` and `data.version`, the executable's package version. These informational results use `outcome: "success"`, empty errors and warnings, null project and retry, and unchanged state with no affected files. They do not read project files. Help text is presentation content, not a stable command-discovery schema; its wording and layout may change within schema version 1.
+
+`why` data contains `package`, deterministic `paths`, `truncated`, `not_found`, and `graph_warnings`. Each path contains `steps` with package identity, incoming dependency name and kind, and source kind. A missing match is an unchanged successful operation envelope with `data.not_found: true`, but the command exits 1 to preserve its CLI no-match contract. Operational errors use the standard `failure` envelope and typed `errors` entry.
 
 Install and mutating lifecycle data contains `package_count` and `replayed`. Graphs, artifact URLs, raw metadata, credentials, source error chains, and uncontrolled diagnostic messages are excluded. There is no graph selection in version 1.
 
