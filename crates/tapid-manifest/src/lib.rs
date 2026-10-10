@@ -313,6 +313,46 @@ mod tests {
     }
 
     #[test]
+    fn updates_existing_dependency_sections_without_moving_declarations() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"app","version":"1.0.0","dependencies":{"npm:foo":"^1"},"devDependencies":{"npm:foo":"^2"},"optionalDependencies":{"npm:foo":"^3"},"peerDependencies":{"npm:foo":"^4"},"customMetadata":{"kept":true}}"#,
+        ).unwrap();
+        for (kind, field) in [
+            (DependencyKind::Dependencies, "dependencies"),
+            (DependencyKind::DevDependencies, "devDependencies"),
+            (DependencyKind::OptionalDependencies, "optionalDependencies"),
+            (DependencyKind::PeerDependencies, "peerDependencies"),
+        ] {
+            let updated = manifest
+                .clone()
+                .update_dependency_kind(kind, "npm:foo", " * ")
+                .unwrap();
+            let mut expected: serde_json::Value =
+                serde_json::from_str(&manifest.to_json()).unwrap();
+            expected[field]["npm:foo"] = "*".into();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&updated.to_json()).unwrap(),
+                expected
+            );
+
+            let error = manifest
+                .clone()
+                .update_dependency_kind(kind, "missing", "*")
+                .unwrap_err();
+            assert!(
+                matches!(error, ManifestError::DependencyNotDeclared { field: actual, name } if actual == field && name == "missing")
+            );
+        }
+        let moved = manifest
+            .with_dependency_kind(DependencyKind::DevDependencies, "npm:foo", "*")
+            .unwrap();
+        assert_eq!(moved.dev_dependencies()["npm:foo"], "*");
+        assert!(!moved.dependencies().contains_key("npm:foo"));
+        assert!(!moved.optional_dependencies().contains_key("npm:foo"));
+        assert!(!moved.peer_dependencies().contains_key("npm:foo"));
+    }
+
+    #[test]
     fn preserves_unmodeled_package_json_fields_when_updating_dependencies() {
         let manifest = PackageManifest::parse(
             r#"{
