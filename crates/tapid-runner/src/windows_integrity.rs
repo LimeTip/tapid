@@ -189,13 +189,14 @@ fn verify_label(file: &File, inherits: bool) -> Result<(), ExecutionError> {
         return Err(failure(std::io::Error::from_raw_os_error(status as i32)));
     }
     let _descriptor = Descriptor(descriptor);
-    if sacl.is_null() || unsafe { (*sacl).AceCount } != 1 {
+    let sacl = NonNull::new(sacl).ok_or_else(|| failure("missing mandatory-label SACL"))?;
+    if unsafe { sacl.as_ref() }.AceCount != 1 {
         return Err(failure(
             "write target needs an explicit low-integrity label",
         ));
     }
     let mut pointer = null_mut();
-    if unsafe { GetAce(sacl, 0, &mut pointer) } == 0 {
+    if unsafe { GetAce(sacl.as_ptr(), 0, &mut pointer) } == 0 {
         return Err(failure(std::io::Error::last_os_error()));
     }
     let pointer = NonNull::new(pointer).ok_or_else(|| failure("missing mandatory-label ACE"))?;

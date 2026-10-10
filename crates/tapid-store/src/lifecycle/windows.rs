@@ -248,19 +248,19 @@ fn validate_key(file: &File, sid: PSID) -> io::Result<()> {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
     let descriptor = LocalAllocation(descriptor);
+    let dacl = NonNull::new(dacl).ok_or_else(failure)?;
     let mut control = 0;
     let mut revision = 0;
     if owner.is_null()
-        || dacl.is_null()
         || unsafe { EqualSid(owner, sid) } == 0
         || unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0
         || control & SE_DACL_PROTECTED == 0
-        || unsafe { (*dacl).AceCount } != 1
+        || unsafe { dacl.as_ref() }.AceCount != 1
     {
         return Err(failure());
     }
     let mut ace = null_mut();
-    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 {
+    if unsafe { GetAce(dacl.as_ptr(), 0, &mut ace) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let ace = NonNull::new(ace).ok_or_else(failure)?;
