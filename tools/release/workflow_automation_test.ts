@@ -156,6 +156,48 @@ test('source-only ownership contract rejects missing, disabled, optional and wid
   ]) assert.throws(() => assertSourceOnlyOwners(broken));
 });
 
+const assertWindowsWriteNodeOwner = (ci: string) => {
+  const native = job(ci, 'test');
+  const setup = step(native, 'Install relocatable Node.js for native sandbox tests');
+  const prerequisite = step(native, 'Bind absolute Node for Windows native write tests');
+  assert.match(prerequisite, /if: runner.os == 'Windows'\n        shell: pwsh\n/);
+  assert.doesNotMatch(prerequisite, /continue-on-error:|SilentlyContinue|\|\|/);
+  assert.match(prerequisite, /\$ErrorActionPreference = 'Stop'/);
+  assert.match(prerequisite, /Get-Command node -CommandType Application -ErrorAction Stop/);
+  assert.match(prerequisite, /\[IO.Path\]::IsPathFullyQualified\(\$node\)/);
+  assert.match(prerequisite, /Test-Path -LiteralPath \$node -PathType Leaf/);
+  assert.match(prerequisite, /& \$node --version/);
+  assert.match(prerequisite, /\$LASTEXITCODE -ne 0/);
+  assert.match(prerequisite, /"TAPID_TEST_NODE=\$node" >> \$env:GITHUB_ENV/);
+  assert(native.indexOf(setup) < native.indexOf(prerequisite));
+  assert(native.indexOf(prerequisite) < native.indexOf(step(native, 'Run tests')));
+  assertSourceOnlyOwners(ci);
+};
+
+test('Windows native write owner binds a validated absolute Node before workspace tests', async () => {
+  const ci = await workflow('ci');
+  assertWindowsWriteNodeOwner(ci);
+  const owner = job(ci, 'test');
+  const prerequisite = step(owner, 'Bind absolute Node for Windows native write tests');
+  for (const replacement of [
+    '', prerequisite.replace("runner.os == 'Windows'", 'false'),
+    prerequisite.replace('        shell: pwsh', '        continue-on-error: true\n        shell: pwsh'),
+    prerequisite.replace(' -ErrorAction Stop', ' -ErrorAction SilentlyContinue'),
+    prerequisite.replace('[IO.Path]::IsPathFullyQualified($node)', '$true'),
+    prerequisite.replace('Test-Path -LiteralPath $node -PathType Leaf', '$true'),
+    prerequisite.replace('& $node --version', '& node --version'),
+    prerequisite.replace('$LASTEXITCODE -ne 0', '$false'),
+    prerequisite.replace('TAPID_TEST_NODE=$node', 'TAPID_TEST_NODE=node'),
+  ]) assert.throws(() => assertWindowsWriteNodeOwner(ci.replace(owner, owner.replace(prerequisite, replacement))));
+  const late = owner.replace(prerequisite, '').replace(step(owner, 'Run tests'), step(owner, 'Run tests') + prerequisite);
+  assert.throws(() => assertWindowsWriteNodeOwner(ci.replace(owner, late)));
+  const tests = await source('crates/tapid-runner/src/windows_job_tests.rs');
+  for (const name of ['appcontainer_node_ordinary_project_write_mutation_contract', 'appcontainer_node_write_only_grant_denies_read']) {
+    assert.match(tests, new RegExp(`#\\[test\\]\\s*fn ${name}\\(\\)`));
+  }
+  assert.match(tests, /var_os\("TAPID_TEST_NODE"\)\s*\.expect\(/);
+});
+
 test('main native workspace owns command-help and Windows collision tests without standalone duplicates', async () => {
   const names = await readdir(new URL('../../.github/workflows/', import.meta.url));
   assert(!names.includes('cli-documentation.yml'), 'obsolete standalone command-help owner');
