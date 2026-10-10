@@ -132,6 +132,7 @@ The expected response is `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Next.js production out
 The package-management toolchain also includes:
 
 - `init`, `install`/`i`, `add`, `remove`, and `update` for project manifests and dependencies.
+- `ci` to install the exact graph in `tapid.lock`, downloading missing verified packages without resolving versions again.
 - `outdated` to compare locked versions with registry metadata, and `prune` to remove unreachable managed packages.
 - A content-addressed local store and lockfile replay for offline installs, with transactional activation of managed `node_modules`.
 - Safe archive extraction and integrity checks, plus generated package `bin` shims. Dependency lifecycle scripts are suppressed during installation.
@@ -195,6 +196,17 @@ Released 0.0.10 clients still use signed discovery followed by GitHub checksum f
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
 
+## Install from the lockfile
+
+```text
+tapid ci
+tapid ci --offline
+```
+
+`tapid ci` requires `tapid.lock` and matching root and workspace manifests. It preserves `package.json` and `tapid.lock`, installs the locked versions and edges, and atomically replaces managed `node_modules`. Missing store trees are downloaded from locked HTTPS artifact URLs, checked against locked SHA-512 integrity and SHA-256 tree digests, and published through the install transaction. Dependency lifecycle scripts do not run. `--offline` requires every verified tree in the store.
+
+`ci` requires download URLs for every registry package, even with a warm cache or `--offline`. Incomplete locks need regeneration with `tapid install` and review of the resulting changes. The explicit `--registry-fixture` option supplies local artifacts for tests and air-gapped development. Tapid uses its own lockfile and supported dependency semantics; this is not complete npm compatibility. An unmanaged `node_modules` is rejected rather than deleted.
+
 ## Offline and frozen replay
 
 Both modes require an existing lockfile and all referenced verified trees:
@@ -233,7 +245,7 @@ Start with the [contributing guide](CONTRIBUTING.md) and [open issues](https://g
 
 ## Development
 
-Use Git, Rust with rustfmt and Clippy, and Node.js 22.6.0 or later. Run Cargo through the development wrapper to reuse build artifacts across worktrees. See the [testing guide](docs/testing.md) for focused checks and the full local lane.
+Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later. Run Cargo through the development wrapper to reuse build artifacts across worktrees. See the [testing guide](docs/testing.md) for focused checks and the full local lane.
 
 Rust owns Tapid behavior and security verification. TypeScript owns developer
 scripts, release orchestration, documentation checks, and website/consumer

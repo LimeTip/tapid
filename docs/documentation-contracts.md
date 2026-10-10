@@ -40,7 +40,7 @@ A local commit can unblock clean pinned builds without authorizing a push.
 
 ## Running the Unix lanes
 
-Requires Node.js 22.6.0 or later, Rust for source builds, and macOS/Linux.
+Requires Node.js 22.7.0 or later, Rust for source builds, and macOS/Linux.
 
 ```sh
 node --experimental-strip-types --test tests/doc_examples_test.ts

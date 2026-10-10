@@ -16,7 +16,7 @@ Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, o
 
 ## Development prerequisites and build reuse
 
-Use Git, Rust with rustfmt and Clippy, and Node.js 22.6.0 or later.
+Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later.
 Rust owns package-manager behavior and security verification. TypeScript owns
 developer scripts, release orchestration, documentation checks, and website/consumer
 fixtures. Python and uv are not required to develop or test Tapid.

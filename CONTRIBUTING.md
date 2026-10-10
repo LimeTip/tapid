@@ -31,7 +31,7 @@ Every visible CLI command and nested subcommand needs a help description. Add a 
 
 Use [the testing workflow](docs/testing.md) as the single source for local verification commands. Start with the focused test for the changed behavior, run the affected crate checks before handoff, and use the full local lane for cross-cutting changes. CI retains its cross-platform, security, coverage, compatibility, and packaging gates.
 
-Run Cargo through `node --experimental-strip-types scripts/dev.ts` to reuse build artifacts across this repository's worktrees. Git, Rust with rustfmt and Clippy, and Node.js 22.6.0 or later are the development prerequisites. Optional CI tools do not need to be installed for an ordinary local change.
+Run Cargo through `node --experimental-strip-types scripts/dev.ts` to reuse build artifacts across this repository's worktrees. Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later are the development prerequisites. Optional CI tools do not need to be installed for an ordinary local change.
 
 Use Rust for package-manager behavior and security verification. Use TypeScript
 and Node's built-in test runner for developer helpers, release orchestration,

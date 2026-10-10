@@ -434,11 +434,16 @@ test("public smoke uses published binary rather than source build", () => {
   assert.ok(workflow.includes("--lane published"));
   assert.ok(workflow.includes("--example quickstart"));
   assert.ok(!workflow.includes("cargo build"));
+  const templateLiterals = new Set(
+    Array.from(workflow.matchAll(/`([^`\r\n]*)`/g), ([, value]) => value),
+  );
+  assert.ok(
+    templateLiterals.has(
+      "https://github.com/LimeTip/tapid/releases/download/${tag}/install.${extension}",
+    ),
+  );
   for (const extension of ["sh", "ps1"]) {
     assert.ok(workflow.includes("https://tapid.dev/install." + extension));
-    assert.ok(
-      workflow.includes("https://github.com/LimeTip/tapid/releases/download/"),
-    );
     assert.ok(workflow.includes("selected_installer_" + extension));
     assert.ok(workflow.includes("latest_installer_" + extension));
   }

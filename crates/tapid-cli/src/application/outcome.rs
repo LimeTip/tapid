@@ -64,7 +64,7 @@ impl ErrorKind {
 
 /// URLs in untrusted metadata can carry userinfo, query, or fragment credentials. Strip
 /// those values before limiting the diagnostic; classification uses typed kinds.
-fn sanitize(message: &str) -> String {
+pub(crate) fn sanitize(message: &str) -> String {
     let mut result = String::new();
     let mut rest = message;
     while let Some(start) = rest

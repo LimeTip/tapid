@@ -15,7 +15,7 @@ tapid run dev
 Rust owns package-manager behavior, capability tests, and security verification.
 TypeScript owns developer commands, release orchestration, documentation checks,
 and website/consumer fixtures. Helper regressions use Node's built-in test runner.
-Run TypeScript directly with Node.js 22.6.0 or later and `--experimental-strip-types`.
+Run TypeScript directly with Node.js 22.7.0 or later and `--experimental-strip-types`.
 Do not introduce Python tooling or tests. Shell and PowerShell remain appropriate
 for platform-specific installer integration. [ADR 0008](adr/0008-rust-and-typescript-tooling.md)
 records this language choice and the preserved verification contracts.
@@ -47,7 +47,7 @@ Tests use runtime-derived temporary paths. Preserve existing user files. Malform
 
 ## Source size review
 
-The TypeScript architecture commands require Node.js 22.6.0 or later.
+The TypeScript architecture commands require Node.js 22.7.0 or later.
 
 Run:
 

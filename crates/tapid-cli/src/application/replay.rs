@@ -1,7 +1,7 @@
 use super::outcome::{ErrorKind, OperationalError};
 use crate::context;
 use std::{collections::BTreeMap, fs, path::PathBuf};
-use tapid_core::{ArtifactDigest, PackageInstanceId};
+use tapid_core::PackageInstanceId;
 use tapid_linker::{
     InstanceKey, NamedDependency, NamedDependencyEdge, NamedLayoutInput, PackageInstance, Platform,
     VerifiedTreeReference,
@@ -53,7 +53,40 @@ pub(crate) fn replay_input(
     manifest: &PackageManifest,
     store: &Store,
     registry_config: &crate::registry::RegistryConfig,
+    report_progress: impl FnMut(usize, usize),
+) -> Result<(NamedLayoutInput, BTreeMap<String, PathBuf>), OperationalError> {
+    store.cleanup_stale_replay_snapshots().map_err(|error| {
+        OperationalError::from(error).context("cannot recover stale replay snapshots")
+    })?;
+    replay_input_with_tree_source(
+        lock,
+        manifest,
+        registry_config,
+        report_progress,
+        true,
+        |_, package| {
+            let digest = package
+                .tree_digest()
+                .parse()
+                .map_err(|error: tapid_core::DomainError| error.to_string())?;
+            store
+                .verified_tree_snapshot(&digest)
+                .map_err(OperationalError::from)
+        },
+    )
+}
+
+/// Build the locked layout using either owned replay snapshots or transaction-owned trees.
+pub(crate) fn replay_input_with_tree_source(
+    lock: &Lockfile,
+    manifest: &PackageManifest,
+    registry_config: &crate::registry::RegistryConfig,
     mut report_progress: impl FnMut(usize, usize),
+    owns_snapshots: bool,
+    mut tree_source: impl FnMut(
+        &tapid_lockfile::LockfilePackageKey,
+        &tapid_lockfile::LockedPackage,
+    ) -> Result<PathBuf, OperationalError>,
 ) -> Result<(NamedLayoutInput, BTreeMap<String, PathBuf>), OperationalError> {
     let mut instances = Vec::new();
     let mut keys = BTreeMap::new();
@@ -75,27 +108,20 @@ pub(crate) fn replay_input(
     );
     let root_keys = replay_root_keys_with_config(lock, manifest, &typed_keys, registry_config)
         .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
-    store.cleanup_stale_replay_snapshots().map_err(|error| {
-        OperationalError::from(error).context("cannot recover stale replay snapshots")
-    })?;
     let package_total = typed_packages.len();
     for (index, (key, package)) in typed_packages.iter().enumerate() {
         let completed = index + 1;
         let encoded = key.to_string();
-        let digest: ArtifactDigest = package
-            .tree_digest()
-            .parse()
-            .map_err(|e: tapid_core::DomainError| e.to_string())?;
         let tree = complete_progress_step(
             completed,
             package_total,
-            || store.verified_tree_snapshot(&digest),
+            || tree_source(key, package),
             &mut report_progress,
         )
-        .map_err(|e| {
-            OperationalError::from(e).context(format!("package {encoded} tree unavailable"))
-        })?;
-        snapshots.paths.push(tree.clone());
+        .map_err(|e| e.context(format!("package {encoded} tree unavailable")))?;
+        if owns_snapshots {
+            snapshots.paths.push(tree.clone());
+        }
         let peer = context::parse_peer(&key.peer_context)
             .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
         let platform = context::parse_platform(&key.platform_context)

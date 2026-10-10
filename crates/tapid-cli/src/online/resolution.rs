@@ -302,12 +302,6 @@ pub(super) fn metadata_progress_checkpoint(fetches: usize) -> bool {
     fetches == 1 || fetches.is_multiple_of(50)
 }
 
-fn report_metadata_progress(fetches: usize) {
-    if metadata_progress_checkpoint(fetches) {
-        eprintln!("Registry metadata progress: {fetches} package(s) fetched");
-    }
-}
-
 /// Resolves incrementally, fetching metadata only when the resolver reaches a
 /// package on its currently selected graph.
 #[cfg(test)]
@@ -326,6 +320,7 @@ where
             fetch(registry, name)
                 .map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))
         },
+        |_| {},
     )
     .map_err(|error| error.to_string())
 }
@@ -347,6 +342,7 @@ where
             fetch(registry, name)
                 .map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))
         },
+        |_| {},
     )
     .map_err(|error| error.to_string())
 }
@@ -369,6 +365,7 @@ where
             fetch(registry, name)
                 .map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))
         },
+        |_| {},
     )
     .map_err(|error| error.to_string())
 }
@@ -378,6 +375,7 @@ pub(super) fn resolve_with_fetch_routed_and_overrides<R, F>(
     mut registry_for_dependency: R,
     overrides: &BTreeMap<PackageName, Requirement>,
     mut fetch: F,
+    mut progress: impl FnMut(usize),
 ) -> Result<ResolvedRecords, OperationalError>
 where
     R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
@@ -427,7 +425,9 @@ where
                 if !optional_frontier.is_empty() {
                     for (registry, name) in optional_frontier {
                         fetched.insert((registry.to_string(), name.to_string()));
-                        report_metadata_progress(fetched.len());
+                        if metadata_progress_checkpoint(fetched.len()) {
+                            progress(fetched.len());
+                        }
                         insert_records(
                             &mut records,
                             &mut normalized,
@@ -459,7 +459,9 @@ where
                             ))
                         };
                     }
-                    report_metadata_progress(fetched.len());
+                    if metadata_progress_checkpoint(fetched.len()) {
+                        progress(fetched.len());
+                    }
                     let registry: RegistryOrigin = registry
                         .parse()
                         .map_err(|error: tapid_core::DomainError| error.to_string())?;
@@ -495,7 +497,9 @@ where
                             .context(format!("resolution failed; {discarded}")))
                     };
                 }
-                report_metadata_progress(fetched.len());
+                if metadata_progress_checkpoint(fetched.len()) {
+                    progress(fetched.len());
+                }
                 let registry: RegistryOrigin = registry
                     .parse()
                     .map_err(|error: tapid_core::DomainError| error.to_string())?;

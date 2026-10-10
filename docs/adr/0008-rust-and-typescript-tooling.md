@@ -17,8 +17,10 @@ Keep package-manager behavior and security verification in Rust. Use TypeScript
 for developer commands, release orchestration, documentation checks, and
 website/consumer fixtures. Test those helpers with Node's built-in test runner.
 Run TypeScript directly with `node --experimental-strip-types`, requiring
-Node.js 22.6.0 or later, as existing repository tooling does. Prefer the Node
-standard library instead of adding packages for the migration.
+Node.js 22.7.0 or later. This minimum includes default module syntax detection
+for the helpers' ESM imports and exports without a root `package.json` module
+declaration. Existing CommonJS `.js` fixtures retain their module behavior.
+Prefer the Node standard library instead of adding packages for the migration.
 
 Shell and PowerShell remain for platform-specific installer integration.
 Python is no longer a repository prerequisite. Do not add new Python helpers or

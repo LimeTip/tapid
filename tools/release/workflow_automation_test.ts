@@ -394,3 +394,38 @@ test('public installer discovery runs independently and requires its downloaded 
     assert(section.indexOf(publicInstall) < section.indexOf(discovery));
   }
 });
+
+test('release approval still runs when recovery skips the build job', async () => {
+  const publication = await workflow('release-publication');
+  const assemble = job(publication, 'assemble');
+  const signing = job(publication, 'draft-release');
+  assert(assemble.includes("needs.build.result == 'success' || needs.build.result == 'skipped'"));
+  assert.match(signing, /if: \$\{\{ !cancelled\(\) && needs\.assemble\.result == 'success' \}\}/);
+  assert.match(signing, /environment: stable-release/);
+});
+
+test('previous-release upgrade uses that release installer beneath the current rollback floor', async () => {
+  const smoke = await workflow('release-public-smoke');
+  const resolver = job(smoke, 'resolve');
+  const unix = job(smoke, 'unix');
+  const windows = job(smoke, 'windows');
+  const unixUpgrade = step(unix, 'Check previous-version upgrade and repeat upgrade through the public service');
+  const windowsUpgrade = step(windows, 'Check previous-version upgrade and repeat upgrade through the public service');
+  assert(resolver.includes('previous_installer_sh: ${{ steps.release.outputs.previous_installer_sh }}'));
+  assert(resolver.includes('previous_installer_ps1: ${{ steps.release.outputs.previous_installer_ps1 }}'));
+  assert(resolver.includes('gh api "repos/LimeTip/tapid/commits/$previous_tag" --jq .sha'));
+  assert(resolver.includes('major === 0n && minor === 0n && patch <= 10n'));
+  assert(resolver.includes('raw.githubusercontent.com/LimeTip/tapid/$previous_sha/scripts/install.sh'));
+  assert(resolver.includes('raw.githubusercontent.com/LimeTip/tapid/$previous_sha/scripts/install.ps1'));
+  assert(resolver.includes('https://github.com/LimeTip/tapid/releases/download/$previous_tag/install.sh'));
+  assert(resolver.includes('https://github.com/LimeTip/tapid/releases/download/$previous_tag/install.ps1'));
+  assert(unixUpgrade.includes('PREVIOUS_INSTALLER_URL: ${{ needs.resolve.outputs.previous_installer_sh }}'));
+  assert(unixUpgrade.includes('"$PREVIOUS_INSTALLER_URL" -o "$previous_installer"'));
+  assert(unixUpgrade.includes('previous_installer="$RUNNER_TEMP/previous-install.sh"'));
+  assert(unixUpgrade.includes('sh "$previous_installer" --version "$PREVIOUS_TAG"'));
+  assert(!unixUpgrade.includes('sh "$RUNNER_TEMP/public-install.sh" --version "$PREVIOUS_TAG"'));
+  assert(windowsUpgrade.includes('PREVIOUS_INSTALLER_URL: ${{ needs.resolve.outputs.previous_installer_ps1 }}'));
+  assert(windowsUpgrade.includes('-fsSL $env:PREVIOUS_INSTALLER_URL --output $previousInstaller'));
+  assert(windowsUpgrade.includes('& $previousInstaller -Version $env:PREVIOUS_TAG'));
+  assert(!windowsUpgrade.includes('& $installer -Version $env:PREVIOUS_TAG'));
+});
