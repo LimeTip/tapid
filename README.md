@@ -258,3 +258,5 @@ The Tapid CLI and its supporting crates in this repository are developed by Lime
 Copyright 2026 LimeTip AB.
 
 Run `tapid license` to print the complete license and copyright attribution embedded in the executable. This command works offline and does not require a project.
+
+Existing npm projects can use `tapid import-package-lock <path>` to preserve supported npm v3 selections without resolution. Import is offline; the first frozen install verifies pinned tarballs. See the [migration and rollback guide](docs/npm-lockfile-import.md). Tapid manages packages and lockfiles; Node.js, workerd, Wrangler, and deployment tools keep their existing roles.

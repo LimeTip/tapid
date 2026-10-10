@@ -25,8 +25,20 @@ pub(crate) fn run(args: Args) -> ExitCode {
             let path = PathBuf::from("tapid.lock");
             match fs::read_to_string(&path)
                 .map_err(|error| error.to_string())
-                .and_then(|input| Lockfile::from_json(&input).map_err(|error| error.to_string()))
-            {
+                .and_then(|input| {
+                    if serde_json::from_str::<serde_json::Value>(&input)
+                        .ok()
+                        .is_some_and(|v| v["lockfileVersion"] == 8)
+                    {
+                        tapid_lockfile::ImportedNpmLockfile::from_json(&input)
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                    } else {
+                        Lockfile::from_json(&input)
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                    }
+                }) {
                 Ok(_) => {
                     println!("Valid lockfile: {}", path.display());
                     ExitCode::SUCCESS

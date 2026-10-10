@@ -101,3 +101,7 @@ while preserving the target package. Alias-valued overrides remain unsupported.
 The synthetic alias fixture covers scoped routing, distinct versions, the h3
 prerelease declaration, bins, malformed declarations, and frozen/offline replay.
 This does not establish full npm compatibility or support for every arvtree dependency.
+
+## npm lockfile import
+
+`tapid import-package-lock <path>` imports the documented registry-only npm v3 subset offline into schema 8. Imported install/replay preserves selected nested versions, ancestor peer edges, supported distinct peer contexts, and optional/platform constraints without resolution. This is separate from ordinary online resolution and its direct-root peer limits. Links/workspaces and unrepresentable entries fail before writing. First frozen installation can fetch pinned artifacts and record verified tree receipts. See the [migration guide](npm-lockfile-import.md) for supported fields, platform differences, runtime boundaries, and rollback.

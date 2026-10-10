@@ -7,6 +7,7 @@ mod license;
 pub(crate) mod lifecycle;
 pub(crate) mod lock;
 pub(crate) mod manifest;
+mod npm_import;
 mod release_verification;
 pub(crate) mod run;
 pub(crate) mod upgrade;
@@ -41,6 +42,11 @@ pub(crate) enum Command {
   tapid init ./my-project"
     )]
     Init(init::Args),
+    /// Import an npm v3 package-lock.json offline without changing selected versions.
+    #[command(
+        long_about = "Import an npm lockfileVersion 3 lock into tapid.lock without network access or dependency resolution. Validates package.json in the current directory. Linked/workspace entries and unsupported metadata fail before writing. The first frozen install verifies the pinned tarballs; dependency scripts do not run."
+    )]
+    ImportPackageLock(npm_import::Args),
     /// Validate package.json manifests.
     Manifest(manifest::Args),
     /// Validate tapid.lock.
@@ -57,7 +63,7 @@ pub(crate) enum Command {
     /// Install dependencies, optionally adding one package first.
     #[command(
         visible_alias = "i",
-        long_about = "Install dependencies into node_modules and write tapid.lock. Optionally add one package to dependencies in package.json first.\n\nOnline installs resolve dependencies using registry metadata. Offline and frozen installs replay the existing lockfile from the verified store without network access. Dependency lifecycle scripts do not run.",
+        long_about = "Install dependencies into node_modules and write tapid.lock. Optionally add one package to dependencies in package.json first.\n\nOnline installs resolve dependencies using registry metadata. Offline installs replay verified trees without network access. Frozen installs preserve lockfile selections; imported npm locks can fetch pinned tarballs for their first verification. Dependency lifecycle scripts do not run.",
         after_help = "Examples:
   tapid install
   tapid install 'react@^19.0.0'
@@ -128,6 +134,7 @@ pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(Command::Init(args)) => init::run(args),
+        Some(Command::ImportPackageLock(args)) => npm_import::run(args),
         Some(Command::Manifest(args)) => manifest::run(args),
         Some(Command::Lock(args)) => lock::run(args),
         Some(Command::Run(args)) => run::run(args),

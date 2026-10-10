@@ -323,7 +323,24 @@ fn perform_install(
             .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
     }
     let lock_path = project_dir.join("tapid.lock");
-    if (offline || frozen) && lock_path.is_file() {
+    let mut imported = if lock_path.is_file() && package.is_none() && manifest_override.is_none() {
+        let bytes = fs::read_to_string(&lock_path)
+            .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
+        if serde_json::from_str::<serde_json::Value>(&bytes)
+            .ok()
+            .is_some_and(|v| v["lockfileVersion"] == 8)
+        {
+            Some(
+                tapid_lockfile::ImportedNpmLockfile::from_json(&bytes)
+                    .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if (offline || frozen) && lock_path.is_file() && imported.is_none() {
         read_lock(&lock_path)?;
     }
     session.lock = Some(ActivationLock::acquire(&project_dir)?);
@@ -350,6 +367,17 @@ fn perform_install(
                 .context("cannot preserve tapid.lock for recovery"));
         }
     };
+    if imported.is_some() {
+        imported = original_lock
+            .as_deref()
+            .map(|bytes| {
+                let input = std::str::from_utf8(bytes)
+                    .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
+                tapid_lockfile::ImportedNpmLockfile::from_json(input)
+                    .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))
+            })
+            .transpose()?;
+    }
     if offline || frozen || manifest_override.is_some() || package.is_some() {
         session.journal = Some(
             crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
@@ -404,18 +432,29 @@ fn perform_install(
             default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
         }
     });
-    if !offline && !frozen {
+    if imported.is_some() || !offline && !frozen {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let (lock, mut input, trees, store_transaction, workspace_links) =
-            online::resolve_and_fetch(
-                &project_dir,
-                &root_manifest,
-                &store,
-                registry_fixture,
-                allow_unverified_registry_artifacts,
-                &registry_config,
-            )?;
+            if let Some(imported) = imported.as_mut() {
+                online::fetch_imported(
+                    imported,
+                    &project_dir,
+                    &store,
+                    offline,
+                    registry_fixture,
+                    &registry_config,
+                )?
+            } else {
+                online::resolve_and_fetch(
+                    &project_dir,
+                    &root_manifest,
+                    &store,
+                    registry_fixture,
+                    allow_unverified_registry_artifacts,
+                    &registry_config,
+                )?
+            };
         if session.journal.is_none() {
             session.journal = Some(
                 crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
@@ -432,9 +471,15 @@ fn perform_install(
         journal
             .set_store_root(store.root())
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-        let lock_json = lock
-            .to_json()
-            .map_err(|error| OperationalError::from(error).context("cannot serialize lockfile"))?;
+        let lock_json = if let Some(imported) = imported.as_ref() {
+            imported
+                .to_json()
+                .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?
+        } else {
+            lock.to_json().map_err(|error| {
+                OperationalError::from(error).context("cannot serialize lockfile")
+            })?
+        };
         session.mutated = true;
         let publication = store_transaction
             .publish_for_lifecycle(&journal.coordinator_path())
@@ -503,7 +548,7 @@ fn perform_install(
         journal
             .finish()
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-        return Ok((lock.packages().len(), false));
+        return Ok((lock.packages().len(), imported.is_some()));
     }
     if !lock_path.is_file() {
         return Err(OperationalError::new(

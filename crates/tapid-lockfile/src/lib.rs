@@ -4,6 +4,7 @@
 
 mod error;
 mod model;
+mod npm_import;
 mod validation;
 
 #[cfg(test)]
@@ -23,3 +24,5 @@ const ROOTS_LEGACY_LOCKFILE_VERSION: u32 = 6;
 const REGISTRY_ONLY_LOCKFILE_VERSION: u32 = ROOTS_LEGACY_LOCKFILE_VERSION;
 const LEGACY_LOCKFILE_VERSION: u32 = 4;
 const PROVENANCE_LEGACY_LOCKFILE_VERSION: u32 = 5;
+
+pub use npm_import::{ImportedNpmGraph, ImportedNpmLockfile, ImportedNpmPackage, NpmImportError};
