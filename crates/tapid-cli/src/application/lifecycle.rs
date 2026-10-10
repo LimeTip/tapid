@@ -1,6 +1,7 @@
 use super::outcome::{ErrorKind, OperationFailure, OperationOutcome, OperationalError, Warning};
 use serde::Deserialize;
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -112,30 +113,31 @@ pub(crate) fn plan_update(
             .chain(manifest.optional_dependencies().keys())
             .chain(manifest.peer_dependencies().keys())
             .cloned()
-            .collect::<Vec<_>>()
+            .collect::<BTreeSet<_>>()
     } else {
-        names.to_vec()
+        names.iter().cloned().collect()
     };
+    let mut next = manifest.clone();
     let mut mutations = Vec::new();
     for name in selected {
-        let kind = manifest.dependency_kind(&name).ok_or_else(|| {
-            OperationalError::new(
-                ErrorKind::InvalidRequest,
-                format!("cannot update '{name}': dependency is not declared"),
-            )
-        })?;
-        let requirement = [
-            manifest.dependencies(),
-            manifest.dev_dependencies(),
-            manifest.optional_dependencies(),
-            manifest.peer_dependencies(),
-        ]
-        .iter()
-        .find_map(|map| map.get(&name))
-        .cloned()
-        .unwrap();
-        mutations.push(DependencyMutation {
-            requirement: Some(if latest {
+        let mut declared = false;
+        for (kind, dependencies) in [
+            (DependencyKind::Dependencies, manifest.dependencies()),
+            (DependencyKind::DevDependencies, manifest.dev_dependencies()),
+            (
+                DependencyKind::OptionalDependencies,
+                manifest.optional_dependencies(),
+            ),
+            (
+                DependencyKind::PeerDependencies,
+                manifest.peer_dependencies(),
+            ),
+        ] {
+            let Some(requirement) = dependencies.get(&name) else {
+                continue;
+            };
+            declared = true;
+            let requirement = if latest {
                 let parsed = requirement.parse::<Requirement>().map_err(|error| {
                     OperationalError::from_source(ErrorKind::InvalidRequest, error)
                         .context(format!("invalid dependency '{name}'"))
@@ -147,15 +149,32 @@ pub(crate) fn plan_update(
                     "*".to_owned()
                 }
             } else {
-                requirement
-            }),
-            name,
-            kind,
-        });
+                requirement.clone()
+            };
+            if latest {
+                next = next
+                    .update_dependency_kind(kind, &name, &requirement)
+                    .map_err(|error| {
+                        OperationalError::from_source(ErrorKind::InvalidRequest, error)
+                            .context(format!("cannot update dependency '{name}'"))
+                    })?;
+            }
+            mutations.push(DependencyMutation {
+                requirement: Some(requirement),
+                name: name.clone(),
+                kind,
+            });
+        }
+        if !declared {
+            return Err(OperationalError::new(
+                ErrorKind::InvalidRequest,
+                format!("cannot update '{name}': dependency is not declared"),
+            ));
+        }
     }
     Ok(LifecyclePlan {
         action: LifecycleAction::Update,
-        manifest: manifest.clone(),
+        manifest: next,
         mutations,
         diagnostics: Vec::new(),
     })
@@ -630,5 +649,43 @@ mod tests {
         assert_eq!(update.mutations[0].requirement.as_deref(), Some("^1.2.3"));
         let latest = plan_update(&manifest, &["foo".into()], true).unwrap();
         assert_eq!(latest.mutations[0].requirement.as_deref(), Some("*"));
+    }
+
+    #[test]
+    fn update_plans_each_section_once_and_preserves_its_alias_target() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"app","version":"1.0.0","dependencies":{"local":"npm:regular@^1"},"devDependencies":{"local":"npm:dev@^2"},"optionalDependencies":{"local":"npm:optional@^3"},"peerDependencies":{"local":"npm:peer@^4"}}"#,
+        ).unwrap();
+        for names in [Vec::new(), vec!["local".into(), "local".into()]] {
+            let unchanged = plan_update(&manifest, &names, false).unwrap();
+            assert_eq!(unchanged.manifest, manifest);
+            assert_eq!(unchanged.mutations.len(), 4);
+
+            let latest = plan_update(&manifest, &names, true).unwrap();
+            assert_eq!(latest.action, LifecycleAction::Update);
+            assert_eq!(latest.mutations.len(), 4);
+            assert_eq!(latest.manifest.dependencies()["local"], "npm:regular@*");
+            assert_eq!(latest.manifest.dev_dependencies()["local"], "npm:dev@*");
+            assert_eq!(
+                latest.manifest.optional_dependencies()["local"],
+                "npm:optional@*"
+            );
+            assert_eq!(latest.manifest.peer_dependencies()["local"], "npm:peer@*");
+        }
+    }
+
+    #[test]
+    fn update_rejects_undeclared_names_and_invalid_overlapping_ranges() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"app","version":"1.0.0","devDependencies":{"foo":"^1"},"peerDependencies":{"foo":"npm:"}}"#,
+        ).unwrap();
+        for names in [Vec::new(), vec!["foo".into()]] {
+            let error = plan_update(&manifest, &names, true).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        }
+        let error = plan_update(&manifest, &["missing".into()], true).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        assert_eq!(manifest.dev_dependencies()["foo"], "^1");
+        assert_eq!(manifest.peer_dependencies()["foo"], "npm:");
     }
 }

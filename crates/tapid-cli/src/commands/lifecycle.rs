@@ -165,13 +165,7 @@ pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
 
 pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
     let result = mutate_and_install(&args.common, json, |manifest| {
-        let plan =
-            crate::application::lifecycle::plan_update(manifest, &args.packages, args.latest)?;
-        if args.latest {
-            crate::application::lifecycle::plan_add(manifest, &plan.mutations)
-        } else {
-            Ok(plan)
-        }
+        crate::application::lifecycle::plan_update(manifest, &args.packages, args.latest)
     });
     report(result, json, "update", "Updated dependencies")
 }
