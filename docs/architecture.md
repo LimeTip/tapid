@@ -49,6 +49,10 @@ Current examples include:
 - `RegistryOrigin`, `PackageInstanceId`, and lossless `PackageIntegrity` for registry-qualified package identity and integrity metadata.
 - `PeerContext` and `PlatformContext`, deterministic context primitives used by dependency resolution and lockfile identity.
 
+## npm lockfile migration
+
+The lockfile capability owns offline npm v3 parsing, selection validation, placement lookup, and platform selection. Its `Requirement` dependency validates selected ranges and aliases without invoking the resolver. Imported schema 8 keeps pending tree evidence separate from ordinary schema 7 verified-tree locks. The CLI fetches exact pinned artifacts and uses existing transactional publication and activation. Imported ancestor peer placements can become explicit linker edges; ordinary online resolver peer placement retains the limits below. See [ADR 0008](adr/0008-offline-npm-lock-import.md).
+
 ## Peer dependency lifecycle boundary
 
 The resolver supports registry package peer requirements when a compatible provider is selected as a direct project root from the same registry. The provider is not flattened into ordinary dependency metadata; its selected version is captured in the requiring package's peer context, lockfile key, and linker instance. A missing or incompatible root provider fails before transaction commit.

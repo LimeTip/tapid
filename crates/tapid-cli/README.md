@@ -32,6 +32,7 @@ tapid init [PATH]
 tapid license
 tapid manifest validate [PATH]
 tapid lock verify
+tapid import-package-lock <PATH>
 tapid install [OPTIONS]
 tapid ci [OPTIONS]
 tapid upgrade [OPTIONS]
@@ -142,7 +143,7 @@ tapid ci --project-dir ./example
 tapid ci --offline --store-dir /absolute/path/to/verified-store
 ```
 
-`ci` requires a valid `tapid.lock` and matching root and workspace manifests. It installs exact locked versions and dependency edges without version resolution or changes to `package.json` and `tapid.lock`. Existing verified store trees are reused; missing trees are downloaded from locked HTTPS URLs and checked against locked SHA-512 integrity and SHA-256 tree digests. Private registry downloads use the configured route and exact-origin credentials. Every registry package must have a locked artifact URL, including with a warm cache or `--offline`. Incomplete locks require regeneration with `tapid install` and review of the resulting changes. Explicit `--registry-fixture` installs can supply local artifacts without locked URLs for tests and air-gapped development. This exception requires a readable fixture containing every URL-less locked registry, name, and version, even with a warm cache or `--offline`.
+`ci` requires an ordinary verified-tree `tapid.lock` and matching root and workspace manifests. Imported npm schema 8 locks use `tapid install --frozen`; `ci` rejects them before mutation because their verification receipts can change during installation. It installs exact locked versions and dependency edges without version resolution or changes to `package.json` and `tapid.lock`. Existing verified store trees are reused; missing trees are downloaded from locked HTTPS URLs and checked against locked SHA-512 integrity and SHA-256 tree digests. Private registry downloads use the configured route and exact-origin credentials. Every registry package must have a locked artifact URL, including with a warm cache or `--offline`. Incomplete locks require regeneration with `tapid install` and review of the resulting changes. Explicit `--registry-fixture` installs can supply local artifacts without locked URLs for tests and air-gapped development. This exception requires a readable fixture containing every URL-less locked registry, name, and version, even with a warm cache or `--offline`.
 
 Installation uses atomic managed `node_modules` replacement and coordinated store publication. Validation or activation failure preserves the previous install when rollback succeeds. An unmanaged `node_modules` is rejected. Dependency lifecycle scripts do not run. `--offline` disables downloads and requires all trees in the store. Package arguments and the unverified-artifact exception are unavailable on `ci`.
 
@@ -218,3 +219,5 @@ The macOS runner requires the binary's early private-launcher initializer. `sand
 For retained bindings, `executable_resolution.reserved_node.cleanup_observed` is `false`, and `limitations` explicitly describes retention. This field reports removal of the private snapshot, independently of best-effort process-group cleanup in `completion`. Retained directories and snapshots consume temporary storage until OS cleanup or host removal after every descendant exits. Tapid does not schedule deletion or reuse them. OS or host removal while descendants survive ends reserved-node protection. Host writes or races after final validation remain outside Restricted containment; retention provides no ManagedTree ownership or cleanup guarantee.
 
 Npm aliases are supported in manifest dependencies and package arguments such as `tapid add 'h3-v2@npm:h3@2.0.1-rc.20'`. Scoped targets and supported semver ranges retain their actual registry identity and local import names during install and frozen/offline replay. See [alias behavior and limits](../../docs/compatibility.md#npm-aliases).
+
+Existing npm projects can use `tapid import-package-lock <path>` to preserve supported npm v3 selections without resolution. Import is offline; the first frozen install verifies pinned tarballs. See the [migration and rollback guide](../../docs/npm-lockfile-import.md). Tapid manages packages and lockfiles; Node.js, workerd, Wrangler, and deployment tools keep their existing roles.
