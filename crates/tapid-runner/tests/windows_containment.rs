@@ -15,16 +15,6 @@ use tapid_runner::{
 #[path = "support/windows_acl.rs"]
 mod windows_acl;
 
-fn temporary_child_directory(parent: &std::path::Path, label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = parent.join(format!("tapid-{label}-{}-{nonce}", std::process::id()));
-    fs::create_dir(&path).unwrap();
-    path
-}
-
 fn temporary_project(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -772,19 +762,15 @@ fn windows_node_runtime_can_resolve_a_script_file_inside_the_project_grant() {
 
 #[test]
 fn windows_node_runtime_can_be_launched_directly_when_test_runtime_is_configured() {
-    let Some(local_app_data) = std::env::var_os("TAPID_TEST_LOCALAPPDATA").map(PathBuf::from)
-    else {
-        eprintln!("skipping: TAPID_TEST_LOCALAPPDATA is not set");
-        return;
-    };
     let Some(node) = std::env::var_os("TAPID_TEST_NODE").map(PathBuf::from) else {
         eprintln!("skipping: TAPID_TEST_NODE is not set");
         return;
     };
     let node = fs::canonicalize(node).unwrap();
-    fs::create_dir_all(&local_app_data).unwrap();
-    let root = temporary_child_directory(&local_app_data, "node-runtime");
-    let root = fs::canonicalize(root).unwrap();
+    let fixture = tapid_test_support::TempProject::new("direct-node-runtime").unwrap();
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    windows_acl::initialize_inheritance(&root);
+    let baseline_acl = project_dacl(&root);
     let runtime_bin = node.parent().unwrap().to_path_buf();
     let system32 = fs::canonicalize(
         PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot is required"))
@@ -809,7 +795,7 @@ fn windows_node_runtime_can_be_launched_directly_when_test_runtime_is_configured
         String::from_utf8_lossy(outcome.stderr())
     );
     assert!(String::from_utf8_lossy(outcome.stdout()).starts_with('v'));
-    fs::remove_dir_all(root).unwrap();
+    assert_eq!(project_dacl(&root), baseline_acl);
 }
 
 #[test]
@@ -1077,7 +1063,7 @@ fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
 #[test]
 fn windows_private_write_tree_creates_and_reopens_files_without_outside_authority() {
     let fixture = tapid_test_support::TempProject::new("private-write-boundary").unwrap();
-    let root = fixture.path().to_path_buf();
+    let root = fs::canonicalize(fixture.path()).unwrap();
     windows_acl::initialize_inheritance(&root);
     let writable = root.join("package");
     fs::create_dir(&writable).unwrap();
@@ -1141,6 +1127,7 @@ fn windows_private_write_tree_creates_and_reopens_files_without_outside_authorit
 
 #[test]
 fn windows_private_write_preparation_rejects_junctions_without_lowering_host_integrity() {
+    use std::os::windows::process::CommandExt;
     let project = tapid_test_support::TempProject::new("private-write-junction").unwrap();
     let root = project.path().to_path_buf();
     windows_acl::initialize_inheritance(&root);
@@ -1152,7 +1139,7 @@ fn windows_private_write_preparation_rejects_junctions_without_lowering_host_int
     let junction = private.join("junction");
     let output = Command::new(shell.program())
         .args(["/D", "/S", "/C"])
-        .arg(format!(
+        .raw_arg(format!(
             "mklink /J \"{}\" \"{}\"",
             junction.display(),
             outside.display()

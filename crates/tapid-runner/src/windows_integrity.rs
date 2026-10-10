@@ -129,6 +129,10 @@ fn directory(file: &File) -> Result<bool, ExecutionError> {
 /// not authorize execution. The contained runner independently validates every
 /// writable object before launch. Reparse points and hard links fail closed.
 pub fn prepare_private_dependency_write_tree(root: &Path) -> Result<(), ExecutionError> {
+    // Inheritable labels can trigger native child metadata propagation. Validate
+    // the complete private tree before the first change so an existing hard link
+    // or junction cannot cause propagation onto a host object before rejection.
+    visit(root, true, false, |_, _| Ok(()))?;
     visit(root, true, true, |file, is_directory| {
         let label = LowLabel::new(is_directory)?;
         // SAFETY: held object and SACL stay live. LABEL changes only the mandatory label,
