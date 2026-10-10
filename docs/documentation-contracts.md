@@ -40,11 +40,11 @@ A local commit can unblock clean pinned builds without authorizing a push.
 
 ## Running the Unix lanes
 
-Requires Python 3.11+ (CI selects 3.12), Rust for source builds, and macOS/Linux.
+Requires Node.js 22.7.0 or later, Rust for source builds, and macOS/Linux.
 
 ```sh
-python3 -m unittest discover -s tests -p test_doc_examples.py -v
-python3 scripts/check-doc-examples.py --lane source --example init --example upgrade-help --report source.json
+node --experimental-strip-types --test tests/doc_examples_test.ts
+node --experimental-strip-types scripts/check-doc-examples.ts --lane source --example init --example upgrade-help --report source.json
 ```
 
 The source lane builds into a new dedicated temporary target directory and uses
@@ -133,7 +133,7 @@ ordinary CI evidence, not cryptographic publisher attestations.
 
 Existing required Unix `Test (...)` jobs run unit tests and source init/upgrade
 capability contracts without making PRs depend on npm. The Unix jobs also run
-`scripts/check-release-record.py --binary target/debug/tapid` after building the
+`node --experimental-strip-types scripts/check-release-record.ts --binary target/debug/tapid` after building the
 CLI. That offline check sends the real generator's six-platform release record
 through the Unix installer and compiled updater, checks repeat upgrades, changes
 the artifact host while keeping discovery fixed, and rejects malformed metadata

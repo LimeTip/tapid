@@ -1,9 +1,6 @@
 # Rust build output
 target/
 
-# Python developer tooling
-__pycache__/
-
 # JavaScript compatibility fixtures and generated installs
 node_modules/
 

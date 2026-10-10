@@ -30,7 +30,7 @@ export function evaluateCi(input: unknown, sha: string): "waiting" | "success" {
 
 // Exact successful main CI owns command-help tests; retain every CodeQL gate.
 // GitHub's default CodeQL setup lives outside repository workflow files.
-export const requiredChecks = ['Analyze (actions)', 'Analyze (rust)', 'Analyze (javascript-typescript)', 'Analyze (python)'];
+export const requiredChecks = ['Analyze (actions)', 'Analyze (rust)', 'Analyze (javascript-typescript)'];
 export function evaluateChecks(input: unknown, sha: string): 'waiting' | 'success' {
   commit(sha);
   if (!Array.isArray(input)) throw Error('invalid check run collection');
