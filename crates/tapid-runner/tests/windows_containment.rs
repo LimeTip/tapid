@@ -1020,9 +1020,10 @@ fn windows_write_policy_fails_closed_before_spawn_until_native_acceptance() {
 }
 
 #[test]
-#[ignore = "re-enable after AppContainer existing-file writes pass on Windows 11"]
 fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
-    let root = temporary_project("write-existing-file");
+    let fixture = tapid_test_support::TempProject::new("write-existing-file").unwrap();
+    let root = fixture.path().to_path_buf();
+    windows_acl::initialize_inheritance(&root);
     let writable = root.join("writable");
     fs::create_dir(&writable).unwrap();
     let authorized = writable.join("authorized.txt");
@@ -1040,6 +1041,9 @@ fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
         String::from_utf8_lossy(&label.stdout),
         String::from_utf8_lossy(&label.stderr)
     );
+    let baseline_root = project_dacl(&root);
+    let baseline_write = project_dacl(&writable);
+    let baseline_file = project_dacl(&authorized);
     let command = format!("echo TAPID_WRITE_GRANTED>\"{}\"", authorized.display());
     let policy = SandboxPolicy::new_with_assurance(
         SandboxMode::Required,
@@ -1065,7 +1069,17 @@ fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
         fs::read_to_string(&authorized).unwrap().trim(),
         "TAPID_WRITE_GRANTED"
     );
-    fs::remove_dir_all(root).unwrap();
+    assert_eq!(project_dacl(&root), baseline_root);
+    assert_eq!(project_dacl(&writable), baseline_write);
+    assert_eq!(project_dacl(&authorized), baseline_file);
+    let command = format!("echo REOPENED>>\"{}\"", authorized.display());
+    let request = command_request_with_policy(&root, &command, request.policy().clone());
+    let outcome = execute(&request).unwrap();
+    assert_eq!(outcome.termination(), &Termination::Exited(0));
+    assert!(fs::read_to_string(&authorized).unwrap().contains("REOPENED"));
+    assert_eq!(project_dacl(&root), baseline_root);
+    assert_eq!(project_dacl(&writable), baseline_write);
+    assert_eq!(project_dacl(&authorized), baseline_file);
 }
 
 #[test]
