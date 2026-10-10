@@ -13,6 +13,8 @@ use std::sync::{Mutex, OnceLock};
 use tapid_core::ArtifactDigest;
 
 mod lifecycle;
+mod maintenance;
+pub use maintenance::{CacheSummary, CacheUsage};
 
 const REPLAY_LEASE: &str = ".tapid-replay-lease";
 
@@ -58,11 +60,15 @@ pub struct StorePublication {
 #[derive(Debug)]
 pub enum IngestError {
     Io(io::Error),
+    /// Eviction started and may have removed some cache entries before failing.
+    CacheCleanup(io::Error),
     DigestMismatch {
         expected: ArtifactDigest,
         actual: String,
     },
     InvalidRoot,
+    /// The selected cache location is symlinked or not a directory.
+    CachePath(io::Error),
     Archive(tapid_archive::ExtractError),
     TreeDigestMismatch {
         expected: ArtifactDigest,
@@ -73,9 +79,11 @@ impl fmt::Display for IngestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(e) => write!(f, "store I/O error: {e}"),
+            Self::CacheCleanup(e) => write!(f, "cache cleanup incomplete: {e}"),
             Self::DigestMismatch { expected, actual } => {
                 write!(f, "digest mismatch: expected {expected}, got {actual}")
             }
+            Self::CachePath(e) => write!(f, "invalid cache path: {e}"),
             Self::InvalidRoot => f.write_str("store root must not be empty"),
             Self::Archive(e) => write!(f, "archive extraction error: {e}"),
             Self::TreeDigestMismatch { expected, actual } => {
@@ -178,7 +186,9 @@ impl Store {
         }
         let marker = path.join(".tapid-tree");
         let marker_meta = fs::symlink_metadata(&marker)?;
-        if !marker_meta.file_type().is_file() || fs::read_to_string(&marker)? != digest.as_str() {
+        if !marker_meta.file_type().is_file()
+            || !tree_marker_matches(&mut File::open(&marker)?, digest)?
+        {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidData, "store tree is not verified").into(),
             );
@@ -385,6 +395,7 @@ impl Store {
         if self.root.as_os_str().is_empty() {
             return Err(IngestError::InvalidRoot);
         }
+        let _guard = lock_file(&self.root, true)?;
         let destination = self.artifact_path(expected);
         if let Ok(metadata) = fs::symlink_metadata(&destination) {
             if !metadata.file_type().is_file() {
@@ -1443,28 +1454,48 @@ fn remove_store_journal(path: &Path) -> io::Result<()> {
     }
 }
 
+fn open_store_lock(root: &Path, create: bool) -> io::Result<File> {
+    let path = root.join(".store.lock");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store lock path is not a regular file",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut options = OpenOptions::new();
+    options
+        .create(create)
+        .truncate(false)
+        .read(true)
+        .write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(&path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "store lock path is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
 fn lock_file(root: &Path, exclusive: bool) -> io::Result<File> {
     fs::create_dir_all(root)?;
-    let path = root.join(".store.lock");
-    let open = || -> io::Result<File> {
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if !metadata.file_type().is_file() => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "store lock path is not a regular file",
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-    };
+    let open = || open_store_lock(root, true);
     if exclusive {
         let file = open()?;
         FileExt::lock(&file)?;
@@ -1489,6 +1520,17 @@ fn lock_file(root: &Path, exclusive: bool) -> io::Result<File> {
         let _ = FileExt::unlock(&recovery_lock);
         recovery?;
     }
+}
+
+fn tree_marker_matches(file: &mut File, digest: &ArtifactDigest) -> io::Result<bool> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.len() != digest.as_str().len() as u64 {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    file.take(digest.as_str().len() as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes == digest.as_str().as_bytes())
 }
 
 fn digest_bytes(data: &[u8]) -> String {

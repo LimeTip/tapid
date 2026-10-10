@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+mod cache;
 mod ci;
 pub(crate) mod init;
 pub(crate) mod install;
@@ -48,6 +49,10 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Inspect or safely clear the published package cache.
+    Cache(cache::Args),
+    /// Preview package-cache removal. Pass --yes to delete published cache entries.
+    Clean(cache::CleanArgs),
     /// Print the Apache-2.0 license and copyright attribution.
     License,
     #[command(name = "__verify-release-record", hide = true)]
@@ -151,6 +156,8 @@ pub(crate) enum Command {
 impl Command {
     fn operation(&self) -> &'static str {
         match self {
+            Self::Cache(_) => "cache",
+            Self::Clean(_) => "clean",
             Self::License => "license",
             Self::VerifyReleaseRecord(_) => "__verify-release-record",
             Self::PrepareReleaseInstall(_) => "__prepare-release-install",
@@ -177,7 +184,9 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         && !matches!(
             command,
             Some(
-                Command::Install(_)
+                Command::Cache(_)
+                    | Command::Clean(_)
+                    | Command::Install(_)
                     | Command::Add(_)
                     | Command::Remove(_)
                     | Command::Update(_)
@@ -193,6 +202,8 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         );
     }
     match command {
+        Some(Command::Cache(args)) => cache::run(args, json),
+        Some(Command::Clean(args)) => cache::clean(args, json),
         Some(Command::License) => license::run(),
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
         Some(Command::PrepareReleaseInstall(args)) => release_verification::prepare_install(args),
