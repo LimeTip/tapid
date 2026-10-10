@@ -9,6 +9,8 @@ use std::{
 };
 use tapid_lockfile::Lockfile;
 
+mod workspace_acceptance;
+
 /// Verifies exact license output with no application environment and invalid project files.
 #[test]
 fn license_prints_complete_apache_text_without_accessing_a_project() {

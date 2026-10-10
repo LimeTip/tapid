@@ -105,6 +105,13 @@ Formatting uses the stable Rust toolchain's rustfmt component, with no repositor
 
 The main native `test` job runs `cargo test --workspace --all-features --locked -- --show-output` from the repository root on all three platforms, including the CLI command-description tests. The Windows leg also owns `native_windows_shim_materialization_rejects_collisions_before_writes`: its source remains `#[cfg(windows)]`, `#[test]`, and not ignored; there is no separate filtered invocation. Node.js 22 is installed before testing and `TAPID_REQUIRE_NODE_ASSERTIONS=1` makes the CLI Node probes fail closed, with successful assertion receipts in the logs. The nested integration workspace remains a separate invocation.
 
+The `news-site-consumer` job also runs the CLI `workspace_acceptance` filter on
+the same Ubuntu 24.04 and Node 22 reference environment as the news-site fixture.
+It requires Node assertion receipts for root/member imports through local links
+and registry packages after install, replay, and lifecycle commands. Reproduce
+that focused check with
+`TAPID_REQUIRE_NODE_ASSERTIONS=1 python3 scripts/dev.py test -p tapid --test cli --locked workspace_acceptance -- --show-output`.
+
 The main `release-contract` job owns Unix installer syntax (`sh -n`) and offline `--help`, plus PowerShell tokenization with a nonzero exit on parser errors. Its release-helper suite also exercises that exact PowerShell validator against the real installer and deterministic malformed input, without executing either input or adding a workflow lane. The regression can skip only when `pwsh` is missing locally; CI must execute it. Standalone CLI documentation and website installer validation workflows are no longer needed; no replacement duplicate or manual runner is introduced. Release automation requires successful exact-SHA main-push CI and all four existing CodeQL analysis checks; the obsolete standalone command-help check is not a separate prerequisite. Other release identity, candidate, publication, and smoke gates remain unchanged.
 
 The security and package jobs use runner-provided workspaces and do not rely on local absolute paths. A local command may be unavailable on a developer machine, but CI treats the corresponding gate as required.

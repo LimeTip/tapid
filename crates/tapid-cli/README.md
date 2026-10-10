@@ -71,6 +71,35 @@ Results carry the effective project directory, affected project outputs, policy 
 
 A nonzero exit after commit does not mean the dependency change failed. Tapid reports that the change committed and warns against repeating the operation. Cleanup failures preserve the durable commit decision. If rollback cannot finish, Tapid reports recovery required and retains its journal for the next recovery attempt. Contention errors advise waiting for the competing operation. Diagnostic messages are limited to 4 KiB each, and HTTP URL user information, query values, and fragments are redacted. These results are internal application types; a JSON command protocol is separate work.
 
+## npm workspaces
+
+Declare members with root `workspaces`, for example `["apps/*", "packages/*"]`.
+Literal paths and `*` as a whole directory component are supported; unsupported
+glob syntax fails before mutation. Ordinary semver dependencies on member names
+link locally without registry fallback. `workspace:*`, `workspace:^`, and
+`workspace:~` are also accepted as compatibility syntax.
+
+Run these commands from the workspace root:
+
+```text
+tapid install
+tapid install --workspace news
+tapid add @example/ui@^1.0.0 --workspace news
+tapid update --workspace news
+tapid remove @example/ui --workspace news
+tapid prune --workspace news
+tapid install --offline --workspace news
+tapid install --frozen --workspace news
+tapid run dev --workspace news
+```
+
+Selection uses the exact member package name. Without `--workspace`, mutations
+and scripts select the root. Install and prune activate the full graph using the
+root lock and root `node_modules`; member scripts run from their directory using
+root policy. Pass `--project-dir <root>` when running elsewhere. See the
+[workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces)
+for discovery, replay, selection, and compatibility limits.
+
 ## Private npm registry routing (development feature)
 
 Registry routing is configured in the project-root `tapid.toml`. With no `[registries]` entries, plain npm package names continue to resolve from `https://registry.npmjs.org`. A matching scope overrides `default`; otherwise `default` applies, then the public npm registry is the fallback. `npm:` aliases use the same scope routing. `jsr:` packages retain their JSR identity and are not routed through npm settings.
