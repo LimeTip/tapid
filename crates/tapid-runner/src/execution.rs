@@ -535,7 +535,7 @@ enum GrantResolution {
         relative_target: PathBuf,
     },
     RuntimeCanonical,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     RuntimeDevice {
         device: u64,
         inode: u64,
@@ -801,7 +801,7 @@ impl ResolvedSandboxPolicy {
                     }
                 }
                 GrantResolution::RuntimeCanonical => validate_canonical_path(&grant.path)?,
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 GrantResolution::RuntimeDevice { .. } => {
                     validate_canonical_path(&grant.path)?;
                     if !grant_kind_matches(grant, &grant.path)? {
@@ -1426,6 +1426,20 @@ pub fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, Execution
     execute_with_backend(request, &platform_backend::PlatformBackend)
 }
 
+/// Byte identity of the native backend and its documented system toolchain.
+/// This performs no project execution and does not require cgroup delegation.
+pub fn dependency_toolchain_identity() -> Result<String, ExecutionError> {
+    #[cfg(target_os = "linux")]
+    {
+        platform_backend::toolchain_identity()
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err(ExecutionError::new(
+        ExecutionErrorCategory::UnsupportedContainment,
+        "dependency lifecycle toolchain identity currently requires Linux",
+    ))
+}
+
 fn resolve_policy(
     request: &ExecutionRequest,
     additions: RuntimeFilesystemAdditions,
@@ -1634,11 +1648,12 @@ fn resolve_runtime_grant(
             ),
         ));
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if matches!(
         canonical.to_str(),
         Some("/dev/null" | "/dev/random" | "/dev/urandom")
-    ) {
+    ) || (cfg!(target_os = "linux") && canonical == Path::new("/dev/zero"))
+    {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
         let metadata = fs::metadata(&canonical).map_err(|_| binding_mismatch())?;
         if !metadata.file_type().is_char_device() {
@@ -1666,7 +1681,7 @@ fn resolve_runtime_grant(
 }
 
 fn grant_kind_matches(grant: &ResolvedGrant, path: &Path) -> Result<bool, ExecutionError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if let GrantResolution::RuntimeDevice {
         device,
         inode,

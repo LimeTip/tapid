@@ -13,6 +13,7 @@ rust-version.workspace = true
 tapid-archive = { version = "0.0.5", path = "../tapid-archive" }
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 fs4 = "1.1"
 same-file = "1.0"

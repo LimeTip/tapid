@@ -289,16 +289,19 @@ impl ExecutionRequest {
         #[cfg(not(target_os = "linux"))]
         if self.allow_process_memory_stats {
             return Err(invalid_request(
-                "process memory statistics opt-in is supported only by the Linux Restricted backend",
+                "process memory statistics opt-in is supported only by Linux containment backends",
             ));
         }
         #[cfg(target_os = "linux")]
         if self.allow_process_memory_stats
             && (self.policy.mode() != SandboxMode::Required
-                || self.policy.assurance() != AssuranceLevel::Restricted)
+                || !matches!(
+                    self.policy.assurance(),
+                    AssuranceLevel::Restricted | AssuranceLevel::ManagedTree
+                ))
         {
             return Err(invalid_request(
-                "process memory statistics opt-in requires required sandbox mode and Linux Restricted assurance",
+                "process memory statistics opt-in requires required sandbox mode and Linux Restricted or ManagedTree assurance",
             ));
         }
         #[cfg(target_os = "linux")]

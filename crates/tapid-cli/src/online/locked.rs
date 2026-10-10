@@ -426,6 +426,13 @@ pub(crate) struct LockedSnapshots {
     trees: Vec<TemporaryTree>,
 }
 
+impl LockedSnapshots {
+    /// Keep an owned private snapshot alive until activation finishes.
+    pub(crate) fn retain(&mut self, tree: PathBuf) {
+        self.trees.push(TemporaryTree(tree));
+    }
+}
+
 pub(crate) fn prepare_locked_install(
     lock: &Lockfile,
     manifest: &PackageManifest,
@@ -458,7 +465,7 @@ pub(crate) fn prepare_locked_install(
                     })?;
             match store.verified_tree_snapshot(&tree_digest) {
                 Ok(snapshot) => {
-                    snapshots.trees.push(TemporaryTree(snapshot.clone()));
+                    snapshots.retain(snapshot.clone());
                     return Ok(snapshot);
                 }
                 Err(tapid_store::IngestError::Io(error))

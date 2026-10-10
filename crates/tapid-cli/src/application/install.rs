@@ -304,6 +304,7 @@ fn perform_install(
         ));
     }
     session.outcome.project_dir = project_dir.clone();
+    let lifecycle_policy = super::dependency_scripts::load_policy(&project_dir)?;
     let target_candidate = if target_manifest_path.is_absolute() {
         target_manifest_path.to_path_buf()
     } else {
@@ -493,6 +494,11 @@ fn perform_install(
                 .map(|(k, p)| (k.clone(), p.manifest_digest().to_owned()))
                 .collect::<BTreeMap<_, _>>();
             replayable
+                && lifecycle_policy.approvals().is_empty()
+                && lock
+                    .packages()
+                    .values()
+                    .all(|p| p.derived_hooks().is_empty())
                 && lock.root_manifest_digest() == online::root_digest(&project_dir)?
                 && current == locked
         } else {
@@ -504,7 +510,7 @@ fn perform_install(
     if imported.is_some() || !offline && !frozen && !replay_existing {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-        let (lock, mut input, trees, store_transaction, workspace_links) =
+        let (mut lock, mut input, mut trees, mut store_transaction, workspace_links) =
             if let Some(imported) = imported.as_mut() {
                 online::fetch_imported(
                     imported,
@@ -546,6 +552,21 @@ fn perform_install(
         journal
             .set_store_root(store.root())
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+        if imported.is_none() {
+            session
+                .outcome
+                .warnings
+                .extend(super::dependency_scripts::apply(
+                    &project_dir,
+                    &lifecycle_policy,
+                    &mut lock,
+                    &mut input,
+                    &mut trees,
+                    &store,
+                    Some(&mut store_transaction),
+                    activation_lock,
+                )?);
+        }
         let lock_json = if let Some(imported) = imported.as_ref() {
             imported
                 .to_json()
@@ -708,15 +729,41 @@ fn perform_install(
             "locked packages target a different platform; regenerate tapid.lock with tapid update and review the resulting changes",
         ));
     }
-    if ci && !offline {
-        let (mut input, trees, transaction, _cached_snapshots) = online::prepare_locked_install(
-            &lock,
-            &root_manifest,
-            &store,
-            &registry_config,
-            registry_fixture,
-            |completed, total| report_replay_progress(Progress::Replay(completed, total)),
-        )?;
+    if !offline
+        && (ci
+            || lock
+                .packages()
+                .values()
+                .any(|p| !p.derived_hooks().is_empty()))
+    {
+        let (mut input, mut trees, transaction, mut cached_snapshots) =
+            online::prepare_locked_install(
+                &lock,
+                &root_manifest,
+                &store,
+                &registry_config,
+                registry_fixture,
+                |completed, total| report_replay_progress(Progress::Replay(completed, total)),
+            )?;
+        let source_trees = trees.clone();
+        session
+            .outcome
+            .warnings
+            .extend(super::dependency_scripts::apply(
+                &project_dir,
+                &lifecycle_policy,
+                &mut lock.clone(),
+                &mut input,
+                &mut trees,
+                &store,
+                None,
+                activation_lock,
+            )?);
+        for (key, tree) in &trees {
+            if source_trees.get(key) != Some(tree) {
+                cached_snapshots.retain(tree.clone());
+            }
+        }
         session.mutated = true;
         let publication = transaction
             .publish_for_lifecycle(&journal.coordinator_path())
@@ -768,7 +815,7 @@ fn perform_install(
         );
         crate::filesystem::activation::test_crash_at("store_published");
     }
-    let (input, trees) = crate::application::replay::replay_input_with_publication(
+    let (mut input, mut trees) = crate::application::replay::replay_input_with_publication(
         &lock,
         &root_manifest,
         &store,
@@ -776,6 +823,28 @@ fn perform_install(
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         publication.as_ref(),
     )?;
+    let source_trees = trees.clone();
+    let hook_warnings = super::dependency_scripts::apply(
+        &project_dir,
+        &lifecycle_policy,
+        &mut lock.clone(),
+        &mut input,
+        &mut trees,
+        &store,
+        None,
+        activation_lock,
+    );
+    if hook_warnings.is_err() {
+        crate::application::replay::cleanup_replay_snapshots(&source_trees);
+        crate::application::replay::cleanup_replay_snapshots(&trees);
+    } else {
+        let replaced = source_trees
+            .into_iter()
+            .filter(|(key, path)| trees.get(key) != Some(path))
+            .collect();
+        crate::application::replay::cleanup_replay_snapshots(&replaced);
+    }
+    session.outcome.warnings.extend(hook_warnings?);
     session.mutated = true;
     session
         .outcome

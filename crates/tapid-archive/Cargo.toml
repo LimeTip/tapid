@@ -18,3 +18,6 @@ flate2 = "1"
 hex = "0.4"
 sha2 = "0.10"
 tar = "0.4"
+
+[dev-dependencies]
+tapid-test-support = { path = "../tapid-test-support" }

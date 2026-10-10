@@ -4,7 +4,7 @@
 
 <p align="center">
   A JavaScript and TypeScript package manager written in Rust,<br>
-  with verified downloads, reproducible installs, and dependency lifecycle scripts disabled during installation.
+  with verified downloads, reproducible installs, and dependency lifecycle scripts denied by default.
 </p>
 
 <p align="center">
@@ -96,7 +96,7 @@ The lockfile pins what was selected and supports verified replay; registry integ
 
 ## Current package-management implementation
 
-The consumer workflow exercises deterministic dependency resolution, npm metadata and artifact retrieval, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline/frozen replay, and suppression of dependency lifecycle scripts. This is a bounded npm-compatible subset, not full npm or pnpm compatibility.
+The consumer workflow exercises deterministic dependency resolution, npm metadata and artifact retrieval, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, and offline/frozen replay. Dependency lifecycle scripts are denied by default; exact checked-in approvals can permit supported hooks. This is a bounded npm-compatible subset, not full npm or pnpm compatibility.
 
 ### Synthetic news-site compatibility fixture
 
@@ -135,7 +135,7 @@ The package-management toolchain also includes:
 - `ci` to install the exact graph in `tapid.lock`, downloading missing verified packages without resolving versions again.
 - `outdated` to compare locked versions with registry metadata, and `prune` to remove unreachable managed packages.
 - A content-addressed local store and lockfile replay for offline installs, with transactional activation of managed `node_modules`.
-- Safe archive extraction and integrity checks, plus generated package `bin` shims. Dependency lifecycle scripts are suppressed during installation.
+- Safe archive extraction and integrity checks, plus generated package `bin` shims. Dependency lifecycle scripts are denied by default; [exact checked-in approvals](docs/dependency-lifecycle.md) can produce verified derived trees through Linux ManagedTree.
 
 These controls improve repeatability and reject certain mismatches, but they do not currently detect vulnerable or malicious packages or authenticate publishers. See [Supported subset and limitations](#supported-subset-and-limitations) for exact behavior. Experimental root-script execution is separate and not the product focus; see [ADR 0005](docs/adr/0005-default-on-root-script-sandbox.md) for its status and limitations.
 
@@ -227,10 +227,10 @@ Ordinary install reuses a matching lock. Changed manifests preserve compatible l
 - Lifecycle mutations are all-or-nothing across the manifest, lockfile, verified store, and managed `node_modules` activation. Resolution, integrity, archive, peer, workspace, and materialization failures preserve the prior state; verified trees are not committed to the shared store until project activation succeeds. Durable recovery journals let the next lifecycle command, including `outdated`, restore the prior state after a crash before commit or finish cleanup after a committed operation.
 - The live npm path requires registry-declared SHA-512 integrity by default and verifies downloaded bytes against that digest. This integrity check matches bytes to registry metadata; it does not authenticate the publisher, prove the user intended that package, or establish the archive's package identity independently of the metadata. The explicit `--allow-unverified-registry-artifacts` compatibility exception permits missing integrity and is online-only.
 - Vulnerability intelligence, package malware scanning, publisher/provenance verification, and human audit attestations are not implemented. A verified archive is not necessarily safe or vulnerability-free.
-- Lifecycle scripts from dependencies never run during install. There is no approval workflow yet.
+- Dependency lifecycle scripts are denied by default. Exact checked-in approvals can run supported hooks through Linux ManagedTree; see [policy and platform requirements](docs/dependency-lifecycle.md).
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
-- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock and seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. ManagedTree, configured resource-limit profiles, Windows native containment, and the broader Linux Restricted probe matrix remain unsupported or pending. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
+- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock and seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. Linux ManagedTree and resource-limit profiles require delegated cgroup v2 and private namespaces. macOS ManagedTree, Windows native containment, and the broader platform probe matrix remain unsupported or pending. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
 
 ## Contributing
 

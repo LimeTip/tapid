@@ -1618,3 +1618,122 @@ fn frozen_refuses_corrupt_warm_content_without_redownloading() {
     assert_eq!(failure.error.kind, ErrorKind::Integrity);
     assert_eq!(fs::read(&lock_path).unwrap(), before);
 }
+
+#[test]
+fn dependency_discovery_failure_warns_without_package_approval_and_preserves_replay() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use sha2::{Digest, Sha512};
+    let project = TempProject::new("lifecycle-discovery-failure").unwrap();
+    let home = tapid_test_support::TempHome::new("lifecycle-discovery-failure").unwrap();
+    let store = home.path().join("store");
+    let manifest = br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0"}}"#;
+    project.write("package.json", manifest).unwrap();
+    // Valid package metadata larger than the bounded lifecycle discovery reader.
+    let archive = "H4sIAAAAAAAA/+3QQUsCQRQHcD/KMmex3TIPHjoVFEQeNOgmy7rYlq2LqxGI372hhSDolkiH3w+GP7zHzHtMkxev+bI8a7ocvLTrundkaTQaDr8y+pHDeLLL715Xz7LRxXkvSY+9yG927TbfxPGnmPUP7UOdv5VhHJrVblnVoR/ey01bretYygbpII2VtthUzbYN432o6vhdq1VslsXzOinbIm/KRXKVTG8nj/fX84fJbH7zdDedhUM/LMruZvfaBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAH4VDDwAAAACAk/kE90MsPAAYEAA=";
+    let bytes = STANDARD.decode(archive).unwrap();
+    let integrity = format!("sha512-{}", STANDARD.encode(Sha512::digest(&bytes)));
+    let fixture = project
+        .write(
+            "registry.json",
+            serde_json::json!({"packages":[{
+                "registry":"https://registry.npmjs.org", "name":"plugin", "version":"1.0.0",
+                "integrity":integrity, "artifact":format!("base64:{archive}")
+            }]})
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+    let policy = |package: &str| {
+        format!(
+            r#"schema = 1
+[[approvals]]
+package = "{package}"
+version = "2.0.0"
+archive-digest = "{integrity}"
+hook = "install"
+script-digest = "sha256-{}"
+system-toolchain = true
+read = ["."]
+write = ["."]
+network = false
+environment = {{}}
+timeout-seconds = 5
+max-output-bytes = 1024
+max-processes = 32
+max-memory-bytes = 134217728
+tools = [{{name="sh", path={}, digest="sha256-{}"}}]
+"#,
+            "0".repeat(64),
+            serde_json::to_string(&project.path().join("unused-sh").to_str().unwrap()).unwrap(),
+            "0".repeat(64)
+        )
+    };
+    for document in ["schema = 1".to_owned(), policy("unrelated")] {
+        project
+            .write("tapid.lifecycle.toml", document.as_bytes())
+            .unwrap();
+        for mode in [InstallMode::Online, InstallMode::Frozen] {
+            let report = run(
+                project.path(),
+                None,
+                Some(&store),
+                mode,
+                Some(&fixture),
+                false,
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(
+                report.outcome.warnings,
+                vec![Warning::DependencyLifecycleDiscoveryFailed {
+                    package: "plugin@1.0.0".into(),
+                }]
+            );
+            assert!(
+                report.outcome.warnings[0]
+                    .to_string()
+                    .contains("could not discover dependency lifecycle hooks for plugin@1.0.0")
+            );
+            assert!(
+                !project
+                    .path()
+                    .join("node_modules/plugin/SHOULD_NOT_EXIST")
+                    .exists()
+            );
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                manifest
+            );
+        }
+    }
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let installed = fs::read(project.path().join("node_modules/plugin/package.json")).unwrap();
+    // Even an approval for a different version of this package must fail closed.
+    project
+        .write("tapid.lifecycle.toml", policy("plugin").as_bytes())
+        .unwrap();
+    for mode in [InstallMode::Online, InstallMode::Frozen] {
+        let failure = run(
+            project.path(),
+            None,
+            Some(&store),
+            mode,
+            Some(&fixture),
+            false,
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(failure.error.kind, ErrorKind::InvalidRequest);
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains("dependency package.json must be a regular file no larger than 1 MiB")
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+        assert_eq!(
+            fs::read(project.path().join("node_modules/plugin/package.json")).unwrap(),
+            installed
+        );
+    }
+}

@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tapid_core::ArtifactDigest;
 
+mod lifecycle;
+
 const REPLAY_LEASE: &str = ".tapid-replay-lease";
 
 #[cfg(test)]

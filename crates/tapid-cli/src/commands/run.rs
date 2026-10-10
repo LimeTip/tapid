@@ -24,7 +24,7 @@ pub(crate) struct Args {
     /// Emit the versioned receipt as one JSON line on stderr after child output.
     #[arg(long)]
     pub(crate) receipt_json: bool,
-    /// Allow process-memory statistics in Linux Restricted mode by creating a private PID/mount namespace with read-only procfs.
+    /// Allow process-memory statistics in required Linux sandbox mode by creating a private PID/mount namespace with read-only procfs.
     #[arg(long, visible_aliases = ["allow-procfs", "allow-memory-read"])]
     pub(crate) allow_process_memory_stats: bool,
     /// Arguments forwarded after `--` to the script.

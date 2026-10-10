@@ -11,6 +11,7 @@ pub enum LockfileError {
     InvalidWorkspaceSource(String),
     UnsupportedVersion(u32),
     AliasMetadataInLegacySchema(u32),
+    InvalidDerivedOutput(String),
     RegenerationRequired(u32),
     DuplicatePackage(String),
     PackageKeyMismatch(String),
@@ -53,6 +54,9 @@ impl fmt::Display for LockfileError {
             }
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported lockfile version: {version}")
+            }
+            Self::InvalidDerivedOutput(reason) => {
+                write!(f, "invalid lifecycle-derived output: {reason}")
             }
             Self::AliasMetadataInLegacySchema(version) => write!(
                 f,
