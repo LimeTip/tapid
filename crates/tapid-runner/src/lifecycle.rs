@@ -370,6 +370,7 @@ mod tests {
     use super::*;
 
     fn document() -> String {
+        let project = tapid_test_support::TempProject::new("lifecycle-policy").unwrap();
         format!(
             r#"schema = 1
 [[approvals]]
@@ -387,10 +388,11 @@ timeout-seconds = 10
 max-output-bytes = 1024
 max-processes = 32
 max-memory-bytes = 134217728
-tools = [{{ name = "sh", path = "/bin/sh", digest = "sha256-{}" }}]
+tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
 "#,
             "A".repeat(86) + "==",
             sha256(b"echo build"),
+            toml::Value::String(project.path().join("sh").to_str().unwrap().into()),
             "0".repeat(64)
         )
     }

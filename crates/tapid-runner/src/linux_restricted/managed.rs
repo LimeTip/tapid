@@ -343,7 +343,7 @@ pub(super) fn filter(
             k: SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
         },
     ]);
-    let mut denied = vec![
+    let denied = [
         libc::SYS_chroot,
         libc::SYS_setuid,
         libc::SYS_setgid,
@@ -359,9 +359,9 @@ pub(super) fn filter(
         libc::SYS_shmget,
         libc::SYS_shmat,
         libc::SYS_mknodat,
+        #[cfg(target_arch = "x86_64")]
+        libc::SYS_mknod,
     ];
-    #[cfg(target_arch = "x86_64")]
-    denied.push(libc::SYS_mknod);
     for syscall in denied {
         filter.extend([
             libc::sock_filter {

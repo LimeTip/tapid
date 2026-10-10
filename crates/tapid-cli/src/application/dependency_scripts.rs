@@ -298,11 +298,10 @@ impl BuildStage {
         activation: &crate::filesystem::activation::ActivationLock,
     ) -> Result<Self, OperationalError> {
         let stage = Self(activation.create_stage(project).map_err(error)?);
-        let path = &stage.0;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(error)?;
+            fs::set_permissions(&stage.0, fs::Permissions::from_mode(0o700)).map_err(error)?;
         }
         Ok(stage)
     }

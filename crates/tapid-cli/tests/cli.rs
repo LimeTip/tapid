@@ -5278,10 +5278,11 @@ timeout-seconds = 5
 max-output-bytes = 1024
 max-processes = 32
 max-memory-bytes = 134217728
-tools = [{{ name = "sh", path = "/bin/sh", digest = "sha256-{}" }}]
+tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
 "#,
                 "A".repeat(86) + "==",
                 "0".repeat(64),
+                serde_json::to_string(&project.path().join("unused-sh").to_str().unwrap()).unwrap(),
                 "0".repeat(64)
             )
             .as_bytes(),
