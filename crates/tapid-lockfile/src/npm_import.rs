@@ -18,6 +18,17 @@ pub struct ImportedNpmLockfile {
     npm_lock: Value,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     verified_trees: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    verified_artifacts: BTreeMap<String, ImportedNpmArtifactReceipt>,
+}
+
+/// Artifact identity proven when a verified tree was produced from an imported lock.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportedNpmArtifactReceipt {
+    pub tree_digest: String,
+    pub resolved: String,
+    pub integrity: String,
 }
 
 /// Exact selected artifact and its npm placement, with no invented tree digest.
@@ -59,6 +70,7 @@ impl ImportedNpmLockfile {
             root_manifest_digest: digest.to_string(),
             npm_lock,
             verified_trees: BTreeMap::new(),
+            verified_artifacts: BTreeMap::new(),
         })
     }
 
@@ -90,6 +102,33 @@ impl ImportedNpmLockfile {
                 .parse::<ArtifactDigest>()
                 .map_err(|e| parse::error("/verifiedTrees", path, "digest", &e.to_string()))?;
         }
+        for (path, receipt) in &lock.verified_artifacts {
+            let Some(package) = graph.packages.get(path) else {
+                return Err(parse::error(
+                    "/verifiedArtifacts",
+                    path,
+                    "path",
+                    "unknown package placement",
+                ));
+            };
+            receipt.tree_digest.parse::<ArtifactDigest>().map_err(|e| {
+                parse::error("/verifiedArtifacts", path, "treeDigest", &e.to_string())
+            })?;
+            receipt.integrity.parse::<PackageIntegrity>().map_err(|e| {
+                parse::error("/verifiedArtifacts", path, "integrity", &e.to_string())
+            })?;
+            if lock.verified_trees.get(path) != Some(&receipt.tree_digest)
+                || receipt.resolved != package.resolved
+                || receipt.integrity != package.integrity.to_string()
+            {
+                return Err(parse::error(
+                    "/verifiedArtifacts",
+                    path,
+                    "receipt",
+                    "does not match the imported artifact selection",
+                ));
+            }
+        }
         Ok(lock)
     }
 
@@ -120,6 +159,10 @@ impl ImportedNpmLockfile {
     pub fn verified_tree(&self, path: &str) -> Option<&str> {
         self.verified_trees.get(path).map(String::as_str)
     }
+
+    pub fn verified_artifact(&self, path: &str) -> Option<&ImportedNpmArtifactReceipt> {
+        self.verified_artifacts.get(path)
+    }
     pub fn record_verified_trees(
         &mut self,
         trees: BTreeMap<String, String>,
@@ -141,6 +184,44 @@ impl ImportedNpmLockfile {
             validated.insert(path, digest.to_string());
         }
         self.verified_trees.extend(validated);
+        Ok(())
+    }
+
+    pub fn record_verified_artifacts(
+        &mut self,
+        receipts: BTreeMap<String, ImportedNpmArtifactReceipt>,
+    ) -> Result<(), NpmImportError> {
+        let graph = self.graph()?;
+        let mut validated = BTreeMap::new();
+        for (path, receipt) in receipts {
+            let Some(package) = graph.packages.get(&path) else {
+                return Err(parse::error(
+                    "/verifiedArtifacts",
+                    &path,
+                    "path",
+                    "unknown package placement",
+                ));
+            };
+            receipt.tree_digest.parse::<ArtifactDigest>().map_err(|e| {
+                parse::error("/verifiedArtifacts", &path, "treeDigest", &e.to_string())
+            })?;
+            receipt.integrity.parse::<PackageIntegrity>().map_err(|e| {
+                parse::error("/verifiedArtifacts", &path, "integrity", &e.to_string())
+            })?;
+            if self.verified_trees.get(&path) != Some(&receipt.tree_digest)
+                || receipt.resolved != package.resolved
+                || receipt.integrity != package.integrity.to_string()
+            {
+                return Err(parse::error(
+                    "/verifiedArtifacts",
+                    &path,
+                    "receipt",
+                    "does not match the imported artifact selection",
+                ));
+            }
+            validated.insert(path, receipt);
+        }
+        self.verified_artifacts.extend(validated);
         Ok(())
     }
 }

@@ -223,6 +223,58 @@ fn npm_import_revalidates_routing_before_cached_or_fixture_artifacts() {
 }
 
 #[test]
+fn npm_import_rejects_replay_after_imported_integrity_changes() {
+    let project = reference_project("npm-import-changed-integrity");
+    assert!(
+        invoke(&project, &["import-package-lock", "package-lock.json"])
+            .status
+            .success()
+    );
+    let store = project.path().join("store");
+    let output = invoke(
+        &project,
+        &[
+            "install",
+            "--frozen",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("tapid.lock")).unwrap()).unwrap();
+    lock["npmLock"]["packages"]["node_modules/shared"]["integrity"] =
+        lock["npmLock"]["packages"]["node_modules/parent"]["integrity"].clone();
+    project
+        .write("tapid.lock", lock.to_string().as_bytes())
+        .unwrap();
+
+    let output = invoke(
+        &project,
+        &[
+            "install",
+            "--offline",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("verifiedArtifacts"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn npm_import_preserves_nested_versions_peers_sources_and_optional_constraints() {
     let project = reference_project("npm-import-reference");
     let manifest = fs::read(project.path().join("package.json")).unwrap();

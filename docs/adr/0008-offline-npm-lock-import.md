@@ -15,7 +15,7 @@ Use a separate schema 8 imported lock model in `tapid-lockfile`. Persist the val
 
 The lockfile capability uses the resolver capability's existing `Requirement` value object to check selected versions and aliases. It never invokes resolution. Parsing, placement lookup, representability checks, and platform graph selection stay in the lockfile capability. The CLI owns files, credential routing, artifact transport, verification, and install orchestration.
 
-Frozen installation verifies only pinned artifacts and records actual canonical tree digests after checking tarball integrity, safe extraction, and package identity. Imported selections remain in schema 8 so another platform can select its applicable optional entries. Offline installation uses previously recorded digests and store verification. Publication and activation reuse the existing lifecycle journal and store transaction.
+Frozen installation verifies only pinned artifacts and records actual canonical tree digests after checking tarball integrity, safe extraction, and package identity. Each receipt also binds the tree digest to the imported tarball URL and integrity value, so changing either pin cannot reuse the old tree. Imported selections remain in schema 8 so another platform can select its applicable optional entries. Offline installation uses previously recorded digests and store verification. Publication and activation reuse the existing lifecycle journal and store transaction.
 
 Existing nested peer placements become explicit named linker edges and peer contexts. The importer rejects conflicting graphs that collapse to the same Tapid instance, cross-registry peer contexts, and unsupported links/workspaces. This does not expand ordinary online resolver peer placement behavior.
 

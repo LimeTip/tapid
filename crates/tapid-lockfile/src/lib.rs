@@ -25,4 +25,7 @@ const REGISTRY_ONLY_LOCKFILE_VERSION: u32 = ROOTS_LEGACY_LOCKFILE_VERSION;
 const LEGACY_LOCKFILE_VERSION: u32 = 4;
 const PROVENANCE_LEGACY_LOCKFILE_VERSION: u32 = 5;
 
-pub use npm_import::{ImportedNpmGraph, ImportedNpmLockfile, ImportedNpmPackage, NpmImportError};
+pub use npm_import::{
+    ImportedNpmArtifactReceipt, ImportedNpmGraph, ImportedNpmLockfile, ImportedNpmPackage,
+    NpmImportError,
+};

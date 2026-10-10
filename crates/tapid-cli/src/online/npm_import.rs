@@ -68,8 +68,13 @@ pub(crate) fn fetch_imported(
             },
         )?;
         let cached = imported
-            .verified_tree(path)
-            .map(|digest| {
+            .verified_artifact(path)
+            .filter(|receipt| {
+                receipt.resolved == package.resolved
+                    && receipt.integrity == package.integrity.to_string()
+            })
+            .map(|receipt| {
+                let digest = receipt.tree_digest.as_str();
                 let digest = digest
                     .parse::<ArtifactDigest>()
                     .map_err(|e| e.to_string())?;
@@ -273,7 +278,28 @@ pub(crate) fn fetch_imported(
     lock.set_root_bindings(bindings)
         .map_err(OperationalError::from)?;
     imported
-        .record_verified_trees(receipts)
+        .record_verified_trees(receipts.clone())
+        .map_err(|e| e.to_string())?;
+    let artifact_receipts = imported
+        .graph()
+        .map_err(|e| e.to_string())?
+        .packages
+        .into_iter()
+        .filter_map(|(path, package)| {
+            receipts.get(&path).map(|tree_digest| {
+                (
+                    path,
+                    tapid_lockfile::ImportedNpmArtifactReceipt {
+                        tree_digest: tree_digest.clone(),
+                        resolved: package.resolved,
+                        integrity: package.integrity.to_string(),
+                    },
+                )
+            })
+        })
+        .collect();
+    imported
+        .record_verified_artifacts(artifact_receipts)
         .map_err(|e| e.to_string())?;
     Ok((
         lock,
