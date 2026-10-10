@@ -6,6 +6,22 @@ content.
 
 ## Language
 
+### Source identity
+
+The origin of selected package content, including its immutable artifact pin
+when copied from a file or repository. Equal package names and versions may have
+different source identities.
+
+### Copied artifact
+
+Package content copied from a contained file archive or a repository commit and
+identified by an accepted immutable artifact pin.
+
+### Dist-tag
+
+A mutable registry label naming a concrete package version. Its accepted target
+becomes a locked selection when the project resolves the declaration.
+
 ### Locked selection
 
 An exact package identity and its dependency, peer-provider, and target contexts

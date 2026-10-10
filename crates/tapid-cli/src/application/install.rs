@@ -337,6 +337,24 @@ fn perform_install(
         online::validate_manifest_roots(&project_dir, updated)
             .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
     }
+    if let Some(spec) = package {
+        let (name, requirement) = package_spec::parse(spec);
+        if manifest_path != project_dir.join("package.json")
+            && online::copied_declaration(requirement)?.is_some()
+        {
+            return Err(OperationalError::new(
+                ErrorKind::InvalidRequest,
+                format!(
+                    "copied workspace member dependency '{name}' is unsupported; declare copied artifacts at the project root"
+                ),
+            ));
+        }
+        let candidate = read_manifest(&manifest_path)?
+            .with_dependency(name, requirement)
+            .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
+        online::validate_manifest_roots(&project_dir, &candidate)
+            .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+    }
     let lock_path = project_dir.join("tapid.lock");
     let mut imported = if lock_path.is_file() {
         let bytes = fs::read_to_string(&lock_path)
@@ -482,6 +500,9 @@ fn perform_install(
             let registry_config = crate::registry::RegistryConfig::load(&project_dir)
                 .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
             replayable &= online::validate_locked_routes(lock, &registry_config)?;
+            if lock.root_manifest_digest() == online::root_digest(&project_dir)? {
+                online::validate_locked_files(&project_dir, lock)?;
+            }
             let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
             let current = workspace
                 .locked
@@ -723,6 +744,7 @@ fn perform_install(
     journal
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+    online::validate_locked_files(&project_dir, &lock)?;
     if !online::validate_locked_routes(&lock, &registry_config)? {
         return Err(OperationalError::new(
             ErrorKind::Lockfile,
@@ -743,6 +765,7 @@ fn perform_install(
                 &store,
                 &registry_config,
                 registry_fixture,
+                &project_dir,
                 |completed, total| report_replay_progress(Progress::Replay(completed, total)),
             )?;
         let source_trees = trees.clone();
@@ -804,8 +827,13 @@ fn perform_install(
     }
     let mut publication = None;
     if !offline
-        && let Some(transaction) =
-            online::hydrate_locked(&lock, &store, &registry_config, registry_fixture)?
+        && let Some(transaction) = online::hydrate_locked(
+            &lock,
+            &store,
+            &registry_config,
+            registry_fixture,
+            &project_dir,
+        )?
     {
         session.mutated = true;
         publication = Some(
@@ -931,9 +959,11 @@ fn validate_workspace_dependency_edges(
             let target_key = target
                 .parse::<tapid_lockfile::LockfilePackageKey>()
                 .map_err(|error| error.to_string())?;
-            if target_key.source.registry() != Some(&dependency.registry)
+            if target_key.source.package_source().as_ref() != Some(&dependency.registry)
                 || target_key.name != dependency.package
-                || !dependency.requirement.matches(&target_key.version)
+                || !dependency
+                    .requirement
+                    .matches_locked_version(&target_key.version)
                 || !lock.packages().contains_key(target)
             {
                 return Err(format!(
@@ -968,9 +998,9 @@ fn validate_workspace_dependency_edges(
                     key.parse::<tapid_lockfile::LockfilePackageKey>()
                         .ok()
                         .is_some_and(|target| {
-                            target.source.registry() == Some(registry)
+                            target.source.package_source().as_ref() == Some(registry)
                                 && target.name == *package
-                                && peer.requirement.matches(&target.version)
+                                && peer.requirement.matches_locked_version(&target.version)
                                 && lock.packages().contains_key(key)
                         })
                 })

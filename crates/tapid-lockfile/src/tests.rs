@@ -2,6 +2,47 @@ use super::{LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfil
 use proptest::prelude::*;
 
 #[test]
+fn copied_sources_require_schema_10_and_cannot_claim_registry_authentication() {
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let source = format!("file:vendor/tool.tgz#{digest}");
+    let original = package_fixture();
+    let package = LockedPackage::new_with_provenance(
+        &source,
+        "tool",
+        "1.0.0",
+        original.artifact_integrity(),
+        &digest,
+        super::RegistryIntegrityProvenance::LocallyComputed,
+    )
+    .unwrap();
+    let key = package.key();
+    let mut lock = Lockfile::new(&digest).unwrap();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    lock.set_root_bindings([("local".into(), key.clone())].into())
+        .unwrap();
+    let serialized = lock.to_json().unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(value["lockfileVersion"], 10);
+    assert!(
+        value["packages"][&key]
+            .get("registryIntegrityDeclared")
+            .is_none()
+    );
+    assert_eq!(
+        Lockfile::from_json(&serialized).unwrap().to_json().unwrap(),
+        serialized
+    );
+    for version in [4, 6, 7, 9] {
+        value["lockfileVersion"] = version.into();
+        assert!(Lockfile::from_json(&value.to_string()).is_err());
+    }
+    value["lockfileVersion"] = 10.into();
+    value["packages"][&key]["registryIntegrityDeclared"] = true.into();
+    assert!(Lockfile::from_json(&value.to_string()).is_err());
+}
+
+#[test]
 fn lifecycle_derived_outputs_require_schema_9_and_preserve_source_identity() {
     let package = package_fixture();
     let key = package.key();

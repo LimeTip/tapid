@@ -13,11 +13,11 @@ Deterministic lockfile models and canonical JSON serialization for Tapid.
 
 The current contract provides:
 
-- Schema version `7`, or `9` when approved dependency hooks produce derived trees, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
+- Schema version `7`, `9` when approved dependency hooks produce derived trees, or `10` when copied sources are present, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
 - Exact package name and version keys, registry origin, canonical padded SHA-512 SRI, required schema 6 registry-integrity provenance, SHA-256 unpacked digest, and explicit `treeDigest` replay identity.
 - Deterministic package ordering through `BTreeMap` serialization.
 - HTTPS registry and artifact URL validation.
-- Rejection of local file URLs, query fragments, userinfo, and unsupported versions.
+- Rejection of local file download URLs, query fragments, userinfo, and unsupported versions.
 - Rejection of missing registry-integrity provenance and missing, dangling, duplicate, unordered, or noncanonical schema 6 roots.
 - Round-trip parsing and replay validation through `Lockfile::from_json` and `validate_replay`.
 - Package identities retain registry origin and canonical peer-provider context; direct roots identify the exact selected package instances without merging peer requirements into regular dependencies.
@@ -47,3 +47,11 @@ CLI frozen installation can hydrate missing trees using recorded artifact URLs a
 Schema 9 adds ordered `derivedHooks` records with exact recipe keys, verified output tree digests, and store-local HMAC attestations. Source archive integrity and `treeDigest` retain their original meanings. Replay validates every recipe and output before selecting the final installed tree. Older schemas cannot contain derived-hook records. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md).
 
 `ImportedNpmLockfile` provides the separate schema 8 offline npm v3 import contract. It preserves validated npm placements and constraints and records tree digests only after artifact verification, with each receipt bound to the imported tarball URL and integrity value. Ordinary `Lockfile` uses schema 7, or schema 9 with approved lifecycle outputs. Imported graph parsing uses existing semver/alias requirement validation without invoking resolution. See [migration and rollback](../../docs/npm-lockfile-import.md) and [ADR 0008](../../docs/adr/0008-offline-npm-lock-import.md).
+
+Schema 10 adds immutable copied package sources. File source identities pin a
+root-relative archive path and SHA-256; Git identities pin a canonical HTTPS
+repository, full commit, and archive SHA-256. `LockfilePackageSource::Copied`
+keeps them distinct from registry and workspace sources. The historical JSON
+`registry` field stores the complete source identity for copied entries, without
+`registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
+Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).

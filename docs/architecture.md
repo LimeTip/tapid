@@ -46,7 +46,7 @@ Current examples include:
 - `PackageName`, including scoped and unscoped package identity.
 - `PackageVersion`, including semantic version validation.
 - `ArtifactDigest`, including validated SHA-256 artifact identity.
-- `RegistryOrigin`, `PackageInstanceId`, and lossless `PackageIntegrity` for registry-qualified package identity and integrity metadata.
+- `RegistryOrigin`, `PackageSource`, `GitRepository`, `PackageInstanceId`, and lossless `PackageIntegrity` for source-qualified package identity and integrity metadata. Registry HTTP inputs retain the narrower `RegistryOrigin`; copied file/Git sources carry immutable artifact pins.
 - `PeerContext` and `PlatformContext`, deterministic context primitives used by dependency resolution and lockfile identity.
 
 ## npm lockfile migration

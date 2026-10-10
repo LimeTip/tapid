@@ -51,13 +51,19 @@ impl ArtifactFetcher<'_> {
                 }
             }
         }
-        if pinned.is_some() && !record.fixture && record.artifact.is_empty() {
+        if pinned.is_some()
+            && record.registry.registry().is_some()
+            && !record.fixture
+            && record.artifact.is_empty()
+        {
             return Err(OperationalError::new(
                 ErrorKind::Lockfile,
                 "locked artifact has no pinned archive URL; regenerate tapid.lock with tapid update and review the resulting changes",
             ));
         }
-        let bytes = if record.fixture {
+        let bytes = if let Some(bytes) = &record.copied_archive {
+            bytes.as_ref().clone()
+        } else if record.fixture {
             if let Some(encoded) = record.artifact.strip_prefix("base64:") {
                 STANDARD.decode(encoded).map_err(|e| {
                     OperationalError::from_source(ErrorKind::RegistryMetadata, e)
@@ -73,16 +79,32 @@ impl ArtifactFetcher<'_> {
             let transport = artifact_transport_for_package(
                 &mut self.transports,
                 self.config,
-                &id.registry,
+                id.registry
+                    .registry()
+                    .ok_or("copied artifact cannot use registry transport")?,
                 &id.name,
                 &self.allowed_origins,
             )?;
             let response = if record.registry.to_string() == JSR {
-                JsrRegistry::new(transport, record.registry.clone())
-                    .download_artifact(&record.artifact)
+                JsrRegistry::new(
+                    transport,
+                    record
+                        .registry
+                        .registry()
+                        .ok_or("copied artifact cannot use registry transport")?
+                        .clone(),
+                )
+                .download_artifact(&record.artifact)
             } else {
-                NpmRegistry::new(transport, record.registry.clone())
-                    .download_artifact(&record.artifact)
+                NpmRegistry::new(
+                    transport,
+                    record
+                        .registry
+                        .registry()
+                        .ok_or("copied artifact cannot use registry transport")?
+                        .clone(),
+                )
+                .download_artifact(&record.artifact)
             }
             .map_err(|e| {
                 OperationalError::from_source(ErrorKind::RegistryTransport, e)
@@ -96,6 +118,16 @@ impl ArtifactFetcher<'_> {
             }
             response.body
         };
+        if record
+            .registry
+            .artifact_digest()
+            .is_some_and(|expected| expected != digest(&bytes).as_str())
+        {
+            return Err(OperationalError::new(
+                ErrorKind::Integrity,
+                "copied artifact digest mismatch",
+            ));
+        }
         let actual = integrity(&bytes);
         if record
             .integrity
@@ -116,7 +148,7 @@ impl ArtifactFetcher<'_> {
         let _temporary_tree = TemporaryTree(temp.clone());
         extract_to(
             &bytes,
-            ArchiveFormat::TarGz,
+            copied::archive_format(&record.registry, &bytes),
             &temp,
             ArchiveLimits::default(),
         )

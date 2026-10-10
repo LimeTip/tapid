@@ -149,13 +149,13 @@ pub(crate) fn replay_input_with_tree_source(
             .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
         let platform = context::parse_platform(&key.platform_context)
             .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
-        let registry = key.source.registry().cloned().ok_or_else(|| {
+        let registry = key.source.package_source().ok_or_else(|| {
             OperationalError::new(
                 ErrorKind::Lockfile,
                 format!("workspace source unexpectedly appeared as a registry artifact: {encoded}"),
             )
         })?;
-        let id = PackageInstanceId::new(registry, key.name.clone(), key.version.clone());
+        let id = PackageInstanceId::from_source(registry, key.name.clone(), key.version.clone());
         let instance = PackageInstance {
             id,
             peer_context: peer,
@@ -172,7 +172,7 @@ pub(crate) fn replay_input_with_tree_source(
             .iter()
             .filter(|root| {
                 root.parse::<tapid_lockfile::LockfilePackageKey>()
-                    .is_ok_and(|key| key.source.registry().is_some())
+                    .is_ok_and(|key| key.source.package_source().is_some())
             })
             .map(|root| {
                 let key: tapid_lockfile::LockfilePackageKey = root
@@ -209,7 +209,7 @@ pub(crate) fn replay_input_with_tree_source(
             let target_key = target
                 .parse::<tapid_lockfile::LockfilePackageKey>()
                 .map_err(|error| error.to_string())?;
-            if target_key.source.registry().is_some() {
+            if target_key.source.package_source().is_some() {
                 roots.push(NamedDependency {
                     name: name
                         .parse()
@@ -312,6 +312,16 @@ fn replay_root_keys_with_config(
             let name = name
                 .parse::<tapid_core::PackageName>()
                 .map_err(|error| error.to_string())?;
+            let key = typed_by_key
+                .get(target)
+                .ok_or_else(|| format!("missing root package target {target}"))?;
+            if crate::online::validate_copied_root_binding(
+                manifest,
+                name.as_str(),
+                key.source.copied(),
+            )? {
+                continue;
+            }
             let expected = declarations.get(&name).ok_or_else(|| {
                 format!("lockfile root binding {name} is not a direct manifest dependency")
             })?;
@@ -323,16 +333,27 @@ fn replay_root_keys_with_config(
                 let registry = if dependency.registry.as_str() == "https://jsr.io" {
                     dependency.registry.clone()
                 } else {
-                    registry_config.origin_for_name(actual)?
+                    registry_config.origin_for_name(actual)?.into()
                 };
-                if key.source.registry() != Some(&registry)
+                if key.source.package_source().as_ref() != Some(&registry)
                     || &key.name != actual
-                    || !dependency.requirement.matches(&key.version)
+                    || !dependency.requirement.matches_locked_version(&key.version)
                 {
                     return Err(format!(
                         "lockfile root binding {name} does not satisfy the manifest declaration"
                     ));
                 }
+            }
+        }
+        for name in crate::online::copied_root_names(manifest)? {
+            if required_names
+                .iter()
+                .any(|required| required.as_str() == name)
+                && !lock.root_bindings().contains_key(&name)
+            {
+                return Err(format!(
+                    "lockfile is missing copied root binding for {name}"
+                ));
             }
         }
         for name in declarations.keys() {
@@ -343,12 +364,17 @@ fn replay_root_keys_with_config(
         }
         return Ok(lock.roots().to_vec());
     }
+    if !crate::online::copied_root_names(manifest)?.is_empty() {
+        return Err("copied dependencies require explicit lockfile root bindings".into());
+    }
     if crate::online::manifest_roots(manifest)?
         .iter()
-        .any(|dependency| dependency.requirement.is_alias())
+        .any(|dependency| {
+            dependency.requirement.is_alias() || dependency.requirement.dist_tag().is_some()
+        })
     {
         return Err(
-            "npm aliases require lockfile root bindings; regenerate tapid.lock online".into(),
+            "npm aliases and dist-tags require lockfile root bindings; regenerate tapid.lock online".into(),
         );
     }
     let root_identities = replay_root_identities_with_config(manifest, registry_config)?;
@@ -533,7 +559,7 @@ pub(crate) fn replay_root_matches(
         .is_some_and(|requirements| {
             requirements
                 .iter()
-                .all(|requirement| requirement.matches(&key.version))
+                .all(|requirement| requirement.matches_locked_version(&key.version))
         })
 }
 

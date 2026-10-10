@@ -1,9 +1,11 @@
 pub(crate) fn parse(spec: &str) -> (&str, &str) {
     let spec = spec.trim();
-    if let Some((name, target)) = spec.split_once("@npm:") {
-        let alias_start = name.len() + 1;
-        if !name.is_empty() && !target.is_empty() {
-            return (name, &spec[alias_start..]);
+    for prefix in ["@npm:", "@file:", "@git+"] {
+        if let Some((name, target)) = spec.split_once(prefix) {
+            let alias_start = name.len() + 1;
+            if !name.is_empty() && !target.is_empty() {
+                return (name, &spec[alias_start..]);
+            }
         }
     }
     let package_start = if spec.starts_with("npm:") || spec.starts_with("jsr:") {

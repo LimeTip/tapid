@@ -22,6 +22,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const LOCKFILE_VERSION: u32 = 7;
 /// Lifecycle-enabled locks require a reader which validates derived-output approvals.
 pub const LIFECYCLE_LOCKFILE_VERSION: u32 = 9;
+/// Locks with immutable copied file and Git sources.
+pub const COPIED_SOURCE_LOCKFILE_VERSION: u32 = 10;
 const ROOTS_LEGACY_LOCKFILE_VERSION: u32 = 6;
 const REGISTRY_ONLY_LOCKFILE_VERSION: u32 = ROOTS_LEGACY_LOCKFILE_VERSION;
 const LEGACY_LOCKFILE_VERSION: u32 = 4;

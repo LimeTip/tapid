@@ -2,8 +2,8 @@ use crate::TransportError;
 use std::{io::Read, time::Duration};
 use url::Url;
 
-const STANDARD_METADATA_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
-const STANDARD_ARTIFACT_MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+pub(crate) const STANDARD_METADATA_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const STANDARD_ARTIFACT_MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_GET_ATTEMPTS: u32 = 3;
 const MAX_REDIRECT_HOPS: usize = 10;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);

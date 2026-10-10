@@ -105,8 +105,18 @@ fn archive_metadata(
     };
     let mut archive = tar::Archive::new(reader);
     let mut result = Vec::new();
+    let mut global_comment_seen = false;
     for item in archive.entries().map_err(ExtractError::Io)? {
-        let e = item.map_err(ExtractError::Io)?;
+        let mut e = item.map_err(ExtractError::Io)?;
+        if git_commit_comment(&mut e)? {
+            if global_comment_seen {
+                return Err(ExtractError::InvalidArchive(
+                    "duplicate global commit comment".into(),
+                ));
+            }
+            global_comment_seen = true;
+            continue;
+        }
         let path = e
             .path()
             .map_err(|x| ExtractError::InvalidArchive(x.to_string()))?
@@ -141,6 +151,38 @@ fn archive_metadata(
     Ok(result)
 }
 
+/// Git's commit archive has one inert global PAX comment. Accept only that
+/// bounded shape, never global path, link, size, or permission overrides.
+fn git_commit_comment(entry: &mut tar::Entry<'_, impl Read>) -> Result<bool, ExtractError> {
+    if !entry.header().entry_type().is_pax_global_extensions() {
+        return Ok(false);
+    }
+    if entry.header().size()? > 1024 {
+        return Err(ExtractError::InvalidArchive(
+            "global PAX metadata is too large".into(),
+        ));
+    }
+    let mut extensions = entry
+        .pax_extensions()?
+        .ok_or_else(|| ExtractError::InvalidArchive("missing global PAX metadata".into()))?;
+    let comment = extensions
+        .next()
+        .ok_or_else(|| ExtractError::InvalidArchive("empty global PAX metadata".into()))??;
+    if comment.key_bytes() != b"comment"
+        || !matches!(comment.value_bytes().len(), 40 | 64)
+        || !comment
+            .value_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        || extensions.next().is_some()
+    {
+        return Err(ExtractError::InvalidArchive(
+            "unsupported global PAX metadata".into(),
+        ));
+    }
+    Ok(true)
+}
+
 fn extract_entries(
     bytes: &[u8],
     format: ArchiveFormat,
@@ -154,6 +196,9 @@ fn extract_entries(
     let mut executable_paths = Vec::new();
     for item in archive.entries().map_err(ExtractError::Io)? {
         let mut entry = item.map_err(ExtractError::Io)?;
+        if git_commit_comment(&mut entry)? {
+            continue;
+        }
         let raw = entry
             .path()
             .map_err(|x| ExtractError::InvalidArchive(x.to_string()))?
@@ -650,6 +695,51 @@ fn symlink_target_escapes(link: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn global_pax_accepts_only_one_bounded_commit_comment() {
+        let commit = "a".repeat(40);
+        for body in [
+            format!("52 comment={commit}\n"),
+            "20 path=../escape\n".into(),
+            "not valid pax".into(),
+            "x".repeat(1025),
+        ] {
+            let project = tapid_test_support::TempProject::new("git-pax").unwrap();
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::new(b'g'));
+            header.set_mode(0o644);
+            header.set_size(body.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "pax_global_header", body.as_bytes())
+                .unwrap();
+            let mut file = tar::Header::new_ustar();
+            file.set_mode(0o644);
+            file.set_size(2);
+            file.set_cksum();
+            builder
+                .append_data(&mut file, "package/file", b"ok".as_slice())
+                .unwrap();
+            let bytes = builder.into_inner().unwrap();
+            let destination = project.path().join("tree");
+            let result = extract_to(
+                &bytes,
+                ArchiveFormat::Tar,
+                &destination,
+                ArchiveLimits::default(),
+            );
+            if body.starts_with("52 comment=") {
+                result.unwrap();
+                assert_eq!(fs::read(destination.join("package/file")).unwrap(), b"ok");
+                assert!(!destination.join("pax_global_header").exists());
+            } else {
+                assert!(result.is_err(), "{body}");
+                assert!(!destination.exists());
+            }
+        }
+    }
+
     fn ok(entry: ArchiveEntry) -> Result<(), ValidationError> {
         validate_entries([entry], ValidationLimits::default())
     }
