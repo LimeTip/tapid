@@ -7,7 +7,7 @@ use std::{
         ffi::OsStrExt,
         io::{AsRawHandle, FromRawHandle},
     },
-    ptr::{null, null_mut},
+    ptr::{NonNull, null, null_mut},
 };
 use windows_sys::Win32::{
     Foundation::{
@@ -260,14 +260,15 @@ fn validate_key(file: &File, sid: PSID) -> io::Result<()> {
         return Err(failure());
     }
     let mut ace = null_mut();
-    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 || ace.is_null() {
+    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+    let ace = NonNull::new(ace).ok_or_else(failure)?;
+    let header = unsafe { ace.cast::<ACE_HEADER>().as_ref() };
     if header.AceType != 0 || usize::from(header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>() {
         return Err(failure());
     }
-    let ace = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+    let ace = unsafe { ace.cast::<ACCESS_ALLOWED_ACE>().as_ref() };
     // Only a single explicit FILE_ALL_ACCESS ACE for this user is accepted. Never repair a weak DACL.
     if ace.Header.AceType != 0
         || ace.Header.AceFlags != 0

@@ -6,7 +6,7 @@ use std::{
     mem::MaybeUninit,
     os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
     path::Path,
-    ptr::null_mut,
+    ptr::{NonNull, null_mut},
 };
 use windows_sys::Win32::{
     Foundation::LocalFree,
@@ -87,10 +87,11 @@ impl LowLabel {
     fn sid(&self) -> Result<*mut c_void, ExecutionError> {
         let mut ace = null_mut();
         // SAFETY: this SACL comes from the fixed, validated SDDL above.
-        if unsafe { GetAce(self.sacl, 0, &mut ace) } == 0 || ace.is_null() {
+        if unsafe { GetAce(self.sacl, 0, &mut ace) } == 0 {
             return Err(failure(std::io::Error::last_os_error()));
         }
-        let ace = unsafe { &*ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>() };
+        let ace = NonNull::new(ace).ok_or_else(|| failure("missing generated label ACE"))?;
+        let ace = unsafe { ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>().as_ref() };
         Ok((&ace.SidStart as *const u32).cast_mut().cast())
     }
 }
@@ -194,16 +195,21 @@ fn verify_label(file: &File, inherits: bool) -> Result<(), ExecutionError> {
         ));
     }
     let mut pointer = null_mut();
-    if unsafe { GetAce(sacl, 0, &mut pointer) } == 0 || pointer.is_null() {
+    if unsafe { GetAce(sacl, 0, &mut pointer) } == 0 {
         return Err(failure(std::io::Error::last_os_error()));
     }
-    let header = unsafe { &*pointer.cast::<windows_sys::Win32::Security::ACE_HEADER>() };
+    let pointer = NonNull::new(pointer).ok_or_else(|| failure("missing mandatory-label ACE"))?;
+    let header = unsafe {
+        pointer
+            .cast::<windows_sys::Win32::Security::ACE_HEADER>()
+            .as_ref()
+    };
     if header.AceType != 17
         || usize::from(header.AceSize) < std::mem::size_of::<SYSTEM_MANDATORY_LABEL_ACE>()
     {
         return Err(failure("invalid mandatory-label ACE"));
     }
-    let ace = unsafe { &*pointer.cast::<SYSTEM_MANDATORY_LABEL_ACE>() };
+    let ace = unsafe { pointer.cast::<SYSTEM_MANDATORY_LABEL_ACE>().as_ref() };
     let expected = LowLabel::new(inherits)?;
     let inheritance = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8;
     if ace.Mask != SYSTEM_MANDATORY_LABEL_NO_WRITE_UP

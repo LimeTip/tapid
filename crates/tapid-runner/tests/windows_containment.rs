@@ -1085,7 +1085,7 @@ fn windows_private_write_tree_creates_and_reopens_files_without_outside_authorit
     .unwrap();
     let shell_request = command_request_with_policy(&root, "", policy.clone());
     let command = format!(
-        "echo denied>..\\readonly.txt & type \"{}\">stolen.txt & echo denied>\"{}\" & echo CREATED>generated.txt & echo REOPENED>>generated.txt",
+        "echo denied>..\\readonly.txt & type \"{}\">stolen.txt & echo denied>\"{}\" & echo CREATED>generated.txt&echo REOPENED>>generated.txt",
         outside.path().join("secret.txt").display(),
         outside.path().join("escaped.txt").display(),
     );
