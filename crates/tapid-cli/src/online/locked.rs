@@ -109,6 +109,9 @@ fn hydrate_with_fetch(
             .tree_digest()
             .parse()
             .map_err(|error: tapid_core::DomainError| error.to_string())?;
+        if staged.contains(digest.as_str()) {
+            continue;
+        }
         match store.verified_tree_path(&digest) {
             Ok(_) => continue,
             Err(tapid_store::IngestError::Io(error))
@@ -260,6 +263,70 @@ pub(super) fn locked_records(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hydration_fetches_a_shared_tree_once_across_locked_contexts() {
+        let project = tapid_test_support::TempProject::new("hydrate-shared-contexts").unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/npm-import/registry.json"
+        ))
+        .unwrap();
+        let artifact = fixture["packages"][0]["artifact"].as_str().unwrap();
+        let bytes = STANDARD
+            .decode(artifact.strip_prefix("base64:").unwrap())
+            .unwrap();
+        let source = project.path().join("source");
+        extract_to(
+            &bytes,
+            ArchiveFormat::TarGz,
+            &source,
+            ArchiveLimits::default(),
+        )
+        .unwrap();
+        let digest: ArtifactDigest = canonical_tree_digest(&source).unwrap().parse().unwrap();
+        let store = Store::new(project.path().join("store"));
+        let mut lock = Lockfile::new(digest.as_str()).unwrap();
+        let empty = tapid_core::PeerContext::default();
+        let bound = empty
+            .clone()
+            .with("react".parse().unwrap(), "18.2.0".parse().unwrap());
+        for peer in [&empty, &bound] {
+            let mut package = LockedPackage::new_with_context_and_provenance(
+                NPM,
+                "parent",
+                "1.0.0",
+                &integrity(&bytes).to_string(),
+                digest.as_str(),
+                (
+                    peer,
+                    &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+                ),
+                RegistryIntegrityProvenance::RegistryDeclared,
+            )
+            .unwrap();
+            package
+                .set_artifact_url("https://registry.npmjs.org/parent/-/parent-1.0.0.tgz")
+                .unwrap();
+            lock.insert_package(package).unwrap();
+        }
+        let mut fetches = 0;
+        let transaction = hydrate_with_fetch(&lock, &store, |_, _| {
+            fetches += 1;
+            if fetches > 1 {
+                return Err(OperationalError::new(
+                    ErrorKind::RegistryTransport,
+                    "redundant request rate limited",
+                ));
+            }
+            Ok(bytes.clone())
+        })
+        .unwrap()
+        .expect("the missing tree must be staged");
+        assert_eq!(fetches, 1);
+        assert!(store.verified_tree_path(&digest).is_err());
+        transaction.publish().unwrap().commit().unwrap();
+        assert!(store.verified_tree_path(&digest).is_ok());
+    }
 
     #[test]
     fn changed_graph_seeding_rejects_multiple_contexts_for_one_exact_version() {
