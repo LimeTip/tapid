@@ -27,7 +27,43 @@ use tapid_store::Store;
 pub(crate) struct InstallReport {
     pub(crate) package_count: usize,
     pub(crate) replayed: bool,
+    pub(crate) package_changes: Option<PackageChanges>,
     pub(crate) outcome: OperationOutcome,
+}
+
+/// Counts exact registry lock records, not filesystem or cache reuse. A version
+/// change has a different key and therefore counts as one addition and removal.
+#[derive(Debug, Default)]
+pub(crate) struct PackageChanges {
+    pub(crate) added: usize,
+    pub(crate) changed: usize,
+    pub(crate) reused: usize,
+    pub(crate) removed: usize,
+}
+
+impl PackageChanges {
+    fn between(previous: Option<&[u8]>, current: &Lockfile) -> Option<Self> {
+        let previous = match previous {
+            Some(bytes) => Some(Lockfile::from_json(std::str::from_utf8(bytes).ok()?).ok()?),
+            None => None,
+        };
+        let empty = BTreeMap::new();
+        let before = previous.as_ref().map_or(&empty, Lockfile::packages);
+        let after = current.packages();
+        let mut changes = Self::default();
+        for (key, package) in after {
+            match before.get(key) {
+                None => changes.added += 1,
+                Some(prior) if prior == package => changes.reused += 1,
+                Some(_) => changes.changed += 1,
+            }
+        }
+        changes.removed = before
+            .keys()
+            .filter(|key| !after.contains_key(*key))
+            .count();
+        Some(changes)
+    }
 }
 
 struct InstallSession {
@@ -38,6 +74,7 @@ struct InstallSession {
     outcome: OperationOutcome,
     mutated: bool,
     committed: bool,
+    package_changes: Option<PackageChanges>,
 }
 impl InstallSession {
     fn new(project: &Path) -> Self {
@@ -48,6 +85,7 @@ impl InstallSession {
             outcome: OperationOutcome::unchanged(project),
             mutated: false,
             committed: false,
+            package_changes: None,
         }
     }
 
@@ -249,6 +287,7 @@ pub(crate) fn run_with_manifest_target(
         Ok((package_count, replayed)) => Ok(InstallReport {
             package_count,
             replayed,
+            package_changes: session.package_changes,
             outcome: session.outcome,
         }),
         Err(error) => Err(session.fail(error)),
@@ -645,6 +684,7 @@ fn perform_install(
         journal
             .finish()
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+        session.package_changes = PackageChanges::between(original_lock.as_deref(), &lock);
         return Ok((lock.packages().len(), imported.is_some()));
     }
     if !lock_path.is_file() {
@@ -664,6 +704,7 @@ fn perform_install(
         ));
     }
     let lock = read_lock(&lock_path)?;
+    session.package_changes = PackageChanges::between(original_lock.as_deref(), &lock);
     let current_manifest_digest = fs::read(project_dir.join("package.json"))
         .map(|bytes| crate::filesystem::atomic::digest_bytes(&bytes))
         .map_err(|error| {
