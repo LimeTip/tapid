@@ -1,5 +1,9 @@
 use clap::Args as ClapArgs;
-use std::{fs, path::PathBuf, process::ExitCode};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 use tapid_lockfile::ImportedNpmLockfile;
 
 #[derive(Debug, ClapArgs)]
@@ -26,8 +30,8 @@ pub(crate) fn run(args: Args) -> ExitCode {
 fn import(args: Args) -> Result<(), String> {
     let project = std::env::current_dir().map_err(|e| e.to_string())?;
     let input = fs::read_to_string(&args.path).map_err(|e| format!("cannot read npm lock: {e}"))?;
-    let manifest = fs::read_to_string(project.join("package.json"))
-        .map_err(|e| format!("cannot read package.json: {e}"))?;
+    let manifest_path = project.join("package.json");
+    let manifest = read_manifest(&manifest_path)?;
     tapid_manifest::PackageManifest::parse(&manifest).map_err(|e| e.to_string())?;
     let digest = crate::filesystem::atomic::digest_bytes(manifest.as_bytes());
     let lock =
@@ -54,9 +58,18 @@ fn import(args: Args) -> Result<(), String> {
     {
         return Err("tapid.lock must be a regular, non-symlink file".into());
     }
-    if fs::read_to_string(project.join("package.json")).map_err(|e| e.to_string())? != manifest {
+    if read_manifest(&manifest_path)? != manifest {
         return Err("package.json changed during import; retry".into());
     }
     let backup = crate::filesystem::atomic::replace_lockfile(&destination, &json)?;
     crate::filesystem::atomic::discard_lockfile_backup(backup.as_deref())
+}
+
+fn read_manifest(path: &Path) -> Result<String, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|e| format!("cannot inspect package.json: {e}"))?;
+    if !metadata.file_type().is_file() {
+        return Err("package.json must be a regular, non-symlink file".into());
+    }
+    fs::read_to_string(path).map_err(|e| format!("cannot read package.json: {e}"))
 }

@@ -95,6 +95,55 @@ fn invoke(project: &TempProject, args: &[&str]) -> std::process::Output {
         .output()
         .unwrap()
 }
+
+#[cfg(unix)]
+#[test]
+fn npm_import_rejects_symlinked_manifest_without_mutation() {
+    let project = reference_project("npm-import-symlinked-manifest");
+    let manifest_path = project.path().join("package.json");
+    let manifest = fs::read(&manifest_path).unwrap();
+    project.write("manifest-target.json", &manifest).unwrap();
+    fs::remove_file(&manifest_path).unwrap();
+    std::os::unix::fs::symlink("manifest-target.json", &manifest_path).unwrap();
+    project.write("tapid.lock", b"prior lock bytes").unwrap();
+    project
+        .write("node_modules/keep.txt", b"prior active tree")
+        .unwrap();
+    project.write("store/keep.txt", b"prior store").unwrap();
+
+    let output = invoke(&project, &["import-package-lock", "package-lock.json"]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("package.json must be a regular, non-symlink file"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        b"prior lock bytes"
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/keep.txt")).unwrap(),
+        b"prior active tree"
+    );
+    assert_eq!(
+        fs::read(project.path().join("store/keep.txt")).unwrap(),
+        b"prior store"
+    );
+    assert_eq!(
+        fs::read(project.path().join("manifest-target.json")).unwrap(),
+        manifest
+    );
+    assert!(
+        fs::symlink_metadata(manifest_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
 #[test]
 fn npm_import_preserves_nested_versions_peers_sources_and_optional_constraints() {
     let project = reference_project("npm-import-reference");
