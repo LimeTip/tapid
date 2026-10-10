@@ -304,18 +304,16 @@ fn request_builder_preserves_ordered_executable_search_paths() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn process_memory_stats_access_requires_linux_restricted_sandbox() {
+fn process_memory_stats_access_requires_linux_containment() {
     let default = ExecutionRequest::builder("node").build().unwrap();
     assert!(!default.allow_process_memory_stats());
 
-    assert!(
-        ExecutionRequest::builder("node")
-            .policy(required_policy())
-            .allow_process_memory_stats(true)
-            .build()
-            .is_err(),
-        "ManagedTree must not accept the Restricted-only opt-in"
-    );
+    let managed = ExecutionRequest::builder("node")
+        .policy(required_policy())
+        .allow_process_memory_stats(true)
+        .build()
+        .expect("ManagedTree must accept the private procfs opt-in");
+    assert!(managed.allow_process_memory_stats());
     let disabled_restricted = SandboxPolicy::new_with_assurance(
         SandboxMode::Disabled,
         AssuranceLevel::Restricted,
@@ -363,7 +361,7 @@ fn process_memory_stats_access_is_rejected_off_linux() {
     assert!(
         error
             .to_string()
-            .contains("only by the Linux Restricted backend")
+            .contains("only by Linux containment backends")
     );
 }
 
