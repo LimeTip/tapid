@@ -1,5 +1,4 @@
 use clap::Args as ClapArgs;
-use serde::Serialize;
 use std::{path::PathBuf, process::ExitCode};
 use tapid_lockfile::{LockfilePackageKey, LockfilePackageSource};
 
@@ -16,25 +15,6 @@ pub(crate) struct Args {
     pub(crate) workspace: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WhyJsonError {
-    schema_version: u32,
-    operation: &'static str,
-    outcome: &'static str,
-    effective_project: String,
-    changes: Vec<String>,
-    warnings: Vec<String>,
-    errors: Vec<WhyJsonErrorDetail>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WhyJsonErrorDetail {
-    code: &'static str,
-    message: String,
-}
-
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     match crate::application::why::explain(
         &args.project_dir,
@@ -43,11 +23,9 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     ) {
         Ok(report) => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string(&report).expect("serializing why report")
-                );
-            } else if report.paths.is_empty() {
+                return crate::output::json::why_success(&report, &args.project_dir);
+            }
+            if report.paths.is_empty() {
                 println!(
                     "No path to '{}' was found in the resolved dependency graph.",
                     report.package
@@ -81,26 +59,10 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
         }
         Err(error) => {
             if json {
-                let output = WhyJsonError {
-                    schema_version: 1,
-                    operation: "why",
-                    outcome: "error",
-                    effective_project: args.project_dir.display().to_string(),
-                    changes: Vec::new(),
-                    warnings: Vec::new(),
-                    errors: vec![WhyJsonErrorDetail {
-                        code: error.kind.code(),
-                        message: error.to_string(),
-                    }],
-                };
-                println!(
-                    "{}",
-                    serde_json::to_string(&output).expect("serializing why error")
-                );
-            } else {
-                eprintln!("error: {error}");
-                eprintln!("diagnostic: {}", error.kind.code());
+                return crate::output::json::why_failure(&args.project_dir, error.kind.code());
             }
+            eprintln!("error: {error}");
+            eprintln!("diagnostic: {}", error.kind.code());
             ExitCode::from(1)
         }
     }

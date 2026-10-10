@@ -101,9 +101,15 @@ pub(crate) fn explain(
         .map_err(OperationalError::from)?;
 
     let roots = if selection.manifest_path == root_manifest_path {
-        direct_roots(&lock, &selection.manifest)
+        direct_roots(&lock, &selection.manifest, &selection.root_dir)?
     } else {
-        workspace_roots(&lock, &selection.manifest, &requested)?
+        workspace_roots(
+            &lock,
+            &selection.manifest,
+            &requested,
+            &selection.root_dir,
+            &selection.manifest_path,
+        )?
     };
     let graph = graph(&lock)?;
     let source_kinds = graph
@@ -161,68 +167,107 @@ pub(crate) fn explain(
     })
 }
 
-fn direct_roots(lock: &Lockfile, manifest: &PackageManifest) -> Vec<Root> {
+fn direct_roots(
+    lock: &Lockfile,
+    manifest: &PackageManifest,
+    project_dir: &Path,
+) -> Result<Vec<Root>, OperationalError> {
     let kinds = direct_dependency_kinds(manifest);
-    let mut roots = BTreeMap::<(String, String), Root>::new();
-    let mut bound_names = BTreeSet::new();
-    for (name, key) in lock.root_bindings() {
-        bound_names.insert(name.clone());
-        let root = Root {
-            key: key.clone(),
-            name: name.clone(),
-            kind: kinds
-                .get(name.as_str())
-                .cloned()
-                .unwrap_or_else(|| "dependency".to_owned()),
-        };
-        roots.insert((root.name.clone(), root.key.clone()), root);
-    }
-
-    let mut locked_keys = lock.roots().to_vec();
-    if let Ok(packages) = lock.packages_typed() {
-        locked_keys.extend(packages.into_iter().map(|(key, _)| key.to_string()));
-    }
-    if let Ok(packages) = lock.workspace_packages_typed() {
-        locked_keys.extend(packages.into_iter().map(|(key, _)| key.to_string()));
-    }
-    locked_keys.sort();
-    locked_keys.dedup();
-
-    for (name, kind) in kinds {
-        if bound_names.contains(&name) {
-            continue;
-        }
-        for key in &locked_keys {
-            let Ok(parsed) = key.parse::<LockfilePackageKey>() else {
-                continue;
-            };
-            if parsed.name.as_str() == name {
-                let root = Root {
+    if !lock.root_bindings().is_empty() {
+        return Ok(lock
+            .root_bindings()
+            .iter()
+            .filter_map(|(name, key)| {
+                let kind = kinds.get(name.as_str())?;
+                Some(Root {
                     key: key.clone(),
                     name: name.clone(),
                     kind: kind.clone(),
-                };
-                roots.insert((root.name.clone(), root.key.clone()), root);
-            }
+                })
+            })
+            .collect());
+    }
+
+    let typed_keys = lock
+        .packages_typed()
+        .map_err(OperationalError::from)?
+        .into_iter()
+        .map(|(key, _)| key)
+        .chain(
+            lock.workspace_packages_typed()
+                .map_err(OperationalError::from)?
+                .into_iter()
+                .map(|(key, _)| key),
+        )
+        .collect::<Vec<_>>();
+    let roots = if !lock.roots().is_empty() {
+        lock.roots().to_vec()
+    } else {
+        let config = crate::registry::RegistryConfig::load(project_dir)
+            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+        crate::application::replay::replay_root_keys_with_config(
+            lock,
+            manifest,
+            &typed_keys,
+            &config,
+        )
+        .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?
+    };
+    let mut result = Vec::new();
+    for key in roots {
+        let parsed = key
+            .parse::<LockfilePackageKey>()
+            .map_err(OperationalError::from)?;
+        let name = parsed.name.to_string();
+        if let Some(kind) = kinds.get(&name) {
+            result.push(Root {
+                key,
+                name,
+                kind: kind.clone(),
+            });
         }
     }
-    roots.into_values().collect()
+    Ok(result)
 }
 
 fn workspace_roots(
     lock: &Lockfile,
     manifest: &PackageManifest,
     requested: &tapid_core::PackageName,
+    project_dir: &Path,
+    manifest_path: &Path,
 ) -> Result<Vec<Root>, OperationalError> {
+    let member_dir = manifest_path.parent().ok_or_else(|| {
+        OperationalError::new(
+            ErrorKind::Manifest,
+            "workspace manifest has no parent directory",
+        )
+    })?;
+    let relative_path = member_dir
+        .strip_prefix(project_dir)
+        .map_err(|error| OperationalError::from_source(ErrorKind::Manifest, error))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let member_bytes = fs::read(manifest_path).map_err(|error| {
+        OperationalError::from_source(ErrorKind::Manifest, error)
+            .context("cannot read selected workspace package.json")
+    })?;
+    let member_digest = digest_bytes(&member_bytes);
     let matched = lock
         .workspace_packages_typed()
         .map_err(OperationalError::from)?
         .into_iter()
-        .find(|(key, _)| key.name == *manifest.name() && key.version == manifest.version());
+        .find(|(key, package)| {
+            key.name == *manifest.name()
+                && key.version == manifest.version()
+                && key.source.workspace().is_some_and(|source| {
+                    source.path() == relative_path && package.manifest_digest() == member_digest
+                })
+        });
     let (key, workspace_package) = matched.ok_or_else(|| {
         OperationalError::new(
-            ErrorKind::Lockfile,
-            "selected workspace member is absent from tapid.lock",
+            ErrorKind::LockManifestMismatch,
+            "selected workspace manifest or membership does not match tapid.lock",
         )
     })?;
     let kinds = direct_dependency_kinds(manifest);
@@ -253,13 +298,18 @@ fn direct_dependency_kinds(manifest: &PackageManifest) -> BTreeMap<String, Strin
         (manifest.dependencies(), "dependencies"),
         (manifest.dev_dependencies(), "devDependencies"),
         (manifest.optional_dependencies(), "optionalDependencies"),
-        (manifest.peer_dependencies(), "peerDependencies"),
     ]
     .into_iter()
     .flat_map(|(entries, kind)| {
-        entries
-            .keys()
-            .map(move |name| (name.clone(), kind.to_owned()))
+        entries.keys().flat_map(move |name| {
+            let normalized = crate::online::dep_parts(name)
+                .map(|(_, package)| package.to_string())
+                .unwrap_or_else(|_| name.clone());
+            [
+                (name.clone(), kind.to_owned()),
+                (normalized, kind.to_owned()),
+            ]
+        })
     })
     .collect()
 }
@@ -336,7 +386,6 @@ fn search_paths(
                 steps: path.clone(),
             });
         }
-        return;
     }
     if depth >= MAX_DEPTH {
         if graph.get(current).is_some_and(|edges| !edges.is_empty()) {
@@ -426,7 +475,13 @@ mod tests {
                     },
                 ],
             ),
-            (target_one.clone(), Vec::new()),
+            (
+                target_one.clone(),
+                vec![Edge {
+                    name: "target-v2".into(),
+                    target: target_two.clone(),
+                }],
+            ),
             (target_two.clone(), Vec::new()),
         ]);
         let source_kinds = graph.keys().map(|key| (key.clone(), "registry")).collect();
@@ -457,7 +512,10 @@ mod tests {
             final_keys,
             BTreeSet::from([target_one.as_str(), target_two.as_str()])
         );
-        assert_eq!(state.paths.len(), 2);
+        assert_eq!(state.paths.len(), 3);
+        assert!(state.paths.iter().any(|path| {
+            path.steps.last().is_some_and(|step| step.key == target_two) && path.steps.len() == 4
+        }));
         assert!(!state.truncated);
     }
 
@@ -498,6 +556,57 @@ mod tests {
     }
 
     #[test]
+    fn workspace_roots_require_matching_member_path_and_manifest_digest() {
+        let project = tapid_test_support::TempProject::new("why-workspace-validation").unwrap();
+        let root_bytes = br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#;
+        let member_bytes =
+            br#"{"name":"member","version":"1.0.0","dependencies":{"removed":"1.0.0"}}"#;
+        project.write("package.json", root_bytes).unwrap();
+        project
+            .write("packages/member/package.json", member_bytes)
+            .unwrap();
+        let root_manifest = digest_bytes(root_bytes);
+        let member_digest = digest_bytes(member_bytes);
+        let manifest = PackageManifest::parse(std::str::from_utf8(member_bytes).unwrap()).unwrap();
+        let source =
+            tapid_lockfile::LocalWorkspaceSource::new("packages/member", "member", "1.0.0")
+                .unwrap();
+        let workspace =
+            tapid_lockfile::LockedWorkspacePackage::new(source, &member_digest).unwrap();
+        let mut lock = Lockfile::new(&root_manifest).unwrap();
+        lock.insert_workspace_package(workspace).unwrap();
+        let requested: tapid_core::PackageName = "member".parse().unwrap();
+        let manifest_path = project.path().join("packages/member/package.json");
+        let valid =
+            workspace_roots(&lock, &manifest, &requested, project.path(), &manifest_path).unwrap();
+        assert_eq!(valid.len(), 1);
+        assert_eq!(valid[0].kind, "workspace");
+
+        let stale_source =
+            tapid_lockfile::LocalWorkspaceSource::new("packages/member", "member", "1.0.0")
+                .unwrap();
+        let stale_workspace = tapid_lockfile::LockedWorkspacePackage::new(
+            stale_source,
+            &format!("sha256-{}", "f".repeat(64)),
+        )
+        .unwrap();
+        let mut stale_lock = Lockfile::new(&root_manifest).unwrap();
+        stale_lock
+            .insert_workspace_package(stale_workspace)
+            .unwrap();
+        assert!(
+            workspace_roots(
+                &stale_lock,
+                &manifest,
+                &requested,
+                project.path(),
+                &manifest_path
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn workspace_lock_identity_is_reported_as_workspace_source() {
         let source =
             tapid_lockfile::LocalWorkspaceSource::new("packages/lib", "lib", "1.0.0").unwrap();
@@ -506,13 +615,14 @@ mod tests {
     }
 
     #[test]
-    fn direct_manifest_edges_retain_optional_and_peer_kinds() {
+    fn direct_manifest_edges_keep_optional_and_normalize_prefixed_names_without_peer_roots() {
         let manifest = PackageManifest::parse(
-            r#"{"name":"root","version":"1.0.0","optionalDependencies":{"opt":"1.0.0"},"peerDependencies":{"peer":"1.0.0"}}"#,
+            r#"{"name":"root","version":"1.0.0","optionalDependencies":{"opt":"1.0.0"},"devDependencies":{"jsr:@scope/pkg":"1.0.0"},"peerDependencies":{"peer":"1.0.0"}}"#,
         )
         .unwrap();
         let kinds = direct_dependency_kinds(&manifest);
         assert_eq!(kinds["opt"], "optionalDependencies");
-        assert_eq!(kinds["peer"], "peerDependencies");
+        assert_eq!(kinds["@scope/pkg"], "devDependencies");
+        assert!(!kinds.contains_key("peer"));
     }
 }
