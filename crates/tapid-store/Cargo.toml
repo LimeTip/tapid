@@ -2,7 +2,7 @@
 name = "tapid-store"
 readme = "README.md"
 description = "Local content-addressed package store foundations for Tapid"
-version = "0.0.7"
+version = "0.0.8"
 edition.workspace = true
 license.workspace = true
 license-file.workspace = true
@@ -27,4 +27,4 @@ rustix = { version = "1.1", features = ["process"] }
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-tapid-test-support = { path = "../tapid-test-support" }
+tapid-test-support = { version = "0.0.3", path = "../tapid-test-support" }

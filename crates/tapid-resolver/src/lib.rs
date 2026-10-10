@@ -440,6 +440,17 @@ pub struct ResolutionOptions {
     pub frozen: bool,
 }
 
+/// Exact version preferences from a previous graph, scoped by registry, local
+/// root name, and actual package name. Preferences never override declared
+/// version requirements.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ResolutionPreferences {
+    /// Previously selected versions, including transitive versions.
+    pub versions: BTreeSet<(RegistryOrigin, PackageName, PackageVersion)>,
+    /// Previously selected direct bindings, ahead of other locked versions.
+    pub roots: BTreeMap<(RegistryOrigin, PackageName, PackageName), PackageVersion>,
+}
+
 /// Exact package identities, root selections, and parent-to-child edges for a graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resolution {
@@ -540,7 +551,29 @@ pub fn resolve_graph_with_routing<F>(
     ds: &[Dependency],
     metadata: &[RegistryMetadata],
     options: ResolutionOptions,
+    registry_for_dependency: F,
+) -> Result<Resolution, ResolveError>
+where
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+{
+    resolve_graph_with_preferences(
+        ds,
+        metadata,
+        options,
+        registry_for_dependency,
+        &ResolutionPreferences::default(),
+    )
+}
+
+/// Resolves with exact version preferences. A preference never overrides range
+/// satisfaction or registry identity; compatible preferred versions win before
+/// the normal highest-version rule, for both roots and transitive dependencies.
+pub fn resolve_graph_with_preferences<F>(
+    ds: &[Dependency],
+    metadata: &[RegistryMetadata],
+    options: ResolutionOptions,
     mut registry_for_dependency: F,
+    preferred: &ResolutionPreferences,
 ) -> Result<Resolution, ResolveError>
 where
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
@@ -581,7 +614,16 @@ where
     let mut queue = Vec::new();
     let mut missing_metadata = BTreeSet::new();
     for ((registry, local_name, name), requirements) in root_constraints {
-        let package = match select_package(&registry, &name, &requirements, &candidate_index) {
+        let package = match select_package(
+            &registry,
+            &name,
+            &requirements,
+            &candidate_index,
+            preferred,
+            preferred
+                .roots
+                .get(&(registry.clone(), local_name.clone(), name.clone())),
+        ) {
             Ok(package) => package,
             Err(ResolveError::MissingCandidate { .. })
                 if !candidate_index.contains_key(&(registry.clone(), name.clone())) =>
@@ -621,18 +663,23 @@ where
             let registry = registry_for_dependency(&parent.registry, &actual_name)
                 .map_err(ResolveError::RegistryRouting)?;
             let requirements = BTreeSet::from([requirement]);
-            let child_package =
-                match select_package(&registry, &actual_name, &requirements, &candidate_index) {
-                    Ok(package) => package,
-                    Err(ResolveError::MissingCandidate { .. })
-                        if !candidate_index
-                            .contains_key(&(registry.clone(), actual_name.clone())) =>
-                    {
-                        missing_metadata.insert((registry.to_string(), actual_name.to_string()));
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
+            let child_package = match select_package(
+                &registry,
+                &actual_name,
+                &requirements,
+                &candidate_index,
+                preferred,
+                None,
+            ) {
+                Ok(package) => package,
+                Err(ResolveError::MissingCandidate { .. })
+                    if !candidate_index.contains_key(&(registry.clone(), actual_name.clone())) =>
+                {
+                    missing_metadata.insert((registry.to_string(), actual_name.to_string()));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let child =
                 RegistryPackageId::new(registry, actual_name, child_package.version.clone());
             dependencies.insert(ResolvedDependency {
@@ -745,6 +792,8 @@ fn select_package(
     name: &PackageName,
     requirements: &BTreeSet<Requirement>,
     candidates: &CandidateIndex<'_>,
+    preferred: &ResolutionPreferences,
+    preferred_root: Option<&PackageVersion>,
 ) -> Result<PackageVersionMetadata, ResolveError> {
     let matching = candidates
         .get(&(registry.clone(), name.clone()))
@@ -758,7 +807,17 @@ fn select_package(
                 .iter()
                 .all(|requirement| matches_requirement(&package.version, requirement))
         })
-        .max_by(|a, b| a.version.cmp(&b.version))
+        .max_by_key(|package| {
+            (
+                preferred_root == Some(&package.version),
+                preferred.versions.contains(&(
+                    registry.clone(),
+                    name.clone(),
+                    package.version.clone(),
+                )),
+                &package.version,
+            )
+        })
         .cloned();
     package.ok_or_else(|| {
         let requirements: Vec<_> = requirements

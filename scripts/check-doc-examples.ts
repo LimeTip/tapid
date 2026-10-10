@@ -125,8 +125,10 @@ export function boundedProcess(
     let failure: string | null = null,
       size = 0;
     const chunks: Buffer[] = [];
+    let terminationRequested = false;
     const kill = () => {
-      if (!child.pid) return;
+      if (terminationRequested || !child.pid) return;
+      terminationRequested = true;
       try {
         if (process.platform === "win32") child.kill("SIGKILL");
         else process.kill(-child.pid, "SIGKILL");

@@ -272,10 +272,16 @@ pub(crate) struct OutdatedImpact {
 
 impl OutdatedEntry {
     pub(crate) fn impact(&self, target: Option<&str>) -> OutdatedImpact {
+        // Peer declarations constrain consumers; they do not select installed roots.
+        let peer_declaration = self.kind == kind_name(DependencyKind::PeerDependencies);
         let Some(target) = target.and_then(|value| value.parse::<PackageVersion>().ok()) else {
             return OutdatedImpact {
                 version_change: "unknown",
-                lockfile: "unknown",
+                lockfile: if peer_declaration {
+                    "unchanged"
+                } else {
+                    "unknown"
+                },
                 manifest: "unknown",
             };
         };
@@ -293,10 +299,14 @@ impl OutdatedEntry {
             Some(locked) if target.patch() != locked.patch() => "patch",
             Some(_) => "prerelease",
         };
-        let lockfile = match version_change {
-            "unknown" => "unknown",
-            "unchanged" => "unchanged",
-            _ => "changed",
+        let lockfile = if peer_declaration {
+            "unchanged"
+        } else {
+            match version_change {
+                "unknown" => "unknown",
+                "unchanged" => "unchanged",
+                _ => "changed",
+            }
         };
         let manifest = match crate::online::workspace_requirement(&self.declared, &target) {
             Ok(requirement) if requirement.matches(&target) => "unchanged",

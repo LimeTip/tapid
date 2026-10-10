@@ -48,12 +48,33 @@ fn complete_progress_step<T, E>(
     Ok(value)
 }
 
-pub(crate) fn replay_input(
+pub(crate) fn validate_root_bindings(
+    lock: &Lockfile,
+    manifest: &PackageManifest,
+    registry_config: &crate::registry::RegistryConfig,
+) -> Result<(), OperationalError> {
+    let mut keys = lock
+        .packages_typed()?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    keys.extend(
+        lock.workspace_packages_typed()?
+            .into_iter()
+            .map(|(key, _)| key),
+    );
+    replay_root_keys_with_config(lock, manifest, &keys, registry_config)
+        .map(|_| ())
+        .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))
+}
+
+pub(crate) fn replay_input_with_publication(
     lock: &Lockfile,
     manifest: &PackageManifest,
     store: &Store,
     registry_config: &crate::registry::RegistryConfig,
     report_progress: impl FnMut(usize, usize),
+    publication: Option<&tapid_store::StorePublication>,
 ) -> Result<(NamedLayoutInput, BTreeMap<String, PathBuf>), OperationalError> {
     store.cleanup_stale_replay_snapshots().map_err(|error| {
         OperationalError::from(error).context("cannot recover stale replay snapshots")
@@ -69,9 +90,11 @@ pub(crate) fn replay_input(
                 .tree_digest()
                 .parse()
                 .map_err(|error: tapid_core::DomainError| error.to_string())?;
-            store
-                .verified_tree_snapshot(&digest)
-                .map_err(OperationalError::from)
+            match publication {
+                Some(publication) => publication.verified_tree_snapshot(&digest),
+                None => store.verified_tree_snapshot(&digest),
+            }
+            .map_err(OperationalError::from)
         },
     )
 }

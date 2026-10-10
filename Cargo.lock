@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "tapid"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-lockfile"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "proptest",
  "serde",
@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-resolver"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "proptest",
  "semver",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-store"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "fs4",
  "hex",

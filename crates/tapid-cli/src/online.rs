@@ -1,10 +1,13 @@
-use crate::application::outcome::{ErrorKind, OperationalError};
+mod artifact;
 mod locked;
+use crate::application::outcome::{ErrorKind, OperationalError};
+pub(crate) use locked::{
+    hydrate_locked, prepare_locked_install, validate_locked_artifact_sources,
+    validate_locked_routes,
+};
 mod npm_import;
-mod resolution;
-pub(crate) use locked::{prepare_locked_install, validate_locked_artifact_sources};
 pub(crate) use npm_import::fetch_imported;
-use resolution::resolve_with_fetch_routed_and_overrides;
+mod resolution;
 #[cfg(test)]
 use resolution::{
     RESOLVER_METADATA_BUILD_COUNT, RESOLVER_METADATA_PARENT_VISITS,
@@ -50,9 +53,11 @@ use tapid_registry_client::{
 };
 use tapid_resolver::{
     Dependency, PackageVersionMetadata, RegistryMetadata, Requirement, Resolution,
-    ResolutionOptions, ResolveError, resolve_graph_with_routing,
+    ResolutionOptions, ResolveError,
 };
 use tapid_store::{Store, StoreTransaction};
+
+type PackageRecordKey = (String, String, String);
 
 const NPM: &str = "https://registry.npmjs.org";
 const JSR: &str = "https://jsr.io";
@@ -130,7 +135,7 @@ fn integrity(data: &[u8]) -> PackageIntegrity {
 fn integrity_matches(expected: &PackageIntegrity, actual: &PackageIntegrity) -> bool {
     expected == actual
 }
-fn root_digest(project: &Path) -> Result<String, String> {
+pub(crate) fn root_digest(project: &Path) -> Result<String, String> {
     let data = fs::read(project.join("package.json")).map_err(|e| e.to_string())?;
     Ok(digest(&data).to_string())
 }
@@ -719,13 +724,15 @@ fn workspace_root_resolution(
     })
 }
 
-pub fn resolve_and_fetch(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_and_fetch_with_lock(
     project: &Path,
     manifest: &PackageManifest,
     store: &Store,
     fixture_path: Option<&Path>,
     allow_missing_integrity: bool,
     registry_config: &crate::registry::RegistryConfig,
+    previous_lock: Option<&Lockfile>,
     mut progress: impl FnMut(crate::application::install::Progress),
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
@@ -808,7 +815,68 @@ pub fn resolve_and_fetch(
     }
     let configured_origins = registry_config.configured_origins();
     let mut metadata_transports = BTreeMap::<(String, String), HttpsTransport>::new();
-    let (resolution, mut records) = resolve_with_fetch_routed_and_overrides(
+    let preferred = previous_lock
+        .map(|lock| {
+            locked::reusable_locked_packages(lock).map(|packages| {
+                packages
+                    .into_iter()
+                    .filter_map(|(key, _)| {
+                        key.source
+                            .registry()
+                            .cloned()
+                            .map(|registry| (registry, key.name, key.version))
+                    })
+                    .collect::<BTreeSet<_>>()
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut preferred = tapid_resolver::ResolutionPreferences {
+        versions: preferred,
+        roots: BTreeMap::new(),
+    };
+    if let Some(lock) = previous_lock {
+        let bindings = if lock.root_bindings().is_empty() {
+            lock.roots()
+                .iter()
+                .map(|key| {
+                    let key: LockfilePackageKey = key.parse()?;
+                    Ok((key.name.to_string(), key))
+                })
+                .collect::<Result<Vec<_>, OperationalError>>()?
+        } else {
+            lock.root_bindings()
+                .iter()
+                .map(|(name, key)| Ok((name.clone(), key.parse()?)))
+                .collect::<Result<Vec<_>, OperationalError>>()?
+        };
+        for (local, key) in bindings {
+            if let Some(registry) = key.source.registry()
+                && preferred.versions.contains(&(
+                    registry.clone(),
+                    key.name.clone(),
+                    key.version.clone(),
+                ))
+                && locked::locked_platform_matches(&key)?
+            {
+                preferred.roots.insert(
+                    (
+                        registry.clone(),
+                        local
+                            .parse()
+                            .map_err(|error: tapid_core::DomainError| error.to_string())?,
+                        key.name,
+                    ),
+                    key.version,
+                );
+            }
+        }
+    }
+    let seed = previous_lock
+        .map(|lock| locked::locked_records(lock, &fixture_records, fixture.is_some()))
+        .transpose()?
+        .unwrap_or_default();
+    let (resolution, records) = resolution::resolve_with_preferences(
         &roots,
         |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
         &overrides,
@@ -836,6 +904,8 @@ pub fn resolve_and_fetch(
                 )
             }
         },
+        &preferred,
+        seed,
         |fetched| progress(crate::application::install::Progress::Metadata(fetched)),
     )?;
     validate_workspace_peer_providers(
@@ -859,7 +929,31 @@ pub fn resolve_and_fetch(
     let mut packages = BTreeMap::new();
     let mut trees = BTreeMap::new();
     let mut instances = Vec::new();
-    let mut artifact_transports = BTreeMap::<(String, String), HttpsTransport>::new();
+    let mut artifact_fetcher = artifact::ArtifactFetcher {
+        store,
+        config: registry_config,
+        transports: BTreeMap::new(),
+        allowed_origins: configured_origins,
+    };
+    let pinned_packages = previous_lock
+        .map(locked::reusable_locked_packages)
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, package)| {
+            Ok((
+                (
+                    key.source
+                        .registry()
+                        .cloned()
+                        .ok_or("expected registry identity")?,
+                    key.name,
+                    key.version,
+                ),
+                package,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, OperationalError>>()?;
     let artifact_total = resolution.selected.len();
     for (index, id) in resolution.selected.iter().enumerate() {
         let peer_context = resolution
@@ -872,35 +966,35 @@ pub fn resolve_and_fetch(
             id.name.to_string(),
             id.version.to_string(),
         );
-        let record = if let Some(p) = records.get(&key3) {
-            p.clone()
-        } else {
-            let transport = metadata_transport_for_package(
-                &mut metadata_transports,
-                registry_config,
-                &id.registry,
-                &id.name,
-                &configured_origins,
-            )?;
-            let fetched = remote_records(
-                transport,
-                registry_config,
-                &id.registry,
-                &id.name,
-                allow_missing_integrity,
-            )?;
-            let p = fetched
-                .into_iter()
-                .find(|p| p.version == id.version)
-                .ok_or_else(|| {
-                    OperationalError::new(
-                        ErrorKind::RegistryMetadata,
-                        format!("missing artifact metadata: {id}"),
-                    )
-                })?;
-            records.insert(key3.clone(), p.clone());
-            p
-        };
+        let record = records.get(&key3).cloned().ok_or_else(|| {
+            OperationalError::new(
+                ErrorKind::RegistryMetadata,
+                format!("missing selected artifact metadata: {id}"),
+            )
+        })?;
+        let pinned = pinned_packages
+            .get(&(id.registry.clone(), id.name.clone(), id.version.clone()))
+            .copied();
+        let mut record = record;
+        if let Some(package) = pinned {
+            if package.registry_integrity_declared() != Some(true) {
+                return Err(OperationalError::new(
+                    ErrorKind::Integrity,
+                    "locked artifact lacks registry-declared integrity provenance",
+                ));
+            }
+            record.integrity = Some(
+                package
+                    .artifact_integrity()
+                    .parse()
+                    .map_err(|error: tapid_core::DomainError| error.to_string())?,
+            );
+            if !record.fixture
+                && let Some(url) = package.artifact_url()
+            {
+                record.artifact = url.to_owned();
+            }
+        }
         let platform_context = selected_platform_context_for(
             std::env::consts::OS,
             std::env::consts::ARCH,
@@ -909,82 +1003,8 @@ pub fn resolve_and_fetch(
         )
         .map_err(|error| OperationalError::new(ErrorKind::Resolution, error))?;
         platform_contexts.insert(id.clone(), platform_context.clone());
-        let bytes = if record.fixture {
-            if let Some(encoded) = record.artifact.strip_prefix("base64:") {
-                STANDARD.decode(encoded).map_err(|e| {
-                    OperationalError::from_source(ErrorKind::RegistryMetadata, e)
-                        .context("invalid artifact encoding")
-                })?
-            } else {
-                fs::read(&record.artifact).map_err(|e| {
-                    OperationalError::from_source(ErrorKind::RegistryTransport, e)
-                        .context(format!("cannot read artifact {}", record.artifact))
-                })?
-            }
-        } else {
-            let transport = artifact_transport_for_package(
-                &mut artifact_transports,
-                registry_config,
-                &id.registry,
-                &id.name,
-                &configured_origins,
-            )?;
-            let response = if record.registry.to_string() == JSR {
-                JsrRegistry::new(transport, record.registry.clone())
-                    .download_artifact(&record.artifact)
-            } else {
-                NpmRegistry::new(transport, record.registry.clone())
-                    .download_artifact(&record.artifact)
-            }
-            .map_err(|e| {
-                OperationalError::from_source(ErrorKind::RegistryTransport, e)
-                    .context(format!("cannot download {id}"))
-            })?;
-            if response.status != 200 {
-                return Err(OperationalError::new(
-                    ErrorKind::RegistryTransport,
-                    format!("cannot download {}: HTTP {}", id, response.status),
-                ));
-            }
-            response.body
-        };
-        let actual = integrity(&bytes);
-        if record
-            .integrity
-            .as_ref()
-            .is_some_and(|expected| !integrity_matches(expected, &actual))
-        {
-            return Err(OperationalError::new(
-                ErrorKind::Integrity,
-                format!("integrity mismatch for {id}"),
-            ));
-        }
-        let temp_id = NEXT_TEMP_TREE_ID.fetch_add(1, Ordering::Relaxed);
-        let temp = store.root().join(format!(
-            ".online-tree-{}-{temp_id}-{}",
-            std::process::id(),
-            id.version
-        ));
-        let _temporary_tree = TemporaryTree(temp.clone());
-        extract_to(
-            &bytes,
-            ArchiveFormat::TarGz,
-            &temp,
-            ArchiveLimits::default(),
-        )
-        .map_err(|e| {
-            OperationalError::from_source(ErrorKind::Archive, e)
-                .context(format!("cannot extract {id}"))
-        })?;
-        let tree_digest: ArtifactDigest = canonical_tree_digest(&temp)
-            .map_err(|e| OperationalError::from_source(ErrorKind::Archive, e))?
-            .parse()
-            .map_err(|e: tapid_core::DomainError| {
-                OperationalError::from_source(ErrorKind::Archive, e)
-            })?;
-        let tree = store_transaction
-            .stage_verified_tree(&tree_digest, &temp)
-            .map_err(OperationalError::from)?;
+        let (actual, tree_digest, tree) =
+            artifact_fetcher.prepare(id, &record, pinned, &mut store_transaction)?;
         let key = LockfilePackageKey::new(
             id.registry.clone(),
             id.name.clone(),
@@ -1008,9 +1028,11 @@ pub fn resolve_and_fetch(
             integrity_provenance,
         )
         .map_err(OperationalError::from)?;
-        if !record.fixture {
+        if let Some(url) = pinned.and_then(LockedPackage::artifact_url).or_else(|| {
+            (!record.fixture && !record.artifact.is_empty()).then_some(record.artifact.as_str())
+        }) {
             locked
-                .set_artifact_url(&record.artifact)
+                .set_artifact_url(url)
                 .map_err(OperationalError::from)?;
         }
         packages.insert(key.clone(), (locked, record, id.clone()));

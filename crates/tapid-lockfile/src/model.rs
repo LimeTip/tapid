@@ -1210,8 +1210,9 @@ impl LockedPackage {
         )
     }
 
-    pub fn tree_digest(&self) -> &str {
-        &self.tree_digest
+    /// Pinned HTTPS archive address, when recorded by the producer.
+    pub fn artifact_url(&self) -> Option<&str> {
+        self.artifact_url.as_deref()
     }
 
     pub fn name(&self) -> &str {
@@ -1226,6 +1227,7 @@ impl LockedPackage {
     pub fn has_declared_registry_integrity(&self) -> bool {
         self.registry_integrity_declared == Some(true)
     }
+    /// Canonical SHA-512 archive integrity recorded in the lock.
     pub fn artifact_integrity(&self) -> &str {
         &self.artifact_integrity
     }
@@ -1239,8 +1241,13 @@ impl LockedPackage {
             .map_or(&self.tree_digest, |output| output.tree_digest())
     }
 
-    pub fn artifact_url(&self) -> Option<&str> {
-        self.artifact_url.as_deref()
+    /// Whether the producer verified registry-declared archive integrity.
+    pub fn registry_integrity_declared(&self) -> Option<bool> {
+        self.registry_integrity_declared
+    }
+
+    pub fn tree_digest(&self) -> &str {
+        &self.tree_digest
     }
 
     pub fn dependencies(&self) -> &BTreeMap<String, String> {

@@ -140,7 +140,7 @@ pub(crate) fn add(args: AddArgs, json: bool) -> ExitCode {
             }
         })
         .collect::<Vec<_>>();
-    let result = mutate_and_install(&args.common, json, |manifest| {
+    let result = mutate_and_install(&args.common, json, false, |manifest| {
         crate::application::lifecycle::plan_add(manifest, &mutations)
     });
     report(result, json, "add", "Added dependencies")
@@ -160,14 +160,14 @@ pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
             json,
         );
     }
-    let result = mutate_and_install(&args.common, json, |manifest| {
+    let result = mutate_and_install(&args.common, json, false, |manifest| {
         crate::application::lifecycle::plan_remove(manifest, &args.packages)
     });
     report(result, json, "remove", "Removed dependencies")
 }
 
 pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
-    let result = mutate_and_install(&args.common, json, |manifest| {
+    let result = mutate_and_install(&args.common, json, true, |manifest| {
         crate::application::lifecycle::plan_update(manifest, &args.packages, args.latest)
     });
     report(result, json, "update", "Updated dependencies")
@@ -233,7 +233,7 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
         None,
         None,
         args.common.store_dir.as_deref(),
-        crate::application::install::InstallMode::Frozen,
+        crate::application::install::InstallMode::Offline,
         None,
         false,
         |event| crate::output::report_progress(event, json),
@@ -253,6 +253,7 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
 fn mutate_and_install(
     common: &CommonArgs,
     json: bool,
+    refresh: bool,
     planner: impl FnOnce(
         &tapid_manifest::PackageManifest,
     ) -> Result<crate::application::lifecycle::LifecyclePlan, OperationalError>,
@@ -270,7 +271,11 @@ fn mutate_and_install(
         Some(&plan.manifest),
         None,
         common.store_dir.as_deref(),
-        crate::application::install::InstallMode::Online,
+        if refresh {
+            crate::application::install::InstallMode::Refresh
+        } else {
+            crate::application::install::InstallMode::Online
+        },
         common.registry_fixture.as_deref(),
         common.allow_unverified_registry_artifacts,
         |event| crate::output::report_progress(event, json),
