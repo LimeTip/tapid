@@ -261,9 +261,16 @@ pub(crate) enum Warning {
     UnverifiedRegistryArtifactsAllowed,
     PreviousTransactionRecovered,
     DependencyLifecycleHookSkipped { package: String, hook: String },
+    DependencyLifecycleDiscoveryFailed { package: String },
 }
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::DependencyLifecycleDiscoveryFailed { package } = self {
+            return write!(
+                f,
+                "could not discover dependency lifecycle hooks for {package}; dependency scripts were not run; generated files or native builds may be missing"
+            );
+        }
         if let Self::DependencyLifecycleHookSkipped { package, hook } = self {
             return write!(
                 f,
@@ -273,7 +280,7 @@ impl fmt::Display for Warning {
         f.write_str(match self {
             Self::UnverifiedRegistryArtifactsAllowed => "npm artifacts without registry integrity are not authenticated against a registry-declared digest",
             Self::PreviousTransactionRecovered => "recovered an interrupted project transaction before this operation",
-            Self::DependencyLifecycleHookSkipped { .. } => unreachable!(),
+            Self::DependencyLifecycleHookSkipped { .. } | Self::DependencyLifecycleDiscoveryFailed { .. } => unreachable!(),
         })
     }
 }

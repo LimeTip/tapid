@@ -50,6 +50,7 @@ fn commands(tree: &Path) -> Result<Vec<(String, String)>, OperationalError> {
         return Err(error("dependency package.json exceeds 1 MiB"));
     }
     let text = std::str::from_utf8(&bytes).map_err(error)?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     tapid_manifest::dependency_lifecycle_commands(text, root.join("binding.gyp").is_file())
         .map_err(error)
 }
@@ -104,7 +105,22 @@ pub(super) fn apply(
             })
             .ok_or_else(|| error("lifecycle package mapping lost"))?;
         let source = input.instances[index].tree.root.clone();
-        let hooks = commands(&source)?;
+        let hooks = match commands(&source) {
+            Ok(hooks) => hooks,
+            Err(discovery_error) => {
+                if policy
+                    .approvals()
+                    .iter()
+                    .any(|approval| approval.package() == package.name())
+                {
+                    return Err(discovery_error);
+                }
+                warnings.push(Warning::DependencyLifecycleDiscoveryFailed {
+                    package: format!("{}@{}", package.name(), package.version()),
+                });
+                Vec::new()
+            }
+        };
         let mut outputs = Vec::new();
         let mut current = source.clone();
         let mut private = None;
@@ -454,6 +470,20 @@ fn validate_output(root: &Path) -> Result<(), OperationalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lifecycle_discovery_accepts_a_leading_bom_without_changing_script_bytes() {
+        let project = tapid_test_support::TempProject::new("lifecycle-discovery-bom").unwrap();
+        project
+            .write(
+                "package.json",
+                "\u{feff}{\"scripts\":{\"install\":\"  exact\\ncommand  \"}}".as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            commands(project.path()).unwrap(),
+            vec![("install".into(), "  exact\ncommand  ".into())]
+        );
+    }
     #[test]
     fn lifecycle_output_rejects_portable_case_collisions() {
         let project = tapid_test_support::TempProject::new("lifecycle-output-case").unwrap();

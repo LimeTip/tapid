@@ -96,7 +96,7 @@ The lockfile pins what was selected and supports verified replay; registry integ
 
 ## Current package-management implementation
 
-The consumer workflow exercises deterministic dependency resolution, npm metadata and artifact retrieval, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, offline/frozen replay, and suppression of dependency lifecycle scripts. This is a bounded npm-compatible subset, not full npm or pnpm compatibility.
+The consumer workflow exercises deterministic dependency resolution, npm metadata and artifact retrieval, exact multi-version dependency edges, verified archives, canonical `tapid.lock` generation, managed `node_modules`, and offline/frozen replay. Dependency lifecycle scripts are denied by default; exact checked-in approvals can permit supported hooks. This is a bounded npm-compatible subset, not full npm or pnpm compatibility.
 
 ### Synthetic news-site compatibility fixture
 

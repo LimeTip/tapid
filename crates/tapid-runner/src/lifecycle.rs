@@ -335,14 +335,17 @@ fn check_sha256(digest: &str) -> Result<(), String> {
 }
 fn sensitive_environment(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
+    if name.starts_with("LD_") || name.starts_with("DYLD_") {
+        return true;
+    }
     matches!(
         name.as_str(),
         "HOME"
             | "USERPROFILE"
             | "PATH"
             | "SSH_AUTH_SOCK"
-            | "LD_PRELOAD"
-            | "LD_LIBRARY_PATH"
+            | "GCONV_PATH"
+            | "GLIBC_TUNABLES"
             | "NODE_OPTIONS"
             | "BASH_ENV"
             | "ENV"
@@ -441,6 +444,28 @@ tools = [{{ name = "sh", path = "/bin/sh", digest = "sha256-{}" }}]
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn approvals_reject_loader_controls_before_launch() {
+        let document = document();
+        for name in [
+            "LD_AUDIT",
+            "LD_BIND_NOW",
+            "LD_DEBUG_OUTPUT",
+            "ld_future_option",
+            "DYLD_INSERT_LIBRARIES",
+            "dyld_library_path",
+            "GCONV_PATH",
+            "GLIBC_TUNABLES",
+        ] {
+            let changed = document.replace("NODE_ENV", name);
+            assert!(
+                DependencyLifecyclePolicy::parse(changed.as_bytes()).is_err(),
+                "accepted {name}"
+            );
+        }
+        assert!(DependencyLifecyclePolicy::parse(document.as_bytes()).is_ok());
     }
 
     #[test]

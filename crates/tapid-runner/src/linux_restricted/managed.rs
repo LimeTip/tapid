@@ -318,6 +318,14 @@ pub(super) fn filter(
 ) -> Result<Vec<libc::sock_filter>, ExecutionError> {
     let mut filter = seccomp_filter(network, subprocess)?;
     filter.pop(); // Replace the final allow with ManagedTree-specific restrictions.
+    // The base socketpair rule can leave args[0] in the accumulator.
+    // Restore seccomp_data.nr before testing ManagedTree syscall numbers.
+    filter.push(libc::sock_filter {
+        code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+        jt: 0,
+        jf: 0,
+        k: 0,
+    });
     // clone3's CLONE_INTO_CGROUP accepts an O_PATH cgroup descriptor and
     // bypasses pathname write mediation. Return ENOSYS so libc can fall back
     // to legacy clone for threads, without exposing cgroup reassignment.

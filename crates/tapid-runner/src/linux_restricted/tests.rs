@@ -592,56 +592,59 @@ fn managed_tree_caller_crash_kills_double_forked_descendants() {
 
 #[test]
 fn managed_filter_denies_clone3_and_reconnectable_unix_socketpairs() {
-    let filter = managed::filter(true, true).unwrap();
-    let pid = unsafe { libc::fork() };
-    assert!(pid >= 0);
-    if pid == 0 {
-        unsafe {
-            if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                || libc::prctl(
-                    PR_SET_SECCOMP,
-                    libc::SECCOMP_MODE_FILTER,
-                    &libc::sock_fprog {
-                        len: filter.len() as u16,
-                        filter: filter.as_ptr() as *mut libc::sock_filter,
-                    },
+    for network in [false, true] {
+        let filter = managed::filter(network, true).unwrap();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                    || libc::prctl(
+                        PR_SET_SECCOMP,
+                        libc::SECCOMP_MODE_FILTER,
+                        &libc::sock_fprog {
+                            len: filter.len() as u16,
+                            filter: filter.as_ptr() as *mut libc::sock_filter,
+                        },
+                    ) != 0
+                {
+                    libc::_exit(3);
+                }
+                if libc::syscall(libc::SYS_clone3, std::ptr::null::<u8>(), 0) != -1
+                    || *libc::__errno_location() != libc::ENOSYS
+                {
+                    libc::_exit(4);
+                }
+                let mut descriptors = [-1; 2];
+                if libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, descriptors.as_mut_ptr())
+                    != -1
+                    || *libc::__errno_location() != libc::EPERM
+                {
+                    libc::_exit(5);
+                }
+                if libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) != -1
+                    || *libc::__errno_location() != libc::EPERM
+                {
+                    libc::_exit(6);
+                }
+                if libc::socketpair(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM,
+                    0,
+                    descriptors.as_mut_ptr(),
                 ) != 0
-            {
-                libc::_exit(3);
+                {
+                    libc::_exit(7);
+                }
+                for fd in descriptors {
+                    libc::close(fd);
+                }
+                libc::_exit(0);
             }
-            if libc::syscall(libc::SYS_clone3, std::ptr::null::<u8>(), 0) != -1
-                || *libc::__errno_location() != libc::ENOSYS
-            {
-                libc::_exit(4);
-            }
-            let mut descriptors = [-1; 2];
-            if libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, descriptors.as_mut_ptr()) != -1
-                || *libc::__errno_location() != libc::EPERM
-            {
-                libc::_exit(5);
-            }
-            if libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) != -1
-                || *libc::__errno_location() != libc::EPERM
-            {
-                libc::_exit(6);
-            }
-            if libc::socketpair(
-                libc::AF_UNIX,
-                libc::SOCK_STREAM,
-                0,
-                descriptors.as_mut_ptr(),
-            ) != 0
-            {
-                libc::_exit(7);
-            }
-            for fd in descriptors {
-                libc::close(fd);
-            }
-            libc::_exit(0);
         }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
     }
-    let mut status = 0;
-    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-    assert!(libc::WIFEXITED(status));
-    assert_eq!(libc::WEXITSTATUS(status), 0);
 }
