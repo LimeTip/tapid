@@ -92,6 +92,12 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
                     "UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED"
                 }
                 Warning::PreviousTransactionRecovered => "PREVIOUS_TRANSACTION_RECOVERED",
+                Warning::DependencyLifecycleHookSkipped { .. } => {
+                    "DEPENDENCY_LIFECYCLE_HOOK_SKIPPED"
+                }
+                Warning::DependencyLifecycleDiscoveryFailed { .. } => {
+                    "DEPENDENCY_LIFECYCLE_DISCOVERY_FAILED"
+                }
             })
             .collect::<Vec<_>>()
     });

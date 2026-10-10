@@ -55,6 +55,7 @@ const PR_SET_SECCOMP: libc::c_int = 22;
 const PRIVATE_LAUNCHER_MARKER: &str = "--tapid-private-linux-procfs-v1";
 const LANDLOCK_RULESET_FD: libc::c_int = 198;
 const PRIVATE_REPORT_FD: libc::c_int = 199;
+const MANAGED_SUPERVISOR_FD: libc::c_int = 200;
 const PRIVATE_REPORT_MAGIC: &[u8; 4] = b"TPMS";
 const PRIVATE_REPORT_FRAME_BYTES: usize = 12;
 const PRIVATE_REPORT_READY: u32 = 1;
@@ -67,6 +68,50 @@ const LIMITATIONS: &[&str] = &[
     "Restricted does not own or guarantee cleanup of detached descendants",
     "standard streams remain connected; other inherited descriptors are closed",
 ];
+
+#[path = "linux_restricted/managed.rs"]
+mod managed;
+#[path = "linux_restricted/toolchain.rs"]
+mod toolchain;
+pub(super) fn toolchain_identity() -> Result<String, ExecutionError> {
+    toolchain::identity(&system_runtime_paths(true))
+}
+
+fn system_runtime_paths(managed_tree: bool) -> Vec<std::path::PathBuf> {
+    let mut paths = [
+        "/usr/bin",
+        "/usr/lib",
+        "/usr/lib64",
+        "/lib",
+        "/lib64",
+        "/etc/ld.so.cache",
+        "/etc/ssl/certs",
+        "/etc/ssl/openssl.cnf",
+        "/etc/localtime",
+    ]
+    .into_iter()
+    .filter_map(|path| fs::canonicalize(path).ok())
+    .collect::<Vec<_>>();
+    if managed_tree {
+        paths.extend(
+            [
+                "/dev/null",
+                "/dev/zero",
+                "/dev/random",
+                "/dev/urandom",
+                "/usr/include",
+                "/usr/libexec",
+                "/usr/share/ca-certificates",
+                "/usr/share/nodejs",
+            ]
+            .into_iter()
+            .filter_map(|path| fs::canonicalize(path).ok()),
+        );
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
 
 #[repr(C)]
 struct RulesetAttr {
@@ -133,7 +178,10 @@ impl LandlockRuleset {
             }
             let access = match grant.access {
                 FilesystemAccess::Read => {
-                    if grant.kind == FilesystemGrantKind::ExactFile {
+                    if matches!(
+                        grant.kind,
+                        FilesystemGrantKind::ExactFile | FilesystemGrantKind::CharacterDevice
+                    ) {
                         LANDLOCK_READ_FILE
                     } else {
                         LANDLOCK_READ
@@ -144,7 +192,9 @@ impl LandlockRuleset {
                     return Err(unsupported("Landlock cannot enforce metadata-only grants"));
                 }
                 FilesystemAccess::Write => {
-                    if grant.kind == FilesystemGrantKind::ExactFile {
+                    if grant.kind == FilesystemGrantKind::CharacterDevice {
+                        LANDLOCK_WRITE_FILE
+                    } else if grant.kind == FilesystemGrantKind::ExactFile {
                         LANDLOCK_WRITE_FILE | LANDLOCK_TRUNCATE
                     } else {
                         LANDLOCK_WRITE
@@ -602,6 +652,70 @@ fn private_launcher_setup(
             "mount namespace inode",
         )?,
     );
+    let managed_tree = parse_private_bool(
+        arguments
+            .next()
+            .ok_or_else(|| io::Error::other("missing managed-tree flag"))?,
+        "managed-tree flag",
+    )?;
+    let read_procfs = parse_private_bool(
+        arguments
+            .next()
+            .ok_or_else(|| io::Error::other("missing procfs flag"))?,
+        "procfs flag",
+    )?;
+    let write_count = parse_private_number::<usize>(
+        arguments
+            .next()
+            .ok_or_else(|| io::Error::other("missing write binding count"))?,
+        "write binding count",
+    )?;
+    if write_count > crate::config::MAX_GRANT_COUNT || (!managed_tree && write_count != 0) {
+        return Err(io::Error::other("invalid managed write bindings"));
+    }
+    let mut writes = Vec::with_capacity(write_count);
+    for _ in 0..write_count {
+        let path = std::path::PathBuf::from(
+            arguments
+                .next()
+                .ok_or_else(|| io::Error::other("missing write path"))?,
+        );
+        let device = parse_private_number(
+            arguments
+                .next()
+                .ok_or_else(|| io::Error::other("missing write device"))?,
+            "write device",
+        )?;
+        let inode = parse_private_number(
+            arguments
+                .next()
+                .ok_or_else(|| io::Error::other("missing write inode"))?,
+            "write inode",
+        )?;
+        writes.push((path, device, inode));
+    }
+    let view = if managed_tree {
+        let path = std::path::PathBuf::from(
+            arguments
+                .next()
+                .ok_or_else(|| io::Error::other("missing filesystem view"))?,
+        );
+        let device = parse_private_number(
+            arguments
+                .next()
+                .ok_or_else(|| io::Error::other("missing view device"))?,
+            "view device",
+        )?;
+        let inode = parse_private_number(
+            arguments
+                .next()
+                .ok_or_else(|| io::Error::other("missing view inode"))?,
+            "view inode",
+        )?;
+        Some((path, device, inode))
+    } else {
+        None
+    };
     let program = arguments
         .next()
         .ok_or_else(|| io::Error::other("missing target program"))?;
@@ -622,9 +736,18 @@ fn private_launcher_setup(
         ));
     }
     establish_private_read_only_procfs(parent_pid_namespace, parent_mount_namespace)?;
-    add_private_procfs_read_rule(ruleset)?;
-    let filter = seccomp_filter(network, subprocess)
-        .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error.to_string()))?;
+    if read_procfs {
+        add_private_procfs_read_rule(ruleset)?;
+    }
+    if managed_tree {
+        managed::protect_namespace_init(&writes, view.as_ref().unwrap())?;
+    }
+    let filter = if managed_tree {
+        managed::filter(network, subprocess)
+    } else {
+        seccomp_filter(network, subprocess)
+    }
+    .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error.to_string()))?;
     install_restrictions(ruleset, &filter, Some(report_fd))?;
     Ok((report_fd, program, program_arguments))
 }
@@ -782,7 +905,34 @@ fn duplicate_fd_above_private_range(fd: libc::c_int) -> Result<OwnedFd, Executio
 fn private_memory_stats_command(
     request: &ExecutionRequest,
     ruleset: &OwnedFd,
+    managed_preflight: Option<&ValidatedPreflight>,
+    view: Option<(&Path, u64, u64)>,
 ) -> Result<(Command, UnixStream), ExecutionError> {
+    let managed_tree = managed_preflight.is_some();
+    let writes = if let Some(preflight) = managed_preflight {
+        preflight
+            .policy
+            .read
+            .iter()
+            .chain(&preflight.policy.write)
+            .zip(&preflight.bindings.grants)
+            .filter(|(grant, _)| {
+                grant.access == FilesystemAccess::Write
+                    && grant.kind != FilesystemGrantKind::CharacterDevice
+            })
+            .map(|(grant, binding)| {
+                binding
+                    .held
+                    .as_ref()
+                    .ok_or_else(|| unsupported("managed writes require held identities"))?
+                    .metadata()
+                    .map(|metadata| (grant.path.clone(), metadata.dev(), metadata.ino()))
+                    .map_err(|error| unsupported(&error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
     let launcher = request
         .private_launcher_executable()
         .ok_or_else(|| unsupported("private launcher was not initialized"))?;
@@ -816,8 +966,28 @@ fn private_memory_stats_command(
         .arg(parent_pid_namespace.1.to_string())
         .arg(parent_mount_namespace.0.to_string())
         .arg(parent_mount_namespace.1.to_string())
-        .arg(request.program())
-        .args(request.arguments());
+        .arg(if managed_tree { "1" } else { "0" })
+        .arg(if request.allow_process_memory_stats() {
+            "1"
+        } else {
+            "0"
+        })
+        .arg(writes.len().to_string());
+    for (path, device, inode) in writes {
+        command
+            .arg(path)
+            .arg(device.to_string())
+            .arg(inode.to_string());
+    }
+    if managed_tree {
+        let (path, device, inode) =
+            view.ok_or_else(|| unsupported("managed filesystem view is missing"))?;
+        command
+            .arg(path)
+            .arg(device.to_string())
+            .arg(inode.to_string());
+    }
+    command.arg(request.program()).args(request.arguments());
     let ruleset_source = ruleset_copy.as_raw_fd();
     let report_source = report_copy.as_raw_fd();
     unsafe {
@@ -861,24 +1031,16 @@ impl ExecutionBackend for PlatformBackend {
 
     fn runtime_filesystem_additions(
         &self,
-        _request: &ExecutionRequest,
+        request: &ExecutionRequest,
     ) -> Result<RuntimeFilesystemAdditions, ExecutionError> {
-        let mut paths = [
-            "/usr/bin",
-            "/usr/lib",
-            "/usr/lib64",
-            "/lib",
-            "/lib64",
-            "/etc/ld.so.cache",
-            "/etc/ssl/certs",
-            "/etc/ssl/openssl.cnf",
-            "/etc/localtime",
-        ]
-        .into_iter()
-        .filter_map(|path| fs::canonicalize(path).ok())
-        .collect::<Vec<_>>();
-        paths.sort();
-        paths.dedup();
+        let paths =
+            system_runtime_paths(request.policy().assurance() == AssuranceLevel::ManagedTree);
+        if request.policy().assurance() == AssuranceLevel::ManagedTree {
+            return RuntimeFilesystemAdditions::checked(
+                paths,
+                vec![Path::new("/dev/null").to_path_buf()],
+            );
+        }
         RuntimeFilesystemAdditions::checked(paths, Vec::new())
     }
 
@@ -899,6 +1061,9 @@ impl ExecutionBackend for PlatformBackend {
         ruleset
             .add_grants(&preflight.policy, &preflight.bindings)
             .map_err(PreparationError::from)?;
+        if request.policy().assurance() == AssuranceLevel::ManagedTree {
+            return managed::prepare(request, preflight, ruleset);
+        }
         let filter = seccomp_filter(request.policy().network(), request.policy().subprocess())
             .map_err(PreparationError::from)?;
         Ok(OwnedExecutionAttempt::new(
@@ -928,6 +1093,9 @@ fn backend_identity() -> BackendIdentity {
 }
 
 pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupport {
+    if request.policy().assurance() == AssuranceLevel::ManagedTree {
+        return managed::containment_support(request);
+    }
     let requested = EnforcementDimensions::requested_by(request.policy());
     let identity = backend_identity();
     let unsupported = |reason: &str| {
@@ -983,7 +1151,8 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
     fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError> {
         let allow_process_memory_stats = self.request.allow_process_memory_stats();
         let (mut command, private_report) = if allow_process_memory_stats {
-            let (command, report) = private_memory_stats_command(&self.request, &self.ruleset.0)?;
+            let (command, report) =
+                private_memory_stats_command(&self.request, &self.ruleset.0, None, None)?;
             (command, Some(report))
         } else {
             let mut command = Command::new(self.request.program());

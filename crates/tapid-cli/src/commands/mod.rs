@@ -84,7 +84,7 @@ pub(crate) enum Command {
     /// Install dependencies, optionally adding one package first.
     #[command(
         visible_alias = "i",
-        long_about = "Install dependencies into node_modules and write tapid.lock. Optionally add one package to dependencies in package.json first.\n\nOnline installs resolve dependencies using registry metadata. Offline installs replay verified trees without network access. Frozen installs preserve lockfile selections; imported npm locks can fetch pinned tarballs for their first verification. Dependency lifecycle scripts do not run.",
+        long_about = "Install dependencies into node_modules and write tapid.lock. Optionally add one package to dependencies in package.json first.\n\nOnline installs resolve dependencies using registry metadata. Offline installs replay verified trees without network access. Frozen installs preserve lockfile selections; imported npm locks can fetch pinned tarballs for their first verification. Dependency lifecycle scripts are denied by default. Exact tapid.lifecycle.toml approvals can build verified derived outputs on supported Linux ManagedTree hosts; offline/frozen replay never executes hooks.",
         after_help = "Examples:
   tapid install
   tapid install 'react@^19.0.0'

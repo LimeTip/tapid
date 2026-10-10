@@ -13,6 +13,7 @@ authors.workspace = true
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10"
+tapid-core = { version = "0.0.7", path = "../tapid-core" }
 tapid-policy = { version = "0.0.4", path = "../tapid-policy" }
 toml = "1.1.5"
 

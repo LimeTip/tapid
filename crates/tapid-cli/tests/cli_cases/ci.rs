@@ -19,7 +19,7 @@ fn locked_project() -> tapid_test_support::TempProject {
         .write("registry.json", fixture.to_string().as_bytes())
         .unwrap();
     let output = run(
-        &project.path().to_path_buf(),
+        project.path(),
         &[
             "install",
             "--registry-fixture",
