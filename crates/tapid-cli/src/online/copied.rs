@@ -114,12 +114,14 @@ fn scratch() -> Result<TemporaryTree, String> {
         std::process::id(),
         crate::filesystem::atomic::unique_nonce()
     ));
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     builder
         .create(&path)
         .map_err(|_| "cannot create private copied-artifact staging directory")?;
