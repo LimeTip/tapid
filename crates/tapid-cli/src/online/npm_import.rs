@@ -396,6 +396,9 @@ pub(crate) fn imported_workspace_manifests(
     project: &Path,
     workspace: &WorkspaceMaterialization,
 ) -> Result<BTreeMap<String, (String, String)>, String> {
+    let canonical_project = fs::canonicalize(project)
+        .map_err(|error| format!("cannot resolve install project root: {error}"))?;
+    let project = canonical_project.as_path();
     let mut manifests = BTreeMap::new();
     for (source, _) in workspace.members.values() {
         let member_root = project.join(source.path());

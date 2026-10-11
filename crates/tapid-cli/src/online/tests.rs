@@ -4,13 +4,25 @@ use super::*;
 fn workspace_materialization_compares_canonical_project_roots() {
     let project = tapid_test_support::TempProject::new("workspace-root-identity").unwrap();
     project
-        .write("package.json", br#"{"name":"root","version":"1.0.0"}"#)
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/member/package.json",
+            br#"{"name":"member","version":"1.0.0"}"#,
+        )
         .unwrap();
     std::fs::create_dir(project.path().join("child")).unwrap();
     let config = crate::registry::RegistryConfig::from_toml("").unwrap();
     let noncanonical = project.path().join("child/..");
-    assert!(workspace_materialization(&noncanonical, &config).is_ok());
-    assert!(workspace_materialization(project.path(), &config).is_ok());
+    for path in [noncanonical.as_path(), project.path()] {
+        let workspace = workspace_materialization(path, &config).unwrap();
+        let manifests = imported_workspace_manifests(path, &workspace).unwrap();
+        assert!(manifests.contains_key("packages/member"));
+    }
 }
 
 #[test]
