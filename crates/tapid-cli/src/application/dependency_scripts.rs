@@ -1,3 +1,6 @@
+#[path = "dependency_node_gyp.rs"]
+mod node_gyp;
+
 use super::outcome::{ErrorKind, OperationalError, Warning};
 use sha2::{Digest, Sha256};
 use std::{
@@ -168,7 +171,12 @@ pub(super) fn apply(
             } else if overrides.allow_unapproved
                 && matches!(hook.as_str(), "preinstall" | "install" | "postinstall")
             {
-                invocation_policy = invocation_approval(&package, &hook, &script)?;
+                invocation_policy = invocation_approval(
+                    &package,
+                    &hook,
+                    &script,
+                    lock.workspace_packages().is_empty(),
+                )?;
                 &invocation_policy.approvals()[0]
             } else {
                 if requires_install && hook == "install" {
@@ -210,6 +218,7 @@ pub(super) fn apply(
                     trees,
                     lock,
                     overrides.without_containment,
+                    selected.is_none() && requires_install && hook == "install",
                 )?;
                 validate_output(&stage.0.join("package"))?;
                 current = stage.0.join("package");
@@ -266,7 +275,7 @@ pub(super) fn apply(
             let stage = private.as_ref().unwrap();
             let build = stage.0.join("package");
             copy_build_source(&current, &build)?;
-            run_hook(stage, approval, &script, input, trees, lock, false)?;
+            run_hook(stage, approval, &script, input, trees, lock, false, false)?;
             validate_output(&build)?;
             let digest = tapid_archive::canonical_tree_digest(&build).map_err(error)?;
             let staged = transaction
@@ -449,6 +458,7 @@ fn invocation_approval(
     package: &tapid_lockfile::LockedPackage,
     hook: &str,
     script: &str,
+    dependencies: bool,
 ) -> Result<DependencyLifecyclePolicy, OperationalError> {
     #[cfg(unix)]
     let (shell_name, shell_path) = ("sh", fs::canonicalize("/bin/sh").map_err(error)?);
@@ -471,12 +481,13 @@ fn invocation_approval(
     let document = serde_json::json!({"schema":1,"approvals":[{
         "package":package.name(),"version":package.version(),"archive-digest":package.artifact_integrity(),
         "hook":hook,"script-digest":format!("sha256-{:x}", Sha256::digest(script.as_bytes())),
-        "system-toolchain":true,"dependencies":true,"read":["."],"write":["."],"network":false,"environment":{},
+        "system-toolchain":true,"dependencies":dependencies,"read":["."],"write":["."],"network":false,"environment":{},
         "timeout-seconds":60,"max-output-bytes":16777216,"max-processes":128,"max-memory-bytes":536870912,"tools":tools
     }]});
     let document = toml::to_string(&document).map_err(error)?;
     DependencyLifecyclePolicy::parse(document.as_bytes()).map_err(error)
 }
+#[allow(clippy::too_many_arguments)]
 fn run_hook(
     stage: &BuildStage,
     approval: &DependencyLifecycleApproval,
@@ -485,6 +496,7 @@ fn run_hook(
     trees: &BTreeMap<String, PathBuf>,
     lock: &Lockfile,
     without_containment: bool,
+    implicit_node_gyp: bool,
 ) -> Result<(), OperationalError> {
     let tools = stage.0.join(".tools");
     if tools.exists() {
@@ -492,6 +504,19 @@ fn run_hook(
     }
     fs::create_dir(&tools).map_err(error)?;
     let prepared_tools = prepare_tools(&tools, approval.tools(), without_containment)?;
+    let script = if implicit_node_gyp {
+        let node = approval
+            .tools()
+            .iter()
+            .find(|tool| tool.name() == "node")
+            .ok_or_else(|| {
+                error("implicit node-gyp builds require an executable Node runtime on PATH")
+            })?;
+        node_gyp::prepare(&tools, Path::new(node.path()))?;
+        node_gyp::COMMAND
+    } else {
+        script
+    };
     let prefix = |s: &str| {
         if s == "." {
             "package".into()
