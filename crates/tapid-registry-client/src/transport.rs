@@ -64,7 +64,7 @@ fn request_error_class(error: &reqwest::Error) -> &'static str {
     }
 }
 
-fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, TransportError> {
+pub(crate) fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, TransportError> {
     let mut body = Vec::new();
     let take_limit = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
     reader

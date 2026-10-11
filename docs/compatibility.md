@@ -222,8 +222,16 @@ Matching installs retain the accepted pin after the reference moves or disappear
 Git declarations again. Cold frozen installation and `ci` fetch the exact commit
 and verify the pinned archive and tree; offline requires verified store trees.
 
-Git runs with an empty inherited environment, isolated configuration and home,
-disabled credential helpers, prompts, hooks, redirects, and non-HTTPS protocols.
+Tapid downloads Git smart HTTPS v0 advertisements and shallow packs with a
+32 MiB metadata limit and a 512 MiB response limit before staging any pack.
+Redirects, proxies, and credentials are disabled. SHA-1 and SHA-256 repositories
+are initialized using the advertised object format. Packs are limited to one
+million objects to bound index writes. Git runs only local validation and archive
+commands with an empty inherited environment, isolated configuration and home,
+and disabled credential helpers, prompts, hooks, and other protocols. Archive
+output is read through a pipe capped at 512 MiB, with no archive file on disk.
+Each HTTP request and local Git command has a 120-second deadline. Dumb HTTP
+repositories and ambiguous branch/tag names are unsupported.
 Credentialed or query-bearing URLs, SSH, arbitrary protocols, revision expressions,
 semver reference selectors, and submodules are rejected. Git must be installed
 for live Git fetching. Private authenticated repositories are unsupported.

@@ -4,11 +4,11 @@ use crate::transport::{
 };
 use std::{
     fs,
-    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 use tapid_core::GitRepository;
+mod http;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitDependency {
@@ -55,56 +55,57 @@ impl GitDependency {
     /// Fetches and peels one reference, then archives that exact commit. The
     /// caller supplies a fresh private scratch directory, never a project/home.
     pub fn fetch(&self, scratch: &Path) -> Result<(String, Vec<u8>), String> {
-        self.fetch_with(scratch, |command| {
-            let output = command.output().map_err(|_| "cannot execute Git")?;
-            if !output.status.success() {
-                return Err(
-                    "Git command failed; repository or pinned commit is unavailable".into(),
-                );
-            }
-            if output.stdout.len() > STANDARD_METADATA_MAX_RESPONSE_BYTES {
-                return Err("Git metadata exceeds 32 MiB".into());
-            }
-            Ok(output.stdout)
-        })
+        self.fetch_with(scratch, http::fetch(self)?, run_bounded)
     }
 
     fn fetch_with(
         &self,
         scratch: &Path,
-        mut run: impl FnMut(&mut Command) -> Result<Vec<u8>, String>,
+        pack: http::FetchedPack,
+        mut run: impl FnMut(&mut Command, usize) -> Result<Vec<u8>, String>,
     ) -> Result<(String, Vec<u8>), String> {
         let program = git_program()?;
         let empty_config = scratch.join("empty-config");
         fs::write(&empty_config, b"").map_err(|_| "cannot create isolated Git configuration")?;
         let bare = scratch.join("repository.git");
         let mut command = git_command(&program, scratch, &empty_config);
-        command.args(["init", "--bare", "--template="]).arg(&bare);
-        run(&mut command)?;
+        command
+            .args(["init", "--bare", "--template="])
+            .arg(format!("--object-format={}", pack.format))
+            .arg(&bare);
+        run(&mut command, STANDARD_METADATA_MAX_RESPONSE_BYTES)?;
+        let pack_path = scratch.join("artifact.pack");
+        fs::write(&pack_path, &pack.bytes).map_err(|_| "cannot stage bounded Git pack")?;
+        drop(pack.bytes);
         let mut command = git_command(&program, scratch, &empty_config);
         command
             .arg("--git-dir")
             .arg(&bare)
             .args([
-                "fetch",
-                "--depth=1",
-                "--no-tags",
-                "--no-recurse-submodules",
-                "--",
+                "index-pack",
+                "--stdin",
+                "--fsck-objects",
+                "--index-version=2",
             ])
-            .arg(self.repository.as_str())
-            .arg(&self.reference);
-        run(&mut command)?;
+            .arg(format!(
+                "--max-input-size={STANDARD_ARTIFACT_MAX_RESPONSE_BYTES}"
+            ))
+            .stdin(Stdio::from(
+                fs::File::open(&pack_path).map_err(|_| "cannot read bounded Git pack")?,
+            ));
+        run(&mut command, STANDARD_METADATA_MAX_RESPONSE_BYTES)?;
+        fs::remove_file(&pack_path).map_err(|_| "cannot remove staged Git pack")?;
         let mut command = git_command(&program, scratch, &empty_config);
         command
             .arg("--git-dir")
             .arg(&bare)
-            .args(["rev-parse", "--verify", "FETCH_HEAD^{commit}"]);
-        let commit = String::from_utf8(run(&mut command)?)
+            .args(["rev-parse", "--verify"])
+            .arg(format!("{}^{{commit}}", pack.object));
+        let commit = String::from_utf8(run(&mut command, STANDARD_METADATA_MAX_RESPONSE_BYTES)?)
             .map_err(|_| "Git returned an invalid commit")?
             .trim()
             .to_owned();
-        if !matches!(commit.len(), 40 | 64)
+        if commit.len() != if pack.format == "sha256" { 64 } else { 40 }
             || !commit
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -123,38 +124,71 @@ impl GitDependency {
             .arg(&bare)
             .args(["ls-tree", "-r"])
             .arg(&commit);
-        if run(&mut command)?
+        if run(&mut command, STANDARD_METADATA_MAX_RESPONSE_BYTES)?
             .split(|byte| *byte == b'\n')
             .any(|line| line.starts_with(b"160000 "))
         {
             return Err("Git submodules are unsupported in copied dependencies".into());
         }
-        let archive = scratch.join("artifact.tar");
         let mut command = git_command(&program, scratch, &empty_config);
         command
             .arg("--git-dir")
             .arg(&bare)
             .args(["archive", "--format=tar", "--prefix=package/"])
-            .arg(format!("--output={}", archive.display()))
             .arg(&commit);
-        run(&mut command)?;
-        let file = fs::File::open(&archive).map_err(|_| "cannot read Git archive")?;
-        if file
-            .metadata()
-            .map_err(|_| "cannot inspect Git archive")?
-            .len()
-            > STANDARD_ARTIFACT_MAX_RESPONSE_BYTES as u64
-        {
-            return Err("Git archive exceeds 512 MiB".into());
-        }
-        let mut bytes = Vec::new();
-        file.take(STANDARD_ARTIFACT_MAX_RESPONSE_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "cannot read Git archive")?;
-        if bytes.len() > STANDARD_ARTIFACT_MAX_RESPONSE_BYTES {
-            return Err("Git archive exceeds 512 MiB".into());
-        }
+        let bytes = run(&mut command, STANDARD_ARTIFACT_MAX_RESPONSE_BYTES)?;
         Ok((commit, bytes))
+    }
+}
+
+fn run_bounded(command: &mut Command, limit: usize) -> Result<Vec<u8>, String> {
+    run_with_deadline(command, limit, std::time::Duration::from_secs(120))
+}
+
+fn run_with_deadline(
+    command: &mut Command,
+    limit: usize,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    let start = std::time::Instant::now();
+    let mut child = command
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|_| "cannot execute Git")?;
+    let stdout = child.stdout.take().ok_or("cannot read Git output")?;
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let _ = tx.send(crate::transport::read_bounded(stdout, limit));
+    });
+    let result = match rx.recv_timeout(timeout) {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(_)) => Err("Git output exceeds its limit or cannot be read".into()),
+        Err(_) => Err("Git command exceeded its deadline".into()),
+    };
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader.join();
+        return result;
+    }
+    let _ = reader.join();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return result,
+            Ok(Some(_)) => {
+                return Err(
+                    "Git command failed; repository or pinned commit is unavailable".into(),
+                );
+            }
+            Ok(None) if start.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Git command exceeded its deadline or cannot be waited for".into());
+            }
+        }
     }
 }
 
@@ -231,6 +265,85 @@ mod tests {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
+    fn fixture_pack(spec: &GitDependency) -> http::FetchedPack {
+        http::FetchedPack {
+            object: "a".repeat(if spec.reference().len() == 64 { 64 } else { 40 }),
+            format: if spec.reference().len() == 64 {
+                "sha256"
+            } else {
+                "sha1"
+            },
+            bytes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn git_output_limits_and_deadlines_terminate_and_reap_the_child() {
+        if let Some(mode) = std::env::var_os("TAPID_GIT_OUTPUT_PROBE") {
+            if mode == "output" {
+                use std::io::Write;
+                loop {
+                    if std::io::stdout().write_all(&[b'x'; 4096]).is_err() {
+                        return;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            return;
+        }
+        for mode in ["output", "timeout"] {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "git::transport_tests::git_output_limits_and_deadlines_terminate_and_reap_the_child", "--nocapture"])
+                .env("TAPID_GIT_OUTPUT_PROBE", mode).stderr(Stdio::null());
+            let error =
+                run_with_deadline(&mut child, 1024, std::time::Duration::from_secs(2)).unwrap_err();
+            assert!(
+                error.contains(if mode == "output" {
+                    "exceeds its limit"
+                } else {
+                    "deadline"
+                }),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_transport_initializes_the_selected_object_format() {
+        let scratch = tapid_test_support::TempProject::new("git-sha256-init").unwrap();
+        let spec =
+            GitDependency::parse(&format!("git+https://example.test/repo#{}", "a".repeat(64)))
+                .unwrap();
+        let _ = spec.fetch_with(scratch.path(), fixture_pack(&spec), |command, _limit| {
+            let args = command.get_args().collect::<Vec<_>>();
+            if args.contains(&std::ffi::OsStr::new("init")) {
+                assert!(args.contains(&std::ffi::OsStr::new("--object-format=sha256")));
+            }
+            Err("stop after init".into())
+        });
+    }
+
+    #[test]
+    fn git_transport_never_delegates_unbounded_network_writes_to_git() {
+        let scratch = tapid_test_support::TempProject::new("git-bounded-fetch").unwrap();
+        let spec = GitDependency::parse("git+https://example.test/repo#main").unwrap();
+        let _ = spec.fetch_with(scratch.path(), fixture_pack(&spec), |command, _limit| {
+            let args = command.get_args().collect::<Vec<_>>();
+            assert!(!args.contains(&std::ffi::OsStr::new("fetch")));
+            if args.contains(&std::ffi::OsStr::new("rev-parse")) {
+                return Ok("a".repeat(40).into_bytes());
+            }
+            if args.contains(&std::ffi::OsStr::new("archive")) {
+                assert!(
+                    !args
+                        .iter()
+                        .any(|arg| arg.to_string_lossy().starts_with("--output="))
+                );
+                return Err("stop after archive".into());
+            }
+            Ok(Vec::new())
+        });
+    }
 
     #[test]
     fn git_transport_rejects_unpinnable_refs_changed_commits_and_submodules() {
@@ -247,7 +360,7 @@ mod transport_tests {
             let spec =
                 GitDependency::parse(&format!("git+https://example.test/repo.git#{reference}"))
                     .unwrap();
-            let result = spec.fetch_with(scratch.path(), |command| {
+            let result = spec.fetch_with(scratch.path(), fixture_pack(&spec), |command, _limit| {
                 let args = command.get_args().collect::<Vec<_>>();
                 assert!(!args.contains(&std::ffi::OsStr::new("archive")));
                 if args.contains(&std::ffi::OsStr::new("rev-parse")) {
@@ -269,7 +382,7 @@ mod transport_tests {
         let commit = "a".repeat(40);
         let mut calls = 0;
         let (pinned, bytes) = spec
-            .fetch_with(scratch.path(), |command| {
+            .fetch_with(scratch.path(), fixture_pack(&spec), |command, _limit| {
                 let args = command
                     .get_args()
                     .map(|arg| arg.to_string_lossy().into_owned())
@@ -297,9 +410,9 @@ mod transport_tests {
                 if args.contains(&"rev-parse".into()) {
                     return Ok(format!("{commit}\n").into_bytes());
                 }
-                if let Some(output) = args.iter().find_map(|arg| arg.strip_prefix("--output=")) {
+                if args.contains(&"archive".into()) {
                     assert_eq!(args.last(), Some(&commit));
-                    fs::write(output, b"archive bytes").unwrap();
+                    return Ok(b"archive bytes".to_vec());
                 }
                 Ok(Vec::new())
             })

@@ -21,8 +21,13 @@ The CLI prepares copied archive metadata, then uses the existing graph resolver,
 safe extraction, store transaction, managed activation, and bin planner. File
 archives are contained regular files; replay verifies them against their pin.
 Git transport belongs to the registry-client capability and isolates Git from
-inherited credentials, configuration, hooks, and non-HTTPS protocols. It fetches
-one reference, peels it, rejects submodules, and archives the exact commit.
+inherited credentials, configuration, hooks, and non-HTTPS protocols. A bounded
+smart HTTPS exchange downloads one shallow pack before allowing disk writes.
+The advertisement selects the SHA-1 or SHA-256 repository format. A pack object
+count ceiling bounds index writes. Git validates the local pack, peels the
+reference, rejects submodules, and streams the exact commit archive through a
+bounded pipe. HTTP requests and Git commands have deadlines; redirects, proxies,
+and authentication are disabled.
 No checkout or package preparation code runs.
 
 Matching installs retain accepted pins. Explicit updates refresh mutable Git

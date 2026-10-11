@@ -30,8 +30,15 @@ The crate is read-only. It does not publish, mutate registry state, choose crede
 ## HTTPS Git artifacts
 
 `GitDependency` parses credential-free `git+https` repositories with branch, tag,
-or commit references. It fetches into a fresh private scratch directory, peels
-the reference to a full commit, rejects submodules, and archives that commit.
+or commit references. A bounded smart HTTPS v0 exchange downloads a shallow pack
+before Git can write it. Advertisements are limited to 32 MiB, pack responses and
+archive output to 512 MiB, and packs to one million objects to bound index writes.
+The advertised SHA-1 or SHA-256 format selects the receiving repository format.
+Git validates the pack in a fresh private scratch directory, peels the reference
+to a full commit, rejects submodules, and archives that commit through a bounded
+pipe without an archive file. Each request and command has a 120-second deadline.
+HTTP redirects, proxies, and credentials are disabled. Dumb HTTP repositories
+and ambiguous branch/tag names are unsupported.
 Git inherits no environment, credentials, user/system configuration, hooks,
 redirect permission, or non-HTTPS protocol permission. No checkout or package
 preparation code executes. Revision expressions and semver selectors are rejected.
