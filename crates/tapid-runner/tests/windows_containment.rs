@@ -131,6 +131,59 @@ fn command_request_with_policy(
 }
 
 #[test]
+fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants() {
+    let project = tapid_test_support::TempProject::new("windows-lpac-project").unwrap();
+    let outside = tapid_test_support::TempProject::new("windows-lpac-outside").unwrap();
+    project.write("approved.txt", b"approved-input").unwrap();
+    let secret = outside.write("undeclared.txt", b"ambient-input").unwrap();
+    windows_acl::initialize_inheritance(project.path());
+    windows_acl::initialize_inheritance(outside.path());
+    let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let grant = Command::new(system32.join("icacls.exe"))
+        .arg(outside.path())
+        .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)"])
+        .output()
+        .unwrap();
+    assert!(
+        grant.status.success(),
+        "{}",
+        String::from_utf8_lossy(&grant.stderr)
+    );
+    // The host can read the fixture. Its only package-side grant is ambient AAP;
+    // neither this file nor its directory appears in the execution policy.
+    assert_eq!(fs::read(&secret).unwrap(), b"ambient-input");
+    let baseline = project_dacl(&outside.path().to_owned());
+    let root = fs::canonicalize(project.path()).unwrap();
+    let child = system32.join("cmd.exe");
+    project
+        .write(
+            "probe.cmd",
+            format!("@type approved.txt\r\n@type \"{}\"\r\n", secret.display()),
+        )
+        .unwrap();
+    for command in [
+        "probe.cmd".to_owned(),
+        format!("\"{}\" /D /C probe.cmd", child.display()),
+    ] {
+        let request = command_request_with_flags(
+            &root,
+            &command,
+            ExecutionLimits::new(Some(30), Some(4096), Some(4), None).unwrap(),
+            true,
+            false,
+        );
+        let outcome = execute(&request).expect("approved cmd and descendants must still execute");
+        let stdout = String::from_utf8_lossy(outcome.stdout());
+        assert!(stdout.contains("approved-input"), "{command}: {stdout}");
+        assert!(
+            !stdout.contains("ambient-input"),
+            "undeclared AAP input was readable by {command}: {stdout}"
+        );
+    }
+    assert_eq!(project_dacl(&outside.path().to_owned()), baseline);
+}
+
+#[test]
 fn windows_managed_tree_executes_with_checked_appcontainer_and_job_evidence() {
     let root = temporary_project("managed-tree");
     let baseline_acl = project_dacl(&root);
