@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 mod cache;
 mod ci;
+mod explain;
 pub(crate) mod init;
 pub(crate) mod install;
 mod license;
@@ -49,6 +50,12 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Summarize integrity, provenance, and missing security checks for an exact npm version.
+    #[command(
+        long_about = "Inspect full npm registry metadata for <package>@<exact-version>. Distinguishes registry claims, byte verification, and missing checks. Reads tapid.toml routing without requiring package.json. Does not install, recover transactions, or write project/store files. Signatures and provenance references are unverified. Vulnerability feeds, malware analysis, and publisher identity verification are unsupported. Use --artifact-file to verify local bytes against the reported SHA-512 digest; a mismatch exits 1.",
+        after_help = "Examples:\n  tapid explain react@19.0.0\n  tapid explain @example/pkg@1.2.3 --artifact-file package.tgz\n  tapid --json explain react@19.0.0"
+    )]
+    Explain(explain::Args),
     /// Inspect or safely clear the published package cache.
     Cache(cache::Args),
     /// Preview package-cache removal. Pass --yes to delete published cache entries.
@@ -156,6 +163,7 @@ pub(crate) enum Command {
 impl Command {
     fn operation(&self) -> &'static str {
         match self {
+            Self::Explain(_) => "explain",
             Self::Cache(_) => "cache",
             Self::Clean(_) => "clean",
             Self::License => "license",
@@ -187,6 +195,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
                 Command::Cache(_)
                     | Command::Clean(_)
                     | Command::Install(_)
+                    | Command::Explain(_)
                     | Command::Add(_)
                     | Command::Remove(_)
                     | Command::Update(_)
@@ -202,6 +211,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         );
     }
     match command {
+        Some(Command::Explain(args)) => explain::run(args, json),
         Some(Command::Cache(args)) => cache::run(args, json),
         Some(Command::Clean(args)) => cache::clean(args, json),
         Some(Command::License) => license::run(),
