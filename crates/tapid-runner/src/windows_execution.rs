@@ -131,7 +131,7 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
     }
     let evidence = evidence_for_dimensions(
         &requested,
-        "verified Less-Privileged AppContainer token without network capabilities, explicit path ACL grants with validated low-integrity write targets, suspended Job Object assignment, and bounded standard-handle capture",
+        "verified Less-Privileged AppContainer token with registryRead runtime capability and no network capabilities, explicit path ACL grants with validated low-integrity write targets, suspended Job Object assignment, and bounded standard-handle capture",
         &[],
     );
     ContainmentSupport::supported(

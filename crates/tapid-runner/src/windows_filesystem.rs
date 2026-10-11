@@ -612,8 +612,8 @@ fn verify_existing_runtime_access(
         .map(std::path::PathBuf::from)
         .ok_or_else(|| unsupported_acl("locate runtime access-check executable", 2))?;
     let application = runtime_path_wide(&system_root.join("System32/cmd.exe"));
-    // This verified AppContainer process is never resumed. It supplies the same no-capability
-    // token construction as the real launch, including traditional and restricted principals.
+    // This verified LPAC process is never resumed. It supplies the same runtime-capability
+    // token as the real launch, including traditional and restricted principals.
     // Its owner terminates/reaps it on every exit. No root or SystemRoot DACL is modified.
     let environment =
         crate::execution::windows_environment_block_units(&std::collections::BTreeMap::new())?;
@@ -763,7 +763,7 @@ impl WindowsFilesystemGrants {
                     "Windows AppContainer filesystem policy cannot grant character devices",
                 ));
             }
-            // Backend system files already grant read/execute access to application packages.
+            // Backend system files must grant read/execute access to the verified LPAC token.
             // Do not rewrite TrustedInstaller-owned DACLs for backend-runtime paths. Project grants
             // are still applied when the project happens to live below SystemRoot (for example,
             // Windows' default SystemTemp directory).
