@@ -552,7 +552,10 @@ fn outdated_entries(
                     LockfilePackageSource::Registry(registry)
                         if registry == &origin
                             && key.name == package_name
-                            && bound_root.is_none_or(|target| key.to_string() == *target)
+                            && match bound_root {
+                                Some(target) => key.to_string() == *target,
+                                None => lock.roots().contains(&key.to_string()),
+                            }
                 )
             })
             .map(|(key, _)| key.version.clone())

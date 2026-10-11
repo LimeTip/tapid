@@ -142,6 +142,67 @@ fn json_install_replays_imported_npm_selections() {
 }
 
 #[test]
+fn outdated_schema_6_uses_direct_root_instead_of_newer_transitive_version() {
+    let project = TempProject::new("outdated-legacy-root").unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"^1.0.0","alias-parent":"1.0.0"}}"#).unwrap();
+    let fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+    project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
+    let store = project.path().join("store");
+    let (output, installed) = invoke(
+        &project,
+        &[
+            "--json",
+            "install",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{installed}");
+    let lock_path = project.path().join("tapid.lock");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+    lock["lockfileVersion"] = 6.into();
+    lock.as_object_mut().unwrap().remove("rootBindings");
+    for package in lock["packages"].as_object_mut().unwrap().values_mut() {
+        if let Some(aliases) = package.as_object_mut().unwrap().remove("dependencyAliases") {
+            for (local, actual) in aliases.as_object().unwrap() {
+                let dependencies = package["dependencies"].as_object_mut().unwrap();
+                let target = dependencies.remove(local).unwrap();
+                dependencies.insert(actual.as_str().unwrap().to_owned(), target);
+            }
+        }
+    }
+    fs::write(&lock_path, lock.to_string()).unwrap();
+    let before = fs::read(&lock_path).unwrap();
+    let (output, report) = invoke(
+        &project,
+        &["--json", "outdated", "--registry-fixture", "registry.json"],
+    );
+    assert!(output.status.success(), "{report}");
+    let entry = report["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["identity"] == "h3")
+        .unwrap();
+    assert_eq!(entry["locked"], "1.0.0");
+    assert_eq!(
+        entry["compatible_impact"],
+        serde_json::json!({"version_change":"unchanged","lockfile":"unchanged","manifest":"unchanged"})
+    );
+    assert_eq!(
+        entry["available_impact"],
+        serde_json::json!({"version_change":"major","lockfile":"changed","manifest":"changed"})
+    );
+    assert_eq!(fs::read(&lock_path).unwrap(), before);
+}
+
+#[test]
 fn outdated_peer_declarations_do_not_claim_direct_lockfile_changes() {
     let project = TempProject::new("outdated-peer-only").unwrap();
     project
