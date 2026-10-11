@@ -22,8 +22,8 @@ use windows_sys::Win32::Security::Isolation::{
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Security::{
     EqualSid, FreeSid, GetTokenInformation, IsValidSid, SECURITY_CAPABILITIES,
-    TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TokenAppContainerSid, TokenIsAppContainer,
-    TokenIsLessPrivilegedAppContainer,
+    TOKEN_APPCONTAINER_INFORMATION, TOKEN_DUPLICATE, TOKEN_QUERY, TokenAppContainerSid,
+    TokenIsAppContainer,
 };
 use windows_sys::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
 use windows_sys::Win32::System::JobObjects::{
@@ -429,6 +429,8 @@ pub(super) use filesystem::WindowsPathAcl;
 
 #[path = "windows_process.rs"]
 mod process;
+#[path = "windows_token.rs"]
+mod token;
 pub(super) use process::{
     WindowsChildTermination, WindowsOutputCapture, WindowsStdioPipes, WindowsSuspendedChild,
 };

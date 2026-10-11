@@ -483,26 +483,21 @@ impl WindowsSuspendedChild {
     ) -> Result<(), ExecutionError> {
         let mut token = 0;
         // SAFETY: process is a valid suspended child handle; token receives the queried handle.
-        if unsafe { OpenProcessToken(self.process, TOKEN_QUERY, &mut token) } == 0 {
+        if unsafe { OpenProcessToken(self.process, TOKEN_QUERY | TOKEN_DUPLICATE, &mut token) } == 0
+        {
             return Err(unsupported_job(
                 "open child token for AppContainer verification",
             ));
         }
         let verification = (|| {
-            for (class, label) in [
-                (TokenIsAppContainer, "AppContainer"),
-                (
-                    TokenIsLessPrivilegedAppContainer,
-                    "Less-Privileged AppContainer",
-                ),
-            ] {
+            {
                 let mut enabled = 0i32;
                 let mut returned = 0u32;
                 // SAFETY: each selected token class returns a BOOL-sized value.
                 if unsafe {
                     GetTokenInformation(
                         token,
-                        class,
+                        TokenIsAppContainer,
                         (&mut enabled as *mut i32).cast::<c_void>(),
                         size_of::<i32>() as u32,
                         &mut returned,
@@ -514,9 +509,7 @@ impl WindowsSuspendedChild {
                 if returned != size_of::<i32>() as u32 || enabled == 0 {
                     return Err(ExecutionError::new(
                         ExecutionErrorCategory::UnsupportedContainment,
-                        format!(
-                            "Windows child token is not a verified {label}; refusing to resume it"
-                        ),
+                        "Windows child token is not a verified AppContainer; refusing to resume it",
                     ));
                 }
             }
@@ -558,7 +551,7 @@ impl WindowsSuspendedChild {
                     "Windows child AppContainer SID differs from the requested profile",
                 ));
             }
-            Ok(())
+            super::token::verify_lpac_access(token, expected_sid)
         })();
         // SAFETY: token is the handle returned by OpenProcessToken above.
         unsafe { CloseHandle(token) };
