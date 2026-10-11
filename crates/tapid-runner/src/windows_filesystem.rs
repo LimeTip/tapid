@@ -934,15 +934,20 @@ mod tests {
 
     #[test]
     fn runtime_preexisting_access_does_not_require_write_dac() {
-        immutable_runtime_access_case(false, true);
+        immutable_runtime_access_case("*S-1-15-2-2", false, true);
     }
 
     #[test]
     fn runtime_preexisting_allow_ace_does_not_override_execute_deny() {
-        immutable_runtime_access_case(true, false);
+        immutable_runtime_access_case("*S-1-15-2-2", true, false);
     }
 
-    fn immutable_runtime_access_case(deny_execute: bool, expected_acceptance: bool) {
+    #[test]
+    fn runtime_ambient_application_packages_access_is_not_accepted() {
+        immutable_runtime_access_case("*S-1-15-2-1", false, false);
+    }
+
+    fn immutable_runtime_access_case(trustee: &str, deny_execute: bool, expected_acceptance: bool) {
         use super::windows_acl::read_acl;
         use crate::execution::{
             FilesystemAccess, FilesystemBindingMode, FilesystemGrantKind, FilesystemGrantSource,
@@ -968,11 +973,11 @@ mod tests {
             "/grant:r",
             "*S-1-1-0:RX",
             "*S-1-3-4:R",
-            "*S-1-15-2-1:RX",
+            &format!("{trustee}:RX"),
             "/deny",
         ]);
         if deny_execute {
-            acl_command.arg("*S-1-15-2-1:(X)");
+            acl_command.arg(format!("{trustee}:(X)"));
         }
         let output = acl_command.arg("*S-1-1-0:(WDAC)").output().unwrap();
         assert!(

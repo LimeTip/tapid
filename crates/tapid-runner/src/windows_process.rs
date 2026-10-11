@@ -18,6 +18,8 @@ impl ProcThreadAttributeList {
         container: &WindowsAppContainer,
         inherited_handles: &[HANDLE],
     ) -> Result<Self, ExecutionError> {
+        // Derive before initializing native list storage so failure needs no list cleanup.
+        let registry_read = super::token::RegistryReadCapability::new()?;
         let inherited_handles =
             (!inherited_handles.is_empty()).then(|| inherited_handles.to_vec().into_boxed_slice());
         let attribute_count = if inherited_handles.is_some() { 3 } else { 2 };
@@ -39,7 +41,6 @@ impl ProcThreadAttributeList {
         {
             return Err(unsupported_job("initialize process attribute list"));
         }
-        let registry_read = super::token::RegistryReadCapability::new()?;
         let security_capabilities = Box::new(SECURITY_CAPABILITIES {
             AppContainerSid: container.sid(),
             Capabilities: registry_read.entry(),

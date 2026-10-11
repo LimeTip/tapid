@@ -138,7 +138,9 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
     let secret = outside.write("undeclared.txt", b"ambient-input").unwrap();
     windows_acl::initialize_inheritance(project.path());
     windows_acl::initialize_inheritance(outside.path());
-    let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let system32 =
+        fs::canonicalize(PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32"))
+            .unwrap();
     let grant = Command::new(system32.join("icacls.exe"))
         .arg(outside.path())
         .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)"])
@@ -700,6 +702,7 @@ fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths()
     let private_tools = root.join("tools");
     fs::create_dir(&private_tools).unwrap();
     fs::copy(system32.join("cmd.exe"), private_tools.join("cmd.exe")).unwrap();
+    let private_tools = fs::canonicalize(private_tools).unwrap();
     let request = ExecutionRequest::builder(executable.as_os_str())
         .args([
             OsString::from("--exact"),
@@ -1350,14 +1353,15 @@ fn windows_network_probe_is_denied_with_a_reachable_host_positive_control() {
         ),
         "the AppContainer established a TCP connection to the reachable host listener; stdout={stdout:?}, stderr={stderr:?}"
     );
-    assert_eq!(
-        outcome.termination(),
-        &Termination::Exited(28),
-        "curl did not report a connection timeout for the blocked listener; stdout={stdout:?}, stderr={stderr:?}"
-    );
+    let denied = match outcome.termination() {
+        Termination::Exited(7) => stderr.contains("curl: (7) Failed to connect to"),
+        Termination::Exited(28) => stderr.contains("curl: (28)"),
+        _ => false,
+    };
     assert!(
-        stderr.contains("curl: (28)"),
-        "expected curl's timeout diagnostic; stdout={stdout:?}, stderr={stderr:?}"
+        denied,
+        "expected an immediate connection rejection or timeout after successful curl initialization; termination={:?}; stdout={stdout:?}, stderr={stderr:?}",
+        outcome.termination()
     );
     assert_eq!(
         outcome.completion().cleanup_confidence(),
