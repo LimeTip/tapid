@@ -158,7 +158,7 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
     project
         .write(
             "probe.cmd",
-            format!("@type approved.txt\r\n@type \"{}\"\r\n", secret.display()),
+            format!("@type approved.txt\r\n@type \"{}\"\r\n", secret.display()).as_bytes(),
         )
         .unwrap();
     for command in [
