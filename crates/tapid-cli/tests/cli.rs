@@ -13,6 +13,8 @@ use tapid_lockfile::Lockfile;
 mod cache_tests;
 #[path = "cli_cases/ci.rs"]
 mod ci_tests;
+#[path = "cli_cases/explain.rs"]
+mod explain_tests;
 
 mod workspace_acceptance;
 
