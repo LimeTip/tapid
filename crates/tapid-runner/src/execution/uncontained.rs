@@ -35,11 +35,14 @@ pub fn execute_uncontained(
         .create_new(true)
         .open(capture.join("stderr"))
         .map_err(failure)?;
+    let child_environment = request.child_environment();
+    #[cfg(windows)]
+    let child_environment = super::request::windows_child_environment(&child_environment)?;
     let mut command = Command::new(request.program());
     command
         .current_dir(request.working_directory())
         .env_clear()
-        .envs(request.child_environment())
+        .envs(child_environment)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout.try_clone().map_err(failure)?))
         .stderr(Stdio::from(stderr.try_clone().map_err(failure)?));

@@ -5589,6 +5589,48 @@ fn dependency_override_warnings_preserve_json_and_human_output_contracts() {
 }
 
 #[test]
+fn dependency_review_regression_workspace_selection_retains_json_override_warnings() {
+    let project = tapid_test_support::TempProject::new("workspace-override-warning").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/local/package.json",
+            br#"{"name":"local","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--json",
+            "--workspace",
+            "missing",
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    for warning in [
+        "UNAPPROVED_DEPENDENCY_SCRIPTS_ALLOWED",
+        "DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT",
+    ] {
+        assert!(
+            json.to_string().contains(warning),
+            "missing {warning}: {json}"
+        );
+    }
+    assert!(!project.path().join("tapid.lock").exists());
+}
+
+#[test]
 fn dependency_review_regression_workspace_override_does_not_read_live_members() {
     let project = tapid_test_support::TempProject::new("workspace-hook-override").unwrap();
     let home = tapid_test_support::TempHome::new("workspace-hook-override").unwrap();

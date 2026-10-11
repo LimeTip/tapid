@@ -784,9 +784,30 @@ pub(super) fn validate_windows_command_line_units(
 }
 
 #[cfg(any(windows, test))]
+type WindowsEnvironmentEntries = Vec<(Vec<u16>, Vec<u16>)>;
+
+#[cfg(any(windows, test))]
 pub(super) fn windows_environment_block_units(
     environment: &BTreeMap<OsString, OsString>,
 ) -> Result<Vec<u16>, ExecutionError> {
+    assemble_windows_environment_block(windows_child_environment_entries(environment)?)
+}
+
+#[cfg(windows)]
+pub(super) fn windows_child_environment(
+    environment: &BTreeMap<OsString, OsString>,
+) -> Result<BTreeMap<OsString, OsString>, ExecutionError> {
+    use std::os::windows::ffi::OsStringExt;
+    Ok(windows_child_environment_entries(environment)?
+        .into_iter()
+        .map(|(name, value)| (OsString::from_wide(&name), OsString::from_wide(&value)))
+        .collect())
+}
+
+#[cfg(any(windows, test))]
+fn windows_child_environment_entries(
+    environment: &BTreeMap<OsString, OsString>,
+) -> Result<WindowsEnvironmentEntries, ExecutionError> {
     let mut entries = Vec::with_capacity(environment.len());
     for (name, value) in environment {
         let name = name.to_str().ok_or_else(|| {
@@ -830,15 +851,15 @@ pub(super) fn windows_environment_block_units(
             &system_root_units,
         );
     }
-    assemble_windows_environment_block(entries)
+    Ok(entries)
 }
 
 #[cfg(any(windows, test))]
 pub(super) fn windows_appcontainer_environment_entries(
-    mut entries: Vec<(Vec<u16>, Vec<u16>)>,
+    mut entries: WindowsEnvironmentEntries,
     host_local_app_data: &[u16],
     host_system_root: &[u16],
-) -> Vec<(Vec<u16>, Vec<u16>)> {
+) -> WindowsEnvironmentEntries {
     for (name, value) in [
         ("LOCALAPPDATA", host_local_app_data),
         ("SYSTEMROOT", host_system_root),
@@ -869,7 +890,7 @@ fn windows_environment_names_equal(left: &[u16], right: &[u16]) -> bool {
 
 #[cfg(any(windows, test))]
 pub(super) fn assemble_windows_environment_block(
-    mut entries: Vec<(Vec<u16>, Vec<u16>)>,
+    mut entries: WindowsEnvironmentEntries,
 ) -> Result<Vec<u16>, ExecutionError> {
     fn fold_ascii_case(unit: u16) -> u16 {
         if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {

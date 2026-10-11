@@ -66,7 +66,8 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
                 selection.manifest_path
             }
             Err(error) => {
-                let failure = OperationFailure::unchanged(&args.project_dir, error);
+                let mut failure = OperationFailure::unchanged(&args.project_dir, error);
+                failure.outcome.warnings.extend(overrides.warnings());
                 if json {
                     return crate::output::json::failure_or_human(&failure, "install", true);
                 }

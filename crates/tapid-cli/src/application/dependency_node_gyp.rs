@@ -29,7 +29,8 @@ pub(super) fn prepare(tools: &Path, node: &Path) -> Result<(), OperationalError>
     let modules = source.join("node_modules");
     check_package(&modules.join("node-gyp"), "node-gyp")?;
     reject_reparse_points(&modules)?;
-    let digest = tapid_archive::canonical_tree_digest(&modules).map_err(error)?;
+    let digest =
+        tapid_archive::canonical_tree_digest_without_root_entry(&modules, ".bin").map_err(error)?;
     let destination = tools.join("npm/node_modules");
     snapshot_modules(&modules, &destination, &digest)?;
     check_package(&destination.join("node-gyp"), "node-gyp")?;
@@ -77,7 +78,8 @@ fn snapshot_modules(
             }
         }
     }
-    crate::filesystem::tree::copy_tree_contents(source, destination).map_err(error)?;
+    crate::filesystem::tree::copy_tree_contents_without_root_entry(source, destination, ".bin")
+        .map_err(error)?;
     reject_reparse_points(destination)?;
     if destination.join(".tapid-tree").exists()
         || destination.join(".tapid-executable-modes").exists()
@@ -110,7 +112,11 @@ fn reject_reparse_points(root: &Path) -> Result<(), OperationalError> {
             }
             if metadata.is_dir() {
                 for entry in fs::read_dir(&path).map_err(error)? {
-                    pending.push(entry.map_err(error)?.path());
+                    let entry = entry.map_err(error)?;
+                    if path == root && entry.file_name() == ".bin" {
+                        continue;
+                    }
+                    pending.push(entry.path());
                 }
             }
         }
@@ -254,6 +260,30 @@ mod tests {
         assert_eq!(
             fs::read(outside.path().join("bin/node-gyp.js")).unwrap(),
             b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_gyp_bundle_omits_generated_bin_symlinks() {
+        let source = bundle();
+        source
+            .write("lib/node_modules/npm/node_modules/.bin/placeholder", b"")
+            .unwrap();
+        std::os::unix::fs::symlink(
+            "../node-gyp/bin/node-gyp.js",
+            source
+                .path()
+                .join("lib/node_modules/npm/node_modules/.bin/node-gyp"),
+        )
+        .unwrap();
+        let tools = source.path().join("private-tools");
+        prepare(&tools, &source.path().join("bin/node")).unwrap();
+        assert!(!tools.join("npm/node_modules/.bin").exists());
+        assert!(
+            tools
+                .join("npm/node_modules/node-gyp/bin/node-gyp.js")
+                .is_file()
         );
     }
 

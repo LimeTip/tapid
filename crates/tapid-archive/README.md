@@ -12,3 +12,5 @@
 Unix extraction normalizes regular files to `0644` or `0755`, preserves only the executable distinction, and strips ownership and privilege bits. A canonical internal mode manifest makes executable-aware tree digests identical across Unix and Windows while Unix verification also checks the actual mode. The crate does not scan executable content or provide malware detection; store activation remains a separate layer.
 
 `validate_tree` applies portable archive bounds to generated filesystem outputs and rejects symlinks, special files, noncanonical paths, and reserved store metadata. Canonical tree hashing streams regular-file contents while preserving the established digest framing.
+
+`canonical_tree_digest_without_root_entry` hashes an explicitly filtered tree view. The caller must omit the same single root entry from its private copy. Dependency-tool preparation uses this for generated npm `.bin` shims; ordinary archive and store verification continue to use the complete canonical tree digest. Links elsewhere remain rejected.
