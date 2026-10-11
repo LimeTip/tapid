@@ -36,6 +36,9 @@ tapid import-package-lock <PATH>
 tapid install [OPTIONS]
 tapid ci [OPTIONS]
 tapid upgrade [OPTIONS]
+tapid cache info [--store-dir <PATH>]
+tapid cache clean [--dry-run | --yes] [--store-dir <PATH>]
+tapid clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 ```
 
@@ -48,6 +51,16 @@ executing a script.
 `tapid license` prints the complete Apache-2.0 license and LimeTip AB copyright attribution embedded in the executable. It works offline and does not require a project.
 
 `tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
+
+## Inspect and clear the package cache
+
+`tapid cache` and `tapid cache info` report the package-store path, counts, and logical file bytes for published artifacts and marked package trees. They work offline without a project and do not create files or recover transactions. The default path is the same platform cache location used by installation. Use `--store-dir <PATH>` to inspect an explicit store. Sizes exclude directory overhead, symlink targets, staging, and unrecognized entries. They are not a measurement of allocated disk space.
+
+`tapid clean` and `tapid cache clean` preview that scope by default. Pass `--yes` to delete the currently recognized published entries without prompting. `--dry-run` explicitly requests the preview and conflicts with `--yes`. All forms support global `--json` with schema version 1 results.
+
+Cleaning preserves project `node_modules`, manifests, lockfiles, lifecycle authentication keys, staging, recovery journals, and unrecognized entries. Installed projects keep their materialized files. Future offline or frozen replay may fail until the required cache trees are populated again. Release-upgrade recovery data is outside this command's scope. This is explicit eviction of reusable package data, not automatic garbage collection based on which projects use it.
+
+Maintenance uses the existing cross-process store lock and fails immediately when a competing publication or replay prevents safe access. Symlinked roots, cache directories, and lock files are rejected. Opened directories remain pinned during maintenance, and no-follow traversal prevents concurrent parent replacements from redirecting deletion. Symlink entries are preserved; links inside a recognized tree are never followed. A pending transaction must be recovered by installation before maintenance. A populated legacy store without a lock also requires an install before maintenance. Filesystem errors fail the command; deletion errors can leave a partially cleared cache and are reported as cleanup pending in JSON. Inspection and retry are safe.
 
 ## Upgrade Tapid
 
