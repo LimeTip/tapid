@@ -8,6 +8,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | --- | --- |
 | `install`, alias `i` | Install or replay result |
 | `add`, `remove`, `update`, `prune` | Dependency operation result |
+| `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or eviction result |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
 | `ci`, `init`, `manifest`, `lock`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
 | `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
@@ -61,3 +62,9 @@ Within schema version 1, existing field types, code meanings, transaction states
 ## Run child output and receipts
 
 `tapid run` preserves the child's stdout, stderr, and exit code. Its existing `--receipt-json` option appends a receipt to stderr after child output. That stream may contain arbitrary child bytes, so it is not a single-object JSON channel. Global `--json` rejects `run` before launch to preserve the package-result stdout guarantee. A future machine result channel for run must be a separately selected file or descriptor, isolated from both child streams, and retain the child exit code. This release does not add that channel or change receipt behavior.
+
+## Package cache results
+
+`cache`, `cache info`, `cache clean`, and `clean` use the version 1 envelope. The operation is `cache` for its subcommands and `clean` for the shortcut. `project` is null and `changes.files` and `changes.paths` are empty because maintenance does not change project outputs. `data.scope` is `published_package_data`; `data.store` is bounded display text and `data.store_path` uses the existing lossless native-path encoding. `data.action` is `info`, `preview`, or `clean`. The summary contains `artifacts` and `trees`, each with `entries` and logical file `bytes`, plus `preserved_entries` for unrecognized entries inside those namespaces. Staging and upgrade recovery caches are excluded.
+
+Inspection and previews report `unchanged`. Successful eviction reports `committed` when entries were removed, or `unchanged` for an empty deletion set. `CACHE_BUSY` reports `unchanged` with `retry: "after_contention"`. Other failures before eviction report `unchanged` with `CACHE_MAINTENANCE_FAILED`. A deletion or directory-sync failure reports `committed_cleanup_pending` because some cached data may have been removed. This state concerns cache eviction, not a project transaction; inspection and retry are safe. Failed results have a null summary. Cache-location failures, including explicit roots that are files or symlinks, use `CACHE_PATH_INVALID`. All cache operational errors include `phase: "operation"`. An empty explicit `--store-dir` is rejected during argument parsing as `ARGUMENT_INVALID`, exit 2.
