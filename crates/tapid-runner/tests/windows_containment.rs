@@ -156,50 +156,80 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
     assert_eq!(fs::read(&secret).unwrap(), b"ambient-input");
     let baseline = project_dacl(&outside.path().to_owned());
     let root = fs::canonicalize(project.path()).unwrap();
-    let child = root.join("cmd.exe");
-    fs::copy(system32.join("cmd.exe"), &child).unwrap();
+    let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let child = root.join("probe.exe");
+    fs::copy(&executable, &child).unwrap();
     project
-        .write(
-            "probe.cmd",
-            format!("@type approved.txt\r\n@type \"{}\"\r\n", secret.display()).as_bytes(),
-        )
+        .write("outside-path.txt", secret.to_str().unwrap().as_bytes())
         .unwrap();
-    for command in [
-        "probe.cmd".to_owned(),
-        format!("\"{}\" /D /C probe.cmd", child.display()),
-    ] {
-        let request = ExecutionRequest::builder(system32.join("cmd.exe").as_os_str())
-            .args([
-                OsString::from("/D"),
-                OsString::from("/S"),
-                OsString::from("/C"),
-                command.clone().into(),
-            ])
-            .executable_search_path(&root)
-            .executable_search_path(&system32)
-            .project_root(&root)
-            .policy(managed_policy_with_flags(
-                ExecutionLimits::new(Some(30), Some(4096), Some(4), None).unwrap(),
-                true,
-                false,
-            ))
-            .windows_verbatim_arguments(true)
-            .build()
-            .unwrap();
-        let outcome = execute(&request).expect("approved cmd and descendants must still execute");
-        let stdout = String::from_utf8_lossy(outcome.stdout());
-        assert!(
-            stdout.contains("approved-input"),
-            "{command}: {:?}; stdout={stdout}; stderr={}",
-            outcome.termination(),
-            String::from_utf8_lossy(outcome.stderr())
-        );
-        assert!(
-            !stdout.contains("ambient-input"),
-            "undeclared AAP input was readable by {command}: {stdout}"
-        );
-    }
+    let request = ExecutionRequest::builder(child.as_os_str())
+        .args([
+            "--exact",
+            "windows_ambient_read_probe_helper",
+            "--nocapture",
+        ])
+        .executable_search_path(&root)
+        .executable_search_path(&system32)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(30), Some(8192), Some(4), None).unwrap(),
+            true,
+            false,
+        ))
+        .env("TAPID_TEST_MARKER", "ambient-root")
+        .build()
+        .unwrap();
+    let outcome = execute(&request).expect("approved root and descendant must execute");
+    let stdout = String::from_utf8_lossy(outcome.stdout());
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "stdout={stdout}; stderr={}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert!(
+        stdout.contains("approved-root"),
+        "root positive control missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("approved-child"),
+        "descendant positive control missing: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ambient-input"),
+        "undeclared AAP input was readable: {stdout}"
+    );
     assert_eq!(project_dacl(&outside.path().to_owned()), baseline);
+}
+
+#[test]
+fn windows_ambient_read_probe_helper() {
+    let mode = std::env::var("TAPID_TEST_MARKER").unwrap_or_default();
+    if mode != "ambient-root" && mode != "ambient-child" {
+        return;
+    }
+    assert_eq!(fs::read("approved.txt").unwrap(), b"approved-input");
+    let outside = fs::read_to_string("outside-path.txt").unwrap();
+    let denied = fs::read(outside).expect_err("undeclared AAP file must be denied");
+    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    if mode == "ambient-root" {
+        println!("approved-root");
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "windows_ambient_read_probe_helper",
+                "--nocapture",
+            ])
+            .env("TAPID_TEST_MARKER", "ambient-child")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "descendant denied-read probe failed: {status}"
+        );
+    } else {
+        println!("approved-child");
+    }
 }
 
 #[test]
@@ -701,7 +731,7 @@ fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths()
     let system32 = fs::canonicalize(PathBuf::from(system_root).join("System32")).unwrap();
     let private_tools = root.join("tools");
     fs::create_dir(&private_tools).unwrap();
-    fs::copy(system32.join("cmd.exe"), private_tools.join("cmd.exe")).unwrap();
+    fs::copy(&executable, private_tools.join("probe.exe")).unwrap();
     let private_tools = fs::canonicalize(private_tools).unwrap();
     let request = ExecutionRequest::builder(executable.as_os_str())
         .args([
@@ -741,9 +771,14 @@ fn windows_child_process_probe_helper() {
     if std::env::var("TAPID_TEST_MARKER").as_deref() != Ok("runtime-child") {
         return;
     }
-    let child = std::env::current_dir().unwrap().join("tools/cmd.exe");
+    let child = std::env::current_dir().unwrap().join("tools/probe.exe");
     let status = Command::new(&child)
-        .args(["/D", "/S", "/C", "echo CHILD_PROCESS_MARKER"])
+        .args([
+            "--exact",
+            "windows_runtime_child_marker_helper",
+            "--nocapture",
+        ])
+        .env("TAPID_TEST_MARKER", "runtime-marker")
         .status()
         .unwrap_or_else(|error| {
             panic!(
@@ -754,6 +789,13 @@ fn windows_child_process_probe_helper() {
             )
         });
     assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn windows_runtime_child_marker_helper() {
+    if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("runtime-marker") {
+        println!("CHILD_PROCESS_MARKER");
+    }
 }
 
 #[test]
