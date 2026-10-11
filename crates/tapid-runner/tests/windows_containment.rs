@@ -154,7 +154,8 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
     assert_eq!(fs::read(&secret).unwrap(), b"ambient-input");
     let baseline = project_dacl(&outside.path().to_owned());
     let root = fs::canonicalize(project.path()).unwrap();
-    let child = system32.join("cmd.exe");
+    let child = root.join("cmd.exe");
+    fs::copy(system32.join("cmd.exe"), &child).unwrap();
     project
         .write(
             "probe.cmd",
@@ -165,16 +166,32 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
         "probe.cmd".to_owned(),
         format!("\"{}\" /D /C probe.cmd", child.display()),
     ] {
-        let request = command_request_with_flags(
-            &root,
-            &command,
-            ExecutionLimits::new(Some(30), Some(4096), Some(4), None).unwrap(),
-            true,
-            false,
-        );
+        let request = ExecutionRequest::builder(system32.join("cmd.exe").as_os_str())
+            .args([
+                OsString::from("/D"),
+                OsString::from("/S"),
+                OsString::from("/C"),
+                command.clone().into(),
+            ])
+            .executable_search_path(&root)
+            .executable_search_path(&system32)
+            .project_root(&root)
+            .policy(managed_policy_with_flags(
+                ExecutionLimits::new(Some(30), Some(4096), Some(4), None).unwrap(),
+                true,
+                false,
+            ))
+            .windows_verbatim_arguments(true)
+            .build()
+            .unwrap();
         let outcome = execute(&request).expect("approved cmd and descendants must still execute");
         let stdout = String::from_utf8_lossy(outcome.stdout());
-        assert!(stdout.contains("approved-input"), "{command}: {stdout}");
+        assert!(
+            stdout.contains("approved-input"),
+            "{command}: {:?}; stdout={stdout}; stderr={}",
+            outcome.termination(),
+            String::from_utf8_lossy(outcome.stderr())
+        );
         assert!(
             !stdout.contains("ambient-input"),
             "undeclared AAP input was readable by {command}: {stdout}"
@@ -680,6 +697,9 @@ fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths()
     let executable_directory = executable.parent().expect("test executable directory");
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
     let system32 = fs::canonicalize(PathBuf::from(system_root).join("System32")).unwrap();
+    let private_tools = root.join("tools");
+    fs::create_dir(&private_tools).unwrap();
+    fs::copy(system32.join("cmd.exe"), private_tools.join("cmd.exe")).unwrap();
     let request = ExecutionRequest::builder(executable.as_os_str())
         .args([
             OsString::from("--exact"),
@@ -687,6 +707,7 @@ fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths()
             OsString::from("--nocapture"),
         ])
         .executable_search_path(executable_directory)
+        .executable_search_path(&private_tools)
         .executable_search_path(&system32)
         .project_root(&root)
         .policy(managed_policy_with_flags(
@@ -694,6 +715,7 @@ fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths()
             true,
             false,
         ))
+        .env("TAPID_TEST_MARKER", "runtime-child")
         .build()
         .unwrap();
     let outcome = execute(&request).expect("probe process should remain within the Job Object");
@@ -713,8 +735,10 @@ fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths()
 
 #[test]
 fn windows_child_process_probe_helper() {
-    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
-    let child = PathBuf::from(system_root).join("System32").join("cmd.exe");
+    if std::env::var("TAPID_TEST_MARKER").as_deref() != Ok("runtime-child") {
+        return;
+    }
+    let child = std::env::current_dir().unwrap().join("tools/cmd.exe");
     let status = Command::new(&child)
         .args(["/D", "/S", "/C", "echo CHILD_PROCESS_MARKER"])
         .status()

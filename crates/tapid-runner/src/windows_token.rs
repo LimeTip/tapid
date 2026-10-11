@@ -24,6 +24,86 @@ use windows_sys::Win32::{
     },
 };
 
+/// The sole runtime capability: Windows socket-provider initialization reads the registry.
+/// This grants no network capability and is separate from filesystem package access.
+pub(super) struct RegistryReadCapability {
+    groups: *mut PSID,
+    group_count: u32,
+    capabilities: *mut PSID,
+    capability_count: u32,
+    entry: Box<windows_sys::Win32::Security::SID_AND_ATTRIBUTES>,
+}
+
+impl RegistryReadCapability {
+    pub(super) fn new() -> Result<Self, ExecutionError> {
+        use windows_sys::Win32::Security::{
+            DeriveCapabilitySidsFromName, IsValidSid, SID_AND_ATTRIBUTES,
+        };
+        let mut capability = Self {
+            groups: null_mut(),
+            group_count: 0,
+            capabilities: null_mut(),
+            capability_count: 0,
+            entry: Box::new(SID_AND_ATTRIBUTES {
+                Sid: null_mut(),
+                Attributes: windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED as u32,
+            }),
+        };
+        let name: Vec<_> = "registryRead".encode_utf16().chain(Some(0)).collect();
+        // SAFETY: terminated fixed capability name; the API allocates both output SID arrays.
+        if unsafe {
+            DeriveCapabilitySidsFromName(
+                name.as_ptr(),
+                &mut capability.groups,
+                &mut capability.group_count,
+                &mut capability.capabilities,
+                &mut capability.capability_count,
+            )
+        } == 0
+        {
+            return Err(unsupported_job("derive registry-read runtime capability"));
+        }
+        let sid_array = NonNull::new(capability.capabilities)
+            .ok_or_else(|| unsupported_job("receive registry-read runtime capability"))?;
+        if capability.capability_count != 1 {
+            return Err(unsupported_job(
+                "receive one registry-read runtime capability",
+            ));
+        }
+        // SAFETY: the native output array contains exactly one SID, owned by this value.
+        let sid = unsafe { *sid_array.as_ptr() };
+        if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+            return Err(unsupported_job("validate registry-read runtime capability"));
+        }
+        capability.entry.Sid = sid;
+        Ok(capability)
+    }
+
+    pub(super) fn entry(&self) -> *mut windows_sys::Win32::Security::SID_AND_ATTRIBUTES {
+        (&*self.entry as *const windows_sys::Win32::Security::SID_AND_ATTRIBUTES).cast_mut()
+    }
+}
+
+impl Drop for RegistryReadCapability {
+    fn drop(&mut self) {
+        for (array, count) in [
+            (self.groups, self.group_count),
+            (self.capabilities, self.capability_count),
+        ] {
+            if let Some(array) = NonNull::new(array) {
+                // SAFETY: DeriveCapabilitySidsFromName allocates count SID pointers and each
+                // individual SID with LocalAlloc. Free the SIDs before the containing array.
+                unsafe {
+                    for index in 0..count as usize {
+                        LocalFree(*array.as_ptr().add(index));
+                    }
+                    LocalFree(array.as_ptr().cast());
+                }
+            }
+        }
+    }
+}
+
 struct Token(HANDLE);
 impl Drop for Token {
     fn drop(&mut self) {

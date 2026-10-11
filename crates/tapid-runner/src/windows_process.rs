@@ -8,6 +8,7 @@ struct ProcThreadAttributeList {
     initialized: bool,
     // UpdateProcThreadAttribute retains these pointers until the list is deleted.
     security_capabilities: Box<SECURITY_CAPABILITIES>,
+    _registry_read: super::token::RegistryReadCapability,
     all_application_packages_policy: Box<u32>,
     inherited_handles: Option<Box<[HANDLE]>>,
 }
@@ -38,10 +39,11 @@ impl ProcThreadAttributeList {
         {
             return Err(unsupported_job("initialize process attribute list"));
         }
+        let registry_read = super::token::RegistryReadCapability::new()?;
         let security_capabilities = Box::new(SECURITY_CAPABILITIES {
             AppContainerSid: container.sid(),
-            Capabilities: null_mut(),
-            CapabilityCount: 0,
+            Capabilities: registry_read.entry(),
+            CapabilityCount: 1,
             Reserved: 0,
         });
         let attributes = Self {
@@ -49,6 +51,7 @@ impl ProcThreadAttributeList {
             list,
             initialized: true,
             security_capabilities,
+            _registry_read: registry_read,
             // PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT from the Windows SDK.
             // LPAC removes ambient All Application Packages access. Explicit per-run
             // grants remain necessary; this is not a complete toolchain identity.
@@ -493,7 +496,7 @@ impl WindowsSuspendedChild {
             {
                 let mut enabled = 0i32;
                 let mut returned = 0u32;
-                // SAFETY: each selected token class returns a BOOL-sized value.
+                // SAFETY: TokenIsAppContainer returns a DWORD-sized value.
                 if unsafe {
                     GetTokenInformation(
                         token,
