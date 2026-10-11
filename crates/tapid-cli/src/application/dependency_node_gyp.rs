@@ -218,6 +218,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn node_gyp_bundle_rejects_directory_junctions() {
+        use std::os::windows::process::CommandExt;
         let source = bundle();
         let outside = tapid_test_support::TempProject::new("node-gyp-outside").unwrap();
         outside
@@ -233,9 +234,12 @@ mod tests {
                 .unwrap()
                 .join("cmd.exe"),
         )
-        .args(["/D", "/C", "mklink", "/J"])
-        .arg(&link)
-        .arg(outside.path())
+        .args(["/D", "/S", "/C"])
+        .raw_arg(format!(
+            "mklink /J \"{}\" \"{}\"",
+            link.to_string_lossy().replace('/', "\\"),
+            outside.path().display()
+        ))
         .status()
         .unwrap();
         assert!(status.success(), "junction fixture must exist");
