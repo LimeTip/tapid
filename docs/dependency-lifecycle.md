@@ -43,7 +43,7 @@ Optional `dependencies = true` grants read access to a private materialization o
 
 ## Execution and outputs
 
-The contained execution backend is Linux ManagedTree. It requires Landlock ABI 3 or newer, seccomp, util-linux `unshare`, private PID and mount namespaces, and a writable delegated cgroup v2 parent with the memory and pids controllers enabled. `cgroup.kill` and swap controls must be available. Tapid does not configure host delegation. Missing prerequisites fail before dependency code runs. macOS and Windows contained dependency execution remain unavailable and fail closed. Explicit uncontained execution is available as described below; it does not establish platform containment support.
+Authenticated, cacheable dependency builds currently use Linux ManagedTree. It requires Landlock ABI 3 or newer, seccomp, util-linux `unshare`, private PID and mount namespaces, and a writable delegated cgroup v2 parent with the memory and pids controllers enabled. `cgroup.kill` and swap controls must be available. Tapid does not configure host delegation. Missing prerequisites fail before dependency code runs. macOS contained dependency builds remain unavailable and fail closed. Windows can run invocation-only contained hooks with `--allow-unapproved-dependency-scripts`, using private low-integrity write copies, LPAC, and Job Object supervision. Authenticated, cacheable Windows builds remain gated on complete toolchain identity and integrated acceptance. The approval override does not require `--unsafe-no-dependency-sandbox` when native Windows containment is available. Explicit uncontained execution is a separate risk override, as described below.
 
 ## Explicit execution overrides
 
