@@ -872,7 +872,6 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[cfg(unix)]
     #[test]
     fn filtered_tree_digest_excludes_only_the_selected_root_entry() {
         let source = tapid_test_support::TempProject::new("filtered-source").unwrap();
@@ -918,6 +917,7 @@ mod tests {
         assert!(canonical_tree_digest_without_root_entry(source.path(), ".bin").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn canonical_tree_digest_binds_executable_mode() {
         use std::os::unix::fs::PermissionsExt;
