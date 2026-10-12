@@ -294,6 +294,7 @@ fn direct_dependency_kinds(manifest: &PackageManifest) -> BTreeMap<String, Strin
         (manifest.dependencies(), "dependencies"),
         (manifest.dev_dependencies(), "devDependencies"),
         (manifest.optional_dependencies(), "optionalDependencies"),
+        (manifest.peer_dependencies(), "peerDependencies"),
     ]
     .into_iter()
     .flat_map(|(entries, kind)| {
@@ -611,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_manifest_edges_keep_optional_and_normalize_prefixed_names_without_peer_roots() {
+    fn direct_manifest_edges_keep_optional_peer_and_normalize_prefixed_names() {
         let manifest = PackageManifest::parse(
             r#"{"name":"root","version":"1.0.0","optionalDependencies":{"opt":"1.0.0"},"devDependencies":{"jsr:@scope/pkg":"1.0.0"},"peerDependencies":{"peer":"1.0.0"}}"#,
         )
@@ -619,6 +620,6 @@ mod tests {
         let kinds = direct_dependency_kinds(&manifest);
         assert_eq!(kinds["opt"], "optionalDependencies");
         assert_eq!(kinds["@scope/pkg"], "devDependencies");
-        assert!(!kinds.contains_key("peer"));
+        assert_eq!(kinds["peer"], "peerDependencies");
     }
 }
