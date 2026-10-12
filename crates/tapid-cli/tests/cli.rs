@@ -2186,22 +2186,28 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
     fs::create_dir_all(member.join("bin")).unwrap();
     fs::write(
         member.join("package.json"),
-        r#"{"name":"tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js"}}"#,
+        r#"{"name":"tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js","workspace-direct":"bin/direct.js"}}"#,
     )
     .unwrap();
     let bin_source = member.join("bin/tool.js");
     fs::write(
         &bin_source,
-        "#!/usr/bin/env node\\nconsole.log('workspace tool');\\n",
+        "#!/usr/bin/env node\nconsole.log('workspace tool');\n",
     )
     .unwrap();
+    let direct_source = member.join("bin/direct.js");
+    fs::write(&direct_source, "console.log('workspace direct');\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&bin_source, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&direct_source, fs::Permissions::from_mode(0o755)).unwrap();
     }
     #[cfg(unix)]
-    let mode_before = fs::metadata(&bin_source).unwrap().permissions();
+    let mode_before = (
+        fs::metadata(&bin_source).unwrap().permissions(),
+        fs::metadata(&direct_source).unwrap().permissions(),
+    );
 
     let install = run(
         &dir,
@@ -2230,10 +2236,26 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
             fs::canonicalize(&shim).unwrap(),
             fs::canonicalize(&bin_source).unwrap()
         );
+        let direct_shim = dir.join("node_modules/.bin/workspace-direct");
+        assert!(
+            fs::symlink_metadata(&direct_shim)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::canonicalize(&direct_shim).unwrap(),
+            fs::canonicalize(&direct_source).unwrap()
+        );
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             fs::metadata(&bin_source).unwrap().permissions().mode(),
-            mode_before.mode(),
+            mode_before.0.mode(),
+            "install must not change workspace source permissions"
+        );
+        assert_eq!(
+            fs::metadata(&direct_source).unwrap().permissions().mode(),
+            mode_before.1.mode(),
             "install must not change workspace source permissions"
         );
     }
@@ -2241,6 +2263,9 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
     {
         assert!(shim.with_extension("cmd").is_file());
         assert!(shim.with_extension("ps1").is_file());
+        let direct_shim = dir.join("node_modules/.bin/workspace-direct");
+        assert!(direct_shim.with_extension("cmd").is_file());
+        assert!(direct_shim.with_extension("ps1").is_file());
     }
     cleanup(dir);
 }
