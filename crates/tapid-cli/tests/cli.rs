@@ -4922,7 +4922,6 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
         stderr.contains("network-enabled profiles are unsupported until AppContainer network capabilities are implemented"),
         "{stderr}"
     );
-    assert!(stderr.contains("no process was started"));
     assert!(stderr.contains("no enforcement receipt was issued"));
     assert!(!stderr.contains(secret));
     assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));

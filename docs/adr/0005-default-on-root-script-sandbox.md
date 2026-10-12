@@ -8,6 +8,8 @@ An experimental macOS 26 Restricted backend is implemented with deprecated/priva
 
 ## Decision history
 
+The October 12 PR #220 handoff investigated a production IPC preflight, then removed it after the user required unchanged standard Node with compatibility owned by Tapid. IPC controls remain test-only diagnostics; rejecting a working script because an unrelated IPC control fails is not acceptance. The ancestor ACL approach failed local non-propagation and root-authority checks, so no shared ancestor/root grants were enabled. A native compatibility wrapper plus independently enforcing metadata broker is proposed, not implemented. Full Windows build/test support remains unclaimed; see [the standard-Node design](../superpowers/specs/2026-10-12-windows-full-build-test-acceptance-design.md).
+
 The original decision required filesystem, network, environment, descendant ownership, cleanup, and tree-wide resource controls as one indivisible sandbox contract. That strict position prevented a partial backend from being presented as complete containment and correctly exposed the lack of a race-free descendant boundary on macOS 26.
 
 This amendment preserves that original contract as the **ManagedTree** assurance level, including for legacy profiles that omit an assurance selector. It adds **Restricted** as an explicit target for compatible checked-in root-script profiles, separating authority containment from complete lifecycle ownership without silently weakening existing strict profiles. The amendment does not reinterpret existing fail-before-spawn evidence as native enforcement and does not make any platform supported.

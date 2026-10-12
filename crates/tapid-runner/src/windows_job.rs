@@ -197,6 +197,23 @@ impl WindowsJob {
         Ok(information.ActiveProcesses)
     }
 
+    /// Keep authority alive until kernel ownership proves there are no remaining users.
+    /// Native query failures cannot authorize ACL revocation; retain the existing fail-closed
+    /// retry behavior, including its documented potentially unbounded cleanup wait.
+    pub(super) fn empty_before_revocation(&self) {
+        let interval = Duration::from_millis(10);
+        loop {
+            if matches!(self.active_process_count(), Ok(0)) {
+                return;
+            }
+            let _ = self.terminate_all();
+            if self.wait_until_empty(10).is_ok() {
+                return;
+            }
+            std::thread::sleep(interval);
+        }
+    }
+
     pub(super) fn wait_until_empty(&self, timeout_ms: u32) -> Result<(), ExecutionError> {
         if !self.process_was_assigned.load(Ordering::Acquire) {
             return Ok(());

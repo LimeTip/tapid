@@ -895,9 +895,9 @@ fn restoring_appcontainer_grant_preserves_concurrent_dacl_changes() {
     let icacls =
         std::fs::canonicalize(std::path::PathBuf::from(system_root).join("System32/icacls.exe"))
             .unwrap();
-    // BUILTIN\\Remote Desktop Users is a valid, distinct trustee that is not
-    // inherited by this temporary directory. The numeric form avoids localization.
-    let concurrent_sid = "*S-1-5-32-555";
+    // BUILTIN\\Users is present on client and server Windows editions.
+    // The numeric form avoids localization.
+    let concurrent_sid = "*S-1-5-32-545";
     let concurrent_ace = format!("{concurrent_sid}:(OI)(CI)(R)");
     let change = std::process::Command::new(&icacls)
         .arg(&root)
@@ -934,7 +934,7 @@ fn restoring_appcontainer_grant_preserves_concurrent_dacl_changes() {
         .collect::<Vec<_>>();
     let acl = String::from_utf16_lossy(&utf16);
     assert!(
-        acl.contains(";;;RD)"),
+        acl.contains(";;;BU)"),
         "restoring Tapid's ACE discarded the concurrent ACE: {acl}"
     );
     std::fs::remove_file(saved_acl).unwrap();

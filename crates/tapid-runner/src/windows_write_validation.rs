@@ -49,20 +49,22 @@ impl Object {
     fn validate_acl(&self) -> Result<(), ExecutionError> {
         use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
         use windows_sys::Win32::Security::{
-            DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, SE_DACL_PROTECTED,
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, LABEL_SECURITY_INFORMATION,
+            SE_DACL_PROTECTED,
         };
         let mut dacl = null_mut();
         let mut descriptor = null_mut();
+        let mut labels = null_mut();
         // SAFETY: held handle, writable outputs; free returned allocation on every path.
         let status = unsafe {
             GetSecurityInfo(
                 self.0,
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
+                DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
                 null_mut(),
                 null_mut(),
                 &mut dacl,
-                null_mut(),
+                &mut labels,
                 &mut descriptor,
             )
         };
@@ -76,7 +78,57 @@ impl Object {
         let mut revision = 0;
         let read = unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) };
         let null_dacl = dacl.is_null();
+        let mut blocked_integrity = false;
+        if !labels.is_null() {
+            use windows_sys::Win32::Security::{
+                ACE_HEADER, GetAce, GetSidSubAuthority, GetSidSubAuthorityCount, IsValidSid,
+                SYSTEM_MANDATORY_LABEL_ACE,
+            };
+            use windows_sys::Win32::System::SystemServices::{
+                SECURITY_MANDATORY_LOW_RID, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            };
+            for index in 0..u32::from(unsafe { (*labels).AceCount }) {
+                let mut ace = null_mut();
+                if unsafe { GetAce(labels, index, &mut ace) } == 0 {
+                    blocked_integrity = true;
+                    break;
+                }
+                // SAFETY: GetSecurityInfo owns this native ACL until LocalFree. Check the
+                // ACE header and size before interpreting the mandatory-label payload.
+                let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+                if header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE as u8 {
+                    if usize::from(header.AceSize)
+                        < std::mem::size_of::<SYSTEM_MANDATORY_LABEL_ACE>()
+                    {
+                        blocked_integrity = true;
+                        break;
+                    }
+                    let label = unsafe { &*ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>() };
+                    let sid = std::ptr::addr_of!(label.SidStart).cast_mut().cast();
+                    if unsafe { IsValidSid(sid) } == 0 {
+                        blocked_integrity = true;
+                        break;
+                    }
+                    let count = unsafe { *GetSidSubAuthorityCount(sid) };
+                    if count == 0
+                        || (label.Mask & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP != 0
+                            && unsafe { *GetSidSubAuthority(sid, u32::from(count) - 1) }
+                                > SECURITY_MANDATORY_LOW_RID as u32)
+                    {
+                        blocked_integrity = true;
+                    }
+                } else {
+                    blocked_integrity = true;
+                }
+            }
+        }
         unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+        if blocked_integrity {
+            return Err(unsupported(
+                "Windows write target integrity label denies effective AppContainer filesystem access",
+            ));
+        }
         if null_dacl {
             return Err(unsupported("Windows write target has ambiguous NULL DACL"));
         }
@@ -156,6 +208,11 @@ pub(super) fn validate_existing_write_grants(
         if grant.binding() != super::FilesystemBindingMode::CanonicalPath {
             return Err(unsupported(
                 "Windows write grants require CanonicalPath binding",
+            ));
+        }
+        if grant.path().parent().is_none() {
+            return Err(unsupported(
+                "Windows write target is a shared host boundary: volume or share root",
             ));
         }
         let home = std::env::var_os("USERPROFILE")
@@ -245,6 +302,26 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
 
+    #[test]
+    fn rejects_target_volume_and_share_roots_before_inspection() {
+        for root in [
+            r"Z:\",
+            r"\\server\share\",
+            r"\\?\Z:\",
+            r"\\?\UNC\server\share\",
+        ] {
+            let error = validate_existing_write_grants(&[write_grant(
+                Path::new(root),
+                FilesystemGrantKind::DirectorySubtree,
+            )])
+            .expect_err("every target volume/share root must be rejected");
+            assert!(
+                error.to_string().contains("volume or share root"),
+                "{root}: {error}"
+            );
+        }
+    }
+
     fn write_grant(path: &Path, kind: FilesystemGrantKind) -> ResolvedFilesystemGrant {
         ResolvedFilesystemGrant {
             path: path.to_owned(),
@@ -253,6 +330,12 @@ mod tests {
             source: FilesystemGrantSource::ProjectPolicy,
             binding: FilesystemBindingMode::CanonicalPath,
         }
+    }
+
+    fn traversal_grant(path: &Path) -> ResolvedFilesystemGrant {
+        let mut grant = write_grant(path, FilesystemGrantKind::DirectorySubtree);
+        grant.access = FilesystemAccess::ReadMetadata;
+        grant
     }
 
     struct Fixture {
@@ -765,9 +848,11 @@ mod tests {
         assert_eq!(grant, original);
         assert_eq!(grant.binding(), FilesystemBindingMode::CanonicalPath);
         let mut container = crate::execution::windows_job::WindowsAppContainer::create().unwrap();
-        let mut applied =
-            crate::execution::windows_job::WindowsFilesystemGrants::apply(&container, &[grant])
-                .unwrap();
+        let mut applied = crate::execution::windows_job::WindowsFilesystemGrants::apply(
+            &container,
+            &[traversal_grant(&fixture.root), grant],
+        )
+        .unwrap();
         applied.restore().unwrap();
         container.cleanup().unwrap();
         assert_eq!(read_acl(&file), before);
@@ -791,9 +876,11 @@ mod tests {
         let before: Vec<_> = paths.iter().map(|p| read_acl(p)).collect();
         validate_existing_write_grants(std::slice::from_ref(&grant)).unwrap();
         let mut container = crate::execution::windows_job::WindowsAppContainer::create().unwrap();
-        let mut applied =
-            crate::execution::windows_job::WindowsFilesystemGrants::apply(&container, &[grant])
-                .unwrap();
+        let mut applied = crate::execution::windows_job::WindowsFilesystemGrants::apply(
+            &container,
+            &[traversal_grant(&fixture.root), grant],
+        )
+        .unwrap();
         applied.restore().unwrap();
         container.cleanup().unwrap();
         for (path, snapshot) in paths.iter().zip(before) {

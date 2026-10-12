@@ -19,10 +19,14 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::time::Duration;
 
 const INTERNAL_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
-const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[cfg(test)]
+#[path = "windows_node.rs"]
+mod node_compatibility;
 
 #[cfg(test)]
 std::thread_local! {
@@ -631,17 +635,7 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             // Keep the Job and grants alive until either the kernel's active-process count reaches
             // zero or the associated completion port delivers ACTIVE_PROCESS_ZERO. If a bounded
             // notification wait fails, re-terminate and retry; no failed query is treated as proof.
-            loop {
-                if matches!(job.active_process_count(), Ok(0)) {
-                    break;
-                }
-                let _ = job.terminate_all();
-                let wait_ms = u32::try_from(CLEANUP_POLL_INTERVAL.as_millis()).unwrap_or(u32::MAX);
-                if job.wait_until_empty(wait_ms.max(1)).is_ok() {
-                    break;
-                }
-                std::thread::sleep(CLEANUP_POLL_INTERVAL);
-            }
+            job.empty_before_revocation();
         }
         #[cfg(test)]
         if self.grants.is_some()
