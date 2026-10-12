@@ -6335,10 +6335,61 @@ fn why_traverses_a_persisted_peer_edge_without_treating_manifest_peer_as_a_root(
     let result: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(result["data"]["paths"][0]["steps"][1]["edgeKind"], "peer");
     assert_eq!(result["data"]["paths"][0]["steps"][1]["via"], "peer");
+    assert_eq!(result["data"]["graph_warnings"], serde_json::json!([]));
     assert_eq!(result["changes"]["state"], "unchanged");
     assert_eq!(
         fs::read(project.path().join("package.json")).unwrap(),
         manifest
+    );
+}
+
+#[test]
+fn why_warns_when_generic_transitive_edge_kinds_are_unavailable() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-generic-transitive-warning").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut app = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "app",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let nested = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "nested",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "b".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    app.add_dependency("nested", &nested.key()).unwrap();
+    let app_key = app.key();
+    lock.insert_packages([app, nested]).unwrap();
+    lock.set_roots([app_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "app".to_owned(),
+        app_key,
+    )]))
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+
+    let output = run(project.path(), &["why", "nested", "--json"]);
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["data"]["graph_warnings"],
+        serde_json::json!([
+            "transitive dependency edge kinds are not recorded in the lockfile; those edges are labeled dependency"
+        ])
     );
 }
 

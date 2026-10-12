@@ -145,7 +145,12 @@ pub(crate) fn explain(
         }
     }
 
-    let warnings = if state.paths.iter().any(|path| path.steps.len() > 1) {
+    let warnings = if state.paths.iter().any(|path| {
+        path.steps
+            .iter()
+            .skip(1)
+            .any(|step| step.edge_kind.as_deref() == Some("dependency"))
+    }) {
         vec!["transitive dependency edge kinds are not recorded in the lockfile; those edges are labeled dependency".to_owned()]
     } else {
         Vec::new()
