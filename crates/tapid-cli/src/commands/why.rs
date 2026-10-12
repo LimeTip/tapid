@@ -26,12 +26,16 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                 return crate::output::json::why_success(&report, &args.project_dir);
             }
             if report.paths.is_empty() {
-                println!(
-                    "No path to '{}' was found in the resolved dependency graph.",
-                    report.package
-                );
                 if report.truncated {
-                    println!("The search reached a safety bound; this result may be incomplete.");
+                    println!(
+                        "No complete path to '{}' was found before the search safety bound; this result is incomplete.",
+                        report.package
+                    );
+                } else {
+                    println!(
+                        "No path to '{}' was found in the resolved dependency graph.",
+                        report.package
+                    );
                 }
             } else {
                 println!("Dependency paths to {}:", report.package);
@@ -51,7 +55,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                     println!("Additional paths were omitted or traversal reached a safety bound.");
                 }
             }
-            if report.paths.is_empty() {
+            if report.paths.is_empty() && !report.truncated {
                 ExitCode::from(1)
             } else {
                 ExitCode::SUCCESS

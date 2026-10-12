@@ -9,7 +9,9 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `install`, alias `i` | Install or replay result |
 | `add`, `remove`, `update`, `prune` | Dependency operation result |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
-| `why` | Dependency explanation paths under `data.paths`; an empty match returns `data.not_found: true` and exit 1 |
+| `explain` | Exact package evidence under `data`; registry metadata or a local snapshot, with optional artifact byte verification |
+| `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
+| `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
 | `ci`, `init`, `manifest`, `lock`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
 | `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
 | Private release helpers, no command | `JSON_UNSUPPORTED_COMMAND`, exit 1 |
@@ -41,7 +43,15 @@ Every object contains these fields:
 
 Help results contain `data.text`, the selected command's help text with no ANSI formatting. For example, `tapid --json help run` returns run help without launching a child. Both short and long help forms preserve their usual content. Version results contain `data.name` of `tapid` and `data.version`, the executable's package version. These informational results use `outcome: "success"`, empty errors and warnings, null project and retry, and unchanged state with no affected files. They do not read project files. Help text is presentation content, not a stable command-discovery schema; its wording and layout may change within schema version 1.
 
-`why` data contains `package`, deterministic `paths`, `truncated`, `not_found`, and `graph_warnings`. Each path contains `steps` with package identity, incoming dependency name and kind, and source kind. A missing match is an unchanged successful operation envelope with `data.not_found: true`, but the command exits 1 to preserve its CLI no-match contract. Operational errors use the standard `failure` envelope and typed `errors` entry.
+`explain` data contains the bounded package identity (`package`, `version`, and `registry`), evidence `source`, registry timestamps, `artifact`, `registry_integrity`, `byte_integrity`, `registry_signatures`, `provenance`, `publisher_identity`, `vulnerabilities`, `malware_analysis`, `human_review`, and `limitations`. Metadata claims and attestation references are not treated as verified provenance. With `--artifact-file`, a byte mismatch changes the outcome to `failure`, adds `INTEGRITY_MISMATCH`, and exits 1; a match remains `success`. `--registry-metadata` records a local snapshot source rather than contacting the registry.
+
+`why` data contains `package`, deterministic `paths`, `truncated`, `not_found`, and `graph_warnings`. Each path contains `steps` with package identity, incoming dependency name and kind, and source kind. A confirmed missing match is an unchanged successful operation envelope with `data.not_found: true`, but the command exits 1 to preserve its CLI no-match contract. If traversal reaches a safety bound before finding a path, the envelope outcome is `partial`, `data.truncated` is true, `data.not_found` is false, and the command exits 0. Operational errors use the standard `failure` envelope and typed `errors` entry.
+
+## Package cache results
+
+`cache`, `cache info`, `cache clean`, and `clean` report only the published package-data scope: the store path, an action of `info`, `preview`, or `clean`, and a `summary` with `artifacts.entries`, `artifacts.bytes`, `trees.entries`, `trees.bytes`, and `preserved_entries`. Preview commands leave `changes.state` as `unchanged`; a cleanup that removes entries reports `committed`. These commands work without a project and do not inspect or modify manifests, lockfiles, `node_modules`, staging, recovery journals, lifecycle keys, or unrecognized entries.
+
+Cache failures use stable error codes: `CACHE_BUSY` for competing publication or replay (with `retry: "after_contention"`), `CACHE_PATH_INVALID` for an invalid or symlinked store path, and `CACHE_MAINTENANCE_FAILED` for other inspection or cleanup failures. A cleanup failure after partial deletion reports `changes.state: "committed_cleanup_pending"`; all handled failures exit 1.
 
 Install and mutating lifecycle data contains `package_count` and `replayed`. Graphs, artifact URLs, raw metadata, credentials, source error chains, and uncontrolled diagnostic messages are excluded. There is no graph selection in version 1.
 

@@ -249,9 +249,25 @@ pub(crate) fn why_success(
     report: &crate::application::why::WhyReport,
     project: &std::path::Path,
 ) -> ExitCode {
+    let (result, status) = why_result(report, project);
+    emit(result, status)
+}
+
+fn why_result(
+    report: &crate::application::why::WhyReport,
+    project: &std::path::Path,
+) -> (Value, u8) {
     let outcome = OperationOutcome::unchanged(project);
-    let not_found = report.paths.is_empty();
-    let mut result = envelope("why", "success", Some(&outcome));
+    let not_found = report.paths.is_empty() && !report.truncated;
+    let mut result = envelope(
+        "why",
+        if report.truncated {
+            "partial"
+        } else {
+            "success"
+        },
+        Some(&outcome),
+    );
     result["data"] = json!({
         "package": &report.package,
         "paths": &report.paths,
@@ -259,7 +275,7 @@ pub(crate) fn why_success(
         "not_found": not_found,
         "graph_warnings": &report.warnings,
     });
-    emit(result, if not_found { 1 } else { 0 })
+    (result, u8::from(not_found))
 }
 
 pub(crate) fn why_failure(project: &std::path::Path, code: &str) -> ExitCode {
@@ -490,5 +506,24 @@ mod tests {
         let shortened = result["truncated_fields"].as_array().unwrap();
         assert!(shortened.contains(&json!("/project")));
         assert!(shortened.contains(&json!("/data/entries/0/identity")));
+    }
+
+    #[test]
+    fn truncated_empty_why_result_is_partial_and_successful() {
+        let report = crate::application::why::WhyReport {
+            schema_version: 1,
+            operation: "why",
+            outcome: "not_found",
+            effective_project: "project".into(),
+            changes: Vec::new(),
+            warnings: Vec::new(),
+            package: "missing".into(),
+            paths: Vec::new(),
+            truncated: true,
+        };
+        let (result, status) = why_result(&report, Path::new("project"));
+        assert_eq!(result["outcome"], "partial");
+        assert_eq!(result["data"]["not_found"], false);
+        assert_eq!(status, 0);
     }
 }

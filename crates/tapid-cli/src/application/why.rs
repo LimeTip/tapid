@@ -51,6 +51,7 @@ pub(crate) struct WhyStep {
 struct Edge {
     name: String,
     target: String,
+    kind: &'static str,
 }
 
 #[derive(Clone)]
@@ -149,7 +150,9 @@ pub(crate) fn explain(
     } else {
         Vec::new()
     };
-    let outcome = if state.paths.is_empty() {
+    let outcome = if state.truncated {
+        "partial"
+    } else if state.paths.is_empty() {
         "not_found"
     } else {
         "success"
@@ -174,6 +177,27 @@ fn direct_roots(
 ) -> Result<Vec<Root>, OperationalError> {
     let kinds = direct_dependency_kinds(manifest);
     if !lock.root_bindings().is_empty() {
+        let typed_keys = lock
+            .packages_typed()
+            .map_err(OperationalError::from)?
+            .into_iter()
+            .map(|(key, _)| key)
+            .chain(
+                lock.workspace_packages_typed()
+                    .map_err(OperationalError::from)?
+                    .into_iter()
+                    .map(|(key, _)| key),
+            )
+            .collect::<Vec<_>>();
+        let config = crate::registry::RegistryConfig::load(project_dir)
+            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+        crate::application::replay::replay_root_keys_with_config(
+            lock,
+            manifest,
+            &typed_keys,
+            &config,
+        )
+        .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
         return Ok(lock
             .root_bindings()
             .iter()
@@ -312,7 +336,7 @@ fn direct_dependency_kinds(manifest: &PackageManifest) -> BTreeMap<String, Strin
 }
 
 fn graph(lock: &Lockfile) -> Result<BTreeMap<String, Vec<Edge>>, OperationalError> {
-    let mut graph = BTreeMap::new();
+    let mut graph: BTreeMap<String, Vec<Edge>> = BTreeMap::new();
     for (key, package) in lock.packages_typed().map_err(OperationalError::from)? {
         graph.insert(
             key.to_string(),
@@ -322,6 +346,7 @@ fn graph(lock: &Lockfile) -> Result<BTreeMap<String, Vec<Edge>>, OperationalErro
                 .map(|(name, target)| Edge {
                     name: name.clone(),
                     target: target.clone(),
+                    kind: "dependency",
                 })
                 .collect(),
         );
@@ -338,9 +363,34 @@ fn graph(lock: &Lockfile) -> Result<BTreeMap<String, Vec<Edge>>, OperationalErro
                 .map(|(name, target)| Edge {
                     name: name.clone(),
                     target: target.clone(),
+                    kind: "dependency",
                 })
                 .collect(),
         );
+    }
+    let keys = graph
+        .keys()
+        .filter_map(|key| key.parse::<LockfilePackageKey>().ok())
+        .collect::<Vec<_>>();
+    for source in keys.clone() {
+        let peer_context = crate::context::parse_peer(&source.peer_context)
+            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+        for (name, version) in peer_context.entries() {
+            let Some(target) = keys.iter().find(|candidate| {
+                candidate.source == source.source
+                    && candidate.name == *name
+                    && candidate.version == *version
+            }) else {
+                continue;
+            };
+            if let Some(edges) = graph.get_mut(&source.to_string()) {
+                edges.push(Edge {
+                    name: name.to_string(),
+                    target: target.to_string(),
+                    kind: "peer",
+                });
+            }
+        }
     }
     Ok(graph)
 }
@@ -404,7 +454,7 @@ fn search_paths(
         path.push(WhyStep {
             key: edge.target.clone(),
             via: Some(edge.name.clone()),
-            edge_kind: Some("dependency".to_owned()),
+            edge_kind: Some(edge.kind.to_owned()),
             source_kind,
         });
         search_paths(
@@ -452,10 +502,12 @@ mod tests {
                     Edge {
                         name: "middle".into(),
                         target: middle.clone(),
+                        kind: "dependency",
                     },
                     Edge {
                         name: "target-v2".into(),
                         target: target_two.clone(),
+                        kind: "dependency",
                     },
                 ],
             ),
@@ -465,10 +517,12 @@ mod tests {
                     Edge {
                         name: "root".into(),
                         target: root.clone(),
+                        kind: "dependency",
                     },
                     Edge {
                         name: "target-v1".into(),
                         target: target_one.clone(),
+                        kind: "dependency",
                     },
                 ],
             ),
@@ -477,6 +531,7 @@ mod tests {
                 vec![Edge {
                     name: "target-v2".into(),
                     target: target_two.clone(),
+                    kind: "dependency",
                 }],
             ),
             (target_two.clone(), Vec::new()),
@@ -519,13 +574,14 @@ mod tests {
     #[test]
     fn traversal_caps_path_results_and_marks_the_report_truncated() {
         let root = package_key("root", "1.0.0");
-        let mut graph = BTreeMap::new();
+        let mut graph: BTreeMap<String, Vec<Edge>> = BTreeMap::new();
         let mut edges = Vec::new();
         for version in 0..=MAX_PATHS {
             let target = package_key("target", &format!("1.0.{version}"));
             edges.push(Edge {
                 name: format!("target-{version}"),
                 target: target.clone(),
+                kind: "dependency",
             });
             graph.insert(target, Vec::new());
         }

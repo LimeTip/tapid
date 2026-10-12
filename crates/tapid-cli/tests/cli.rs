@@ -6282,13 +6282,29 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
 }
 
 #[test]
-fn why_reports_direct_peer_dependency_as_a_distinct_root_edge() {
+fn why_traverses_a_persisted_peer_edge_without_treating_manifest_peer_as_a_root() {
+    use tapid_core::PeerContext;
     use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
 
-    let project = tapid_test_support::TempProject::new("why-direct-peer").unwrap();
-    let manifest = br#"{"name":"demo","version":"1.0.0","peerDependencies":{"peer":"1.0.0"}}"#;
+    let project = tapid_test_support::TempProject::new("why-persisted-peer-edge").unwrap();
+    let manifest = br#"{"name":"demo","version":"1.0.0","dependencies":{"plugin":"1.0.0"},"peerDependencies":{"peer":"1.0.0"}}"#;
     project.write("package.json", manifest).unwrap();
     let mut lock = lock_for_manifest(std::str::from_utf8(manifest).unwrap());
+    let peer_context =
+        PeerContext::default().with("peer".parse().unwrap(), "1.0.0".parse().unwrap());
+    let plugin = LockedPackage::new_with_context_and_provenance(
+        "https://registry.npmjs.org",
+        "plugin",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        (
+            &peer_context,
+            &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+        ),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
     let peer = LockedPackage::new_with_provenance(
         "https://registry.npmjs.org",
         "peer",
@@ -6298,12 +6314,12 @@ fn why_reports_direct_peer_dependency_as_a_distinct_root_edge() {
         RegistryIntegrityProvenance::RegistryDeclared,
     )
     .unwrap();
-    let peer_key = peer.key();
-    lock.insert_packages([peer]).unwrap();
-    lock.set_roots([peer_key.clone()]).unwrap();
+    let plugin_key = plugin.key();
+    lock.insert_packages([plugin, peer]).unwrap();
+    lock.set_roots([plugin_key.clone()]).unwrap();
     lock.set_root_bindings(std::collections::BTreeMap::from([(
-        "peer".to_owned(),
-        peer_key,
+        "plugin".to_owned(),
+        plugin_key,
     )]))
     .unwrap();
     project
@@ -6312,15 +6328,13 @@ fn why_reports_direct_peer_dependency_as_a_distinct_root_edge() {
 
     let text = run(project.path(), &["why", "peer"]);
     assert!(text.status.success());
-    assert!(String::from_utf8_lossy(&text.stdout).contains("peerDependencies"));
+    assert!(String::from_utf8_lossy(&text.stdout).contains("peer (peer)"));
 
     let json = run(project.path(), &["why", "peer", "--json"]);
     assert!(json.status.success());
     let result: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(
-        result["data"]["paths"][0]["steps"][0]["edgeKind"],
-        "peerDependencies"
-    );
+    assert_eq!(result["data"]["paths"][0]["steps"][1]["edgeKind"], "peer");
+    assert_eq!(result["data"]["paths"][0]["steps"][1]["via"], "peer");
     assert_eq!(result["changes"]["state"], "unchanged");
     assert_eq!(
         fs::read(project.path().join("package.json")).unwrap(),
@@ -6373,6 +6387,114 @@ fn why_rejects_a_legacy_root_outside_the_manifest_version_range() {
     assert_eq!(
         fs::read(project.path().join("tapid.lock")).unwrap(),
         lock_bytes.as_bytes()
+    );
+}
+
+#[test]
+fn why_rejects_a_stale_recorded_root_binding() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-stale-root-binding").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"^2.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let app = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "app",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let app_key = app.key();
+    lock.insert_packages([app]).unwrap();
+    lock.set_roots([app_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "app".to_owned(),
+        app_key,
+    )]))
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+
+    let output = run(project.path(), &["why", "app", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["outcome"], "failure");
+    assert_eq!(result["errors"][0]["code"], "LOCKFILE_INVALID");
+}
+
+#[test]
+fn why_reports_an_incomplete_empty_search_as_success() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-truncated-empty").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"package-0":"1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut packages = (0..=129)
+        .map(|index| {
+            LockedPackage::new_with_provenance(
+                "https://registry.npmjs.org",
+                &format!("package-{index}"),
+                "1.0.0",
+                &format!("sha512-{}==", "A".repeat(86)),
+                &format!("sha256-{:064x}", index),
+                RegistryIntegrityProvenance::RegistryDeclared,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let keys = packages.iter().map(LockedPackage::key).collect::<Vec<_>>();
+    for index in 0..129 {
+        packages[index]
+            .add_dependency(&format!("package-{}", index + 1), &keys[index + 1])
+            .unwrap();
+    }
+    let root_key = packages[0].key();
+    lock.insert_packages(packages).unwrap();
+    lock.set_roots([root_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "package-0".to_owned(),
+        root_key,
+    )]))
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+
+    let output = run(project.path(), &["why", "missing"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No complete path to 'missing' was found before the search safety bound"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("result is incomplete"), "{stdout}");
+}
+
+#[test]
+fn why_confirmed_absent_package_still_exits_one() {
+    let project = tapid_test_support::TempProject::new("why-confirmed-absent").unwrap();
+    let manifest = br#"{"name":"demo","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    project
+        .write(
+            "tapid.lock",
+            lock_for_manifest(std::str::from_utf8(manifest).unwrap())
+                .to_json()
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+
+    let output = run(project.path(), &["why", "missing"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("No path to 'missing' was found in the resolved dependency graph.")
     );
 }
 
