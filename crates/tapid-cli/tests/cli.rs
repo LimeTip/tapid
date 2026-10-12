@@ -6327,3 +6327,154 @@ fn why_reports_direct_peer_dependency_as_a_distinct_root_edge() {
         manifest
     );
 }
+
+#[test]
+fn why_rejects_a_legacy_root_outside_the_manifest_version_range() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-stale-legacy-root").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"^2.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut app = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "app",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let target = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "target",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "b".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    app.add_dependency("target", &target.key()).unwrap();
+    let app_key = app.key();
+    lock.insert_packages([app, target]).unwrap();
+    lock.set_roots([app_key]).unwrap();
+    let lock_bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+
+    let output = run(project.path(), &["why", "target", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["outcome"], "failure");
+    assert_eq!(result["errors"][0]["code"], "LOCKFILE_INVALID");
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_bytes.as_bytes()
+    );
+}
+
+#[test]
+fn why_reports_a_deterministic_path_from_a_direct_root_without_mutation() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-transitive").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut app = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "app",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let target = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "target",
+        "2.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "b".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    app.add_dependency("target", &target.key()).unwrap();
+    let app_key = app.key();
+    lock.insert_packages([app, target]).unwrap();
+    lock.set_roots([app_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "app".to_owned(),
+        app_key,
+    )]))
+    .unwrap();
+    let lock_bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+    let before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let text = run(project.path(), &["why", "target"]);
+    assert!(text.status.success());
+    assert!(String::from_utf8_lossy(&text.stdout).contains("dependencies (app)"));
+    assert!(String::from_utf8_lossy(&text.stdout).contains("dependency (target)"));
+    let json = run(project.path(), &["why", "target", "--json"]);
+    assert!(json.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        result["data"]["paths"][0]["steps"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+}
+
+#[test]
+fn why_reconstructs_only_manifest_matching_roots_and_reports_nested_instances() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-legacy-roots").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"foo":"^1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let foo_one = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "foo",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "1".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let foo_two = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "foo",
+        "2.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "2".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let root_key = foo_one.key();
+    lock.insert_packages([foo_one, foo_two]).unwrap();
+    lock.set_roots([root_key]).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("rootBindings");
+    project
+        .write("tapid.lock", serde_json::to_vec(&value).unwrap().as_slice())
+        .unwrap();
+    let output = run(project.path(), &["--json", "why", "foo"]);
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let paths = result["data"]["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 1);
+    assert!(
+        paths[0]["steps"][0]["key"]
+            .as_str()
+            .unwrap()
+            .contains("|foo@1.0.0|")
+    );
+}
