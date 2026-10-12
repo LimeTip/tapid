@@ -200,19 +200,15 @@ fn direct_roots(
                 .map(|(key, _)| key),
         )
         .collect::<Vec<_>>();
-    let roots = if !lock.roots().is_empty() {
-        lock.roots().to_vec()
-    } else {
-        let config = crate::registry::RegistryConfig::load(project_dir)
-            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-        crate::application::replay::replay_root_keys_with_config(
-            lock,
-            manifest,
-            &typed_keys,
-            &config,
-        )
-        .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?
-    };
+    let config = crate::registry::RegistryConfig::load(project_dir)
+        .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+    let roots = crate::application::replay::replay_root_keys_with_config(
+        lock,
+        manifest,
+        &typed_keys,
+        &config,
+    )
+    .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
     let mut result = Vec::new();
     for key in roots {
         let parsed = key

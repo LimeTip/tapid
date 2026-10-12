@@ -5552,6 +5552,47 @@ fn lifecycle_workspace_symlink_escape_preserves_external_project() {
 }
 
 #[test]
+fn why_rejects_legacy_root_outside_manifest_version_range() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-stale-legacy-root").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"^2.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut app = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "app",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let target = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "target",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "b".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    app.add_dependency("target", &target.key()).unwrap();
+    let app_key = app.key();
+    lock.insert_packages([app, target]).unwrap();
+    lock.set_roots([app_key]).unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+
+    let output = run(project.path(), &["why", "target", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["outcome"], "failure");
+    assert_eq!(result["errors"][0]["code"], "LOCKFILE_INVALID");
+}
+
+#[test]
 fn why_reports_a_deterministic_path_from_a_direct_root_without_mutation() {
     use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
 
