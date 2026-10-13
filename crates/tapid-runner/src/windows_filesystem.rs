@@ -707,7 +707,12 @@ fn verify_effective_filesystem_access(
                 );
             }
         }
-        targets.push((path, desired, metadata.is_dir()));
+        targets.push((
+            path,
+            desired,
+            metadata.is_dir(),
+            metadata.permissions().readonly(),
+        ));
     }
 
     struct Token(HANDLE);
@@ -792,7 +797,7 @@ fn verify_effective_filesystem_access(
         ));
     }
     let duplicate = Token(duplicate);
-    for (path, desired, _) in targets
+    for (path, desired, _, _) in targets
         .iter()
         .filter(|_| grant.access() == FilesystemAccess::Write)
     {
@@ -861,7 +866,7 @@ fn verify_effective_filesystem_access(
         ));
     }
     let _impersonation = Impersonation;
-    for (path, desired, is_directory) in targets {
+    for (path, mut desired, is_directory, readonly) in targets {
         if grant.access() == FilesystemAccess::Write && is_directory {
             // Directory creation rights were checked against the child token above. Opening
             // a directory adds listing/synchronization requirements that write-only grants
@@ -869,6 +874,12 @@ fn verify_effective_filesystem_access(
             continue;
         }
         let wide = runtime_path_wide(&path);
+        if grant.access() == FilesystemAccess::Write && readonly && !is_directory {
+            // The full DACL authority was checked above. The readonly attribute prevents
+            // data writes until the child clears it using its granted WRITE_ATTRIBUTES.
+            use windows_sys::Win32::Storage::FileSystem::{FILE_APPEND_DATA, FILE_WRITE_DATA};
+            desired &= !(FILE_WRITE_DATA | FILE_APPEND_DATA);
+        }
         // Keep the existing kernel-open check for files and runtime access. Explicit write
         // integrity labels are independently rejected by the read-only topology preflight.
         let handle = unsafe {
@@ -934,9 +945,9 @@ impl WindowsFilesystemGrants {
                 // Windows' default SystemTemp directory).
                 if grant.access != FilesystemAccess::Write
                     && grant.source() == crate::execution::FilesystemGrantSource::BackendRuntime
-                    && system_root
-                        .as_ref()
-                        .is_some_and(|root| grant.path.starts_with(root))
+                    && system_root.as_ref().is_some_and(|root| {
+                        grant.path == *root || grant.path == root.join("System32")
+                    })
                 {
                     continue;
                 }

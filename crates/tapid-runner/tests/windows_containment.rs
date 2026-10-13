@@ -771,6 +771,121 @@ fn windows_node_runtime_can_resolve_a_script_file_inside_the_project_grant() {
 }
 
 #[test]
+fn windows_standard_node_ipc_and_ancestor_metadata_preserve_denied_authority() {
+    use tapid_runner::{FilesystemAccess, FilesystemGrantKind, FilesystemGrantSource};
+    let project = tapid_test_support::TempProject::new("stock-node-compatibility").unwrap();
+    let runtime = tapid_test_support::TempProject::new("stock-node-runtime").unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
+    let node = runtime.path().join("node.exe");
+    fs::copy(
+        std::env::var_os("TAPID_TEST_NODE").expect("standard Node is required"),
+        &node,
+    )
+    .unwrap();
+    let node = fs::canonicalize(node).unwrap();
+    windows_acl::initialize_inheritance(&root);
+    windows_acl::initialize_inheritance(node.parent().unwrap());
+    fs::write(root.join("readable.txt"), b"read control").unwrap();
+    let before = windows_acl::read_acl(&root);
+    let script = r#"
+const fs=require('node:fs'),p=require('node:path'),a=require('node:assert/strict'),{spawn}=require('node:child_process');
+const root=p.parse(process.cwd()).root;
+a.equal(fs.lstatSync(root).isDirectory(),true);
+a.throws(()=>fs.readdirSync(root),e=>['EPERM','EACCES'].includes(e.code));
+a.equal(fs.realpathSync.native('readable.txt'),p.join(process.cwd(),'readable.txt'));
+a.throws(()=>fs.writeFileSync('readable.txt','overwrite'),e=>['EPERM','EACCES'].includes(e.code));
+const leaf="const fs=require('node:fs'),p=require('node:path'),a=require('node:assert/strict');a.equal(fs.lstatSync(p.parse(process.cwd()).root).isDirectory(),true);a.equal(fs.realpathSync.native('readable.txt'),p.join(process.cwd(),'readable.txt'));process.on('message',m=>process.send(m,()=>process.disconnect()));";
+let finished=0;
+for(let i=0;i<2;i++) {
+ const c=spawn(process.execPath,['-e',leaf],{stdio:['ignore','inherit','inherit','ipc']});let replied=false;
+ c.on('error',e=>{console.error(e);process.exit(2);});
+ c.on('message',m=>{a.equal(m,'roundtrip');replied=true;});
+ c.on('exit',n=>{a.equal(n,0);a.equal(replied,true);if(++finished===2)console.log('STOCK_NODE_COMPAT_OK');});
+ c.send('roundtrip');
+}
+"#;
+    let request = ExecutionRequest::builder(node.as_os_str())
+        .args([OsString::from("-e"), OsString::from(script)])
+        .executable_search_path(node.parent().unwrap())
+        .trusted_node_runtime(&node)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(5), Some(4096), Some(4), None).unwrap(),
+            true,
+            false,
+        ))
+        .build()
+        .unwrap();
+    let outcome = execute(&request).expect("standard Node must execute with containment");
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "{}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert_eq!(outcome.stdout(), b"STOCK_NODE_COMPAT_OK\n");
+    assert!(
+        outcome
+            .enforcement()
+            .resolved_filesystem()
+            .grants()
+            .iter()
+            .any(|grant| grant.access() == FilesystemAccess::ReadMetadata
+                && grant.kind() == FilesystemGrantKind::ExactDirectory
+                && grant.source() == FilesystemGrantSource::BackendRuntime
+                && grant.path().parent().is_none())
+    );
+    assert_eq!(
+        fs::read(root.join("readable.txt")).unwrap(),
+        b"read control"
+    );
+    assert_eq!(windows_acl::read_acl(&root), before);
+    let outside = tapid_test_support::TempProject::new("stock-node-outside").unwrap();
+    let sentinel = outside.path().join("private.txt");
+    fs::write(&sentinel, b"outside control").unwrap();
+    let sentinel_js = sentinel
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
+    fs::write(root.join("stock.test.mjs"),format!(r#"
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';import {{spawn}} from 'node:child_process';
+test('default test isolation retains ancestor capabilities and denied access',async()=>{{
+ assert.equal(fs.lstatSync(path.parse(process.cwd()).root).isDirectory(),true);
+ assert.throws(()=>fs.readFileSync('{sentinel_js}'),e=>['EPERM','EACCES'].includes(e.code));
+ const leaf="const fs=require('node:fs'),p=require('node:path'),a=require('node:assert/strict');a.equal(fs.lstatSync(p.parse(process.cwd()).root).isDirectory(),true);a.equal(fs.realpathSync.native('readable.txt'),p.join(process.cwd(),'readable.txt'));process.on('message',m=>process.send(m,()=>process.disconnect()));";
+ const middle="const {{spawn}}=require('node:child_process');const c=spawn(process.execPath,['-e',"+JSON.stringify(leaf)+"],{{stdio:['ignore','inherit','inherit','ipc']}});let replied=false;c.on('message',m=>{{if(m!=='grandchild')process.exit(7);replied=true;}});c.on('error',()=>process.exit(8));c.on('exit',n=>process.exit(n||(!replied?9:0)));c.send('grandchild');";
+ await new Promise((resolve,reject)=>{{const c=spawn(process.execPath,['-e',middle],{{stdio:'inherit'}});c.on('error',reject);c.on('exit',n=>n?reject(new Error('grandchild exit '+n)):resolve());}});
+}});
+"#)).unwrap();
+    let request = ExecutionRequest::builder(node.as_os_str())
+        .args(["--test", "stock.test.mjs"])
+        .executable_search_path(node.parent().unwrap())
+        .trusted_node_runtime(&node)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(5), Some(4096), Some(4), None).unwrap(),
+            true,
+            false,
+        ))
+        .build()
+        .unwrap();
+    let outcome = execute(&request).unwrap();
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "{}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert!(
+        String::from_utf8_lossy(outcome.stdout())
+            .lines()
+            .any(|line| line.ends_with(" pass 1"))
+    );
+    assert_eq!(fs::read(sentinel).unwrap(), b"outside control");
+    assert_eq!(windows_acl::read_acl(&root), before);
+}
+
+#[test]
 fn windows_node_runtime_can_be_launched_directly_when_test_runtime_is_configured() {
     let Some(local_app_data) = std::env::var_os("TAPID_TEST_LOCALAPPDATA").map(PathBuf::from)
     else {

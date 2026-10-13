@@ -232,6 +232,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Compile tapid-runner and Windows tests for MSVC
+        env:
+          TAPID_WINDOWS_COMPAT_COMPILE_ONLY: '1'
         run: cargo check -p tapid-runner --tests --target x86_64-pc-windows-msvc --locked
 
   nextest:

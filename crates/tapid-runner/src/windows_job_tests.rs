@@ -934,7 +934,7 @@ fn restoring_appcontainer_grant_preserves_concurrent_dacl_changes() {
         .collect::<Vec<_>>();
     let acl = String::from_utf16_lossy(&utf16);
     assert!(
-        acl.contains(";;;BU)"),
+        acl.contains("(A;OICI;FR;;;BU)"),
         "restoring Tapid's ACE discarded the concurrent ACE: {acl}"
     );
     std::fs::remove_file(saved_acl).unwrap();

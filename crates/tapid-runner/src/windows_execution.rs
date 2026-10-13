@@ -24,6 +24,9 @@ use std::time::Duration;
 
 const INTERNAL_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 
+#[path = "windows_compatibility.rs"]
+pub(super) mod compatibility;
+
 #[cfg(test)]
 #[path = "windows_node.rs"]
 mod node_compatibility;
@@ -464,6 +467,15 @@ fn add_node_appcontainer_options(environment: &mut std::collections::BTreeMap<Os
 pub(super) struct PlatformBackend;
 
 impl ExecutionBackend for PlatformBackend {
+    fn runtime_filesystem_additions(
+        &self,
+        request: &ExecutionRequest,
+    ) -> Result<super::RuntimeFilesystemAdditions, ExecutionError> {
+        match request.windows_compatibility.as_ref() {
+            Some(binding) => binding.additions(),
+            None => Ok(super::RuntimeFilesystemAdditions::default()),
+        }
+    }
     fn containment_support(&self, request: &ExecutionRequest) -> ContainmentSupport {
         containment_support(request)
     }
@@ -516,11 +528,8 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
             EnforcementDimensions::none(),
         );
     }
-    let evidence = evidence_for_dimensions(
-        &requested,
-        "AppContainer token without network capabilities, explicit path ACL grants, suspended Job Object assignment, and bounded standard-handle capture",
-        &[],
-    );
+    let mechanism = windows_launch_mechanism(request);
+    let evidence = evidence_for_dimensions(&requested, &mechanism, &[]);
     ContainmentSupport::supported(
         backend,
         requested.clone(),
@@ -529,6 +538,19 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
         evidence.clone(),
         evidence,
     )
+}
+
+fn windows_launch_mechanism(request: &ExecutionRequest) -> String {
+    let mut mechanism = String::from(
+        "AppContainer token without network capabilities, explicit path ACL grants, suspended Job Object assignment, and bounded standard-handle capture",
+    );
+    if request.windows_compatibility.is_some() {
+        mechanism = format!(
+            "AppContainer/Job, ACLs, bounded stdio; {}",
+            compatibility::describe()
+        );
+    }
+    mechanism
 }
 
 struct WindowsExecutionLifecycle<'a> {
@@ -565,10 +587,17 @@ impl<'a> WindowsExecutionLifecycle<'a> {
         self.appcontainer = Some(WindowsAppContainer::create()?);
         let appcontainer = self.appcontainer.as_ref().expect("AppContainer prepared");
         trace_windows_stage("prepare: filesystem grants");
-        self.grants = Some(WindowsFilesystemGrants::apply(
-            appcontainer,
-            &self.preflight.bindings.receipt().grants,
-        )?);
+        let grants = self.preflight.bindings.receipt().grants;
+        let acl_grants = grants
+            .into_iter()
+            .filter(|grant| {
+                !(self.request.windows_compatibility.is_some()
+                    && grant.source() == super::FilesystemGrantSource::BackendRuntime
+                    && grant.access() == super::FilesystemAccess::ReadMetadata
+                    && grant.kind() == super::FilesystemGrantKind::ExactDirectory)
+            })
+            .collect::<Vec<_>>();
+        self.grants = Some(WindowsFilesystemGrants::apply(appcontainer, &acl_grants)?);
         trace_windows_stage("prepare: Job Object");
         self.job = Some(WindowsJob::new(
             &self.preflight.policy.limits,
@@ -610,6 +639,9 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             .assign_suspended_process(
                 self.child.as_ref().expect("child created").process_handle(),
             )?;
+        if let Some(binding) = self.request.windows_compatibility.as_ref() {
+            binding.install(self.child.as_ref().expect("child created").process_handle())?;
+        }
         let readers = pipes.into_parent_readers()?;
         self.capture = Some(WindowsOutputCapture::start(
             readers,
@@ -752,11 +784,8 @@ impl ExecutionLifecycle for WindowsExecutionLifecycle<'_> {
             }
         };
         let enforced = self.preflight.support.requested().clone();
-        let established = evidence_for_dimensions(
-            &enforced,
-            "AppContainer token and SID verified before resume; filesystem ACL grants applied; Job Object membership and limits verified; stdout/stderr drained with a combined byte cap",
-            &[],
-        );
+        let mechanism = windows_launch_mechanism(&self.request);
+        let established = evidence_for_dimensions(&enforced, &mechanism, &[]);
         let receipt = EnforcementReceipt::checked(self.preflight, enforced, established)?;
         Ok(Box::new(ExecutionOutcome::checked(
             termination,

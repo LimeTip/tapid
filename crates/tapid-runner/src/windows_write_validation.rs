@@ -889,6 +889,42 @@ mod tests {
     }
 
     #[test]
+    fn readonly_files_do_not_reject_declared_write_authority() {
+        let fixture = Fixture::new();
+        let file = fixture.target.join("readonly.txt");
+        std::fs::write(&file, b"ordinary").unwrap();
+        let original_permissions = std::fs::metadata(&file).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions).unwrap();
+        let before = read_acl(&file);
+        for (path, kind) in [
+            (&file, FilesystemGrantKind::ExactFile),
+            (&fixture.target, FilesystemGrantKind::DirectorySubtree),
+        ] {
+            let grant = write_grant(path, kind);
+            validate_existing_write_grants(std::slice::from_ref(&grant)).unwrap();
+            let mut container =
+                crate::execution::windows_job::WindowsAppContainer::create().unwrap();
+            let result = crate::execution::windows_job::WindowsFilesystemGrants::apply(
+                &container,
+                &[traversal_grant(&fixture.root), grant],
+            );
+            match result {
+                Ok(mut applied) => applied.restore().unwrap(),
+                Err(error) => {
+                    container.cleanup().unwrap();
+                    panic!("readonly file rejected write authority: {error}");
+                }
+            }
+            container.cleanup().unwrap();
+            assert_eq!(read_acl(&file), before);
+            assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+        }
+        std::fs::set_permissions(&file, original_permissions).unwrap();
+    }
+
+    #[test]
     fn missing_components_are_not_materialized() {
         let fixture = Fixture::new();
         let missing = fixture.target.join("missing").join("nested");

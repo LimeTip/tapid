@@ -1422,7 +1422,9 @@ impl std::error::Error for ExecutionError {}
 pub fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
     #[cfg(target_os = "macos")]
     return platform_backend::execute_reserved(request);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    return platform_backend::compatibility::execute(request);
+    #[cfg(not(any(target_os = "macos", windows)))]
     execute_with_backend(request, &platform_backend::PlatformBackend)
 }
 

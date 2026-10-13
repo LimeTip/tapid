@@ -129,3 +129,5 @@ On a Linux host with the documented namespace privileges and cgroup delegation, 
 TAPID_REQUIRE_MANAGED_ASSERTIONS=1 python3 scripts/dev.py test -p tapid-runner --lib --locked
 TAPID_REQUIRE_MANAGED_ASSERTIONS=1 python3 scripts/dev.py test -p tapid --test cli --locked approved_dependency_lifecycle_builds_native_output_and_replays_exactly
 ```
+
+The post-8cf2c84 Windows implementation embeds a Cargo-built stock-Node compatibility DLL and delegates finite exact read-attributes-only ancestor handles without shared ACL mutation. Integrated Node 22/24 IPC, native realpath, default test isolation and grandchild controls pass on Home build 26200; the real news-site CLI build/test pass. Receipts now disclose component identity and delegated metadata grants. Broader Windows and exact-head CI acceptance remain separate; see the updated Windows scope and standard-Node design.
