@@ -330,6 +330,110 @@ fn racing_wrong_artifact_is_rejected_and_preserved() {
 }
 
 #[test]
+fn racing_matching_artifact_is_accepted_and_preserved() {
+    let root = root();
+    let store = Store::new(&root);
+    let bytes = b"expected artifact";
+    let expected = digest(bytes);
+    let destination = store.artifact_path(&expected);
+    struct CompetingReader {
+        destination: PathBuf,
+        bytes: &'static [u8],
+        inserted: bool,
+    }
+    impl Read for CompetingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.inserted {
+                fs::create_dir_all(self.destination.parent().unwrap())?;
+                fs::write(&self.destination, self.bytes)?;
+                self.inserted = true;
+            }
+            let count = self.bytes.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&self.bytes[..count]);
+            self.bytes = &self.bytes[count..];
+            Ok(count)
+        }
+    }
+    let result = store.ingest(
+        &expected,
+        CompetingReader {
+            destination: destination.clone(),
+            bytes,
+            inserted: false,
+        },
+    );
+    assert!(matches!(result, Ok(IngestResult::AlreadyPresent(_))));
+    assert_eq!(fs::read(&destination).unwrap(), bytes);
+    assert!(
+        !root
+            .join(".staging")
+            .read_dir()
+            .unwrap()
+            .any(|entry| entry.is_ok())
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn racing_symlink_artifact_is_rejected_and_preserved() {
+    let root = root();
+    let store = Store::new(&root);
+    let bytes = b"expected artifact";
+    let expected = digest(bytes);
+    let destination = store.artifact_path(&expected);
+    fs::create_dir_all(&root).unwrap();
+    let target = root.join("target");
+    fs::write(&target, bytes).unwrap();
+    struct CompetingReader {
+        destination: PathBuf,
+        target: PathBuf,
+        bytes: &'static [u8],
+        inserted: bool,
+    }
+    impl Read for CompetingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.inserted {
+                fs::create_dir_all(self.destination.parent().unwrap())?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&self.target, &self.destination)?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_file(&self.target, &self.destination)?;
+                self.inserted = true;
+            }
+            let count = self.bytes.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&self.bytes[..count]);
+            self.bytes = &self.bytes[count..];
+            Ok(count)
+        }
+    }
+    let result = store.ingest(
+        &expected,
+        CompetingReader {
+            destination: destination.clone(),
+            target: target.clone(),
+            bytes,
+            inserted: false,
+        },
+    );
+    assert!(result.is_err());
+    assert!(
+        fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(target).unwrap(), bytes);
+    assert!(
+        !root
+            .join(".staging")
+            .read_dir()
+            .unwrap()
+            .any(|entry| entry.is_ok())
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn transaction_stages_tree_without_publishing_it_and_rolls_back_on_drop() {
     let root = root();
     let _ = fs::remove_dir_all(&root);
