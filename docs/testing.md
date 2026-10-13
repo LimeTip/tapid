@@ -17,6 +17,9 @@ Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, o
 ## Development prerequisites and build reuse
 
 Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later.
+The Rust toolchain must provide `cargo`, `rustc`, `rustfmt`, and Clippy on `PATH`.
+On Windows with the MSVC toolchain, also install the Visual Studio C++ Build
+Tools and a Windows SDK. See the [Rust Windows prerequisites](https://rust-lang.github.io/rustup/installation/windows-msvc.html).
 Rust owns package-manager behavior and security verification. TypeScript owns
 developer scripts, release orchestration, documentation checks, and website/consumer
 fixtures. Python and uv are not required to develop or test Tapid.
