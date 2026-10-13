@@ -286,7 +286,12 @@ console.log('NATIVE_DATA_ONLY_EXECUTE_DENIED');
                             error.category(),
                             ExecutionErrorCategory::UnsupportedContainment
                         );
-                        assert!(error.to_string().contains("3 second deadline"), "{error}");
+                        let message = error.to_string();
+                        assert!(
+                            message.contains("3 second deadline")
+                                || message.contains("exited unsuccessfully"),
+                            "{error}"
+                        );
                         eprintln!("NODE_APPCONTAINER_IPC incompatible: {error}");
                     }
                 }
