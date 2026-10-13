@@ -283,6 +283,53 @@ fn existing_wrong_bytes_are_rejected() {
 }
 
 #[test]
+fn racing_wrong_artifact_is_rejected_and_preserved() {
+    let root = root();
+    let store = Store::new(&root);
+    let expected_bytes = b"expected artifact";
+    let expected = digest(expected_bytes);
+    let destination = store.artifact_path(&expected);
+    struct CompetingReader {
+        destination: PathBuf,
+        bytes: &'static [u8],
+        inserted: bool,
+    }
+    impl Read for CompetingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.inserted {
+                fs::create_dir_all(self.destination.parent().unwrap())?;
+                fs::write(&self.destination, b"attacker bytes")?;
+                self.inserted = true;
+            }
+            let count = self.bytes.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&self.bytes[..count]);
+            self.bytes = &self.bytes[count..];
+            Ok(count)
+        }
+    }
+
+    let result = store.ingest(
+        &expected,
+        CompetingReader {
+            destination: destination.clone(),
+            bytes: expected_bytes,
+            inserted: false,
+        },
+    );
+
+    assert!(matches!(result, Err(IngestError::DigestMismatch { .. })));
+    assert_eq!(fs::read(&destination).unwrap(), b"attacker bytes");
+    assert!(
+        !root
+            .join(".staging")
+            .read_dir()
+            .unwrap()
+            .any(|entry| entry.is_ok())
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn transaction_stages_tree_without_publishing_it_and_rolls_back_on_drop() {
     let root = root();
     let _ = fs::remove_dir_all(&root);

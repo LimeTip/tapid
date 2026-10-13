@@ -397,22 +397,9 @@ impl Store {
         }
         let _guard = lock_file(&self.root, true)?;
         let destination = self.artifact_path(expected);
-        if let Ok(metadata) = fs::symlink_metadata(&destination) {
-            if !metadata.file_type().is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "artifact path is not a regular file",
-                )
-                .into());
-            }
-            let actual = digest_file(&destination)?;
-            if actual == expected.as_str() {
-                return Ok(IngestResult::AlreadyPresent(destination));
-            }
-            return Err(IngestError::DigestMismatch {
-                expected: expected.clone(),
-                actual,
-            });
+        if fs::symlink_metadata(&destination).is_ok() {
+            verify_existing_artifact(&destination, expected)?;
+            return Ok(IngestResult::AlreadyPresent(destination));
         }
         if destination.exists() {
             return Err(io::Error::new(
@@ -455,6 +442,7 @@ impl Store {
                     Ok(IngestResult::Activated(destination.clone()))
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    verify_existing_artifact(&destination, expected)?;
                     Ok(IngestResult::AlreadyPresent(destination.clone()))
                 }
                 Err(error) => Err(error.into()),
@@ -771,6 +759,25 @@ fn create_staging_file(dir: &Path) -> io::Result<(PathBuf, File)> {
         io::ErrorKind::AlreadyExists,
         "unable to allocate staging file",
     ))
+}
+
+fn verify_existing_artifact(path: &Path, expected: &ArtifactDigest) -> Result<(), IngestError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "artifact path is not a regular file",
+        )
+        .into());
+    }
+    let actual = digest_file(path)?;
+    if actual != expected.as_str() {
+        return Err(IngestError::DigestMismatch {
+            expected: expected.clone(),
+            actual,
+        });
+    }
+    Ok(())
 }
 
 fn digest_file(path: &Path) -> io::Result<String> {
