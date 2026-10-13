@@ -415,7 +415,7 @@ fn racing_symlink_artifact_is_rejected_and_preserved() {
             inserted: false,
         },
     );
-    assert!(result.is_err());
+    assert!(matches!(result, Err(IngestError::Io(_))));
     assert!(
         fs::symlink_metadata(&destination)
             .unwrap()
@@ -446,6 +446,50 @@ fn no_follow_artifact_open_rejects_symlink() {
     let result = open_artifact_without_following_links(&link);
 
     assert!(result.is_err());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn fifo_artifact_open_does_not_block() {
+    use std::os::unix::ffi::OsStrExt;
+
+    if let Some(path) = std::env::var_os("TAPID_TEST_FIFO_PATH") {
+        let expected = digest(b"artifact");
+        let result = verify_existing_artifact(Path::new(&path), &expected);
+        assert!(
+            matches!(result, Err(IngestError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists)
+        );
+        return;
+    }
+
+    let root = root();
+    fs::create_dir_all(&root).unwrap();
+    let fifo = root.join("artifact-fifo");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("tests::fifo_artifact_open_does_not_block")
+        .env("TAPID_TEST_FIFO_PATH", &fifo)
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "FIFO verification subprocess failed: {status}"
+            );
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("opening a FIFO artifact blocked instead of rejecting it");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let _ = fs::remove_dir_all(root);
 }
 
