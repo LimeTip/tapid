@@ -123,6 +123,32 @@ pub unsafe extern "system" fn TapidInitialize(parameter: *mut c_void) -> u32 {
     if !setup.valid() {
         return 0;
     }
+    let mut setup = setup.clone();
+    let input = if setup.stdin_eof == 0 {
+        unsafe { GetStdHandle((-10i32) as u32) }
+    } else {
+        setup.stdin_eof
+    };
+    // The runner closes the stdin pipe writer before launch. Pin only a verified EOF
+    // pipe; a live input stream or character device cannot become ignored stdin.
+    if !closed_stdin(input) {
+        return 0;
+    }
+    if setup.stdin_eof == 0
+        && unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                input,
+                GetCurrentProcess(),
+                &mut setup.stdin_eof,
+                0,
+                0,
+                2,
+            )
+        } == 0
+    {
+        return 0;
+    }
     // Verify the kernel capability boundary, independently of import hooks. A file
     // metadata handle must not duplicate into listing/data, execution, mutation,
     // deletion, ownership or DACL editing authority in the contained recipient.
@@ -156,10 +182,27 @@ pub unsafe extern "system" fn TapidInitialize(parameter: *mut c_void) -> u32 {
             }
         }
     }
-    if SETUP.set(setup.clone()).is_err() {
+    if SETUP.set(setup).is_err() {
         return 0;
     }
     u32::from(install_imports().is_ok())
+}
+
+fn closed_stdin(input: Handle) -> bool {
+    input != 0
+        && input != -1
+        && unsafe { GetFileType(input) } == 3
+        && unsafe {
+            PeekNamedPipe(
+                input,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        } == 0
+        && unsafe { GetLastError() } == 109
 }
 
 #[unsafe(no_mangle)]
@@ -202,6 +245,33 @@ type FileFn =
     unsafe extern "system" fn(*const u8, u32, u32, *const c_void, u32, u32, Handle) -> Handle;
 type WFileFn =
     unsafe extern "system" fn(*const u16, u32, u32, *const c_void, u32, u32, Handle) -> Handle;
+
+#[repr(C)]
+struct StdioAttributes {
+    length: u32,
+    descriptor: *const c_void,
+    inherit: i32,
+}
+
+fn ignored_stdin_request(
+    path: &[u16],
+    access: u32,
+    share: u32,
+    creation: u32,
+    flags: u32,
+    template: Handle,
+    attributes: &StdioAttributes,
+) -> bool {
+    same_path(path, &[78, 85, 76])
+        && access == 0x120089
+        && share == 3
+        && creation == 3
+        && flags == 0
+        && template == 0
+        && attributes.length as usize == std::mem::size_of::<StdioAttributes>()
+        && attributes.descriptor.is_null()
+        && attributes.inherit == 1
+}
 unsafe extern "system" fn create_pipe(
     name: *const u8,
     a: u32,
@@ -346,6 +416,30 @@ unsafe extern "system" fn create_wfile(
             path.push(unit);
         }
         if same_path(&path, &[78, 85, 76]) {
+            if error == 5
+                && !attributes.is_null()
+                && ignored_stdin_request(&path, access, share, creation, flags, template, unsafe {
+                    &*attributes.cast::<StdioAttributes>()
+                })
+                && let Some(setup) = SETUP.get()
+            {
+                let mut duplicate = 0;
+                if unsafe {
+                    DuplicateHandle(
+                        GetCurrentProcess(),
+                        setup.stdin_eof,
+                        GetCurrentProcess(),
+                        &mut duplicate,
+                        0,
+                        1,
+                        2,
+                    )
+                } != 0
+                {
+                    unsafe { SetLastError(0) };
+                    return duplicate;
+                }
+            }
             report_failure("open null stdio", error);
         }
     }
@@ -414,6 +508,20 @@ fn initialize_child(child: &ProcessInfo) -> Result<(), u32> {
     let (base, size) = load_component(child.process, &path)?;
     let offset = export_offset(module, c"TapidInitialize", size)?;
     let mut setup = SETUP.get().ok_or(87u32)?.clone();
+    if unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            setup.stdin_eof,
+            child.process,
+            &mut setup.stdin_eof,
+            0,
+            0,
+            2,
+        )
+    } == 0
+    {
+        return Err(unsafe { GetLastError() });
+    }
     for entry in &mut setup.entries[..setup.count as usize] {
         let mut handle = 0;
         if unsafe {
@@ -522,6 +630,160 @@ unsafe extern "system" fn create_process(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ignored_stdin_requires_exact_libuv_request() {
+        let attributes = StdioAttributes {
+            length: std::mem::size_of::<StdioAttributes>() as u32,
+            descriptor: ptr::null(),
+            inherit: 1,
+        };
+        let nul = [78, 85, 76];
+        assert!(ignored_stdin_request(
+            &nul,
+            0x120089,
+            3,
+            3,
+            0,
+            0,
+            &attributes
+        ));
+        for access in [0, 0x120196, 0x1f01ff] {
+            assert!(!ignored_stdin_request(
+                &nul,
+                access,
+                3,
+                3,
+                0,
+                0,
+                &attributes
+            ));
+        }
+        assert!(!ignored_stdin_request(
+            &[67, 58, 92],
+            0x120089,
+            3,
+            3,
+            0,
+            0,
+            &attributes
+        ));
+        assert!(!ignored_stdin_request(
+            &nul,
+            0x120089,
+            3,
+            3,
+            0x02000000,
+            0,
+            &attributes
+        ));
+        let noninherit = StdioAttributes {
+            inherit: 0,
+            ..attributes
+        };
+        assert!(!ignored_stdin_request(
+            &nul,
+            0x120089,
+            3,
+            3,
+            0,
+            0,
+            &noninherit
+        ));
+    }
+
+    #[test]
+    fn denied_null_input_reuses_eof_without_device_or_write_authority() {
+        // The unoptimized test build moves the fixed capability frame through OnceLock.
+        // Production builds compile this component with optimization enabled.
+        std::thread::Builder::new()
+            .stack_size(4 * 1024 * 1024)
+            .spawn(|| {
+                use windows_sys::Win32::{Foundation::CloseHandle, System::Pipes::CreatePipe};
+                unsafe extern "system" fn denied(
+                    _: *const u16,
+                    _: u32,
+                    _: u32,
+                    _: *const c_void,
+                    _: u32,
+                    _: u32,
+                    _: Handle,
+                ) -> Handle {
+                    unsafe { SetLastError(5) };
+                    -1
+                }
+                let (mut reader, mut writer) = (0, 0);
+                assert_ne!(
+                    unsafe { CreatePipe(&mut reader, &mut writer, ptr::null(), 0) },
+                    0
+                );
+                unsafe { CloseHandle(writer) };
+                let mut setup = Setup::empty();
+                setup.stdin_eof = reader;
+                assert!(SETUP.set(setup).is_ok());
+                let original = WFILE.swap(denied as *const () as usize, Ordering::AcqRel);
+                let attributes = StdioAttributes {
+                    length: std::mem::size_of::<StdioAttributes>() as u32,
+                    descriptor: ptr::null(),
+                    inherit: 1,
+                };
+                let nul = [78, 85, 76, 0];
+                let duplicate = unsafe {
+                    create_wfile(
+                        nul.as_ptr(),
+                        0x120089,
+                        3,
+                        (&attributes as *const StdioAttributes).cast(),
+                        3,
+                        0,
+                        0,
+                    )
+                };
+                assert_ne!(duplicate, -1);
+                assert!(closed_stdin(duplicate));
+                assert_eq!(
+                    unsafe {
+                        create_wfile(
+                            nul.as_ptr(),
+                            0x120196,
+                            3,
+                            (&attributes as *const StdioAttributes).cast(),
+                            3,
+                            0,
+                            0,
+                        )
+                    },
+                    -1
+                );
+                assert_eq!(
+                    unsafe { create_wfile(nul.as_ptr(), 0x120089, 3, ptr::null(), 3, 0, 0) },
+                    -1
+                );
+                WFILE.store(original, Ordering::Release);
+                unsafe {
+                    CloseHandle(duplicate);
+                    CloseHandle(reader);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn only_closed_pipe_can_supply_ignored_stdin() {
+        use windows_sys::Win32::{Foundation::CloseHandle, System::Pipes::CreatePipe};
+        let (mut reader, mut writer) = (0, 0);
+        assert_ne!(
+            unsafe { CreatePipe(&mut reader, &mut writer, ptr::null(), 0) },
+            0
+        );
+        assert!(!closed_stdin(reader));
+        unsafe { CloseHandle(writer) };
+        assert!(closed_stdin(reader));
+        unsafe { CloseHandle(reader) };
+        assert!(!closed_stdin(0));
+        assert!(!closed_stdin(-1));
+    }
     #[test]
     fn only_generated_uv_prefix_is_translated() {
         assert_eq!(

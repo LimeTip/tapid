@@ -42,6 +42,16 @@ pub struct MemoryInfo {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     pub fn GetCurrentProcess() -> Handle;
+    pub fn GetStdHandle(which: u32) -> Handle;
+    pub fn GetFileType(handle: Handle) -> u32;
+    pub fn PeekNamedPipe(
+        handle: Handle,
+        buffer: *mut c_void,
+        length: u32,
+        read: *mut u32,
+        available: *mut u32,
+        remaining: *mut u32,
+    ) -> i32;
     pub fn GetModuleHandleW(name: *const u16) -> Handle;
     pub fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut Handle) -> i32;
     pub fn GetModuleFileNameW(module: Handle, path: *mut u16, length: u32) -> u32;

@@ -131,3 +131,5 @@ TAPID_REQUIRE_MANAGED_ASSERTIONS=1 python3 scripts/dev.py test -p tapid --test c
 ```
 
 The post-8cf2c84 Windows implementation embeds a Cargo-built stock-Node compatibility DLL and delegates finite exact read-attributes-only ancestor handles without shared ACL mutation. Integrated Node 22/24 IPC, native realpath, default test isolation and grandchild controls pass on Home build 26200; the real news-site CLI build/test pass. Receipts now disclose component identity and delegated metadata grants. Broader Windows and exact-head CI acceptance remain separate; see the updated Windows scope and standard-Node design.
+
+Hosted Windows Server testing exposed a denied `NUL` open while libuv prepares ignored stdin. The adapter now reuses a pinned copy of Tapid's existing closed stdin pipe for that exact read-only stdio request. It verifies EOF before initialization and propagates the non-inherited handle to suspended descendants. Live pipes, ordinary opens, and null-device writes are excluded; no system device ACL or filesystem grant changes. A forced-denial regression checks the fallback locally; hosted acceptance remains required.

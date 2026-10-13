@@ -1,5 +1,5 @@
 //! Fixed-size preparation data shared by the host and its embedded native component.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_ANCESTORS: usize = 64;
 pub const MAX_PATH_UNITS: usize = 1024;
 pub const METADATA_ACCESS: u32 = 0x80;
@@ -47,7 +47,7 @@ mod tests {
         assert!(!invalid.valid());
         if cfg!(target_pointer_width = "64") {
             assert_eq!(std::mem::size_of::<MetadataEntry>(), 2064);
-            assert_eq!(std::mem::size_of::<Setup>(), 8 + MAX_ANCESTORS * 2064);
+            assert_eq!(std::mem::size_of::<Setup>(), 16 + MAX_ANCESTORS * 2064);
         }
     }
 }
@@ -57,6 +57,7 @@ mod tests {
 pub struct Setup {
     pub version: u32,
     pub count: u32,
+    pub stdin_eof: isize,
     pub entries: [MetadataEntry; MAX_ANCESTORS],
 }
 
@@ -69,6 +70,7 @@ impl Setup {
 
     pub fn valid(&self) -> bool {
         self.version == VERSION
+            && self.stdin_eof != -1
             && self.count > 0
             && self.count as usize <= MAX_ANCESTORS
             && self.entries[..self.count as usize].iter().all(|entry| {

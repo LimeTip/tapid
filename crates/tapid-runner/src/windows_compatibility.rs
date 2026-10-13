@@ -294,7 +294,7 @@ impl Binding {
 pub(super) fn describe() -> String {
     use sha2::{Digest, Sha256};
     format!(
-        "Node DLL sha256:{:x}; suspended-child propagation; exact ancestor handles (READ_ATTRIBUTES, non-inherited); NT realpath; no ancestor ACL writes",
+        "Node DLL sha256:{:x}; suspended-child propagation; exact ancestor handles (READ_ATTRIBUTES, non-inherited); EOF stdin; NT realpath; no ancestor ACL writes",
         Sha256::digest(COMPONENT)
     )
 }
