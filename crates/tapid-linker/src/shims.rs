@@ -400,10 +400,6 @@ mod tests {
                 b"MZ native executable".as_slice(),
                 Some(ShimInterpreter::Direct),
             ),
-            (
-                b"console.log('workspace tool');\n".as_slice(),
-                Some(ShimInterpreter::Direct),
-            ),
             (b"#!/usr/bin/env node --inspect\n".as_slice(), None),
             (b"#!/usr/bin/env node&evil\n".as_slice(), None),
             (b"#!/bin/sh\n".as_slice(), None),

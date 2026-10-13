@@ -2186,7 +2186,7 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
     fs::create_dir_all(member.join("bin")).unwrap();
     fs::write(
         member.join("package.json"),
-        r#"{"name":"tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js","workspace-direct":"bin/direct.js"}}"#,
+        r#"{"name":"tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js","workspace-direct":"bin/direct.exe"}}"#,
     )
     .unwrap();
     let bin_source = member.join("bin/tool.js");
@@ -2195,8 +2195,17 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
         "#!/usr/bin/env node\nconsole.log('workspace tool');\n",
     )
     .unwrap();
-    let direct_source = member.join("bin/direct.js");
-    fs::write(&direct_source, "console.log('workspace direct');\n").unwrap();
+    let direct_source = member.join("bin/direct.exe");
+    #[cfg(windows)]
+    let system_root = std::env::var_os("SystemRoot").unwrap();
+    #[cfg(windows)]
+    fs::copy(
+        PathBuf::from(&system_root).join("System32/cmd.exe"),
+        &direct_source,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    fs::write(&direct_source, "#!/bin/sh\nexit 7\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2266,6 +2275,16 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
         let direct_shim = dir.join("node_modules/.bin/workspace-direct");
         assert!(direct_shim.with_extension("cmd").is_file());
         assert!(direct_shim.with_extension("ps1").is_file());
+        let executed = Command::new(PathBuf::from(&system_root).join("System32/cmd.exe"))
+            .args(["/D", "/C"])
+            .arg(direct_shim.with_extension("cmd"))
+            .args(["/D", "/C", "exit", "7"])
+            .env_clear()
+            .env("SystemRoot", &system_root)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(executed.status.code(), Some(7), "{executed:?}");
     }
     cleanup(dir);
 }
