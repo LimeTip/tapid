@@ -334,7 +334,23 @@ unsafe extern "system" fn create_wfile(
             return if succeeded != 0 { duplicate } else { -1 };
         }
     }
-    unsafe { original(name, access, share, attributes, creation, flags, template) }
+    let result = unsafe { original(name, access, share, attributes, creation, flags, template) };
+    let error = unsafe { GetLastError() };
+    if result == -1 && !name.is_null() {
+        let mut path = Vec::new();
+        for index in 0..4 {
+            let unit = unsafe { *name.add(index) };
+            if unit == 0 {
+                break;
+            }
+            path.push(unit);
+        }
+        if same_path(&path, &[78, 85, 76]) {
+            report_failure("open null stdio", error);
+        }
+    }
+    unsafe { SetLastError(error) };
+    result
 }
 
 type FinalFn = unsafe extern "system" fn(Handle, *mut u16, u32, u32) -> u32;
