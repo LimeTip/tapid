@@ -94,6 +94,16 @@ valid_version() {
   '
 }
 
+valid_path_block() {
+  awk -v begin="$PATH_MARKER_BEGIN" -v end="$PATH_MARKER_END" -v line="$path_line" '
+    $0 == begin { if (state != 0 || seen) bad=1; state=1; seen=1; next }
+    $0 == end { if (state != 2) bad=1; state=0; next }
+    state == 1 { if ($0 != line) bad=1; state=2; next }
+    state == 2 { bad=1 }
+    END { exit (bad || state != 0 || !seen) }
+  ' "$1"
+}
+
 configure_path() {
   [ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0
   shell_name="${SHELL-}"; shell_name="${shell_name##*/}"
@@ -118,7 +128,7 @@ configure_path() {
   end_count="$(grep -Fxc "$PATH_MARKER_END" "$PATH_RC" || true)"
   [ "$begin_count" -eq 0 ] && [ "$end_count" -eq 0 ] || {
     [ "$begin_count" -eq 1 ] && [ "$end_count" -eq 1 ] || return 1
-    grep -Fqx "$path_line" "$PATH_RC" || return 1
+    valid_path_block "$PATH_RC" || return 1
   }
   if [ "$begin_count" -eq 0 ]; then
     if grep -Fqx "$path_line" "$PATH_RC"; then
@@ -126,12 +136,15 @@ configure_path() {
       return 0
     fi
     path_tmp="$(mktemp "$PATH_RC.tapid.XXXXXX")" || return 1
-    if ! { cat "$PATH_RC"; printf '%s\n%s\n%s\n' "$PATH_MARKER_BEGIN" "$path_line" "$PATH_MARKER_END"; } > "$path_tmp"; then
+    if ! {
+      cat "$PATH_RC" &&
+      { [ ! -s "$PATH_RC" ] || [ "$(tail -c 1 "$PATH_RC" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || printf '\n'; } &&
+      printf '%s\n%s\n%s\n' "$PATH_MARKER_BEGIN" "$path_line" "$PATH_MARKER_END"
+    } > "$path_tmp" || ! valid_path_block "$path_tmp"; then
       rm -f "$path_tmp"; return 1
     fi
     mv -f "$path_tmp" "$PATH_RC" || { rm -f "$path_tmp"; return 1; }
   fi
-  grep -Fqx "$PATH_MARKER_BEGIN" "$PATH_RC" && grep -Fqx "$PATH_MARKER_END" "$PATH_RC" || return 1
   PATH="$INSTALL_DIR${PATH:+:$PATH}"; export PATH; PATH_UPDATED=1
 }
 
