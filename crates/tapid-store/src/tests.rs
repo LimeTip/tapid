@@ -384,6 +384,24 @@ fn racing_symlink_artifact_is_rejected_and_preserved() {
     fs::create_dir_all(&root).unwrap();
     let target = root.join("target");
     fs::write(&target, bytes).unwrap();
+    #[cfg(windows)]
+    {
+        let probe = root.join("symlink-probe");
+        match std::os::windows::fs::symlink_file(&target, &probe) {
+            Ok(()) => fs::remove_file(probe).unwrap(),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+                ) =>
+            {
+                eprintln!("skipping symlink race case: symlink creation unavailable: {error}");
+                let _ = fs::remove_dir_all(root);
+                return;
+            }
+            Err(error) => panic!("failed to probe Windows symlink support: {error}"),
+        }
+    }
     struct CompetingReader {
         destination: PathBuf,
         target: PathBuf,
