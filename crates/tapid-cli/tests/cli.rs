@@ -2275,10 +2275,13 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
         let direct_shim = dir.join("node_modules/.bin/workspace-direct");
         assert!(direct_shim.with_extension("cmd").is_file());
         assert!(direct_shim.with_extension("ps1").is_file());
+        use std::os::windows::process::CommandExt;
+        let command = direct_shim.with_extension("cmd");
+        let command = command.to_string_lossy();
+        let command = command.strip_prefix(r"\\?\").unwrap_or(&command);
         let executed = Command::new(PathBuf::from(&system_root).join("System32/cmd.exe"))
-            .args(["/D", "/C"])
-            .arg(direct_shim.with_extension("cmd"))
-            .args(["/D", "/C", "exit", "7"])
+            .args(["/D", "/S", "/C"])
+            .raw_arg(format!("\"\"{command}\" /D /C exit 7\""))
             .env_clear()
             .env("SystemRoot", &system_root)
             .current_dir(&dir)
