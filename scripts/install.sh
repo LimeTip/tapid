@@ -94,6 +94,7 @@ valid_version() {
   '
 }
 
+# Require exactly one ordered managed PATH block without changing surrounding bytes.
 valid_path_block() {
   awk -v begin="$PATH_MARKER_BEGIN" -v end="$PATH_MARKER_END" -v line="$path_line" '
     $0 == begin { if (state != 0 || seen) bad=1; state=1; seen=1; next }
@@ -104,6 +105,7 @@ valid_path_block() {
   ' "$1"
 }
 
+# Stage and verify an owned startup profile before atomically adding Tapid's PATH block.
 configure_path() {
   [ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0
   shell_name="${SHELL-}"; shell_name="${shell_name##*/}"
@@ -136,11 +138,13 @@ configure_path() {
       return 0
     fi
     path_tmp="$(mktemp "$PATH_RC.tapid.XXXXXX")" || return 1
+    if ! cat "$PATH_RC" > "$path_tmp" || ! cmp -s "$PATH_RC" "$path_tmp"; then
+      rm -f "$path_tmp"; return 1
+    fi
     if ! {
-      cat "$PATH_RC" &&
-      { [ ! -s "$PATH_RC" ] || [ "$(tail -c 1 "$PATH_RC" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || printf '\n'; } &&
+      { [ ! -s "$path_tmp" ] || [ "$(tail -c 1 "$path_tmp" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || printf '\n'; } &&
       printf '%s\n%s\n%s\n' "$PATH_MARKER_BEGIN" "$path_line" "$PATH_MARKER_END"
-    } > "$path_tmp" || ! valid_path_block "$path_tmp"; then
+    } >> "$path_tmp" || ! valid_path_block "$path_tmp"; then
       rm -f "$path_tmp"; return 1
     fi
     mv -f "$path_tmp" "$PATH_RC" || { rm -f "$path_tmp"; return 1; }

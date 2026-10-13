@@ -51,6 +51,7 @@ pub(crate) fn clean(args: CleanArgs, json: bool) -> ExitCode {
     execute(args.store_dir, true, args.options.yes, json, "clean")
 }
 
+/// Inspect or evict published cache entries and render human or versioned JSON results.
 fn execute(
     root: Option<PathBuf>,
     clean: bool,

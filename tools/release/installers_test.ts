@@ -23,10 +23,12 @@ const shell = platform === "win32"
   ? await run("where.exe", ["sh"]).then(result => result.stdout.trim().split(/\r?\n/)[0], () => undefined)
   : "/bin/sh";
 const shellOptions = { skip: shell ? false : "POSIX shell is unavailable" };
+/** Convert native fixture paths for the POSIX shell used to execute installer artifacts. */
 function shellPath(path: string): string {
   return platform === "win32" ? path.replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive) => "/" + drive.toLowerCase()) : path;
 }
 
+/** Build an isolated release fixture with generated installers and local download/verifier stubs. */
 async function fixture() {
   if (!shell) throw new Error("POSIX shell is unavailable");
   const directory = await mkdtemp(join(tmpdir(), "tapid-record-installer-"));
@@ -526,12 +528,12 @@ for (const copyStatus of [0, 1]) {
     const f = await fixture();
     const home = join(f.directory, "home");
     const profile = join(home, ".profile");
-    const original = '# preserve user configuration\n';
+    const original = '# preserve user configuration\nexport EXISTING=1\n';
     try {
       await mkdir(home);
       await writeFile(profile, original);
-      // Simulate an incomplete copy, including a successful exit, to exercise staged validation.
-      await writeFile(join(f.directory, "bin", "cat"), `#!/bin/sh\ncase "$1" in */.profile) printf "%s" "incomplete copy"; exit ${copyStatus} ;; *) exec /bin/cat "$@" ;; esac\n`);
+      // A truncated prefix ending in LF must be rejected even if copying reports success.
+      await writeFile(join(f.directory, "bin", "cat"), `#!/bin/sh\ncase "$1" in */.profile) printf '# preserve user configuration\\n'; exit ${copyStatus} ;; *) exec /bin/cat "$@" ;; esac\n`);
       await chmod(join(f.directory, "bin", "cat"), 0o755);
       await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
       equal(await readFile(profile, "utf8"), original);
