@@ -1,5 +1,6 @@
 //! Fixed-size preparation data shared by the host and its embedded native component.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
+pub const REOPEN_POLICY_MASK: u32 = 1 | 2 | 4 | 8 | 0x10 | 0x20 | 0x100 | 0x10000;
 pub const MAX_ANCESTORS: usize = 64;
 pub const MAX_PATH_UNITS: usize = 1024;
 pub const METADATA_ACCESS: u32 = 0x80;
@@ -9,7 +10,7 @@ pub const METADATA_ACCESS: u32 = 0x80;
 pub struct MetadataEntry {
     pub handle: isize,
     pub length: u32,
-    pub reserved: u32,
+    pub allowed_reopen: u32,
     pub path: [u16; MAX_PATH_UNITS],
 }
 
@@ -37,7 +38,7 @@ mod tests {
             assert!(!invalid.valid());
         }
         let mut invalid = setup.clone();
-        invalid.entries[0].reserved = 1;
+        invalid.entries[0].allowed_reopen = 0x40000;
         assert!(!invalid.valid());
         let mut invalid = setup.clone();
         invalid.entries[0].path[3] = 1;
@@ -76,7 +77,7 @@ impl Setup {
             && self.entries[..self.count as usize].iter().all(|entry| {
                 let length = entry.length as usize;
                 entry.handle != 0
-                    && entry.reserved == 0
+                    && entry.allowed_reopen & !REOPEN_POLICY_MASK == 0
                     && entry.handle != -1
                     && (3..MAX_PATH_UNITS).contains(&length)
                     && entry.path[length] == 0

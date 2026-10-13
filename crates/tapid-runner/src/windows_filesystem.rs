@@ -87,7 +87,11 @@ pub struct WindowsPathAcl {
     appcontainer_sid: Box<[u32]>,
 }
 
-fn write_permissions(is_directory: bool, subtree: bool, descendant: bool) -> u32 {
+pub(in crate::execution) fn write_permissions(
+    is_directory: bool,
+    subtree: bool,
+    descendant: bool,
+) -> u32 {
     use windows_sys::Win32::Storage::FileSystem::*;
     if descendant {
         FILE_GENERIC_WRITE | DELETE

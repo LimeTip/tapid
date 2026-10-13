@@ -14,17 +14,22 @@ use std::{
     ffi::{CString, c_void},
     ptr,
     sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicIsize, AtomicUsize, Ordering},
     },
 };
 
+static IMPORT_LOCK: Mutex<()> = Mutex::new(());
 static SELF: AtomicIsize = AtomicIsize::new(0);
 static SETUP: OnceLock<Setup> = OnceLock::new();
 static PIPE: AtomicUsize = AtomicUsize::new(0);
 static FILE: AtomicUsize = AtomicUsize::new(0);
 static WFILE: AtomicUsize = AtomicUsize::new(0);
 static PROCESS: AtomicUsize = AtomicUsize::new(0);
+static LOAD_EX_W: AtomicUsize = AtomicUsize::new(0);
+static LOAD_W: AtomicUsize = AtomicUsize::new(0);
+static LOAD_A: AtomicUsize = AtomicUsize::new(0);
+static LOAD_EX_A: AtomicUsize = AtomicUsize::new(0);
 static FINAL: AtomicUsize = AtomicUsize::new(0);
 
 #[link(name = "kernel32")]
@@ -62,18 +67,51 @@ fn read_memory(base: usize, offset: usize, length: usize) -> Option<Vec<u8>> {
     Some(unsafe { std::slice::from_raw_parts(start as *const u8, length) }.to_vec())
 }
 
-fn install_imports() -> Result<(), u32> {
-    let base = unsafe { GetModuleHandleW(ptr::null()) } as usize;
-    let entries =
-        imports::imports(|offset, length| read_memory(base, offset, length)).ok_or(193u32)?;
+struct SystemExport {
+    name: &'static [u8],
+    wrapper: usize,
+    direct: usize,
+}
+
+fn system_exports() -> Result<Vec<SystemExport>, u32> {
     let kernel: Vec<_> = "kernel32.dll\0".encode_utf16().collect();
     let kernel = unsafe { GetModuleHandleW(kernel.as_ptr()) };
-    let image = module_path(0)?;
-    let name = image
-        .rsplit(|unit| *unit == 92 || *unit == 47)
-        .next()
-        .ok_or(193u32)?;
-    let node = same_path(name, &"node.exe".encode_utf16().collect::<Vec<_>>());
+    let direct: Vec<_> = "kernelbase.dll\0".encode_utf16().collect();
+    let direct = unsafe { GetModuleHandleW(direct.as_ptr()) };
+    if kernel == 0 || direct == 0 {
+        return Err(193);
+    }
+    [
+        b"CreateProcessW".as_slice(),
+        b"CreateNamedPipeA",
+        b"CreateFileA",
+        b"CreateFileW",
+        b"GetFinalPathNameByHandleW",
+        b"LoadLibraryExW",
+        b"LoadLibraryW",
+        b"LoadLibraryA",
+        b"LoadLibraryExA",
+    ]
+    .into_iter()
+    .map(|name| {
+        let symbol = CString::new(name).map_err(|_| 193u32)?;
+        let wrapper = unsafe { GetProcAddress(kernel, symbol.as_ptr().cast()) } as usize;
+        let direct = unsafe { GetProcAddress(direct, symbol.as_ptr().cast()) } as usize;
+        if wrapper == 0 {
+            return Err(193);
+        }
+        Ok(SystemExport {
+            name,
+            wrapper,
+            direct,
+        })
+    })
+    .collect()
+}
+
+fn patch_module(base: usize, node: bool, exports: &[SystemExport]) -> Result<(), u32> {
+    let entries =
+        imports::imports(|offset, length| read_memory(base, offset, length)).ok_or(193u32)?;
     let mut patches = Vec::new();
     let mut kinds = 0;
     for entry in entries {
@@ -83,16 +121,37 @@ fn install_imports() -> Result<(), u32> {
             b"CreateFileA" if node => (create_file as *const () as usize, &FILE, 4),
             b"CreateFileW" if node => (create_wfile as *const () as usize, &WFILE, 8),
             b"GetFinalPathNameByHandleW" if node => (final_path as *const () as usize, &FINAL, 16),
+            b"LoadLibraryExW" => (load_ex_w as *const () as usize, &LOAD_EX_W, 0),
+            b"LoadLibraryW" => (load_w as *const () as usize, &LOAD_W, 0),
+            b"LoadLibraryA" => (load_a as *const () as usize, &LOAD_A, 0),
+            b"LoadLibraryExA" => (load_ex_a as *const () as usize, &LOAD_EX_A, 0),
             _ => continue,
         };
-        let symbol = CString::new(entry.name).map_err(|_| 193u32)?;
-        let expected = unsafe { GetProcAddress(kernel, symbol.as_ptr().cast()) } as usize;
-        if expected == 0 || entry.address != expected {
+        // API-set imports may resolve directly to KernelBase rather than Kernel32's
+        // public wrapper. Both must name the verified system export for this symbol.
+        let export = exports
+            .iter()
+            .find(|export| export.name == entry.name)
+            .ok_or(193u32)?;
+        let expected = export.wrapper;
+        let direct = export.direct;
+        if expected == 0
+            || (entry.address != expected
+                && entry.address != direct
+                && entry.address != replacement)
+        {
             return Err(193);
         }
         original.store(expected, Ordering::Release);
         kinds |= kind;
-        patches.push((base.checked_add(entry.offset).ok_or(193u32)?, replacement));
+        if entry.address == replacement {
+            continue;
+        }
+        let address = base.checked_add(entry.offset).ok_or(193u32)?;
+        if address % std::mem::align_of::<AtomicUsize>() != 0 {
+            return Err(193);
+        }
+        patches.push((address, replacement));
     }
     if node && kinds != 31 {
         return Err(193);
@@ -104,7 +163,7 @@ fn install_imports() -> Result<(), u32> {
         if unsafe { VirtualProtect(address as *mut c_void, 8, 4, &mut old) } == 0 {
             return Err(unsafe { GetLastError() });
         }
-        unsafe { (address as *mut usize).write_unaligned(replacement) };
+        unsafe { &*(address as *const AtomicUsize) }.store(replacement, Ordering::Release);
         let mut ignored = 0;
         if unsafe { VirtualProtect(address as *mut c_void, 8, old, &mut ignored) } == 0 {
             return Err(unsafe { GetLastError() });
@@ -113,6 +172,98 @@ fn install_imports() -> Result<(), u32> {
     Ok(())
 }
 
+struct ModulePin(Handle);
+impl Drop for ModulePin {
+    fn drop(&mut self) {
+        unsafe { FreeLibrary(self.0) };
+    }
+}
+
+fn install_imports() -> Result<(), u32> {
+    // Acquire every loader reference and resolve exports before IMPORT_LOCK. DllMain
+    // callbacks may reenter a hooked load while Windows owns the loader lock.
+    let main = unsafe { GetModuleHandleW(ptr::null()) } as usize;
+    let image = module_path(0)?;
+    let name = image
+        .rsplit(|unit| *unit == 92 || *unit == 47)
+        .next()
+        .ok_or(193u32)?;
+    let node = same_path(name, &"node.exe".encode_utf16().collect::<Vec<_>>());
+    let exports = system_exports()?;
+    let mut system = [0u16; 32768];
+    let length =
+        unsafe { GetSystemWindowsDirectoryW(system.as_mut_ptr(), system.len() as u32) } as usize;
+    if length == 0 || length + 1 >= system.len() {
+        return Err(193);
+    }
+    system[length] = 92;
+    let system = &system[..length + 1];
+    let mut modules = Vec::new();
+    for base in loaded_modules()? {
+        if base == SELF.load(Ordering::Acquire) as usize {
+            continue;
+        }
+        let mut pinned = 0;
+        if unsafe { GetModuleHandleExW(4, base as *const u16, &mut pinned) } == 0 {
+            return Err(unsafe { GetLastError() });
+        }
+        let pinned = ModulePin(pinned);
+        let path = module_path(pinned.0)?;
+        let path = path.strip_prefix(&[92, 92, 63, 92]).unwrap_or(&path);
+        if base != main && path.len() >= system.len() && same_path(&path[..system.len()], system) {
+            continue;
+        }
+        modules.push(pinned);
+    }
+    let result = {
+        let _guard = IMPORT_LOCK.lock().map_err(|_| 193u32)?;
+        modules.iter().try_for_each(|module| {
+            patch_module(
+                module.0 as usize,
+                node && module.0 as usize == main,
+                &exports,
+            )
+        })
+    };
+    // Drop references after unlocking: FreeLibrary may execute DLL detach callbacks.
+    drop(modules);
+    result
+}
+fn after_load(module: Handle, flags: u32, error: u32) -> Handle {
+    // Data/resource mappings cannot execute imports. Normal imports are patched before
+    // returning to the caller, including Node's subsequent N-API registration.
+    if module != 0 && flags & 0x63 == 0 && install_imports().is_err() {
+        report_failure("loaded module imports", 193);
+        unsafe { TerminateProcess(GetCurrentProcess(), 127) };
+        return 0;
+    }
+    unsafe { SetLastError(error) };
+    module
+}
+unsafe extern "system" fn load_ex_w(name: *const u16, file: Handle, flags: u32) -> Handle {
+    let original: unsafe extern "system" fn(*const u16, Handle, u32) -> Handle =
+        unsafe { std::mem::transmute(LOAD_EX_W.load(Ordering::Acquire)) };
+    let module = unsafe { original(name, file, flags) };
+    after_load(module, flags, unsafe { GetLastError() })
+}
+unsafe extern "system" fn load_w(name: *const u16) -> Handle {
+    let original: unsafe extern "system" fn(*const u16) -> Handle =
+        unsafe { std::mem::transmute(LOAD_W.load(Ordering::Acquire)) };
+    let module = unsafe { original(name) };
+    after_load(module, 0, unsafe { GetLastError() })
+}
+unsafe extern "system" fn load_ex_a(name: *const u8, file: Handle, flags: u32) -> Handle {
+    let original: unsafe extern "system" fn(*const u8, Handle, u32) -> Handle =
+        unsafe { std::mem::transmute(LOAD_EX_A.load(Ordering::Acquire)) };
+    let module = unsafe { original(name, file, flags) };
+    after_load(module, flags, unsafe { GetLastError() })
+}
+unsafe extern "system" fn load_a(name: *const u8) -> Handle {
+    let original: unsafe extern "system" fn(*const u8) -> Handle =
+        unsafe { std::mem::transmute(LOAD_A.load(Ordering::Acquire)) };
+    let module = unsafe { original(name) };
+    after_load(module, 0, unsafe { GetLastError() })
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn TapidInitialize(parameter: *mut c_void) -> u32 {
     if parameter.is_null() {
@@ -171,16 +322,17 @@ pub unsafe extern "system" fn TapidInitialize(parameter: *mut c_void) -> u32 {
                 return 0;
             }
         }
-        let path = ordinary_path(&entry.path[..entry.length as usize]);
-        if path.len() == 3 && path[1..] == [58, 92] {
-            for access in [1, 2, 4, 0x40000, 0x80000] {
-                let reopened = unsafe { ReOpenFile(entry.handle, access, 7, 0x02000000) };
-                if reopened != -1 {
-                    unsafe { CloseHandle(reopened) };
-                    return 0;
-                }
-            }
+    }
+    if has_undeclared_reopen(&setup, |handle, access| {
+        let reopened = unsafe { ReOpenFile(handle, access, 7, 0x02200000) };
+        if reopened == -1 {
+            false
+        } else {
+            unsafe { CloseHandle(reopened) };
+            true
         }
+    }) {
+        return 0;
     }
     if SETUP.set(setup).is_err() {
         return 0;
@@ -188,6 +340,29 @@ pub unsafe extern "system" fn TapidInitialize(parameter: *mut c_void) -> u32 {
     u32::from(install_imports().is_ok())
 }
 
+fn has_undeclared_reopen(setup: &Setup, mut reopen: impl FnMut(Handle, u32) -> bool) -> bool {
+    setup.entries[..setup.count as usize].iter().any(|entry| {
+        [1, 2, 4, 8, 0x10, 0x20, 0x100, 0x10000, 0x40000, 0x80000]
+            .into_iter()
+            .any(|access| entry.allowed_reopen & access == 0 && reopen(entry.handle, access))
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn non_root_reopen_is_checked_against_resolved_authority() {
+    let mut setup = Setup::empty();
+    setup.count = 2;
+    setup.entries[0].handle = 10;
+    setup.entries[1].handle = 20;
+    assert!(has_undeclared_reopen(&setup, |handle, access| handle == 20 && access == 1));
+    setup.entries[1].allowed_reopen = 1;
+    assert!(!has_undeclared_reopen(&setup, |handle, access| handle
+        == 20
+        && access == 1));
+    assert!(has_undeclared_reopen(&setup, |handle, access| handle == 20 && access == 2));
+    assert!(has_undeclared_reopen(&setup, |handle, access| handle == 20 && access == 0x40000));
+}
 fn closed_stdin(input: Handle) -> bool {
     input != 0
         && input != -1

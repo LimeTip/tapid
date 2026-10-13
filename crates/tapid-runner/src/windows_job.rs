@@ -442,6 +442,7 @@ mod filesystem;
 pub(super) use filesystem::WindowsFilesystemGrants;
 #[cfg(test)]
 pub(super) use filesystem::WindowsPathAcl;
+pub(super) use filesystem::write_permissions;
 
 #[path = "windows_process.rs"]
 mod process;

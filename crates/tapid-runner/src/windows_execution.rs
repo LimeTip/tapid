@@ -529,7 +529,14 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
         );
     }
     let mechanism = windows_launch_mechanism(request);
-    let evidence = evidence_for_dimensions(&requested, &mechanism, &[]);
+    let limitations: &[&str] = if request.windows_compatibility.is_some() {
+        &[
+            "Node compatibility covers application imports and normal LoadLibrary loads; system DLL internals, DLL initialization launches, manual mapping and dynamically resolved launch APIs are excluded",
+        ]
+    } else {
+        &[]
+    };
+    let evidence = evidence_for_dimensions(&requested, &mechanism, limitations);
     ContainmentSupport::supported(
         backend,
         requested.clone(),

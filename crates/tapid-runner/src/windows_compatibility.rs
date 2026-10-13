@@ -34,6 +34,7 @@ struct Metadata {
     path: PathBuf,
     file: fs::File,
     identity: (u32, u64),
+    allowed_reopen: u32,
 }
 
 #[derive(Debug)]
@@ -48,11 +49,9 @@ impl PartialEq for Binding {
     fn eq(&self, other: &Self) -> bool {
         self.path == other.path
             && self.metadata.len() == other.metadata.len()
-            && self
-                .metadata
-                .iter()
-                .zip(&other.metadata)
-                .all(|(a, b)| a.path == b.path && a.identity == b.identity)
+            && self.metadata.iter().zip(&other.metadata).all(|(a, b)| {
+                a.path == b.path && a.identity == b.identity && a.allowed_reopen == b.allowed_reopen
+            })
     }
 }
 impl Eq for Binding {}
@@ -195,10 +194,34 @@ impl Binding {
                 ));
             }
             let identity = crate::execution::request::windows_handle_identity(raw)?;
+            let mut allowed_reopen = 0;
+            for grant in policy.read.iter().chain(&policy.write) {
+                if path == grant.path
+                    || (grant.kind == FilesystemGrantKind::DirectorySubtree
+                        && path.starts_with(&grant.path))
+                {
+                    match grant.access {
+                        FilesystemAccess::Read => allowed_reopen |= 1 | 8 | 0x20,
+                        FilesystemAccess::ReadData => allowed_reopen |= 1,
+                        FilesystemAccess::Write => {
+                            allowed_reopen |= crate::execution::windows_job::write_permissions(
+                                true,
+                                grant.kind == FilesystemGrantKind::DirectorySubtree,
+                                path != grant.path,
+                            ) & protocol::REOPEN_POLICY_MASK
+                        }
+                        FilesystemAccess::ReadMetadata => allowed_reopen |= 8,
+                    }
+                }
+            }
+            if path == binding.directory {
+                allowed_reopen |= 1 | 8 | 0x20;
+            }
             binding.metadata.push(Metadata {
                 path,
                 file,
                 identity,
+                allowed_reopen,
             });
         }
         Ok(binding)
@@ -254,6 +277,7 @@ impl Binding {
             }
             let units = wide(source.path.as_os_str());
             target.length = (units.len() - 1) as u32;
+            target.allowed_reopen = source.allowed_reopen;
             target.path[..units.len()].copy_from_slice(&units);
             if unsafe {
                 DuplicateHandle(
@@ -294,7 +318,7 @@ impl Binding {
 pub(super) fn describe() -> String {
     use sha2::{Digest, Sha256};
     format!(
-        "Node DLL sha256:{:x}; suspended-child propagation; exact ancestor handles (READ_ATTRIBUTES, non-inherited); EOF stdin; NT realpath; no ancestor ACL writes",
+        "Node DLL sha256:{:x}; app-IAT child propagation; exact ancestor handles (READ_ATTRIBUTES, non-inherited); EOF stdin; NT realpath; no ancestor ACL writes",
         Sha256::digest(COMPONENT)
     )
 }

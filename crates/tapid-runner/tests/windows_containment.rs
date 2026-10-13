@@ -771,6 +771,87 @@ fn windows_node_runtime_can_resolve_a_script_file_inside_the_project_grant() {
 }
 
 #[test]
+fn windows_native_addon_launch_preserves_stock_node_metadata() {
+    let project = tapid_test_support::TempProject::new("native-addon-launch").unwrap();
+    let runtime = tapid_test_support::TempProject::new("native-addon-runtime").unwrap();
+    let ancestor = fs::canonicalize(project.path()).unwrap();
+    let root = ancestor.join("project");
+    fs::create_dir(&root).unwrap();
+    windows_acl::initialize_inheritance(&ancestor);
+    let acl = Command::new(
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("icacls.exe"),
+    )
+    .arg(&ancestor)
+    .args(["/grant", "*S-1-15-2-1:(RX)"])
+    .output()
+    .unwrap();
+    assert!(acl.status.success(), "{acl:?}");
+    let node = runtime.path().join("node.exe");
+    fs::copy(std::env::var_os("TAPID_TEST_NODE").unwrap(), &node).unwrap();
+    let node = fs::canonicalize(node).unwrap();
+    windows_acl::initialize_inheritance(&root);
+    windows_acl::initialize_inheritance(node.parent().unwrap());
+    let source =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/windows_node_launcher.rs");
+    let mut compiler = Command::new("rustc");
+    compiler
+        .args([
+            "--crate-type",
+            "cdylib",
+            "--edition",
+            "2024",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "panic=abort",
+        ])
+        .arg(source)
+        .arg("-o")
+        .arg(root.join("launcher.node"));
+    if let Ok(flags) = std::env::var("RUSTFLAGS") {
+        compiler.args(flags.split_whitespace());
+    }
+    let compiled = compiler.output().unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let script = format!(
+        r#"
+const assert = require('node:assert/strict');
+const addon = require('./launcher.node');
+assert.equal(addon.reopen({:?}, ""), 0, "metadata handle must not reopen with listing rights");
+const code = "require('node:fs').lstatSync(require('node:path').parse(process.cwd()).root);const child=require('node:child_process').fork('unused', {{execArgv:['-e', 'process.send(7)'],stdio:['ignore','ignore','ignore','ipc']}});child.on('message', value=>{{require('node:assert/strict').equal(value,7);console.log('ADDON_CHILD_METADATA_OK')}});";
+assert.equal(addon.launch(process.execPath, code), 0);
+"#,
+        ancestor.file_name().unwrap().to_str().unwrap()
+    );
+    let request = ExecutionRequest::builder(node.as_os_str())
+        .args(["-e", &script])
+        .executable_search_path(node.parent().unwrap())
+        .trusted_node_runtime(&node)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(10), Some(4096), Some(4), None).unwrap(),
+            true,
+            false,
+        ))
+        .build()
+        .unwrap();
+    let outcome = execute(&request).unwrap();
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "{}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert_eq!(outcome.stdout(), b"ADDON_CHILD_METADATA_OK\n");
+}
+
+#[test]
 fn windows_standard_node_ipc_and_ancestor_metadata_preserve_denied_authority() {
     use tapid_runner::{FilesystemAccess, FilesystemGrantKind, FilesystemGrantSource};
     let project = tapid_test_support::TempProject::new("stock-node-compatibility").unwrap();

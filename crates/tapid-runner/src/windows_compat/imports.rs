@@ -29,6 +29,9 @@ pub fn imports(mut read: impl FnMut(usize, usize) -> Option<Vec<u8>>) -> Option<
     }
     let import = u32::from_le_bytes(header[144..148].try_into().ok()?) as usize;
     let import_size = u32::from_le_bytes(header[148..152].try_into().ok()?) as usize;
+    if import == 0 && import_size == 0 {
+        return Some(Vec::new());
+    }
     if import == 0 || import_size < 20 || import.checked_add(import_size)? > size {
         return None;
     }
@@ -95,6 +98,10 @@ pub fn imports(mut read: impl FnMut(usize, usize) -> Option<Vec<u8>>) -> Option<
                     | b"CreateFileW"
                     | b"CreateProcessW"
                     | b"GetFinalPathNameByHandleW"
+                    | b"LoadLibraryExW"
+                    | b"LoadLibraryW"
+                    | b"LoadLibraryA"
+                    | b"LoadLibraryExA"
             ) {
                 let address = u64::from_le_bytes(read(offset, 8)?.try_into().ok()?) as usize;
                 if address == 0 {
@@ -162,6 +169,23 @@ mod tests {
         for length in [0, 63, 100, 511, 607, 703, 809] {
             assert!(parse(&bytes[..length]).is_none());
         }
+    }
+    #[test]
+    fn reads_loader_imports_and_accepts_an_image_without_imports() {
+        for name in [
+            b"LoadLibraryW".as_slice(),
+            b"LoadLibraryExW",
+            b"LoadLibraryA",
+            b"LoadLibraryExA",
+        ] {
+            let mut bytes = image();
+            bytes[802..834].fill(0);
+            bytes[802..802 + name.len()].copy_from_slice(name);
+            assert_eq!(parse(&bytes).unwrap()[0].name, name);
+        }
+        let mut bytes = image();
+        bytes[208..216].fill(0);
+        assert!(parse(&bytes).unwrap().is_empty());
     }
     #[test]
     fn malformed_offsets_and_unterminated_tables_are_rejected() {

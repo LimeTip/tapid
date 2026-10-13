@@ -42,6 +42,7 @@ pub struct MemoryInfo {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     pub fn GetCurrentProcess() -> Handle;
+    pub fn GetSystemWindowsDirectoryW(path: *mut u16, length: u32) -> u32;
     pub fn GetStdHandle(which: u32) -> Handle;
     pub fn GetFileType(handle: Handle) -> u32;
     pub fn PeekNamedPipe(
@@ -152,6 +153,28 @@ pub fn module_path(module: Handle) -> Result<Vec<u16>, u32> {
     Ok(path)
 }
 
+pub fn loaded_modules() -> Result<Vec<usize>, u32> {
+    let snapshot =
+        OwnedHandle(unsafe { CreateToolhelp32Snapshot(0x18, GetProcessId(GetCurrentProcess())) });
+    if snapshot.0 == -1 {
+        return Err(unsafe { GetLastError() });
+    }
+    let mut entry: ModuleEntry = unsafe { mem::zeroed() };
+    entry.size = mem::size_of::<ModuleEntry>() as u32;
+    let mut valid = unsafe { Module32FirstW(snapshot.0, &mut entry) };
+    let mut result = Vec::new();
+    while valid != 0 {
+        if result.len() == 256 {
+            return Err(193);
+        }
+        result.push(entry.base as usize);
+        valid = unsafe { Module32NextW(snapshot.0, &mut entry) };
+    }
+    if unsafe { GetLastError() } != 18 {
+        return Err(unsafe { GetLastError() });
+    }
+    Ok(result)
+}
 pub fn module_in_process(process: Handle, name: &[u16]) -> Result<(usize, usize), u32> {
     let snapshot = OwnedHandle(unsafe { CreateToolhelp32Snapshot(0x18, GetProcessId(process)) });
     if snapshot.0 == -1 {
