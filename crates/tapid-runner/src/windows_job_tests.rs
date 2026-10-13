@@ -520,7 +520,10 @@ fn ordinary_project_write_contract(write_only: bool) {
             .resume_and_wait_for_status(&job, 10000, capture.output_limit_exceeded(), None)
             .unwrap();
         let (stdout, stderr) = capture.finish().unwrap();
-        job.wait_for_active_process_zero_notification(5000).unwrap();
+        // The child wait may already consume ACTIVE_PROCESS_ZERO. Verify the held
+        // Job's kernel count instead of requiring the same notification twice.
+        job.wait_until_empty(5000).unwrap();
+        assert_eq!(job.active_process_count().unwrap(), 0);
         drop(child);
         drop(job);
         (termination, stdout, stderr)
@@ -866,6 +869,10 @@ fn job_completion_port_reports_when_the_last_member_exits() {
     assert!(child.wait_for_signal(5_000).unwrap());
     job.wait_for_active_process_zero_notification(5_000)
         .unwrap();
+    // Cleanup remains verifiable after the one-shot notification was consumed.
+    job.wait_until_empty(0).unwrap();
+    job.wait_until_empty(0).unwrap();
+    assert_eq!(job.active_process_count().unwrap(), 0);
     drop(child);
     drop(job);
     container.cleanup().unwrap();
