@@ -294,7 +294,7 @@ pub fn load_component(process: Handle, path: &[u16]) -> Result<(usize, usize), u
     // trusted ntdll thread-exit entry first: loader initialization completes, while the
     // original application thread remains suspended. Resolve ntdll from actual mapped
     // file identity, so this bootstrap also does not depend on identical ASLR addresses.
-    initialize_loader(process)?;
+    initialize_loader(process).inspect_err(|error| report_failure("initialize loader", *error))?;
     let mut terminated = path.to_vec();
     terminated.push(0);
     let bytes =
@@ -305,8 +305,19 @@ pub fn load_component(process: Handle, path: &[u16]) -> Result<(usize, usize), u
         process,
         remote_system_function(process, c"LoadLibraryW")?,
         bytes,
-    )?;
-    module_in_process(process, path)
+    )
+    .inspect_err(|error| report_failure("load component", *error))?;
+    module_in_process(process, path).inspect_err(|error| report_failure("locate component", *error))
+}
+
+pub(super) fn report_failure(stage: &'static str, error: u32) {
+    use std::io::Write;
+    // Fixed internal stage names and numeric errors disclose no paths or handles.
+    // Ignore closed stderr; diagnostic failure must not change native API behavior.
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "Tapid Node compatibility: {stage} failed (Win32 {error})"
+    );
 }
 
 fn initialize_loader(process: Handle) -> Result<(), u32> {

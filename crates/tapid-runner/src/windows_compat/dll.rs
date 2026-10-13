@@ -229,6 +229,9 @@ unsafe extern "system" fn create_pipe(
         )
     };
     let error = unsafe { GetLastError() };
+    if result == -1 && translated.is_some() {
+        report_failure("create IPC pipe", error);
+    }
     drop(translated);
     unsafe { SetLastError(error) };
     result
@@ -258,6 +261,9 @@ unsafe extern "system" fn create_file(
         )
     };
     let error = unsafe { GetLastError() };
+    if result == -1 && translated.is_some() {
+        report_failure("open IPC pipe", error);
+    }
     drop(translated);
     unsafe { SetLastError(error) };
     result
@@ -406,7 +412,9 @@ fn initialize_child(child: &ProcessInfo) -> Result<(), u32> {
             )
         } == 0
         {
-            return Err(unsafe { GetLastError() });
+            let error = unsafe { GetLastError() };
+            report_failure("duplicate metadata", error);
+            return Err(error);
         }
         entry.handle = handle;
     }
@@ -417,6 +425,7 @@ fn initialize_child(child: &ProcessInfo) -> Result<(), u32> {
         )
     };
     if remote_call(child.process, base + offset, bytes)? != 1 {
+        report_failure("initialize component", 193);
         return Err(193);
     }
     Ok(())
@@ -462,6 +471,8 @@ unsafe extern "system" fn create_process(
     };
     let error = unsafe { GetLastError() };
     if result == 0 {
+        report_failure("create child", error);
+        unsafe { SetLastError(error) };
         return result;
     }
     let child = unsafe { &*info };
@@ -472,6 +483,7 @@ unsafe extern "system" fn create_process(
             Ok(())
         }
     }) {
+        report_failure("prepare child", failure);
         unsafe {
             TerminateProcess(child.process, 127);
             WaitForSingleObject(child.process, 5000);
