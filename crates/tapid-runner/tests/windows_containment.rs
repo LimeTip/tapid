@@ -824,7 +824,7 @@ fn windows_native_addon_launch_preserves_stock_node_metadata() {
 const assert = require('node:assert/strict');
 const addon = require('./launcher.node');
 assert.equal(addon.reopen({:?}, ""), 0, "metadata handle must not reopen with listing rights");
-const code = "require('node:fs').lstatSync(require('node:path').parse(process.cwd()).root);const child=require('node:child_process').fork('unused', {{execArgv:['-e', 'process.send(7)'],stdio:['ignore','ignore','ignore','ipc']}});child.on('message', value=>{{require('node:assert/strict').equal(value,7);console.log('ADDON_CHILD_METADATA_OK')}});";
+const code = "require('node:fs').lstatSync(require('node:path').parse(process.cwd()).root);const child=require('node:child_process').fork('unused', {{execArgv:['-e', 'process.send(7)'],stdio:['ignore','inherit','inherit','ipc']}});child.on('message', value=>{{require('node:assert/strict').equal(value,7);console.log('ADDON_CHILD_METADATA_OK')}});";
 assert.equal(addon.launch(process.execPath, code), 0);
 "#,
         ancestor.file_name().unwrap().to_str().unwrap()
