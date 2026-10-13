@@ -433,6 +433,22 @@ fn racing_symlink_artifact_is_rejected_and_preserved() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn no_follow_artifact_open_rejects_symlink() {
+    let root = root();
+    fs::create_dir_all(&root).unwrap();
+    let target = root.join("target");
+    let link = root.join("link");
+    fs::write(&target, b"artifact").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let result = open_artifact_without_following_links(&link);
+
+    assert!(result.is_err());
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn transaction_stages_tree_without_publishing_it_and_rolls_back_on_drop() {
     let root = root();

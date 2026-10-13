@@ -762,15 +762,15 @@ fn create_staging_file(dir: &Path) -> io::Result<(PathBuf, File)> {
 }
 
 fn verify_existing_artifact(path: &Path, expected: &ArtifactDigest) -> Result<(), IngestError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
+    let mut file = open_artifact_without_following_links(path)?;
+    if !file.metadata()?.file_type().is_file() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             "artifact path is not a regular file",
         )
         .into());
     }
-    let actual = digest_file(path)?;
+    let actual = digest_reader(&mut file)?;
     if actual != expected.as_str() {
         return Err(IngestError::DigestMismatch {
             expected: expected.clone(),
@@ -780,8 +780,24 @@ fn verify_existing_artifact(path: &Path, expected: &ArtifactDigest) -> Result<()
     Ok(())
 }
 
-fn digest_file(path: &Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
+fn open_artifact_without_following_links(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+fn digest_reader(file: &mut impl Read) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
