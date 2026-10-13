@@ -222,7 +222,30 @@ test("PowerShell uninstaller preserves a foreign binary and removes a marked bin
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
- test("Unix installer owns an idempotent POSIX PATH block and uninstall removes only that block", { skip: platform === "win32" }, async () => {
+ test("Unix installer preserves a profile without a final newline through install and uninstall", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "home");
+  const profile = join(home, ".profile");
+  const pathInstall = join(home, ".local", "bin");
+  const original = "export EXISTING=1";
+  try {
+    await mkdir(home);
+    await mkdir(pathInstall, { recursive: true });
+    await writeFile(profile, original);
+    const installShell = () => run("/bin/sh", [f.installer, "--install-dir", pathInstall], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
+    await installShell();
+    const installed = await readFile(profile, "utf8");
+    equal(installed, `${original}\n# tapid-path-managed-v1\nexport PATH="$HOME/.local/bin:$PATH"\n# end tapid-path-managed-v1\n`);
+    await installShell();
+    equal(await readFile(profile, "utf8"), installed);
+    await run("/bin/sh", [join(root, "scripts/uninstall.sh"), "--install-dir", pathInstall], {
+      env: { ...f.env, HOME: home, SHELL: "/bin/sh" },
+    });
+    equal(await readFile(profile, "utf8"), `${original}\n`);
+  } finally { await f.cleanup(); }
+});
+
+test("Unix installer owns an idempotent POSIX PATH block and uninstall removes only that block", { skip: platform === "win32" }, async () => {
   const f = await fixture();
   const home = join(f.directory, "home");
   const profile = join(home, ".profile");

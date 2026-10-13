@@ -126,7 +126,18 @@ configure_path() {
       return 0
     fi
     path_tmp="$(mktemp "$PATH_RC.tapid.XXXXXX")" || return 1
-    if ! { cat "$PATH_RC"; printf '%s\n%s\n%s\n' "$PATH_MARKER_BEGIN" "$path_line" "$PATH_MARKER_END"; } > "$path_tmp"; then
+    if ! cat "$PATH_RC" > "$path_tmp"; then
+      rm -f "$path_tmp"; return 1
+    fi
+    if [ -s "$PATH_RC" ] && [ "$(tail -c 1 "$PATH_RC" | wc -l | tr -d ' ')" -eq 0 ]; then
+      printf '\n' >> "$path_tmp" || { rm -f "$path_tmp"; return 1; }
+    fi
+    if ! printf '%s\n%s\n%s\n' "$PATH_MARKER_BEGIN" "$path_line" "$PATH_MARKER_END" >> "$path_tmp"; then
+      rm -f "$path_tmp"; return 1
+    fi
+    begin_count="$(grep -Fxc "$PATH_MARKER_BEGIN" "$path_tmp" || true)"
+    end_count="$(grep -Fxc "$PATH_MARKER_END" "$path_tmp" || true)"
+    if [ "$begin_count" -ne 1 ] || [ "$end_count" -ne 1 ] || ! grep -Fqx "$path_line" "$path_tmp"; then
       rm -f "$path_tmp"; return 1
     fi
     mv -f "$path_tmp" "$PATH_RC" || { rm -f "$path_tmp"; return 1; }
