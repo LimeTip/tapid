@@ -2200,7 +2200,7 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
     let system_root = std::env::var_os("SystemRoot").unwrap();
     #[cfg(windows)]
     fs::copy(
-        PathBuf::from(&system_root).join("System32/cmd.exe"),
+        PathBuf::from(&system_root).join("System32").join("cmd.exe"),
         &direct_source,
     )
     .unwrap();
@@ -2245,7 +2245,10 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
             fs::canonicalize(&shim).unwrap(),
             fs::canonicalize(&bin_source).unwrap()
         );
-        let direct_shim = dir.join("node_modules/.bin/workspace-direct");
+        let direct_shim = dir
+            .join("node_modules")
+            .join(".bin")
+            .join("workspace-direct");
         assert!(
             fs::symlink_metadata(&direct_shim)
                 .unwrap()
@@ -2272,14 +2275,17 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
     {
         assert!(shim.with_extension("cmd").is_file());
         assert!(shim.with_extension("ps1").is_file());
-        let direct_shim = dir.join("node_modules/.bin/workspace-direct");
+        let direct_shim = dir
+            .join("node_modules")
+            .join(".bin")
+            .join("workspace-direct");
         assert!(direct_shim.with_extension("cmd").is_file());
         assert!(direct_shim.with_extension("ps1").is_file());
         use std::os::windows::process::CommandExt;
         let command = direct_shim.with_extension("cmd");
         let command = command.to_string_lossy();
         let command = command.strip_prefix(r"\\?\").unwrap_or(&command);
-        let executed = Command::new(PathBuf::from(&system_root).join("System32/cmd.exe"))
+        let executed = Command::new(PathBuf::from(&system_root).join("System32").join("cmd.exe"))
             .args(["/D", "/S", "/C"])
             .raw_arg(format!("\"\"{command}\" /D /C exit 7\""))
             .env_clear()

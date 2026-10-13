@@ -1221,11 +1221,13 @@ mod copy_tests {
             fs::create_dir_all(&project).unwrap();
             let manifest = serde_json::json!({
                 "name": "example", "version": "1.0.0",
-                "bin": {first: "first-bin", second: "second.js", "aaa": "first-bin"}
+                "bin": {first: "first-bin", second: "second.exe", "aaa": "first-bin"}
             });
             fs::write(source.join("package.json"), manifest.to_string()).unwrap();
             fs::write(source.join("first-bin"), "#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)));process.exit(7);\n").unwrap();
-            fs::write(source.join("second.js"), "second payload").unwrap();
+            let system32 =
+                std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+            fs::copy(system32.join("cmd.exe"), source.join("second.exe")).unwrap();
             let digest = tapid_archive::canonical_tree_digest(&source).unwrap();
             let instance = PackageInstance {
                 id: PackageInstanceId::new(
@@ -1275,7 +1277,7 @@ mod copy_tests {
                 result.unwrap();
                 for (command, source) in [
                     (first, "first-bin"),
-                    (second, "second.js"),
+                    (second, "second.exe"),
                     ("aaa", "first-bin"),
                 ] {
                     for extension in ["cmd", "ps1"] {
@@ -1312,6 +1314,15 @@ mod copy_tests {
                     String::from_utf8_lossy(&output.stdout).trim(),
                     r#"["two words","literal&value"]"#
                 );
+                let direct = std::process::Command::new(system32.join("cmd.exe"))
+                    .args(["/D", "/S", "/C"])
+                    .raw_arg(format!(
+                        "\"\"{}\" /D /C exit 7\"",
+                        bin.join(second).with_extension("cmd").display()
+                    ))
+                    .output()
+                    .unwrap();
+                assert_eq!(direct.status.code(), Some(7), "{direct:?}");
                 let output = std::process::Command::new(
                     system32.join("WindowsPowerShell/v1.0/powershell.exe"),
                 )
