@@ -677,6 +677,18 @@ test("CI runs the TypeScript tool suite", async () => {
 });
 
 
+test("CI verifies the declared Rust 1.88 minimum on the locked production workspace", async () => {
+  const workflow = await text(".github/workflows/ci.yml");
+  const job = workflow.slice(workflow.indexOf("  rust-minimum:"), workflow.indexOf("  test:"));
+  assert(job.includes("name: Rust 1.88 minimum"));
+  assert(job.includes("toolchain: 1.88.0"));
+  assert(job.includes("cargo check --workspace --all-targets --all-features --locked"));
+  assert(!job.includes("continue-on-error: true"));
+  const stable = workflow.slice(workflow.indexOf("  test:"), workflow.indexOf("  windows-installer-contract:"));
+  assert(stable.includes("os: [ubuntu-latest, macos-latest, windows-latest]"));
+  assert(stable.includes("cargo test --workspace --all-features --locked -- --show-output"));
+});
+
 test("native Windows archive fixture refreshes release records before each install", async () => {
   const workflow = await text(".github/workflows/ci.yml");
   const fixture = workflow.slice(workflow.indexOf("  windows-installer-contract:"), workflow.indexOf("  package:"));
