@@ -433,7 +433,18 @@ fn racing_symlink_artifact_is_rejected_and_preserved() {
             inserted: false,
         },
     );
-    assert!(matches!(result, Err(IngestError::Io(_))));
+    #[cfg(unix)]
+    assert!(matches!(
+        result,
+        Err(IngestError::Io(error)) if error.raw_os_error() == Some(libc::ELOOP)
+    ));
+    #[cfg(windows)]
+    assert!(matches!(
+        result,
+        Err(IngestError::Io(error))
+            if error.kind() == io::ErrorKind::AlreadyExists
+                && error.to_string() == "artifact path is not a regular file"
+    ));
     assert!(
         fs::symlink_metadata(&destination)
             .unwrap()
