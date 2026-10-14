@@ -374,6 +374,19 @@ fn racing_matching_artifact_is_accepted_and_preserved() {
     let _ = fs::remove_dir_all(root);
 }
 
+fn symlink_creation_unavailable(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+    ) || error.raw_os_error() == Some(1314)
+}
+
+#[test]
+fn windows_symlink_privilege_error_is_unavailable() {
+    let error = io::Error::from_raw_os_error(1314);
+    assert!(symlink_creation_unavailable(&error));
+}
+
 #[test]
 fn racing_symlink_artifact_is_rejected_and_preserved() {
     let root = root();
@@ -389,12 +402,7 @@ fn racing_symlink_artifact_is_rejected_and_preserved() {
         let probe = root.join("symlink-probe");
         match std::os::windows::fs::symlink_file(&target, &probe) {
             Ok(()) => fs::remove_file(probe).unwrap(),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
-                ) =>
-            {
+            Err(error) if symlink_creation_unavailable(&error) => {
                 eprintln!("skipping symlink race case: symlink creation unavailable: {error}");
                 let _ = fs::remove_dir_all(root);
                 return;
