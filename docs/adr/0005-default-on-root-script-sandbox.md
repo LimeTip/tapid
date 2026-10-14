@@ -4,7 +4,7 @@
 
 Accepted; amended to separate Restricted authority containment from ManagedTree lifecycle ownership
 
-An experimental macOS 26 Restricted backend is implemented with deprecated/private native Seatbelt APIs. It probes enforcement before project spawn and issues checked Restricted receipts. ManagedTree, resource-limit profiles, and Linux/Windows native backends still fail closed before root-script spawn.
+An experimental macOS 26 Restricted backend is implemented with deprecated/private native Seatbelt APIs. It probes enforcement before project spawn and issues checked Restricted receipts. A Windows AppContainer/Job Object backend exists but remains experimental and unsupported. Every Windows project-write policy and every network-enabled policy fails before spawn; read-only Windows execution remains an unclaimed prototype. Fresh Windows 11 probes show that explicit DACL write grants do not allow the low-integrity AppContainer to modify ordinary host-created files. Writable Windows support is deferred and no staging/copyback implementation is included in this PR. Cleanup may still wait indefinitely for a verified empty Job, and ACL updates remain non-atomic against external writers and trustee-wide during revocation. ManagedTree support claims remain gated on full lifecycle probes; Linux native backends still fail closed before root-script spawn.
 
 ## Decision history
 
@@ -86,7 +86,7 @@ Platform backends are independent security boundaries:
 - **macOS 26 ManagedTree:** native ManagedTree is unsupported. Process groups are escapable with `setsid` or `setpgid`, and public process-lineage scanning retains a rapid double-fork/intermediate-exit race. A future strict Linux VM hosted through Virtualization.framework is a separate backend that changes platform and operational semantics; it must not be described as native macOS containment.
 - **Linux Restricted:** the planned backend combines Landlock, `no_new_privs`, seccomp, and explicit environment/descriptor construction, selecting only enhancements proven available at runtime. A requested dimension that the active kernel or host cannot establish fails before spawn.
 - **Linux ManagedTree:** support requires proven namespace ownership and cgroup delegation for descendants, cleanup, and configured tree-wide limits. Their presence must be probed rather than inferred from running on Linux or in a container.
-- **Windows Restricted and ManagedTree:** the planned authority boundary is AppContainer or LPAC with explicit environment and handle construction. ManagedTree additionally uses a non-breakaway Job Object assigned before untrusted execution. Any brokered listen port or network exception requires native proof that the configured scope, identity, and descendant behavior match the receipt.
+- **Windows Restricted and ManagedTree:** an AppContainer/Job Object runner backend exists but remains experimental and unsupported. Any project write grant or `network = true` is rejected before spawn. Fresh Windows 11 Pro VM probes found a critical writable-filesystem gap: the AppContainer token is low integrity (RID 4096); an explicit write ACE still cannot open an ordinary host-created file, and a directory-subtree grant permits creating a file but does not permit appending to it. No staging/copyback implementation is included in this PR. Cleanup can wait indefinitely for a verified empty Job, and ACL updates remain non-atomic against external writers while cleanup revokes ACEs trustee-wide. Earlier runner-suite and CLI-smoke reports are not support evidence; exact read-only CLI acceptance and broader Node compatibility remain outstanding.
 
 ### Receipts and support claims
 
@@ -105,7 +105,7 @@ No platform or assurance level is described as supported until positive and nega
 - Process execution remains behind the focused `tapid-runner` capability. The CLI owns parsing, file discovery, interaction, and rendering.
 - Dependency lifecycle scripts remain disabled by default and are not made eligible by a root-script profile. Root scripts run only through explicit selection.
 - Perfect containment is not claimed. Each backend and receipt reports only the dimensions and scopes it actually enforces.
-- At the current exact HEAD, experimental native macOS 26 Restricted execution and a Linux Landlock/seccomp Restricted backend exist. Linux has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation; the broader common probe matrix is still pending. ManagedTree, configured resource limits, Windows native containment, and `--no-sandbox` remain unsupported or unimplemented.
+- Experimental native macOS Restricted execution, a Linux Landlock/seccomp Restricted backend, and read-only Windows AppContainer/Job Object execution are implemented. Linux has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted validation; Windows read-only Node execution and graceful Ctrl+C have native Windows 11 and hosted validation on the pre-integration branch. Exact merged-revision acceptance remains required. Windows writes and network-enabled policies fail closed. The broader platform probe matrix and complete Windows support scope remain pending; `--no-sandbox` does not exist.
 
 ## Rejected alternatives
 
@@ -140,9 +140,9 @@ Rejected because native policy formats are platform-specific and would make equi
 ## Staged implementation and verification
 
 1. Preserve the current checked configuration, exact root-script selection, argument forwarding, controlled environment/PATH construction, and fail-before-spawn behavior.
-2. Implement the assurance schema so `assurance = "restricted"` opts in explicitly and omission remains ManagedTree, then add one native Restricted backend behind private runner adapters. Prove pre-spawn filesystem/network enforcement, descendant propagation, environment and descriptor hygiene, and honest lifecycle/limit scope before enabling execution.
-3. Integrate that backend through the exact `tapid run <SCRIPT> -- <ARGS...>` path and retain exact-commit positive and negative evidence. Do not infer support from a standalone probe.
-4. Add ManagedTree only on platforms where race-free ownership, complete cleanup, and configured tree-wide limits are proven. Unsupported required dimensions continue to fail before spawn.
+2. The assurance schema and experimental macOS Restricted backend are implemented. The Windows AppContainer/Job Object backend remains experimental: project write grants and network-enabled policies fail before spawn. Read-only Windows runner tests and the exact `tapid run` CLI matrix remain acceptance gates; prior suite and smoke reports are not support evidence. Preserve fail-closed behavior, fix cleanup and ACL-restoration lifecycle findings, and broaden Node compatibility tests before reconsidering Windows support. Linux remains future work.
+3. Retain exact-commit positive and negative evidence through the integrated CLI path; do not infer support from a standalone primitive or runner-level probe.
+4. Add ManagedTree platform support only where race-free ownership, complete cleanup, and configured tree-wide limits are proven. Unsupported required dimensions continue to fail before spawn.
 5. Design narrower listen/connect policy, an explicit ManagedTree spelling beyond legacy omission, or `--no-sandbox` as separate schema and CLI changes with their own review and evidence.
 
 Verification includes:

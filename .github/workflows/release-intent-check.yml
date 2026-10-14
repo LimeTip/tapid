@@ -1,0 +1,51 @@
+name: Release intent freshness
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-intent-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  freshness:
+    name: Release intent freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Require release intent analyzed from the current PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- docs/releases/intent.json; then
+            echo 'Release intent unchanged; no release freshness check needed.'
+            exit 0
+          fi
+          node --experimental-strip-types tools/release/candidate.ts intent docs/releases/intent.json > "$RUNNER_TEMP/validated-intent.json"
+          PREPARED_FROM="$(jq -r .prepared_from "$RUNNER_TEMP/validated-intent.json")"
+          test "$PREPARED_FROM" = "$BASE_SHA" || {
+            echo 'Release preparation is stale. Close the release PR and prepare again from current main.' >&2
+            exit 1
+          }
+          test "$(git merge-base "$BASE_SHA" "$HEAD_SHA")" = "$BASE_SHA" || {
+            echo 'The release branch must descend from the exact analyzed main commit.' >&2
+            exit 1
+          }
+          echo 'Release intent is valid and prepared from the exact current PR base.'

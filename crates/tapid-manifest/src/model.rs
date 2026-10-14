@@ -97,7 +97,7 @@ impl PackageManifest {
         self.set_dependency(DependencyKind::Dependencies, name, requirement)
     }
 
-    /// Add or update a dependency in the selected manifest section.
+    /// Add a dependency to the selected section, removing declarations in other sections.
     pub fn with_dependency_kind(
         self,
         kind: DependencyKind,
@@ -105,6 +105,39 @@ impl PackageManifest {
         requirement: &str,
     ) -> Result<Self, ManifestError> {
         self.set_dependency(kind, name, requirement)
+    }
+
+    /// Update an existing declaration in one section, preserving all other sections.
+    pub fn update_dependency_kind(
+        mut self,
+        kind: DependencyKind,
+        name: &str,
+        requirement: &str,
+    ) -> Result<Self, ManifestError> {
+        let (field, dependencies) = self.dependency_section_mut(kind);
+        let declared =
+            dependencies
+                .get_mut(name)
+                .ok_or_else(|| ManifestError::DependencyNotDeclared {
+                    field,
+                    name: name.to_owned(),
+                })?;
+        *declared = requirement.trim().to_owned();
+        Ok(self)
+    }
+
+    fn dependency_section_mut(
+        &mut self,
+        kind: DependencyKind,
+    ) -> (&'static str, &mut BTreeMap<String, String>) {
+        match kind {
+            DependencyKind::Dependencies => ("dependencies", &mut self.dependencies),
+            DependencyKind::DevDependencies => ("devDependencies", &mut self.dev_dependencies),
+            DependencyKind::OptionalDependencies => {
+                ("optionalDependencies", &mut self.optional_dependencies)
+            }
+            DependencyKind::PeerDependencies => ("peerDependencies", &mut self.peer_dependencies),
+        }
     }
 
     fn set_dependency(
@@ -128,12 +161,7 @@ impl PackageManifest {
         ] {
             dependencies.remove(name);
         }
-        let dependencies = match kind {
-            DependencyKind::Dependencies => &mut self.dependencies,
-            DependencyKind::DevDependencies => &mut self.dev_dependencies,
-            DependencyKind::OptionalDependencies => &mut self.optional_dependencies,
-            DependencyKind::PeerDependencies => &mut self.peer_dependencies,
-        };
+        let (_, dependencies) = self.dependency_section_mut(kind);
         dependencies.insert(name.to_owned(), requirement.trim().to_owned());
         Ok(self)
     }

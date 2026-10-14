@@ -397,18 +397,21 @@ pub fn accept_release(
             received_sequence: sequence,
         });
     }
-    if compare_version(version, &state.release_floor)? == std::cmp::Ordering::Less {
-        return Err(Error::ReleaseDowngrade {
-            floor: state.release_floor.clone(),
-            received: version.into(),
-        });
+    match compare_version(version, &state.release_floor)? {
+        std::cmp::Ordering::Less => {
+            return Err(Error::ReleaseDowngrade {
+                floor: state.release_floor.clone(),
+                received: version.into(),
+            });
+        }
+        std::cmp::Ordering::Equal if artifact_sha256 != state.last_known_good.artifact_sha256 => {
+            return Err(Error::State(
+                "same release version has a different artifact digest".into(),
+            ));
+        }
+        _ => {}
     }
-    let floor = if compare_version(version, &state.release_floor)? != std::cmp::Ordering::Less {
-        version
-    } else {
-        &state.release_floor
-    };
-    let mut next = ReleaseState::new(floor, sequence, artifact_sha256)?;
+    let mut next = ReleaseState::new(version, sequence, artifact_sha256)?;
     next.verification = state.verification.clone();
     validate_state(&next)?;
     Ok(next)

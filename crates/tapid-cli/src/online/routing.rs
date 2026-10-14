@@ -1,4 +1,5 @@
 //! Route selection and origin-scoped metadata/artifact transport caches.
+use crate::application::outcome::{ErrorKind, OperationalError};
 
 use super::{BTreeMap, HttpsTransport, JSR, PackageName, RegistryOrigin};
 
@@ -6,7 +7,7 @@ fn package_registry_route(
     registry_config: &crate::registry::RegistryConfig,
     registry: &RegistryOrigin,
     name: &PackageName,
-) -> Result<crate::registry::RegistryRoute, String> {
+) -> Result<crate::registry::RegistryRoute, OperationalError> {
     if registry.to_string() == JSR {
         return Ok(crate::registry::RegistryRoute {
             origin: registry.clone(),
@@ -16,9 +17,12 @@ fn package_registry_route(
     }
     let route = registry_config.route(name.as_str())?;
     if route.origin != *registry {
-        return Err(format!(
-            "registry identity mismatch for package {name}: selected {}, requested {registry}",
-            route.origin
+        return Err(OperationalError::new(
+            ErrorKind::RegistryConfiguration,
+            format!(
+                "registry identity mismatch for package {name}: selected {}, requested {registry}",
+                route.origin
+            ),
         ));
     }
     Ok(route)
@@ -29,7 +33,7 @@ pub(super) fn transport_for_route<'a>(
     route: crate::registry::RegistryRoute,
     allowed_origins: &[String],
     artifact: bool,
-) -> Result<&'a HttpsTransport, String> {
+) -> Result<&'a HttpsTransport, OperationalError> {
     let origin = route.origin.to_string();
     let key = (origin.clone(), route.policy);
     if !cache.contains_key(&key) {
@@ -42,7 +46,10 @@ pub(super) fn transport_for_route<'a>(
         } else {
             HttpsTransport::authenticated_metadata(allowed_origins.to_vec(), credentials)
         }
-        .map_err(|error| format!("cannot create registry transport: {error}"))?;
+        .map_err(|error| {
+            OperationalError::from_source(ErrorKind::RegistryTransport, error)
+                .context("cannot create registry transport")
+        })?;
         cache.insert(key.clone(), transport);
     }
     Ok(cache
@@ -56,7 +63,7 @@ pub(crate) fn metadata_transport_for_package<'a>(
     registry: &RegistryOrigin,
     name: &PackageName,
     allowed_origins: &[String],
-) -> Result<&'a HttpsTransport, String> {
+) -> Result<&'a HttpsTransport, OperationalError> {
     let route = package_registry_route(registry_config, registry, name)?;
     transport_for_route(cache, route, allowed_origins, false)
 }
@@ -67,7 +74,7 @@ pub(super) fn artifact_transport_for_package<'a>(
     registry: &RegistryOrigin,
     name: &PackageName,
     allowed_origins: &[String],
-) -> Result<&'a HttpsTransport, String> {
+) -> Result<&'a HttpsTransport, OperationalError> {
     let route = package_registry_route(registry_config, registry, name)?;
     transport_for_route(cache, route, allowed_origins, true)
 }

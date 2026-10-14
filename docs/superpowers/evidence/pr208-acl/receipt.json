@@ -1,0 +1,48 @@
+{
+  "base_commit": "41034109ed122f64102a0fbb9a2811a47c22d0fa",
+  "os": "Microsoft Windows 11 Pro 10.0.26300 build 26300",
+  "vm": 126,
+  "principal": "tapidtest, Interactive, Limited, medium integrity, Administrators deny-only",
+  "compiler": "Rust 1.99.0 x86_64-pc-windows-gnu",
+  "source_sha256": {
+    "crates/tapid-runner/src/windows_job.rs": "a6b231519a3574d132b0ad277503b88bc748c892236fc2dfb1da60e0de69c274",
+    "crates/tapid-runner/src/windows_execution.rs": "93322b6e93a9abd449ffd4a376fb22ea9abaded051801034a39920ada88a4376",
+    "crates/tapid-runner/src/windows_job_tests.rs": "9e0f8b339d890fefd4e1ebf50d31d47d35e33fb0beea9aa27bc3bc085bdc03dd",
+    "crates/tapid-runner/src/windows_cancellation.rs": "53cbfbd8cb1f7c62e8da80cd8f0a4da9511f6c69c73ac1c6ea0c1904cc96154d",
+    "crates/tapid-runner/src/windows_filesystem.rs": "957f902e23c0af60028f1f4877aacaaf9388b03c374927002876587b84c1b47f",
+    "crates/tapid-runner/src/windows_process.rs": "6e4f46149616a27c7fa9e7dbaf711a00fee8108f2cd3b4adf81edae1fe46ec01"
+  },
+  "artifact_sha256": {
+    "tapid_runner-731fcdadb298eb9e.exe": "67583074443bb5a77711861c854760dd4d4247bfae15e767e4f2d715c21851cc",
+    "windows_containment-cf334b3fdb288fcf.exe": "6680fd110f8163647feda0febc292da2b3076be1416c65c0c386ddf648670d5b"
+  },
+  "raw_log_receipts": {
+    "red3.txt": {
+      "sha256": "2af23ec25403bdcec406981589ab5d4184f4824b5a369046aea11ec5359796b7",
+      "test_results": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 122 filtered out; finished in 0.05s"
+      ]
+    },
+    "final-library-2.txt": {
+      "sha256": "cb7101a8261a59aa75dde3f3cf344f0f850cbdf856b4f7c3f32812252f274f0e",
+      "test_results": [
+        "test result: ok. 122 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 1.33s"
+      ]
+    },
+    "final-large-2.txt": {
+      "sha256": "6ccfa992974e648ac625d3adf6a77eb3e75eb61f019ecdbc45947406ebad509b",
+      "test_results": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 53.27s"
+      ]
+    },
+    "integration-final.txt": {
+      "sha256": "7c16ddf77730db8499e0689114179801a6b9d5bf0027c309e33108373fbc4b39",
+      "test_results": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.12s",
+        "test result: ok. 19 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 12.66s"
+      ]
+    }
+  },
+  "original_utf16_identity_sha256": "8ff3609a42585049af3d5d0758bc7b462820cb42c9443c786af15e5692f3e461",
+  "hosted_ci": "not run; local commit only, no push"
+}

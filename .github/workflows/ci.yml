@@ -43,6 +43,14 @@ jobs:
           target/debug/tapid --version
       - name: Prepare project-local build and temporary storage
         run: mkdir -p examples/news-site-consumer/.next examples/news-site-consumer/.tmp
+      - name: Verify workspace reference acceptance
+        env:
+          TAPID_REQUIRE_NODE_ASSERTIONS: '1'
+        run: cargo test -p tapid --test cli --locked workspace_acceptance -- --show-output
+      - name: Verify pinned news-site resolution inputs and strict graph comparator
+        env:
+          TAPID_NEWS_FIXTURE_BINARY: ${{ github.workspace }}/target/debug/tapid
+        run: node --experimental-strip-types --test tests/news_site_fixture_test.ts
       - name: Install npm reference tree
         run: |
           mkdir -p "$RUNNER_TEMP/news-site-npm-reference"
@@ -60,7 +68,7 @@ jobs:
           test "$(sha256sum "$project/tapid.lock" | cut -d' ' -f1)" = "$lock_hash"
       - name: Compare installed dependency graphs
         run: |
-          python3 scripts/compare-news-site-package-graphs.py \
+          node --experimental-strip-types scripts/compare-news-site-package-graphs.ts \
             --npm-root "$RUNNER_TEMP/news-site-npm-reference" \
             --tapid-root examples/news-site-consumer \
             --json "$RUNNER_TEMP/news-site-package-graph.json" \
@@ -100,6 +108,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       TAPID_SOURCE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Node 22 below owns the otherwise optional CLI assertion probes.
+      TAPID_REQUIRE_NODE_ASSERTIONS: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -114,44 +124,44 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: source-install-release-v1
       - name: Install relocatable Node.js for native sandbox tests
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
       - name: Verify pinned node-semver compatibility oracle
+        if: matrix.os == 'ubuntu-latest'
         working-directory: tests/node-semver-oracle
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm test --offline
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Verify native Windows shim materialization collision guard
-        if: runner.os == 'Windows'
-        run: cargo test -p tapid --lib --locked native_windows_shim_materialization_rejects_collisions_before_writes
       - name: Run tests
-        run: cargo test --workspace --all-features --locked
-      - name: Install Python for development and documentation tests
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: '3.12'
+        # Retain success output so each Node assertion branch has a receipt.
+        run: cargo test --workspace --all-features --locked -- --show-output
       - name: Verify generated release record end to end (Unix, offline)
         if: runner.os != 'Windows'
         timeout-minutes: 3
         shell: bash
         run: |
           cargo build --locked --bin tapid
-          python3 scripts/check-release-record.py --binary target/debug/tapid
+          node --experimental-strip-types scripts/check-release-record.ts --binary target/debug/tapid
       - name: Test executable documentation runner (Unix)
         if: runner.os != 'Windows'
-        run: python3 -m unittest discover -s tests -p test_doc_examples.py -v
+        run: node --experimental-strip-types --test tests/doc_examples_test.ts
       - name: Test development build cache selection
-        run: python -m unittest discover -s tests -p test_dev.py -v
+        run: node --experimental-strip-types --test tests/dev_test.ts
+      - name: Test offline release fixture signing
+        run: node --experimental-strip-types --test tests/release_record_test.ts
       - name: Verify source documentation artifact (Unix, offline)
         if: runner.os != 'Windows'
-        run: python3 scripts/check-doc-examples.py --lane source --example init --example upgrade-help --report doc-contract-source.json
+        run: node --experimental-strip-types scripts/check-doc-examples.ts --lane source --example init --example upgrade-help --report doc-contract-source.json
       - name: Retain documentation evidence
         if: always() && runner.os != 'Windows'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -165,6 +175,8 @@ jobs:
       - name: Validate Unix developer installer at the checked head
         if: runner.os != 'Windows'
         shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           set -euo pipefail
           install_dir="$RUNNER_TEMP/tapid-install"
@@ -178,6 +190,8 @@ jobs:
       - name: Validate Windows developer installer
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           $installDir = Join-Path $env:RUNNER_TEMP 'tapid-install'
           & "$env:GITHUB_WORKSPACE\scripts\install.ps1" -Repo LimeTip/tapid -SourceRef $env:TAPID_SOURCE_REF -InstallDir $installDir
@@ -191,9 +205,28 @@ jobs:
           if (Test-Path -LiteralPath $binary) { throw 'Tapid was not uninstalled' }
           Write-Host 'Windows developer install and uninstall passed.'
 
+  windows-msvc-cross-check:
+    name: Windows MSVC compile-only check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain and Windows target
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Compile tapid-runner and Windows tests for MSVC
+        run: cargo check -p tapid-runner --tests --target x86_64-pc-windows-msvc --locked
+
   nextest:
     name: Nextest (Ubuntu)
     runs-on: ubuntu-latest
+    env:
+      TAPID_REQUIRE_NODE_ASSERTIONS: '1'
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -202,17 +235,23 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install cargo-nextest
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
           tool: cargo-nextest
+      - name: Install Node.js 22 for required CLI assertions
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - name: Run tests with nextest
         run: cargo nextest run --workspace --all-features --locked
 
   coverage:
     name: Coverage (Ubuntu)
     runs-on: ubuntu-latest
+    env:
+      TAPID_REQUIRE_NODE_ASSERTIONS: '1'
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -221,11 +260,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
           tool: cargo-llvm-cov
+      - name: Install Node.js 22 for required CLI assertions
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - name: Generate LCOV coverage report
         run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
       - name: Upload LCOV coverage report
@@ -258,6 +301,11 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
+      - name: Cache ARM release build dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-${{ matrix.target }}
+          cache-bin: 'false'
       - name: Build release target
         shell: bash
         run: cargo build --release --locked --bin tapid --target "${{ matrix.target }}"
@@ -288,6 +336,7 @@ jobs:
             shell: bash
           - os: windows-latest
             shell: pwsh
+      # Hosted Windows CI complements native Windows 11 acceptance on VM 126.
     defaults:
       run:
         shell: ${{ matrix.shell }}
@@ -307,12 +356,36 @@ jobs:
       - name: Create dynamic Node fixture project
         run: |
           node tests/fixtures/create_consumer_project.js
-      - name: Verify install and lifecycle suppression; reject unsupported containment (Linux/Windows)
-        if: runner.os != 'macOS'
+      - name: Verify install and lifecycle suppression; reject unsupported Linux containment
+        if: runner.os == 'Linux'
+        run: node tests/fixtures/validate_consumer_project.js
+      - name: Verify native read-only child, forwarding and exit codes (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
         run: node tests/fixtures/validate_consumer_project.js
       - name: Verify native Restricted child, forwarding and exit codes (macOS)
         if: runner.os == 'macOS'
         run: node tests/fixtures/validate_consumer_project.js
+      - name: Prepare same-run Windows CLI handoff
+        if: runner.os == 'Windows'
+        run: node --experimental-strip-types tools/release/ci_binary.ts prepare --directory "$env:RUNNER_TEMP/tapid-ci-cli" --binary target/debug/tapid.exe
+      - name: Retain same-run Windows CLI
+        if: runner.os == 'Windows'
+        id: windows-cli
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-cli-${{ github.run_id }}-${{ github.run_attempt }}-windows-latest-Windows-X64-default-debug
+          path: ${{ runner.temp }}/tapid-ci-cli/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+      - name: Record Windows handoff artifact identity
+        if: runner.os == 'Windows'
+        env:
+          ARTIFACT_ID: ${{ steps.windows-cli.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.windows-cli.outputs.artifact-digest }}
+        run: Write-Host "Windows CLI artifact $env:ARTIFACT_ID digest $env:ARTIFACT_DIGEST"
 
   pr-published-binary-smoke:
     # Exact PR runner + immutable published binary: pre-merge regression evidence only.
@@ -412,7 +485,9 @@ jobs:
         with:
           node-version: 22
       - name: Test release helpers and workflows
-        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/release_test.ts tools/release/publish_test.ts tools/release/installers_test.ts tools/release/evidence_test.ts
+        run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/*_test.ts
+      - name: Test consumer capability contracts
+        run: node --test tests/fixtures/consumer_contract.test.js tests/fixtures/validate_consumer_project.test.js
       - name: Check source architecture
         run: node --experimental-strip-types tools/check_architecture.ts
       - name: Validate Unix installer syntax and help
@@ -443,7 +518,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install cargo-deny
         uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2
         with:
@@ -460,10 +535,33 @@ jobs:
   windows-installer-contract:
     name: Windows installer contract
     runs-on: windows-latest
+    needs: [platform-consumer-validation]
+    if: ${{ always() && !cancelled() }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      # Failed-only reruns deliberately cannot reuse an earlier attempt's CLI.
+      # Rerun the producer and verifier together, or the full workflow.
+      - name: Download same-attempt Windows CLI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-cli-${{ github.run_id }}-${{ github.run_attempt }}-windows-latest-Windows-X64-default-debug
+          path: ${{ runner.temp }}/tapid-ci-cli-download
+          digest-mismatch: error
+      - name: Verify same-run native verifier
+        shell: pwsh
+        run: |
+          node --experimental-strip-types tools/release/ci_binary.ts verify --directory "$env:RUNNER_TEMP/tapid-ci-cli-download" --destination target/debug/tapid.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $expected = [regex]::Match((Get-Content -Raw crates/tapid-cli/Cargo.toml), '(?m)^version = "([^"]+)"\r?$').Groups[1].Value
+          if (-not $expected) { throw 'Missing CLI manifest version' }
+          $actual = & target/debug/tapid.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($actual -cne "tapid $expected") { throw "Unexpected native version: $actual" }
       - name: Install and reject archive fixtures
         shell: pwsh
         run: |
@@ -484,19 +582,8 @@ jobs:
             $size = (Get-Item -LiteralPath $archive).Length
             $record = "tapid-release-v1`t1.2.3`n$target`t$archiveName`t$size`t$digest`thttps://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName`n"
             Set-Content -Encoding ascii -NoNewline -Path (Join-Path $fixture 'v1.2.3.tsv') -Value $record
-            $signer = Join-Path $fixture 'sign-fixture.py'
-          @'
-          import importlib.util
-          import sys
-          from pathlib import Path
-
-          spec = importlib.util.spec_from_file_location('check_release_record', sys.argv[1])
-          module = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(module)
-          module.sign_record(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
-          '@ | Set-Content -Encoding utf8 -Path $signer
             $keyring = Join-Path $fixture 'keyring.json'
-            & python.exe $signer (Join-Path $PWD 'scripts/check-release-record.py') (Join-Path $fixture 'v1.2.3.tsv') (Join-Path $fixture 'v1.2.3.tsv.sig') $keyring
+            & node --experimental-strip-types scripts/check-release-record.ts --sign-record (Join-Path $fixture 'v1.2.3.tsv') --signature (Join-Path $fixture 'v1.2.3.tsv.sig') --keyring $keyring
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           Write-FixtureReleaseRecord
@@ -513,22 +600,26 @@ jobs:
             '^function Save-BoundedHttpsFile\([^\r\n]+\) \{.*?^\}',
             ([Text.RegularExpressions.RegexOptions]::Multiline -bor [Text.RegularExpressions.RegexOptions]::Singleline)
           )
-          $fixtureVerifier = Join-Path $fixture 'verify-release-record.py'
-          $fixtureVerifierText = Get-Content -Raw (Join-Path $PWD 'scripts/verify-release-record.py')
-          $fixturePublicKey = ((Get-Content -Raw (Join-Path $fixture 'keyring.json') | ConvertFrom-Json).keys[0].public_key)
-          $fixtureVerifierText = $fixtureVerifierText.Replace(
-            'eYPvN15Ah8ytHoBd2jY+36Wh/5g1kbqhDA9TL6wPRWc=',
-            $fixturePublicKey)
-          Set-Content -Encoding utf8 -NoNewline -Path $fixtureVerifier -Value $fixtureVerifierText
-          $fixtureVerifierHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixtureVerifier).Hash.ToLowerInvariant()
+          # Authenticate the real native verifier independently of the target fixture archive.
+          $bootstrapDir = Join-Path $fixture 'bootstrap-assets'
+          $bootstrapPayload = Join-Path $fixture 'bootstrap-payload'
+          New-Item -ItemType Directory -Force -Path $bootstrapDir, $bootstrapPayload | Out-Null
+          Copy-Item -LiteralPath (Join-Path $PWD 'target/debug/tapid.exe') -Destination (Join-Path $bootstrapPayload 'tapid.exe')
+          foreach ($bootstrapTarget in @('aarch64-apple-darwin', 'x86_64-apple-darwin', 'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-gnu', 'aarch64-pc-windows-msvc', 'x86_64-pc-windows-msvc')) {
+            $name = "tapid-1.0.0-$bootstrapTarget.tar.gz"
+            & tar.exe -czf (Join-Path $bootstrapDir $name) -C $bootstrapPayload tapid.exe
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Copy-Item -LiteralPath (Join-Path $bootstrapDir $name) -Destination (Join-Path $fixture $name)
+          }
+          node --experimental-strip-types tools/release/bootstrap.ts $bootstrapDir 1.0.0 'https://fixture.example/bootstrap/v1.0.0'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installerText = Get-Content -Raw (Join-Path $bootstrapDir 'install.ps1')
           $fixtureInstallerText = $downloaderPattern.Replace($installerText, $fixtureDownloader, 1)
           if ($fixtureInstallerText -eq $installerText) { throw 'failed to create isolated installer fixture' }
+          # Only this fixture selects an explicit ephemeral keyring.
           $fixtureInstallerText = $fixtureInstallerText.Replace(
-            'https://raw.githubusercontent.com/LimeTip/tapid/a01d5008ab3c892538e3297488917a817fa20fee/scripts/verify-release-record.py',
-            'https://fixture.example/verify-release-record.py')
-          $fixtureInstallerText = $fixtureInstallerText.Replace(
-            '4596933259b6ef99fae7adc00aaf74c19e4ed4421cd81d73b9588a63772cfd3d',
-            $fixtureVerifierHash)
+            '& $bootstrap __verify-release-record $recordPath $signaturePath',
+            ('& $bootstrap __verify-release-record $recordPath $signaturePath --keyring ''{0}''' -f (Join-Path $fixture 'keyring.json')))
           Set-Content -NoNewline -Path $installerUnderTest -Value $fixtureInstallerText
           $env:TAPID_FIXTURE_ROOT = $fixture
           Set-Content -NoNewline -Path (Join-Path $fixture 'requests.txt') -Value ''
@@ -553,18 +644,41 @@ jobs:
           $expectedRequests = @(
             'https://tapid.dev/releases/v1/v1.2.3.tsv'
             'https://tapid.dev/releases/v1/v1.2.3.tsv.sig'
-            'https://fixture.example/verify-release-record.py'
+            "https://fixture.example/bootstrap/v1.0.0/tapid-1.0.0-$target.tar.gz"
             "https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName"
             'https://tapid.dev/releases/v1/v1.2.3.tsv'
             'https://tapid.dev/releases/v1/v1.2.3.tsv.sig'
-            'https://fixture.example/verify-release-record.py'
+            "https://fixture.example/bootstrap/v1.0.0/tapid-1.0.0-$target.tar.gz"
             "https://gitlab.example/tapid/releases/v1.2.3/downloads/$archiveName"
           )
           if (($requests -join "`n") -cne ($expectedRequests -join "`n")) { throw 'fixture did not use release record discovery and artifact URLs' }
+          $signaturePath = Join-Path $fixture 'v1.2.3.tsv.sig'
+          $validSignature = [IO.File]::ReadAllBytes($signaturePath)
+          [IO.File]::WriteAllBytes($signaturePath, [Text.Encoding]::ASCII.GetBytes('{}'))
+          try {
+            & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
+            throw 'invalid signature was accepted'
+          } catch {
+            if ($_.Exception.Message -notlike '*release record signature verification failed*') { throw }
+          }
+          if ((Get-FileHash -Algorithm SHA256 $installed).Hash -ne $before) { throw 'invalid signature changed installation' }
+          [IO.File]::WriteAllBytes($signaturePath, $validSignature)
+          [IO.File]::WriteAllBytes((Join-Path $fixture "tapid-1.0.0-$target.tar.gz"), [byte[]](1, 2, 3))
+          try {
+            & $installerUnderTest -Version 1.2.3 -InstallDir $installDir
+            throw 'tampered bootstrap was accepted'
+          } catch {
+            if ($_.Exception.Message -notlike '*bootstrap archive checksum mismatch*') { throw }
+          }
+          if ((Get-FileHash -Algorithm SHA256 $installed).Hash -ne $before) { throw 'tampered bootstrap changed installation' }
+
           } finally {
             Remove-Item Env:TAPID_FIXTURE_ROOT -ErrorAction SilentlyContinue
             [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')
           }
+          # The expected native signature failure sets LASTEXITCODE to 1.
+          # Reaching this point means all rejection and preservation assertions passed.
+          $global:LASTEXITCODE = 0
 
   package:
     name: Package workspace
@@ -578,7 +692,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Validate workspace metadata
         run: cargo metadata --no-deps --format-version 1 --locked
       - name: Package all crates

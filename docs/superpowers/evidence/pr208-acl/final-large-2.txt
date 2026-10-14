@@ -1,0 +1,10 @@
+
+running 1 test
+test execution::windows_job::filesystem::tests::representative_node_modules_acl_measurement ... LARGE_ACL iteration=0 files=25000 packages=500 audited_objects=26004 grant_ms=3689.977 restore_ms=3524.319 grant_wait_ms=0.068 grant_hold_ms=3689.876 restore_wait_ms=0.032 restore_hold_ms=3524.280
+LARGE_ACL iteration=1 files=25000 packages=500 audited_objects=26004 grant_ms=3411.706 restore_ms=3365.496 grant_wait_ms=0.011 grant_hold_ms=3411.687 restore_wait_ms=0.030 restore_hold_ms=3365.456
+LARGE_ACL iteration=2 files=25000 packages=500 audited_objects=26004 grant_ms=3425.249 restore_ms=3398.656 grant_wait_ms=0.012 grant_hold_ms=3425.228 restore_wait_ms=0.032 restore_hold_ms=3398.617
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 53.27s
+
+EXIT=0

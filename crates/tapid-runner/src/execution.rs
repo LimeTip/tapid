@@ -6,12 +6,19 @@ use request::windows_path_units_semantically_equal;
 pub use request::{ExecutionRequest, ExecutionRequestBuilder};
 #[cfg(test)]
 use request::{
+    assemble_windows_environment_block, join_executable_search_paths,
+    windows_appcontainer_environment_entries, windows_environment_path_units,
+};
+#[cfg(test)]
+use request::{
     join_windows_path_units, os_units, validate_executable_search_paths,
     validate_windows_command_line_units, windows_command_line_units_upper_bound,
 };
+#[cfg(any(windows, test))]
+use request::{serialize_windows_command_line_units, windows_environment_block_units};
 
 mod supervision;
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
 use supervision::ExecutionLifecycle;
 use supervision::{
     ExecutionBackend, OwnedExecutionAttempt, PreparationError, execute_with_backend,
@@ -528,7 +535,7 @@ enum GrantResolution {
         relative_target: PathBuf,
     },
     RuntimeCanonical,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     RuntimeDevice {
         device: u64,
         inode: u64,
@@ -794,7 +801,7 @@ impl ResolvedSandboxPolicy {
                     }
                 }
                 GrantResolution::RuntimeCanonical => validate_canonical_path(&grant.path)?,
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 GrantResolution::RuntimeDevice { .. } => {
                     validate_canonical_path(&grant.path)?;
                     if !grant_kind_matches(grant, &grant.path)? {
@@ -1185,6 +1192,7 @@ pub enum Termination {
     OutputLimitExceeded,
     ProcessLimitExceeded,
     MemoryLimitExceeded,
+    Cancelled,
 }
 
 /// Captured execution result paired with an enforcement receipt.
@@ -1418,6 +1426,20 @@ pub fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, Execution
     execute_with_backend(request, &platform_backend::PlatformBackend)
 }
 
+/// Byte identity of the native backend and its documented system toolchain.
+/// This performs no project execution and does not require cgroup delegation.
+pub fn dependency_toolchain_identity() -> Result<String, ExecutionError> {
+    #[cfg(target_os = "linux")]
+    {
+        platform_backend::toolchain_identity()
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err(ExecutionError::new(
+        ExecutionErrorCategory::UnsupportedContainment,
+        "dependency lifecycle toolchain identity currently requires Linux",
+    ))
+}
+
 fn resolve_policy(
     request: &ExecutionRequest,
     additions: RuntimeFilesystemAdditions,
@@ -1626,11 +1648,12 @@ fn resolve_runtime_grant(
             ),
         ));
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if matches!(
         canonical.to_str(),
         Some("/dev/null" | "/dev/random" | "/dev/urandom")
-    ) {
+    ) || (cfg!(target_os = "linux") && canonical == Path::new("/dev/zero"))
+    {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
         let metadata = fs::metadata(&canonical).map_err(|_| binding_mismatch())?;
         if !metadata.file_type().is_char_device() {
@@ -1658,7 +1681,7 @@ fn resolve_runtime_grant(
 }
 
 fn grant_kind_matches(grant: &ResolvedGrant, path: &Path) -> Result<bool, ExecutionError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if let GrantResolution::RuntimeDevice {
         device,
         inode,
@@ -1707,6 +1730,16 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
     )
 }
 
+#[cfg(windows)]
+#[path = "windows_execution.rs"]
+mod platform_backend;
+#[cfg(any(windows, test))]
+#[path = "windows_cancellation.rs"]
+mod windows_cancellation;
+#[cfg(windows)]
+#[path = "windows_job.rs"]
+mod windows_job;
+
 #[cfg(target_os = "macos")]
 #[path = "macos_restricted.rs"]
 mod platform_backend;
@@ -1715,7 +1748,7 @@ mod platform_backend;
 #[path = "linux_restricted.rs"]
 mod platform_backend;
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform_backend {
     use super::{
         BackendIdentity, ContainmentSupport, EnforcementDimensions, ExecutionBackend,

@@ -1,0 +1,11 @@
+{
+  "name": "news",
+  "version": "1.0.0",
+  "dependencies": {
+    "@example/ui": "^1.0.0",
+    "external": "^1.0.0"
+  },
+  "scripts": {
+    "probe": "node probe.js"
+  }
+}

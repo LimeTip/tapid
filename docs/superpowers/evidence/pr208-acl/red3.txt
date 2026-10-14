@@ -1,0 +1,16 @@
+
+running 1 test
+test execution::windows_job::filesystem::tests::runtime_preexisting_access_does_not_require_write_dac ... 
+thread 'execution::windows_job::filesystem::tests::runtime_preexisting_access_does_not_require_write_dac' (7108) panicked at crates/tapid-runner/src/windows_filesystem.rs:721:9:
+preexisting AppContainer read/execute must not require host WRITE_DAC
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    execution::windows_job::filesystem::tests::runtime_preexisting_access_does_not_require_write_dac
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 122 filtered out; finished in 0.05s
+
+EXIT=101

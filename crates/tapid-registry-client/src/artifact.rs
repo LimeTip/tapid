@@ -100,19 +100,25 @@ mod tests {
     #[test]
     fn artifact_download_requires_status_200() {
         let url = "https://registry.npmjs.org/a.tgz";
-        let transport = Fake {
-            response: HttpResponse {
-                status: 206,
-                content_type: Some("application/json; charset=utf-8".into()),
-                body: vec![],
-            },
-            url: url.into(),
-        };
-        assert!(matches!(
-            download_artifact(&transport, url),
-            Err(RegistryClientError::Metadata(MetadataError::HttpStatus(
-                206
-            )))
-        ));
+        for status in [206, 301, 403, 404, 500, 503] {
+            let transport = Fake {
+                response: HttpResponse {
+                    status,
+                    content_type: Some("application/json; charset=utf-8".into()),
+                    body: b"not an artifact".to_vec(),
+                },
+                url: url.into(),
+            };
+            let registry =
+                crate::NpmRegistry::new(&transport, "https://registry.npmjs.org".parse().unwrap());
+            assert!(
+                matches!(
+                    registry.download_artifact(url),
+                    Err(RegistryClientError::Metadata(MetadataError::HttpStatus(actual)))
+                        if actual == status
+                ),
+                "HTTP {status} must fail before the artifact body reaches integrity verification"
+            );
+        }
     }
 }

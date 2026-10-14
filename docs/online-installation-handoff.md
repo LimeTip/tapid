@@ -9,13 +9,15 @@ The CLI supports bounded live npm metadata and artifact retrieval in addition to
 - Normal npm candidates require HTTPS tarball URLs and registry-declared SHA-512 integrity.
 - Historical versions with unsupported dependency syntax or missing integrity are excluded without hiding otherwise usable versions.
 - Exact package metadata HTTP 404 and narrowly validated unpublished tombstones produce no candidates. Other malformed or unsuccessful responses fail closed.
-- Metadata is fetched incrementally for packages reached by the selected graph.
+- Ordinary install replays matching locks without metadata requests. Changed manifests start with locked selections and exact edges, fetching metadata when necessary; `update` requests a fresh graph.
+- Frozen installation hydrates missing trees from pinned HTTPS archives without metadata resolution or lock rewrites. Offline requires all verified content locally. Both modes retain archive, provenance, registry-route, target, and tree-digest verification.
 - Verified npm trees materialize from either a direct package root or exactly one named top-level wrapper containing `package.json`; missing and ambiguous roots are rejected before activation.
 - Metadata and immutable artifact GETs retry a bounded set of transient failures, with three total attempts and deterministic 100 ms and 200 ms delays.
 - Distinct parents can select different exact versions of one transitive package.
 - Resolver root selections and exact dependency edges are preserved through lockfile construction, linking, and replay.
 - Project activation uses an operating-system advisory lock and owner-marked staging directories. A later run reclaims only stages matching the prior unlocked owner's exact marker; live, malformed, oversized, symlinked, and ambiguous state fails closed.
 - Online verified trees are staged privately, then published under the store's cross-process lock before lockfile replacement; publication remains rollback-capable and readers are blocked until managed project activation succeeds and the commit decision is durable. Durable project and store journals define recovery across process crashes: a pending decision restores the pre-operation state, while a committed decision completes cleanup.
+- `tapid ci` installs the locked graph without resolution or manifest/lockfile edits. Missing trees use locked artifact URLs, integrity and tree digests, with coordinated store publication and atomic managed activation. `tapid ci --offline` requires all verified trees in the store.
 - Lifecycle scripts remain disabled during installation.
 
 The explicit `--allow-unverified-registry-artifacts` compatibility option can retain npm versions without declared integrity for an interactive online install. It emits a warning and cannot be combined with `--offline` or `--frozen`. It does not turn a locally computed digest into registry authentication.
@@ -23,7 +25,7 @@ The explicit `--allow-unverified-registry-artifacts` compatibility option can re
 ## Remaining limitations
 
 - Live JSR installation and integrity behavior are not verified.
-- Full npm range and tag support (alias targets accept supported semver ranges, but dist-tags remain unsupported; see [npm aliases](compatibility.md#npm-aliases)), automatic peer placement/nested peer lookup, complete optional-dependency and platform-condition semantics, workspace linking, and production-grade private registry support are incomplete. Environment-variable token authentication for scoped/default registry routing exists as a development feature (see the [CLI guide](../crates/tapid-cli/README.md#private-npm-registry-routing-development-feature)); credential helper and file providers are not implemented.
+- Full npm range and tag support (alias targets accept supported semver ranges, but dist-tags remain unsupported; see [npm aliases](compatibility.md#npm-aliases)), automatic peer placement/nested peer lookup, complete optional-dependency and platform-condition semantics, and workspace behavior beyond Tapid's documented bounded subset remain incomplete. Private registry routing and environment-variable token authentication are available as a development feature (see the [CLI guide](../crates/tapid-cli/README.md#private-npm-registry-routing-development-feature)); credential helper and file providers, and production-grade private registry support, remain incomplete.
 - Metadata and artifact downloads remain sequential; retry delays and per-attempt timeouts are bounded but can extend a single resource fetch.
 - Frozen replay does not yet implement every npm frozen-lockfile policy rule.
 

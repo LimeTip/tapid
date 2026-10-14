@@ -4,14 +4,16 @@
 [![Crates.io](https://img.shields.io/crates/v/tapid-lockfile)](https://crates.io/crates/tapid-lockfile)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-lockfile)](https://crates.io/crates/tapid-lockfile)
 [![Docs.rs](https://docs.rs/tapid-lockfile/badge.svg)](https://docs.rs/tapid-lockfile)
-[![License](https://img.shields.io/crates/l/tapid-lockfile)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Deterministic lockfile models and canonical JSON serialization for Tapid.
 
+`LockedPackage::artifact_url()` and `artifact_integrity()` expose the pinned download URL and SHA-512 integrity. The model permits omitted URLs for older or fixture-generated locks; `tapid ci` requires every registry URL regardless of cache contents, except when an explicit local registry fixture supplies artifacts. `tapid ci` uses these fields to fetch missing artifacts without resolving versions, and also verifies the extracted tree against `tree_digest()`.
+
 The current contract provides:
 
-- Schema version `7`, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
+- Schema version `7`, or `9` when approved dependency hooks produce derived trees, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
 - Exact package name and version keys, registry origin, canonical padded SHA-512 SRI, required schema 6 registry-integrity provenance, SHA-256 unpacked digest, and explicit `treeDigest` replay identity.
 - Deterministic package ordering through `BTreeMap` serialization.
 - HTTPS registry and artifact URL validation.
@@ -26,15 +28,22 @@ Schema `4` remains readable for controlled compatibility when package keys use c
 Persisted registry identities must be canonical in package records, keys, roots
 and edges. `NonCanonicalRegistryIdentity` rejects older uppercase/default-port
 spellings, including schema 4, without rekeying or collapsing identities. Preserve
-a separate backup, deliberately re-resolve using online `tapid install` without
+a separate verified backup, deliberately remove the incompatible original lock,
+then re-resolve using online `tapid install` without
 `--offline`/`--frozen`, then review the new graph. This may change versions and
 artifacts; it is not a byte-preserving migration. See the repository
 [compatibility and recovery contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#persisted-registry-identity-compatibility).
 
 Package keys encode empty contexts as `peer=-|platform=-`. Non-empty peer contexts use canonical `name=...;version=...` fields. Platform contexts use fixed canonical fields such as `os=linux;cpu=x86_64;libc=gnu`. Reserved context characters are percent-encoded, and noncanonical wire representations are rejected.
 
-Consumer replay uses `STORE/trees/<digest>/` and a regular `.tapid-tree` marker containing the exact digest. Before reading store trees, the CLI rejects schema 5 locks that lack the schema 6 provenance contract and packages marked as lacking registry-declared integrity, validates every explicit schema 6 root against direct manifest identity and version requirements, and requires exactly one root per direct identity. It then validates every referenced tree and stages the managed layout before atomically replacing `node_modules`; dependency lifecycle scripts never run. `tapid install --store-dir PATH` supplies a dynamic store root.
+Consumer replay uses `STORE/trees/<digest>/` and a regular `.tapid-tree` marker containing the exact digest. Before reading store trees, the CLI rejects schema 5 locks that lack the schema 6 provenance contract and packages marked as lacking registry-declared integrity, validates every explicit schema 6 root against direct manifest identity and version requirements, and requires exactly one root per direct identity. It then validates every referenced tree and stages the managed layout before atomically replacing `node_modules`; offline and frozen replay never execute dependency lifecycle scripts. Approved online hooks record authenticated derived outputs in schema 9 for exact replay. `tapid install --store-dir PATH` supplies a dynamic store root.
 
 This is a lockfile model and replay contract, not a complete npm lockfile implementation or dependency resolver. Rich peer, optional, platform, lifecycle, provenance, audit, and complete dependency-edge semantics remain limited to the tested subset.
 
 Schema 7 preserves alias names separately from actual package identities. `rootBindings` maps local direct names to exact package keys. `dependencyAliases` records each renamed transitive dependency and its actual target name; it must agree with the exact dependency key. Alias metadata in older schemas, unsafe names, inconsistent targets, and dangling bindings are rejected. Schema 6 locks without alias metadata retain their existing replay support. Older clients reject schema 7.
+
+CLI frozen installation can hydrate missing trees using recorded artifact URLs and registry-declared integrity provenance. It verifies archive integrity and the pinned tree digest without changing the graph or serialized lock. Offline requires existing verified trees. Locks lacking these archive fields can still replay warm content under the documented schema rules, but cannot hydrate cold content.
+
+Schema 9 adds ordered `derivedHooks` records with exact recipe keys, verified output tree digests, and store-local HMAC attestations. Source archive integrity and `treeDigest` retain their original meanings. Replay validates every recipe and output before selecting the final installed tree. Older schemas cannot contain derived-hook records. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md).
+
+`ImportedNpmLockfile` provides the separate schema 8 offline npm v3 import contract. It preserves validated npm placements and constraints and records tree digests only after artifact verification, with each receipt bound to the imported tarball URL and integrity value. Ordinary `Lockfile` uses schema 7, or schema 9 with approved lifecycle outputs. Imported graph parsing uses existing semver/alias requirement validation without invoking resolution. See [migration and rollback](../../docs/npm-lockfile-import.md) and [ADR 0008](../../docs/adr/0008-offline-npm-lock-import.md).

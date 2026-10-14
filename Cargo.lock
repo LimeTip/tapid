@@ -303,6 +303,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -535,6 +536,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "http"
@@ -1466,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "tapid"
-version = "0.0.11"
+version = "0.0.13"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -1497,17 +1507,18 @@ dependencies = [
 
 [[package]]
 name = "tapid-archive"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "flate2",
  "hex",
  "sha2",
+ "tapid-test-support",
  "tar",
 ]
 
 [[package]]
 name = "tapid-attestations"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1517,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-core"
-version = "0.0.5"
+version = "0.0.7"
 dependencies = [
  "base64 0.22.1",
  "semver",
@@ -1526,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-linker"
-version = "0.0.5"
+version = "0.0.7"
 dependencies = [
  "sha2",
  "tapid-core",
@@ -1535,28 +1546,30 @@ dependencies = [
 
 [[package]]
 name = "tapid-lockfile"
+version = "0.0.12"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "tapid-core",
+ "tapid-resolver",
+ "url",
+]
+
+[[package]]
+name = "tapid-manifest"
 version = "0.0.9"
 dependencies = [
  "proptest",
  "serde",
  "serde_json",
  "tapid-core",
- "url",
-]
-
-[[package]]
-name = "tapid-manifest"
-version = "0.0.7"
-dependencies = [
- "proptest",
- "serde",
- "serde_json",
- "tapid-core",
+ "tapid-test-support",
 ]
 
 [[package]]
 name = "tapid-policy"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1564,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-protocol"
-version = "0.0.3"
+version = "0.0.5"
 dependencies = [
  "serde",
  "tapid-core",
@@ -1572,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-publish"
-version = "0.0.3"
+version = "0.0.5"
 dependencies = [
  "sha2",
  "tapid-core",
@@ -1580,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-registry-client"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "httpdate",
  "reqwest",
@@ -1588,12 +1601,13 @@ dependencies = [
  "serde",
  "serde_json",
  "tapid-core",
+ "time",
  "url",
 ]
 
 [[package]]
 name = "tapid-release-client"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "ed25519-dalek",
  "serde",
@@ -1605,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-resolver"
-version = "0.0.6"
+version = "0.0.8"
 dependencies = [
  "proptest",
  "semver",
@@ -1616,19 +1630,21 @@ dependencies = [
 
 [[package]]
 name = "tapid-runner"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "libc",
  "serde",
  "sha2",
+ "tapid-core",
  "tapid-policy",
+ "tapid-test-support",
  "toml",
  "windows-sys 0.52.0",
 ]
 
 [[package]]
 name = "tapid-signatures"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
@@ -1640,10 +1656,11 @@ dependencies = [
 
 [[package]]
 name = "tapid-store"
-version = "0.0.6"
+version = "0.0.8"
 dependencies = [
  "fs4",
  "hex",
+ "hmac",
  "libc",
  "rustix",
  "same-file",
@@ -1651,16 +1668,17 @@ dependencies = [
  "sha2",
  "tapid-archive",
  "tapid-core",
+ "tapid-test-support",
  "windows-sys 0.52.0",
 ]
 
 [[package]]
 name = "tapid-test-support"
-version = "0.0.2"
+version = "0.0.3"
 
 [[package]]
 name = "tapid-transparency"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",

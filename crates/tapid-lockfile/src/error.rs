@@ -11,6 +11,7 @@ pub enum LockfileError {
     InvalidWorkspaceSource(String),
     UnsupportedVersion(u32),
     AliasMetadataInLegacySchema(u32),
+    InvalidDerivedOutput(String),
     RegenerationRequired(u32),
     DuplicatePackage(String),
     PackageKeyMismatch(String),
@@ -23,6 +24,7 @@ pub enum LockfileError {
     },
     DanglingRoot(String),
     MissingRoots,
+    WorkspaceIdentityRequiresCurrentVersion,
     MissingRegistryIntegrityProvenance(String),
     UnverifiedRegistryArtifact(String),
     NonCanonicalRoots,
@@ -53,6 +55,9 @@ impl fmt::Display for LockfileError {
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported lockfile version: {version}")
             }
+            Self::InvalidDerivedOutput(reason) => {
+                write!(f, "invalid lifecycle-derived output: {reason}")
+            }
             Self::AliasMetadataInLegacySchema(version) => write!(
                 f,
                 "lockfile version {version} cannot contain npm alias bindings; alias metadata requires schema 7"
@@ -67,7 +72,7 @@ impl fmt::Display for LockfileError {
             }
             Self::NonCanonicalRegistryIdentity => write!(
                 f,
-                "noncanonical persisted registry identity; replay is refused without rekeying; preserve a backup of tapid.lock, then deliberately re-resolve online with `tapid install` (without --offline or --frozen) and review the new graph; see docs/compatibility.md"
+                "noncanonical persisted registry identity; replay is refused without rekeying; preserve a backup of tapid.lock, then deliberately remove the incompatible original lock and re-resolve online with `tapid install` (without --offline or --frozen) and review the new graph; see docs/compatibility.md"
             ),
             Self::InvalidPackageKey(key) => {
                 write!(f, "invalid canonical lockfile package key: {key}")
@@ -80,6 +85,10 @@ impl fmt::Display for LockfileError {
             }
             Self::DanglingRoot(root) => write!(f, "lockfile has dangling root package {root}"),
             Self::MissingRoots => write!(f, "current lockfile schema requires exact root packages"),
+            Self::WorkspaceIdentityRequiresCurrentVersion => write!(
+                f,
+                "workspace package identities require the current lockfile schema"
+            ),
             Self::MissingRegistryIntegrityProvenance(package) => write!(
                 f,
                 "current lockfile schema requires registry integrity provenance for {package}"

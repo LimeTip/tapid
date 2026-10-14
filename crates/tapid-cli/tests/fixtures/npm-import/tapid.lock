@@ -1,0 +1,59 @@
+{
+  "lockfileVersion": 8,
+  "rootManifestDigest": "sha256-33c7c0b1335ff2af6f999d16ae21b20a8e80ea4896231d1a0e712b7db136773e",
+  "npmLock": {
+    "lockfileVersion": 3,
+    "name": "npm-import-reference",
+    "packages": {
+      "": {
+        "dependencies": {
+          "consumer": "1.0.0",
+          "parent": "1.0.0",
+          "shared": "1.0.0"
+        },
+        "name": "npm-import-reference",
+        "optionalDependencies": {
+          "native": "1.0.0"
+        },
+        "version": "1.0.0"
+      },
+      "node_modules/consumer": {
+        "integrity": "sha512-O/4aCnmS0/IY3G9y5Q0tK4TLoAIDMcv4fUwn65rGWobqAs8V5tXVYx1LgCfEBD0U7XbTlKlgUCWIAcyorBfDfQ==",
+        "peerDependencies": {
+          "shared": "1.0.0"
+        },
+        "resolved": "https://registry.npmjs.org/consumer/-/consumer-1.0.0.tgz",
+        "version": "1.0.0"
+      },
+      "node_modules/native": {
+        "integrity": "sha512-khKIUanfAqv6ZH7ReBrpeDMRZgv2F+ksGxvB++qTrXzYIfD2xRUUdF6JvYuOmwJVU0+pqFH7TKJPc84N9a7l3w==",
+        "optional": true,
+        "os": [
+          "tapid-test-unsupported-os"
+        ],
+        "resolved": "https://registry.npmjs.org/native/-/native-1.0.0.tgz",
+        "version": "1.0.0"
+      },
+      "node_modules/parent": {
+        "dependencies": {
+          "shared": "2.0.0"
+        },
+        "integrity": "sha512-g3zA9Bxdzo9gumL/0PSMLyuFX61qSsTl7aPrdQTghvcF0FhKl+RB0TvsO6aHo30tRfvsAFIJ++k0UNJ4wGmjWA==",
+        "resolved": "https://registry.npmjs.org/parent/-/parent-1.0.0.tgz",
+        "version": "1.0.0"
+      },
+      "node_modules/parent/node_modules/shared": {
+        "integrity": "sha512-tKFsM1F9DuInaIqRY0XoDBScexjudC92EzL4LE8AL00E/d9mOblXBOqr6geQ/fsL1MpSFWucRm2ILGV3ejSzAg==",
+        "resolved": "https://registry.npmjs.org/shared/-/shared-2.0.0.tgz",
+        "version": "2.0.0"
+      },
+      "node_modules/shared": {
+        "integrity": "sha512-yy/SfIkupQhLqYGoubOppkEX5ZLGqZH9Ky1iIr3ViFNSFAS95Fi1Xmot1B68+TN9MwRgXU15JlkRlqkQ8+saUQ==",
+        "resolved": "https://registry.npmjs.org/shared/-/shared-1.0.0.tgz",
+        "version": "1.0.0"
+      }
+    },
+    "requires": true,
+    "version": "1.0.0"
+  }
+}

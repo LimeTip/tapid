@@ -3,7 +3,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -15,13 +15,16 @@ pub(crate) struct Args {
     /// Project directory containing package.json.
     #[arg(long, default_value = ".")]
     pub(crate) project_dir: PathBuf,
+    /// Select a workspace member by package name while retaining root policy and containment.
+    #[arg(long)]
+    pub(crate) workspace: Option<String>,
     /// Exact Node executable; otherwise the first valid Node on the host PATH is used.
     #[arg(long)]
     pub(crate) node_runtime: Option<PathBuf>,
     /// Emit the versioned receipt as one JSON line on stderr after child output.
     #[arg(long)]
     pub(crate) receipt_json: bool,
-    /// Allow process-memory statistics in Linux Restricted mode by creating a private PID/mount namespace with read-only procfs.
+    /// Allow process-memory statistics in required Linux sandbox mode by creating a private PID/mount namespace with read-only procfs.
     #[arg(long, visible_aliases = ["allow-procfs", "allow-memory-read"])]
     pub(crate) allow_process_memory_stats: bool,
     /// Arguments forwarded after `--` to the script.
@@ -59,15 +62,51 @@ pub(crate) fn run(args: Args) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let manifest = match super::manifest::read_manifest(&project_dir.join("package.json")) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("error: {error}");
+    let (manifest, working_directory) = if let Some(workspace_name) = args.workspace.as_deref() {
+        let workspace = match tapid_manifest::Workspace::discover(&project_dir) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let manifest = match workspace.select(Some(workspace_name)) {
+            Ok(manifest) => manifest.clone(),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let member_manifest = match workspace.select_path(Some(workspace_name)) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let Some(working_directory) = member_manifest.parent() else {
+            eprintln!("error: workspace member manifest has no parent");
             return ExitCode::from(1);
-        }
+        };
+        (manifest, working_directory.to_owned())
+    } else {
+        let manifest = match super::manifest::read_manifest(&project_dir.join("package.json")) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        (manifest, project_dir.clone())
     };
     let Some(script) = manifest.scripts().get(&args.script).cloned() else {
-        eprintln!("error: root package script is missing: {}", args.script);
+        match args.workspace.as_deref() {
+            Some(workspace_name) => eprintln!(
+                "error: workspace member '{workspace_name}' package script is missing: {}",
+                args.script
+            ),
+            None => eprintln!("error: root package script is missing: {}", args.script),
+        }
         return ExitCode::from(1);
     };
     let config_path = project_dir.join("tapid.toml");
@@ -139,19 +178,37 @@ pub(crate) fn run(args: Args) -> ExitCode {
         .is_none()
         .then(|| env::var_os("PATH"))
         .flatten();
-    let prepared = match crate::run::prepare_execution_request(
-        &project_dir,
-        &args.script,
-        &config,
-        &script,
-        &args.arguments,
-        crate::run::HostExecutionEnvironment {
-            node_runtime: args.node_runtime.as_deref(),
-            path: host_path.as_deref(),
-            allowlisted: &ambient_environment,
-            allow_process_memory_stats: args.allow_process_memory_stats,
-        },
-    ) {
+    let prepared_result = if args.workspace.is_some() {
+        crate::run::prepare_execution_request_with_working_directory(
+            &project_dir,
+            &working_directory,
+            &args.script,
+            &config,
+            &script,
+            &args.arguments,
+            crate::run::HostExecutionEnvironment {
+                node_runtime: args.node_runtime.as_deref(),
+                path: host_path.as_deref(),
+                allowlisted: &ambient_environment,
+                allow_process_memory_stats: args.allow_process_memory_stats,
+            },
+        )
+    } else {
+        crate::run::prepare_execution_request(
+            &project_dir,
+            &args.script,
+            &config,
+            &script,
+            &args.arguments,
+            crate::run::HostExecutionEnvironment {
+                node_runtime: args.node_runtime.as_deref(),
+                path: host_path.as_deref(),
+                allowlisted: &ambient_environment,
+                allow_process_memory_stats: args.allow_process_memory_stats,
+            },
+        )
+    };
+    let prepared = match prepared_result {
         Ok(prepared) => prepared,
         Err(error) => {
             eprintln!("error: {error}");
@@ -282,7 +339,54 @@ fn receipt_value(outcome: &tapid_runner::ExecutionOutcome) -> serde_json::Value 
     })
 }
 
+#[cfg(any(not(any(target_os = "macos", target_os = "linux")), test))]
+fn forward_child_output(
+    child_stdout: &[u8],
+    child_stderr: &[u8],
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> io::Result<()> {
+    stdout.write_all(child_stdout)?;
+    stdout.flush()?;
+    stderr.write_all(child_stderr)?;
+    stderr.flush()
+}
+
+fn forward_child_output_for_cli(
+    child_stdout: &[u8],
+    child_stderr: &[u8],
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // The macOS backend streams bytes while capturing them; replay would duplicate output.
+        let _ = (child_stdout, child_stderr, stdout, stderr);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        #[cfg(target_os = "linux")]
+        {
+            // The Linux backend also streams bytes while capturing them.
+            let _ = (child_stdout, child_stderr, stdout, stderr);
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            forward_child_output(child_stdout, child_stderr, stdout, stderr)
+        }
+    }
+}
+
 fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> ExitCode {
+    let output_error = forward_child_output_for_cli(
+        outcome.stdout(),
+        outcome.stderr(),
+        &mut io::stdout(),
+        &mut io::stderr(),
+    )
+    .err();
     let value = receipt_value(outcome);
     if machine {
         eprintln!("\n{value}");
@@ -291,6 +395,10 @@ fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> Ex
             "\nsandbox receipt: {}",
             serde_json::to_string_pretty(&value).expect("receipt JSON values are serializable")
         );
+    }
+    if let Some(error) = output_error {
+        eprintln!("error: failed to forward root package script output: {error}");
+        return ExitCode::from(1);
     }
     if outcome.process_memory_stats_hint() {
         eprintln!(
@@ -310,6 +418,9 @@ fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> Ex
         tapid_runner::Termination::MemoryLimitExceeded => {
             eprintln!("error: root package script exceeded its memory limit");
         }
+        tapid_runner::Termination::Cancelled => {
+            eprintln!("error: root package script cancelled by Ctrl+C");
+        }
         tapid_runner::Termination::Exited(_) | tapid_runner::Termination::Signaled(_) => {}
     }
     termination_exit_code(outcome.termination())
@@ -325,6 +436,7 @@ fn termination_exit_code(termination: &tapid_runner::Termination) -> ExitCode {
         | tapid_runner::Termination::OutputLimitExceeded
         | tapid_runner::Termination::ProcessLimitExceeded
         | tapid_runner::Termination::MemoryLimitExceeded => ExitCode::from(1),
+        tapid_runner::Termination::Cancelled => ExitCode::from(130),
     }
 }
 

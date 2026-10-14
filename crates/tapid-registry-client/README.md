@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tapid-registry-client)](https://crates.io/crates/tapid-registry-client)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-registry-client)](https://crates.io/crates/tapid-registry-client)
 [![Docs.rs](https://docs.rs/tapid-registry-client/badge.svg)](https://docs.rs/tapid-registry-client)
-[![License](https://img.shields.io/crates/l/tapid-registry-client)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Read-only, validated registry metadata and artifact-download boundary for Tapid.
@@ -12,6 +12,20 @@ Read-only, validated registry metadata and artifact-download boundary for Tapid.
 ## npm
 
 `NpmRegistry` accepts an HTTPS npm registry origin, normally `https://registry.npmjs.org`, and package names such as `foo` or `@scope/name`. It requests npm's abbreviated install metadata, validates package and version identity, exposes string dependency requirements, and requires an HTTPS `dist.tarball`. Normal fetches require a valid SHA-512 `dist.integrity`, normalize equivalent padded and unpadded Base64 to canonical padded SRI, and exclude historical records that omit integrity. The explicit compatibility option can retain missing-integrity records for an interactive install, but those artifacts are not registry-authenticated and the CLI warns before proceeding.
+
+`NpmRegistry::inspect` requests full npm metadata for one exact version and
+returns `NpmPackageEvidence`. It validates identity, SHA-512 SRI and HTTPS
+references, while retaining absent evidence instead of excluding the version.
+`NpmPackageEvidence::from_metadata` applies the same contract to local snapshots.
+It reports signature counts and attestation references without fetching or
+verifying them. Malformed supplied evidence fails closed. Installation retains
+its stricter artifact and integrity requirements.
+
+Inspection also retains the selected version's `time[version]` publication time
+and the package metadata's `time.modified`. Present timestamps must be valid
+RFC 3339 strings and are normalized to RFC 3339 for display. Missing fields remain
+absent; malformed timestamps fail validation. These registry-reported times are
+unverified and do not establish artifact, provenance, or vulnerability freshness.
 
 ## JSR
 

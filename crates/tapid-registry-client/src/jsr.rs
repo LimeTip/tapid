@@ -76,7 +76,7 @@ fn jsr_metadata_url(origin: &RegistryOrigin, package: &str) -> Result<String, Re
             MetadataError::InvalidPackageName(package.into()),
         ));
     }
-    let mut url = Url::parse(&format!("{}/", origin)).map_err(|_| {
+    let mut url = Url::parse(&format!("{origin}/")).map_err(|_| {
         RegistryClientError::Metadata(MetadataError::InvalidRegistry(origin.to_string()))
     })?;
     {

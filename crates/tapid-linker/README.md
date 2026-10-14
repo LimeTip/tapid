@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tapid-linker)](https://crates.io/crates/tapid-linker)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-linker)](https://crates.io/crates/tapid-linker)
 [![Docs.rs](https://docs.rs/tapid-linker/badge.svg)](https://docs.rs/tapid-linker)
-[![License](https://img.shields.io/crates/l/tapid-linker)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 `tapid-linker` owns deterministic planning for materializing verified package instances and executable shims into a project layout. It accepts registry-qualified identities, peer and platform context, verified content-addressed tree references, and package metadata. Plans are sorted and constrained to an explicitly managed absolute root with a `.tapid-managed` marker path.

@@ -1,0 +1,12 @@
+{
+  "name": "npm-import-reference",
+  "version": "1.0.0",
+  "dependencies": {
+    "parent": "1.0.0",
+    "shared": "1.0.0",
+    "consumer": "1.0.0"
+  },
+  "optionalDependencies": {
+    "native": "1.0.0"
+  }
+}

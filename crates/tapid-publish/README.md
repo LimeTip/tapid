@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tapid-publish)](https://crates.io/crates/tapid-publish)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-publish)](https://crates.io/crates/tapid-publish)
 [![Docs.rs](https://docs.rs/tapid-publish/badge.svg)](https://docs.rs/tapid-publish)
-[![License](https://img.shields.io/crates/l/tapid-publish)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Deterministic package packing and staged publication foundations for Tapid.

@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tapid-signatures)](https://crates.io/crates/tapid-signatures)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-signatures)](https://crates.io/crates/tapid-signatures)
 [![Docs.rs](https://docs.rs/tapid-signatures/badge.svg)](https://docs.rs/tapid-signatures)
-[![License](https://img.shields.io/crates/l/tapid-signatures)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LimeTip/tapid/blob/main/LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Canonical artifact-bound trust foundations for Tapid, a JavaScript and TypeScript package manager written in Rust.

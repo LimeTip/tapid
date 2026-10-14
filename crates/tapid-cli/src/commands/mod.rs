@@ -1,13 +1,20 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+mod cache;
+mod ci;
+mod explain;
 pub(crate) mod init;
 pub(crate) mod install;
+mod license;
 pub(crate) mod lifecycle;
 pub(crate) mod lock;
 pub(crate) mod manifest;
+mod npm_import;
+mod release_verification;
 pub(crate) mod run;
 pub(crate) mod upgrade;
+pub(crate) mod why;
 
 #[cfg(test)]
 mod documentation;
@@ -19,12 +26,47 @@ mod documentation;
     about = "A deterministic JavaScript and TypeScript package manager"
 )]
 pub(crate) struct Cli {
+    /// Emit a versioned JSON result for supported package commands.
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
 
+impl Cli {
+    // Check after Clap propagates global arguments. A subcommand's `requires`
+    // check cannot see --json when it appears before the subcommand.
+    pub(crate) fn validate_json_options(&self) -> Result<(), clap::Error> {
+        if !self.json
+            && matches!(&self.command, Some(Command::Outdated(args)) if args.json_limit.is_some())
+        {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "--json-limit requires --json",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Summarize integrity, provenance, and missing security checks for an exact npm version.
+    #[command(
+        long_about = "Inspect full npm registry metadata for <package>@<exact-version>. Distinguishes registry claims, byte verification, and missing checks. Reads tapid.toml routing without requiring package.json. Does not install, recover transactions, or write project/store files. Signatures and provenance references are unverified. Vulnerability feeds, malware analysis, and publisher identity verification are unsupported. Use --artifact-file to verify local bytes against the reported SHA-512 digest; a mismatch exits 1.",
+        after_help = "Examples:\n  tapid explain react@19.0.0\n  tapid explain @example/pkg@1.2.3 --artifact-file package.tgz\n  tapid --json explain react@19.0.0"
+    )]
+    Explain(explain::Args),
+    /// Inspect or safely clear the published package cache.
+    Cache(cache::Args),
+    /// Preview package-cache removal. Pass --yes to delete published cache entries.
+    Clean(cache::CleanArgs),
+    /// Print the Apache-2.0 license and copyright attribution.
+    License,
+    #[command(name = "__verify-release-record", hide = true)]
+    VerifyReleaseRecord(release_verification::Args),
+    #[command(name = "__prepare-release-install", hide = true)]
+    PrepareReleaseInstall(release_verification::InstallArgs),
     /// Create a private package.json manifest.
     #[command(
         long_about = "Create a private package.json in an existing directory. Uses the directory name as the package name and sets version 0.1.0. Refuses to overwrite an existing package.json.",
@@ -33,6 +75,11 @@ pub(crate) enum Command {
   tapid init ./my-project"
     )]
     Init(init::Args),
+    /// Import an npm v3 package-lock.json offline without changing selected versions.
+    #[command(
+        long_about = "Import an npm lockfileVersion 3 lock into tapid.lock without network access or dependency resolution. Validates package.json in the current directory. Linked/workspace entries and unsupported metadata fail before writing. The first frozen install verifies the pinned tarballs; dependency scripts do not run."
+    )]
+    ImportPackageLock(npm_import::Args),
     /// Validate package.json manifests.
     Manifest(manifest::Args),
     /// Validate tapid.lock.
@@ -49,7 +96,7 @@ pub(crate) enum Command {
     /// Install dependencies, optionally adding one package first.
     #[command(
         visible_alias = "i",
-        long_about = "Install dependencies into node_modules and write tapid.lock. Optionally add one package to dependencies in package.json first.\n\nOnline installs resolve dependencies using registry metadata. Offline and frozen installs replay the existing lockfile from the verified store without network access. Dependency lifecycle scripts do not run.",
+        long_about = "Install dependencies into node_modules and write tapid.lock. Optionally add one package to dependencies in package.json first.\n\nOnline installs resolve dependencies using registry metadata. Offline installs replay verified trees without network access. Frozen installs preserve lockfile selections; imported npm locks can fetch pinned tarballs for their first verification. Dependency lifecycle scripts are denied by default. Exact tapid.lifecycle.toml approvals can build verified derived outputs on supported Linux ManagedTree hosts; offline/frozen replay never executes hooks.",
         after_help = "Examples:
   tapid install
   tapid install 'react@^19.0.0'
@@ -57,6 +104,11 @@ pub(crate) enum Command {
   tapid install --offline --store-dir ./verified-store"
     )]
     Install(install::Args),
+    /// Install exact locked dependencies without changing package.json or tapid.lock.
+    #[command(
+        long_about = "Install the exact dependency graph in tapid.lock. Requires matching project and workspace manifests and download URLs for every registry package, including with --offline. Explicit local registry fixtures can supply artifacts without URLs. Missing verified trees are downloaded and verified without version resolution. Atomically replaces managed node_modules. Dependency lifecycle scripts do not run."
+    )]
+    Ci(ci::Args),
     /// Add packages to package.json and install dependencies.
     #[command(
         long_about = "Add one or more packages to dependencies in package.json, then resolve and install the dependency graph and write tapid.lock.\n\nUse --dev, --optional, or --peer to select another dependency section. A package without a version requirement uses *.",
@@ -90,7 +142,7 @@ pub(crate) enum Command {
   tapid outdated
   tapid outdated --workspace web"
     )]
-    Outdated(lifecycle::ReadOnlyArgs),
+    Outdated(lifecycle::OutdatedArgs),
     /// Rebuild node_modules from tapid.lock to remove stale packages.
     #[command(
         long_about = "Replay tapid.lock from the verified store to replace managed node_modules and remove stale packages.\n\nRequires a matching package.json, a valid lockfile, and all referenced verified trees. Uses frozen replay without network access. Does not delete cached trees from the store.\n\n--registry-fixture and --allow-unverified-registry-artifacts have no effect on this command.",
@@ -99,6 +151,12 @@ pub(crate) enum Command {
   tapid prune --store-dir ./verified-store"
     )]
     Prune(lifecycle::ReadOnlyArgs),
+    /// Explain which dependency paths bring a package into the project.
+    #[command(
+        long_about = "Trace a package through the resolved graph in package.json and tapid.lock. Reads local project files only and does not contact registries or change the manifest, lockfile, store, or node_modules. Direct dependency kinds are read from the selected manifest; the lockfile currently does not preserve kinds for transitive edges.",
+        after_help = "Examples:\n  tapid why react\n  tapid why @scope/package --project-dir ./app\n  tapid --json why lodash --workspace web"
+    )]
+    Why(why::Args),
     /// Download, verify, and install the latest stable Tapid release.
     #[command(
         long_about = "Download and verify the latest stable Tapid release for this platform, then replace the current executable or --destination.\n\nUses the signed release record from tapid.dev by default. If release discovery is unavailable, a cached release may be used for recovery; the command reports when it cannot check the latest version.",
@@ -109,24 +167,83 @@ pub(crate) enum Command {
     Upgrade(upgrade::Args),
 }
 
+impl Command {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::Explain(_) => "explain",
+            Self::Cache(_) => "cache",
+            Self::Clean(_) => "clean",
+            Self::License => "license",
+            Self::VerifyReleaseRecord(_) => "__verify-release-record",
+            Self::PrepareReleaseInstall(_) => "__prepare-release-install",
+            Self::Init(_) => "init",
+            Self::ImportPackageLock(_) => "import-package-lock",
+            Self::Manifest(_) => "manifest",
+            Self::Lock(_) => "lock",
+            Self::Run(_) => "run",
+            Self::Install(_) => "install",
+            Self::Ci(_) => "ci",
+            Self::Add(_) => "add",
+            Self::Remove(_) => "remove",
+            Self::Update(_) => "update",
+            Self::Outdated(_) => "outdated",
+            Self::Prune(_) => "prune",
+            Self::Why(_) => "why",
+            Self::Upgrade(_) => "upgrade",
+        }
+    }
+}
+
 /// Routes a parsed command to its handler, or prints usage guidance when no command is given.
-pub(crate) fn dispatch(command: Option<Command>) -> ExitCode {
+pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
+    if json
+        && !matches!(
+            command,
+            Some(
+                Command::Cache(_)
+                    | Command::Clean(_)
+                    | Command::Install(_)
+                    | Command::Explain(_)
+                    | Command::Add(_)
+                    | Command::Remove(_)
+                    | Command::Update(_)
+                    | Command::Outdated(_)
+                    | Command::Prune(_)
+                    | Command::Why(_)
+            )
+        )
+    {
+        return crate::output::json::protocol_error(
+            command.as_ref().map_or("none", Command::operation),
+            "JSON_UNSUPPORTED_COMMAND",
+            1,
+        );
+    }
     match command {
+        Some(Command::Explain(args)) => explain::run(args, json),
+        Some(Command::Cache(args)) => cache::run(args, json),
+        Some(Command::Clean(args)) => cache::clean(args, json),
+        Some(Command::License) => license::run(),
+        Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
+        Some(Command::PrepareReleaseInstall(args)) => release_verification::prepare_install(args),
         None => {
             println!("Run 'tapid --help' for usage");
             ExitCode::SUCCESS
         }
         Some(Command::Init(args)) => init::run(args),
+        Some(Command::ImportPackageLock(args)) => npm_import::run(args),
         Some(Command::Manifest(args)) => manifest::run(args),
         Some(Command::Lock(args)) => lock::run(args),
         Some(Command::Run(args)) => run::run(args),
 
-        Some(Command::Install(args)) => install::run(args),
-        Some(Command::Add(args)) => lifecycle::add(args),
-        Some(Command::Remove(args)) => lifecycle::remove(args),
-        Some(Command::Update(args)) => lifecycle::update(args),
-        Some(Command::Outdated(args)) => lifecycle::outdated(args),
-        Some(Command::Prune(args)) => lifecycle::prune(args),
+        Some(Command::Install(args)) => install::run(args, json),
+        Some(Command::Ci(args)) => ci::run(args),
+        Some(Command::Add(args)) => lifecycle::add(args, json),
+        Some(Command::Remove(args)) => lifecycle::remove(args, json),
+        Some(Command::Update(args)) => lifecycle::update(args, json),
+        Some(Command::Outdated(args)) => lifecycle::outdated(args, json),
+        Some(Command::Prune(args)) => lifecycle::prune(args, json),
+        Some(Command::Why(args)) => why::run(args, json),
         Some(Command::Upgrade(args)) => upgrade::run(args),
     }
 }

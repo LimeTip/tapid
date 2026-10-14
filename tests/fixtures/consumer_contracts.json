@@ -1,0 +1,28 @@
+{
+  "source": {
+    "legacy": false,
+    "nativePlatforms": ["darwin", "linux", "win32"]
+  },
+  "current": {
+    "legacy": false,
+    "nativePlatforms": ["darwin", "linux", "win32"]
+  },
+  "historical": {
+    "v0.0.12": {
+      "legacy": false,
+      "nativePlatforms": ["darwin", "linux", "win32"]
+    },
+    "v0.0.11": {
+      "legacy": false,
+      "nativePlatforms": ["darwin", "linux"]
+    },
+    "v0.0.9": {
+      "legacy": true,
+      "nativePlatforms": []
+    },
+    "v0.0.10": {
+      "legacy": false,
+      "nativePlatforms": ["darwin"]
+    }
+  }
+}

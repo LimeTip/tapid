@@ -7,7 +7,8 @@ use tapid_core::{
 };
 
 use crate::{
-    LEGACY_LOCKFILE_VERSION, LOCKFILE_VERSION, LockfileError, PROVENANCE_LEGACY_LOCKFILE_VERSION,
+    LEGACY_LOCKFILE_VERSION, LIFECYCLE_LOCKFILE_VERSION, LOCKFILE_VERSION, LockfileError,
+    PROVENANCE_LEGACY_LOCKFILE_VERSION, REGISTRY_ONLY_LOCKFILE_VERSION,
     ROOTS_LEGACY_LOCKFILE_VERSION, validation,
 };
 
@@ -151,9 +152,9 @@ fn validate_platform_context(value: &str, original: &str) -> Result<(), Lockfile
 
 /// Identifies a package provided by a workspace member.
 ///
-/// The path is a normalized, workspace-root-relative POSIX path. This type is
-/// representation-only: installation and registry fallback deliberately do not
-/// consume it yet.
+/// The path is a normalized, workspace-root-relative POSIX path. The source
+/// records local package identity in the lockfile; installation resolves it to
+/// the separately validated workspace member and never treats it as a registry artifact.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct LocalWorkspaceSource {
     path: String,
@@ -239,7 +240,11 @@ impl std::str::FromStr for LocalWorkspaceSource {
 }
 
 fn canonical_workspace_path(value: &str) -> Result<String, LockfileError> {
-    if value.is_empty() || value.contains('\\') || value.chars().any(char::is_control) {
+    if value.is_empty()
+        || value.contains('\\')
+        || value.contains('|')
+        || value.chars().any(char::is_control)
+    {
         return Err(LockfileError::InvalidWorkspaceSource(value.to_owned()));
     }
     let path = std::path::Path::new(value);
@@ -270,11 +275,34 @@ fn canonical_workspace_path(value: &str) -> Result<String, LockfileError> {
     Ok(components.join("/"))
 }
 
+/// Package source encoded in a persisted package identity.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum LockfilePackageSource {
+    Registry(RegistryOrigin),
+    Workspace(LocalWorkspaceSource),
+}
+
+impl LockfilePackageSource {
+    pub fn registry(&self) -> Option<&RegistryOrigin> {
+        match self {
+            Self::Registry(origin) => Some(origin),
+            Self::Workspace(_) => None,
+        }
+    }
+
+    pub fn workspace(&self) -> Option<&LocalWorkspaceSource> {
+        match self {
+            Self::Registry(_) => None,
+            Self::Workspace(source) => Some(source),
+        }
+    }
+}
+
 /// Exact persisted package identity. Parsing requires an already canonical
-/// registry origin; unlike new registry inputs, legacy graph keys are not rekeyed.
+/// source origin and canonical peer/platform context.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LockfilePackageKey {
-    pub registry: RegistryOrigin,
+    pub source: LockfilePackageSource,
     pub name: PackageName,
     pub version: PackageVersion,
     pub peer_context: String,
@@ -289,22 +317,62 @@ impl LockfilePackageKey {
         peer_context: &PeerContext,
         platform_context: &PlatformContext,
     ) -> Self {
+        Self::with_source(
+            LockfilePackageSource::Registry(registry),
+            name,
+            version,
+            peer_context,
+            platform_context,
+        )
+    }
+
+    pub fn with_source(
+        source: LockfilePackageSource,
+        name: PackageName,
+        version: PackageVersion,
+        peer_context: &PeerContext,
+        platform_context: &PlatformContext,
+    ) -> Self {
         Self {
-            registry,
+            source,
             name,
             version,
             peer_context: canonical_peer_context(peer_context),
             platform_context: canonical_platform_context(platform_context),
         }
     }
+
+    pub fn workspace(source: LocalWorkspaceSource) -> Self {
+        let name = source
+            .name
+            .parse()
+            .expect("validated workspace package name");
+        let version = source
+            .version
+            .parse()
+            .expect("validated workspace package version");
+        Self {
+            source: LockfilePackageSource::Workspace(source),
+            name,
+            version,
+            peer_context: String::new(),
+            platform_context: canonical_platform_context(
+                &PlatformContext::new(None, None, None).unwrap(),
+            ),
+        }
+    }
 }
 
 impl std::fmt::Display for LockfilePackageKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let source = match &self.source {
+            LockfilePackageSource::Registry(origin) => origin.to_string(),
+            LockfilePackageSource::Workspace(source) => source.identity(),
+        };
         write!(
             f,
             "{}|{}@{}|peer={}|platform={}",
-            self.registry,
+            source,
             self.name,
             self.version,
             context_or_dash(&self.peer_context),
@@ -323,19 +391,199 @@ impl std::str::FromStr for LockfilePackageKey {
         let (name, version) = p[1]
             .rsplit_once('@')
             .ok_or_else(|| LockfileError::InvalidPackageKey(value.into()))?;
+        let source = if p[0].starts_with("workspace:") {
+            LockfilePackageSource::Workspace(p[0].parse()?)
+        } else {
+            let origin: RegistryOrigin = p[0].parse().map_err(LockfileError::Domain)?;
+            if origin.as_str() != p[0] {
+                return Err(LockfileError::NonCanonicalRegistryIdentity);
+            }
+            LockfilePackageSource::Registry(origin)
+        };
         let key = Self {
-            registry: p[0].parse().map_err(LockfileError::Domain)?,
+            source,
             name: name.parse().map_err(LockfileError::Domain)?,
             version: version.parse().map_err(LockfileError::Domain)?,
             peer_context: parse_context(p[2], "peer=", value)?,
             platform_context: parse_context(p[3], "platform=", value)?,
         };
-        if key.registry.as_str() != p[0] {
-            return Err(LockfileError::NonCanonicalRegistryIdentity);
-        }
         validate_peer_context(&key.peer_context, value)?;
         validate_platform_context(&key.platform_context, value)?;
+        if key.to_string() != value {
+            return Err(LockfileError::InvalidPackageKey(value.into()));
+        }
+        match &key.source {
+            LockfilePackageSource::Workspace(source)
+                if source.name() != key.name.as_str()
+                    || source.version() != key.version.to_string() =>
+            {
+                return Err(LockfileError::InvalidPackageKey(value.into()));
+            }
+            _ => {}
+        }
         Ok(key)
+    }
+}
+
+fn validate_dependency_target(
+    package: &str,
+    name: &str,
+    dependency: &str,
+    aliases: &BTreeMap<String, String>,
+    exists: impl Fn(&str) -> bool,
+) -> Result<(), LockfileError> {
+    let target = dependency.parse::<LockfilePackageKey>()?;
+    if dependency == package {
+        return Err(LockfileError::SelfDependency(package.to_owned()));
+    }
+    if target.name.as_str() != name && aliases.get(name) != Some(&target.name.to_string()) {
+        return Err(LockfileError::DependencyNameMismatch {
+            package: package.to_owned(),
+            dependency: name.to_owned(),
+            target: target.name.to_string(),
+        });
+    }
+    if !exists(dependency) {
+        return Err(LockfileError::DanglingDependency {
+            package: package.to_owned(),
+            dependency: dependency.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// A package supplied by a local workspace member, with no registry artifact.
+/// This is lock state for package management and does not imply runtime support.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockedWorkspacePackage {
+    source: LocalWorkspaceSource,
+    manifest_digest: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    dependencies: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    dependency_aliases: BTreeMap<String, String>,
+}
+
+impl LockedWorkspacePackage {
+    pub fn new(source: LocalWorkspaceSource, manifest_digest: &str) -> Result<Self, LockfileError> {
+        let manifest_digest = manifest_digest
+            .parse::<ArtifactDigest>()
+            .map_err(LockfileError::Domain)?
+            .to_string();
+        Ok(Self {
+            source,
+            manifest_digest,
+            dependencies: BTreeMap::new(),
+            dependency_aliases: BTreeMap::new(),
+        })
+    }
+
+    pub fn key(&self) -> String {
+        LockfilePackageKey::workspace(self.source.clone()).to_string()
+    }
+
+    pub fn manifest_digest(&self) -> &str {
+        &self.manifest_digest
+    }
+
+    pub fn dependencies(&self) -> &BTreeMap<String, String> {
+        &self.dependencies
+    }
+
+    pub fn add_alias_dependency(&mut self, name: &str, key: &str) -> Result<(), LockfileError> {
+        let name = name
+            .parse::<PackageName>()
+            .map_err(LockfileError::Domain)?
+            .to_string();
+        let target = key.parse::<LockfilePackageKey>()?;
+        if key == self.key() {
+            return Err(LockfileError::SelfDependency(key.to_owned()));
+        }
+        if name != target.name.as_str() {
+            self.dependency_aliases
+                .insert(name.clone(), target.name.to_string());
+        } else {
+            self.dependency_aliases.remove(&name);
+        }
+        self.dependencies.insert(name, key.to_owned());
+        Ok(())
+    }
+
+    pub fn add_dependency(&mut self, name: &str, key: &str) -> Result<(), LockfileError> {
+        let name = name.parse::<PackageName>().map_err(LockfileError::Domain)?;
+        let parsed = key.parse::<LockfilePackageKey>()?;
+        if parsed.name != name {
+            return Err(LockfileError::DependencyNameMismatch {
+                package: self.key(),
+                dependency: name.to_string(),
+                target: parsed.name.to_string(),
+            });
+        }
+        if key == self.key() {
+            return Err(LockfileError::SelfDependency(key.to_owned()));
+        }
+        self.dependencies.insert(name.to_string(), key.to_owned());
+        self.dependency_aliases.remove(name.as_str());
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), LockfileError> {
+        let source = LocalWorkspaceSource::new(
+            self.source.path(),
+            self.source.name(),
+            self.source.version(),
+        )?;
+        if source != self.source {
+            return Err(LockfileError::InvalidWorkspaceSource(
+                self.source.identity(),
+            ));
+        }
+        let digest = self
+            .manifest_digest
+            .parse::<ArtifactDigest>()
+            .map_err(LockfileError::Domain)?;
+        if digest.to_string() != self.manifest_digest {
+            return Err(LockfileError::InvalidPackageKey(self.key()));
+        }
+        for (name, dependency) in &self.dependencies {
+            let parsed = dependency.parse::<LockfilePackageKey>()?;
+            if parsed.name.as_str() != name
+                && self.dependency_aliases.get(name) != Some(&parsed.name.to_string())
+            {
+                return Err(LockfileError::DependencyNameMismatch {
+                    package: self.key(),
+                    dependency: name.clone(),
+                    target: parsed.name.to_string(),
+                });
+            }
+            if dependency == &self.key() {
+                return Err(LockfileError::SelfDependency(self.key()));
+            }
+        }
+        for (name, actual) in &self.dependency_aliases {
+            name.parse::<PackageName>().map_err(LockfileError::Domain)?;
+            actual
+                .parse::<PackageName>()
+                .map_err(LockfileError::Domain)?;
+            let target = self
+                .dependencies
+                .get(name)
+                .ok_or_else(|| LockfileError::DependencyNameMismatch {
+                    package: self.key(),
+                    dependency: name.clone(),
+                    target: actual.clone(),
+                })?
+                .parse::<LockfilePackageKey>()?;
+            if actual != target.name.as_str() || name == actual {
+                return Err(LockfileError::DependencyNameMismatch {
+                    package: self.key(),
+                    dependency: name.clone(),
+                    target: target.name.to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -351,6 +599,8 @@ pub struct Lockfile {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     root_bindings: BTreeMap<String, String>,
     packages: BTreeMap<String, LockedPackage>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workspace_packages: BTreeMap<String, LockedWorkspacePackage>,
 }
 
 impl Lockfile {
@@ -364,6 +614,7 @@ impl Lockfile {
             roots: Vec::new(),
             root_bindings: BTreeMap::new(),
             packages: BTreeMap::new(),
+            workspace_packages: BTreeMap::new(),
         })
     }
 
@@ -371,55 +622,151 @@ impl Lockfile {
         self.insert_packages(std::iter::once(package))
     }
 
-    /// Inserts a validated package batch, allowing dependencies within the batch.
-    ///
-    /// A lockfile dependency graph need not be acyclic. Single-package insertion
-    /// retains the historical dangling-dependency check, while batch insertion
-    /// lets online materialization commit mutually dependent packages atomically.
+    /// Records outputs produced by exact approved hooks without changing source identity.
+    pub fn set_derived_hooks(
+        &mut self,
+        key: &str,
+        outputs: Vec<DerivedHookOutput>,
+    ) -> Result<(), LockfileError> {
+        validate_derived_hooks(&outputs)?;
+        let package = self
+            .packages
+            .get_mut(key)
+            .ok_or_else(|| LockfileError::InvalidPackageKey(key.to_owned()))?;
+        package.derived_hooks = outputs;
+        if !package.derived_hooks.is_empty() {
+            self.lockfile_version = LIFECYCLE_LOCKFILE_VERSION;
+        }
+        Ok(())
+    }
+
+    /// Canonical source graph used to bind lifecycle recipes independently of outputs.
+    pub fn source_graph(&self) -> Self {
+        let mut source = self.clone();
+        if source.lockfile_version == LIFECYCLE_LOCKFILE_VERSION {
+            source.lockfile_version = LOCKFILE_VERSION;
+        }
+        for package in source.packages.values_mut() {
+            package.derived_hooks.clear();
+        }
+        source
+    }
+
+    pub fn insert_workspace_package(
+        &mut self,
+        package: LockedWorkspacePackage,
+    ) -> Result<(), LockfileError> {
+        self.insert_graph([], [package])
+    }
+
+    /// Inserts registry and workspace packages together, validating graph edges
+    /// against both source classes before making any changes.
+    pub fn insert_graph<R, W>(
+        &mut self,
+        registry_packages: R,
+        workspace_packages: W,
+    ) -> Result<(), LockfileError>
+    where
+        R: IntoIterator<Item = LockedPackage>,
+        W: IntoIterator<Item = LockedWorkspacePackage>,
+    {
+        let registry_packages: Vec<_> = registry_packages.into_iter().collect();
+        let workspace_packages: Vec<_> = workspace_packages.into_iter().collect();
+        let mut registry_batch = BTreeMap::new();
+        let mut workspace_batch = BTreeMap::new();
+        for package in &registry_packages {
+            package.validate()?;
+            let key = package.key();
+            if self.packages.contains_key(&key)
+                || self.workspace_packages.contains_key(&key)
+                || registry_batch.contains_key(&key)
+                || workspace_batch.contains_key(&key)
+            {
+                return Err(LockfileError::DuplicatePackage(key));
+            }
+            registry_batch.insert(key, package);
+        }
+        for package in &workspace_packages {
+            package.validate()?;
+            let key = package.key();
+            if self.packages.contains_key(&key)
+                || self.workspace_packages.contains_key(&key)
+                || registry_batch.contains_key(&key)
+                || workspace_batch.contains_key(&key)
+            {
+                return Err(LockfileError::DuplicatePackage(key));
+            }
+            workspace_batch.insert(key, package);
+        }
+        let exists = |key: &str| {
+            self.packages.contains_key(key)
+                || self.workspace_packages.contains_key(key)
+                || registry_batch.contains_key(key)
+                || workspace_batch.contains_key(key)
+        };
+        for (key, package) in &registry_batch {
+            for (name, dependency) in &package.dependencies {
+                validate_dependency_target(
+                    key,
+                    name,
+                    dependency,
+                    &package.dependency_aliases,
+                    exists,
+                )?;
+            }
+        }
+        for (key, package) in &workspace_batch {
+            for (name, dependency) in &package.dependencies {
+                validate_dependency_target(
+                    key,
+                    name,
+                    dependency,
+                    &package.dependency_aliases,
+                    exists,
+                )?;
+            }
+        }
+        self.packages.extend(
+            registry_packages
+                .into_iter()
+                .map(|package| (package.key(), package)),
+        );
+        self.workspace_packages.extend(
+            workspace_packages
+                .into_iter()
+                .map(|package| (package.key(), package)),
+        );
+        Ok(())
+    }
+
+    /// Inserts a validated registry-package batch, allowing dependency edges
+    /// within the batch and to already inserted workspace packages.
     pub fn insert_packages<I>(&mut self, packages: I) -> Result<(), LockfileError>
     where
         I: IntoIterator<Item = LockedPackage>,
     {
-        let packages: Vec<_> = packages.into_iter().collect();
-        let mut batch = BTreeMap::new();
-        for package in &packages {
-            package.validate()?;
-            let key = package.key();
-            if self.packages.contains_key(&key) || batch.contains_key(&key) {
-                return Err(LockfileError::DuplicatePackage(key));
-            }
-            batch.insert(key, package);
-        }
-        for (key, package) in &batch {
-            for (name, dependency) in &package.dependencies {
-                let target = dependency.parse::<LockfilePackageKey>()?;
-                if dependency == key {
-                    return Err(LockfileError::SelfDependency(key.clone()));
-                }
-                if target.name.to_string() != *name
-                    && package.dependency_aliases.get(name) != Some(&target.name.to_string())
-                {
-                    return Err(LockfileError::DependencyNameMismatch {
-                        package: key.clone(),
-                        dependency: name.clone(),
-                        target: target.name.to_string(),
-                    });
-                }
-                if !self.packages.contains_key(dependency) && !batch.contains_key(dependency) {
-                    return Err(LockfileError::DanglingDependency {
-                        package: key.clone(),
-                        dependency: dependency.clone(),
-                    });
-                }
-            }
-        }
-        self.packages
-            .extend(packages.into_iter().map(|package| (package.key(), package)));
-        Ok(())
+        self.insert_graph(packages, std::iter::empty())
     }
 
     pub fn packages(&self) -> &BTreeMap<String, LockedPackage> {
         &self.packages
+    }
+
+    pub fn workspace_packages(&self) -> &BTreeMap<String, LockedWorkspacePackage> {
+        &self.workspace_packages
+    }
+
+    pub fn workspace_packages_typed(
+        &self,
+    ) -> Result<Vec<(LockfilePackageKey, &LockedWorkspacePackage)>, LockfileError> {
+        self.workspace_packages
+            .iter()
+            .map(|(encoded, package)| encoded.parse().map(|key| (key, package)))
+            .collect()
+    }
+
+    pub fn contains_package_key(&self, key: &str) -> bool {
+        self.packages.contains_key(key) || self.workspace_packages.contains_key(key)
     }
 
     /// Replaces the exact root package identities used during replay.
@@ -436,7 +783,7 @@ impl Lockfile {
         roots.dedup();
         for root in &roots {
             root.parse::<LockfilePackageKey>()?;
-            if !self.packages.contains_key(root) {
+            if !self.contains_package_key(root) {
                 return Err(LockfileError::DanglingRoot(root.clone()));
             }
         }
@@ -462,13 +809,19 @@ impl Lockfile {
                 return Err(LockfileError::DanglingRoot(target.clone()));
             }
         }
-        if bindings
+        let bound_roots = bindings
             .values()
             .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            != self.roots.iter().cloned().collect()
-        {
-            return Err(LockfileError::NonCanonicalRoots);
+            .collect::<std::collections::BTreeSet<_>>();
+        for root in &self.roots {
+            if !bound_roots.contains(root)
+                && root
+                    .parse::<LockfilePackageKey>()
+                    .ok()
+                    .is_none_or(|key| key.source.workspace().is_none())
+            {
+                return Err(LockfileError::NonCanonicalRoots);
+            }
         }
         self.root_bindings = bindings;
         Ok(())
@@ -517,6 +870,19 @@ impl Lockfile {
     }
 
     fn validate_alias_schema(&self) -> Result<(), LockfileError> {
+        if self.lockfile_version < LIFECYCLE_LOCKFILE_VERSION
+            && self
+                .packages
+                .values()
+                .any(|package| !package.derived_hooks.is_empty())
+        {
+            return Err(LockfileError::InvalidDerivedOutput(
+                "derived hooks require schema 9".into(),
+            ));
+        }
+        for package in self.packages.values() {
+            validate_derived_hooks(&package.derived_hooks)?;
+        }
         if self.lockfile_version < LOCKFILE_VERSION
             && (!self.root_bindings.is_empty()
                 || self
@@ -534,7 +900,7 @@ impl Lockfile {
     pub fn to_json(&self) -> Result<String, LockfileError> {
         self.validate_alias_schema()?;
         if self.lockfile_version >= ROOTS_LEGACY_LOCKFILE_VERSION
-            && !self.packages.is_empty()
+            && (!self.packages.is_empty() || !self.workspace_packages.is_empty())
             && self.roots.is_empty()
         {
             return Err(LockfileError::MissingRoots);
@@ -558,20 +924,21 @@ impl Lockfile {
         let mut lockfile: Self =
             serde_json::from_str(input).map_err(LockfileError::Serialization)?;
         if lockfile.lockfile_version != LOCKFILE_VERSION
+            && lockfile.lockfile_version != LIFECYCLE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LEGACY_LOCKFILE_VERSION
             && lockfile.lockfile_version != PROVENANCE_LEGACY_LOCKFILE_VERSION
-            && lockfile.lockfile_version != ROOTS_LEGACY_LOCKFILE_VERSION
+            && lockfile.lockfile_version != REGISTRY_ONLY_LOCKFILE_VERSION
         {
             return Err(LockfileError::UnsupportedVersion(lockfile.lockfile_version));
         }
         lockfile.root_manifest_digest = canonical_artifact_digest(&lockfile.root_manifest_digest)?;
         if lockfile.lockfile_version >= PROVENANCE_LEGACY_LOCKFILE_VERSION
-            && !lockfile.packages.is_empty()
+            && (!lockfile.packages.is_empty() || !lockfile.workspace_packages.is_empty())
             && lockfile.roots.is_empty()
         {
             return Err(LockfileError::MissingRoots);
         }
-        if lockfile.lockfile_version >= ROOTS_LEGACY_LOCKFILE_VERSION
+        if lockfile.lockfile_version >= REGISTRY_ONLY_LOCKFILE_VERSION
             && let Some((key, _)) = lockfile
                 .packages
                 .iter()
@@ -587,9 +954,12 @@ impl Lockfile {
         if canonical_roots != lockfile.roots {
             return Err(LockfileError::NonCanonicalRoots);
         }
+        if lockfile.lockfile_version < LOCKFILE_VERSION && !lockfile.workspace_packages.is_empty() {
+            return Err(LockfileError::WorkspaceIdentityRequiresCurrentVersion);
+        }
         for root in &lockfile.roots {
             root.parse::<LockfilePackageKey>()?;
-            if !lockfile.packages.contains_key(root) {
+            if !lockfile.contains_package_key(root) {
                 return Err(LockfileError::DanglingRoot(root.clone()));
             }
         }
@@ -603,26 +973,35 @@ impl Lockfile {
             if key != &package.key() {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));
             }
+        }
+        for (key, package) in &lockfile.workspace_packages {
+            key.parse::<LockfilePackageKey>()?;
+            package.validate()?;
+            if key != &package.key() {
+                return Err(LockfileError::PackageKeyMismatch(key.clone()));
+            }
+        }
+        let exists = |key: &str| lockfile.contains_package_key(key);
+        for (key, package) in &lockfile.packages {
             for (name, dependency) in &package.dependencies {
-                let target = dependency.parse::<LockfilePackageKey>()?;
-                if dependency == key {
-                    return Err(LockfileError::SelfDependency(key.clone()));
-                }
-                if target.name.to_string() != *name
-                    && package.dependency_aliases.get(name) != Some(&target.name.to_string())
-                {
-                    return Err(LockfileError::DependencyNameMismatch {
-                        package: key.clone(),
-                        dependency: name.clone(),
-                        target: target.name.to_string(),
-                    });
-                }
-                if !lockfile.packages.contains_key(dependency) {
-                    return Err(LockfileError::DanglingDependency {
-                        package: key.clone(),
-                        dependency: dependency.clone(),
-                    });
-                }
+                validate_dependency_target(
+                    key,
+                    name,
+                    dependency,
+                    &package.dependency_aliases,
+                    exists,
+                )?;
+            }
+        }
+        for (key, package) in &lockfile.workspace_packages {
+            for (name, dependency) in &package.dependencies {
+                validate_dependency_target(
+                    key,
+                    name,
+                    dependency,
+                    &package.dependency_aliases,
+                    exists,
+                )?;
             }
         }
         Ok(lockfile)
@@ -641,6 +1020,8 @@ pub struct LockedPackage {
     unpacked_digest: String,
     /// Explicit replay identity for the verified unpacked store tree.
     tree_digest: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    derived_hooks: Vec<DerivedHookOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_url: Option<String>,
     #[serde(skip_serializing_if = "String::is_empty", default)]
@@ -650,6 +1031,91 @@ pub struct LockedPackage {
     dependencies: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     dependency_aliases: BTreeMap<String, String>,
+}
+
+/// A generated verified tree bound to one hook's complete derivation identity.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DerivedHookOutput {
+    attestation: String,
+    hook: String,
+    key: String,
+    tree_digest: String,
+}
+impl DerivedHookOutput {
+    pub fn new(
+        hook: &str,
+        key: &str,
+        tree_digest: &str,
+        attestation: &str,
+    ) -> Result<Self, LockfileError> {
+        let output = Self {
+            attestation: attestation.into(),
+            hook: hook.into(),
+            key: key.into(),
+            tree_digest: tree_digest.into(),
+        };
+        validate_derived_hooks(std::slice::from_ref(&output))?;
+        Ok(output)
+    }
+    pub fn attestation(&self) -> &str {
+        &self.attestation
+    }
+    pub fn hook(&self) -> &str {
+        &self.hook
+    }
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+    pub fn tree_digest(&self) -> &str {
+        &self.tree_digest
+    }
+}
+fn validate_derived_hooks(outputs: &[DerivedHookOutput]) -> Result<(), LockfileError> {
+    let mut previous = None;
+    for output in outputs {
+        let tag = output
+            .attestation
+            .strip_prefix("hmac-sha256-")
+            .ok_or_else(|| {
+                LockfileError::InvalidDerivedOutput(
+                    "missing lifecycle output authentication".into(),
+                )
+            })?;
+        if tag.len() != 64
+            || !tag
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(LockfileError::InvalidDerivedOutput(
+                "invalid lifecycle output authentication".into(),
+            ));
+        }
+        let rank = match output.hook.as_str() {
+            "preinstall" => 0,
+            "install" => 1,
+            "postinstall" => 2,
+            _ => {
+                return Err(LockfileError::InvalidDerivedOutput(
+                    "unsupported hook".into(),
+                ));
+            }
+        };
+        if previous.is_some_and(|previous| previous >= rank) {
+            return Err(LockfileError::InvalidDerivedOutput(
+                "duplicate or unordered hooks".into(),
+            ));
+        }
+        previous = Some(rank);
+        for digest in [&output.key, &output.tree_digest] {
+            if canonical_artifact_digest(digest)? != *digest || !digest.starts_with("sha256-") {
+                return Err(LockfileError::InvalidDerivedOutput(
+                    "noncanonical digest".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Identifies the source of a package artifact integrity value.
@@ -719,6 +1185,7 @@ impl LockedPackage {
                 .map_err(LockfileError::Domain)?
                 .to_string(),
             tree_digest: unpacked_digest.to_owned(),
+            derived_hooks: Vec::new(),
             artifact_url: None,
             peer_context: canonical_peer_context(contexts.0),
             platform_context: canonical_platform_context(contexts.1),
@@ -741,6 +1208,42 @@ impl LockedPackage {
             context_or_dash(&self.peer_context),
             context_or_dash(&self.platform_context)
         )
+    }
+
+    /// Pinned HTTPS archive address, when recorded by the producer.
+    pub fn artifact_url(&self) -> Option<&str> {
+        self.artifact_url.as_deref()
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+    pub fn registry(&self) -> &str {
+        &self.registry
+    }
+    pub fn has_declared_registry_integrity(&self) -> bool {
+        self.registry_integrity_declared == Some(true)
+    }
+    /// Canonical SHA-512 archive integrity recorded in the lock.
+    pub fn artifact_integrity(&self) -> &str {
+        &self.artifact_integrity
+    }
+    pub fn derived_hooks(&self) -> &[DerivedHookOutput] {
+        &self.derived_hooks
+    }
+    /// Tree activated for installation after policy validation by the caller.
+    pub fn install_tree_digest(&self) -> &str {
+        self.derived_hooks
+            .last()
+            .map_or(&self.tree_digest, |output| output.tree_digest())
+    }
+
+    /// Whether the producer verified registry-declared archive integrity.
+    pub fn registry_integrity_declared(&self) -> Option<bool> {
+        self.registry_integrity_declared
     }
 
     pub fn tree_digest(&self) -> &str {

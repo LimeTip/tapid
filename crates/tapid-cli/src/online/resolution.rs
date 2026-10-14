@@ -1,4 +1,5 @@
 //! Metadata normalization, overrides, and incremental dependency graph resolution.
+use crate::application::outcome::{ErrorKind, OperationalError};
 
 use super::*;
 
@@ -112,7 +113,6 @@ pub(super) fn normalize_record(package: &PackageRecord) -> Result<NormalizedReco
     })
 }
 
-type PackageRecordKey = (String, String, String);
 type ResolvedRecords = (Resolution, BTreeMap<PackageRecordKey, PackageRecord>);
 
 #[cfg(test)]
@@ -226,6 +226,13 @@ where
                     .expect("inserted registry metadata")
             };
         let mut combined = std::mem::take(&mut metadata[registry_index].packages);
+        combined.retain(|package| {
+            !inserted_keys.contains(&(
+                registry.to_string(),
+                package.name.to_string(),
+                package.version.to_string(),
+            ))
+        });
         combined.extend(additions);
         metadata[registry_index] =
             RegistryMetadata::normalize(registry, combined).map_err(|error| error.to_string())?;
@@ -301,18 +308,12 @@ pub(super) fn metadata_progress_checkpoint(fetches: usize) -> bool {
     fetches == 1 || fetches.is_multiple_of(50)
 }
 
-fn report_metadata_progress(fetches: usize) {
-    if metadata_progress_checkpoint(fetches) {
-        eprintln!("Registry metadata progress: {fetches} package(s) fetched");
-    }
-}
-
 /// Resolves incrementally, fetching metadata only when the resolver reaches a
 /// package on its currently selected graph.
 #[cfg(test)]
 pub(super) fn resolve_with_fetch<F>(
     roots: &[Dependency],
-    fetch: F,
+    mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
@@ -321,59 +322,160 @@ where
         roots,
         |parent, _| Ok(parent.clone()),
         &BTreeMap::new(),
-        fetch,
+        |registry, name| {
+            fetch(registry, name)
+                .map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))
+        },
+        |_| {},
     )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 pub(super) fn resolve_with_overrides<F>(
     roots: &[Dependency],
     overrides: &BTreeMap<PackageName, Requirement>,
-    fetch: F,
+    mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
-    resolve_with_fetch_routed_and_overrides(roots, |parent, _| Ok(parent.clone()), overrides, fetch)
+    resolve_with_fetch_routed_and_overrides(
+        roots,
+        |parent, _| Ok(parent.clone()),
+        overrides,
+        |registry, name| {
+            fetch(registry, name)
+                .map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))
+        },
+        |_| {},
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 pub(super) fn resolve_with_fetch_routed<R, F>(
     roots: &[Dependency],
     registry_for_dependency: R,
-    fetch: F,
-) -> Result<ResolvedRecords, String>
-where
-    R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
-    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
-{
-    resolve_with_fetch_routed_and_overrides(roots, registry_for_dependency, &BTreeMap::new(), fetch)
-}
-
-pub(super) fn resolve_with_fetch_routed_and_overrides<R, F>(
-    roots: &[Dependency],
-    mut registry_for_dependency: R,
-    overrides: &BTreeMap<PackageName, Requirement>,
     mut fetch: F,
 ) -> Result<ResolvedRecords, String>
 where
     R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
     F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, String>,
 {
+    resolve_with_fetch_routed_and_overrides(
+        roots,
+        registry_for_dependency,
+        &BTreeMap::new(),
+        |registry, name| {
+            fetch(registry, name)
+                .map_err(|error| OperationalError::new(ErrorKind::RegistryMetadata, error))
+        },
+        |_| {},
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+pub(super) fn resolve_with_fetch_routed_and_overrides<R, F>(
+    roots: &[Dependency],
+    registry_for_dependency: R,
+    overrides: &BTreeMap<PackageName, Requirement>,
+    fetch: F,
+    progress: impl FnMut(usize),
+) -> Result<ResolvedRecords, OperationalError>
+where
+    R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
+{
+    resolve_with_preferences(
+        roots,
+        registry_for_dependency,
+        overrides,
+        fetch,
+        &tapid_resolver::ResolutionPreferences::default(),
+        Vec::new(),
+        progress,
+    )
+}
+
+pub(super) fn resolve_with_preferences<R, F>(
+    roots: &[Dependency],
+    mut registry_for_dependency: R,
+    overrides: &BTreeMap<PackageName, Requirement>,
+    mut fetch: F,
+    preferred: &tapid_resolver::ResolutionPreferences,
+    seed: Vec<PackageRecord>,
+    mut progress: impl FnMut(usize),
+) -> Result<ResolvedRecords, OperationalError>
+where
+    R: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+    F: FnMut(&RegistryOrigin, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
+{
     let mut fetched = BTreeSet::<(String, String)>::new();
     let mut records = BTreeMap::<PackageRecordKey, PackageRecord>::new();
     let mut normalized = NormalizedRecords::new();
     let mut metadata = Vec::<RegistryMetadata>::new();
+    let mut preferred = preferred.clone();
+    let pinned_records = seed
+        .iter()
+        .map(|record| {
+            (
+                (
+                    record.registry.to_string(),
+                    record.name.to_string(),
+                    record.version.to_string(),
+                ),
+                record.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut fetch = |registry: &RegistryOrigin, name: &PackageName| {
+        fetch(registry, name).map(|packages| {
+            packages
+                .into_iter()
+                .map(|package| {
+                    let key = (
+                        package.registry.to_string(),
+                        package.name.to_string(),
+                        package.version.to_string(),
+                    );
+                    if let Some(pinned) = pinned_records.get(&key) {
+                        // Preserve exact edges, platform constraints, and artifact pins.
+                        // Metadata may fill an absent registry URL and recover peer ranges.
+                        let mut preserved = pinned.clone();
+                        if preserved.artifact.is_empty() && !package.fixture {
+                            preserved.artifact = package.artifact;
+                        }
+                        preserved.peer_dependencies = package.peer_dependencies;
+                        preserved.optional_peer_dependencies = package.optional_peer_dependencies;
+                        preserved
+                    } else {
+                        package
+                    }
+                })
+                .collect()
+        })
+    };
+    insert_records(
+        &mut records,
+        &mut normalized,
+        &mut metadata,
+        overrides,
+        seed,
+        &mut registry_for_dependency,
+    )?;
 
     loop {
         #[cfg(test)]
         RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
 
-        match resolve_graph_with_routing(
+        match tapid_resolver::resolve_graph_with_preferences(
             roots,
             &metadata,
             ResolutionOptions::default(),
             |parent, dependency| registry_for_dependency(parent, dependency),
+            &preferred,
         ) {
             Ok(resolution) => {
                 let mut optional_frontier = BTreeSet::<(RegistryOrigin, PackageName)>::new();
@@ -404,7 +506,9 @@ where
                 if !optional_frontier.is_empty() {
                     for (registry, name) in optional_frontier {
                         fetched.insert((registry.to_string(), name.to_string()));
-                        report_metadata_progress(fetched.len());
+                        if metadata_progress_checkpoint(fetched.len()) {
+                            progress(fetched.len());
+                        }
                         insert_records(
                             &mut records,
                             &mut normalized,
@@ -428,12 +532,17 @@ where
                             "resolution failed: metadata for {registry}:{name} remains unavailable"
                         );
                         return if discarded.is_empty() {
-                            Err(error)
+                            Err(OperationalError::new(ErrorKind::Resolution, error))
                         } else {
-                            Err(format!("{error}; {discarded}"))
+                            Err(OperationalError::new(
+                                ErrorKind::Resolution,
+                                format!("{error}; {discarded}"),
+                            ))
                         };
                     }
-                    report_metadata_progress(fetched.len());
+                    if metadata_progress_checkpoint(fetched.len()) {
+                        progress(fetched.len());
+                    }
                     let registry: RegistryOrigin = registry
                         .parse()
                         .map_err(|error: tapid_core::DomainError| error.to_string())?;
@@ -463,12 +572,15 @@ where
                 if !fetched.insert(key) {
                     let discarded = discarded_version_diagnostics(&normalized, &registry, &name);
                     return if discarded.is_empty() {
-                        Err(format!("resolution failed: {error}"))
+                        Err(OperationalError::from(error).context("resolution failed"))
                     } else {
-                        Err(format!("resolution failed: {error}; {discarded}"))
+                        Err(OperationalError::from(error)
+                            .context(format!("resolution failed; {discarded}")))
                     };
                 }
-                report_metadata_progress(fetched.len());
+                if metadata_progress_checkpoint(fetched.len()) {
+                    progress(fetched.len());
+                }
                 let registry: RegistryOrigin = registry
                     .parse()
                     .map_err(|error: tapid_core::DomainError| error.to_string())?;
@@ -484,7 +596,65 @@ where
                     &mut registry_for_dependency,
                 )?;
             }
-            Err(error) => return Err(format!("resolution failed: {error}")),
+            Err(error @ ResolveError::PeerDependency { .. }) => {
+                let ResolveError::PeerDependency { package, .. } = &error else {
+                    unreachable!()
+                };
+                let candidate = records
+                    .values()
+                    .find(|record| {
+                        tapid_registry_client::RegistryPackageId::new(
+                            record.registry.clone(),
+                            record.name.clone(),
+                            record.version.clone(),
+                        )
+                        .to_string()
+                            == *package
+                    })
+                    .map(|record| {
+                        (
+                            record.registry.clone(),
+                            record.name.clone(),
+                            record.version.clone(),
+                        )
+                    });
+                let Some((registry, name, version)) = candidate else {
+                    return Err(OperationalError::from(error).context("resolution failed"));
+                };
+                if fetched.insert((registry.to_string(), name.to_string())) {
+                    if metadata_progress_checkpoint(fetched.len()) {
+                        progress(fetched.len());
+                    }
+                    insert_records(
+                        &mut records,
+                        &mut normalized,
+                        &mut metadata,
+                        overrides,
+                        fetch(&registry, &name)?,
+                        &mut registry_for_dependency,
+                    )?;
+                } else {
+                    let removed = preferred.versions.remove(&(
+                        registry.clone(),
+                        name.clone(),
+                        version.clone(),
+                    ));
+                    preferred.roots.retain(|(origin, local, actual), selected| {
+                        !(origin == &registry
+                            && selected == &version
+                            && actual == &name
+                            && roots.iter().any(|dependency| {
+                                dependency.registry == registry
+                                    && &dependency.name == local
+                                    && dependency.requirement.package_name(local) == actual
+                            }))
+                    });
+                    if !removed {
+                        return Err(OperationalError::from(error).context("resolution failed"));
+                    }
+                }
+            }
+            Err(error) => return Err(OperationalError::from(error).context("resolution failed")),
         }
     }
 }
@@ -544,9 +714,7 @@ pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependenc
     ] {
         for (name, range) in map {
             if range.starts_with("workspace:") {
-                return Err(format!(
-                    "unsupported workspace dependency reference: {name}@{range}; workspace linking is not implemented"
-                ));
+                continue;
             }
             let (registry, package) = dep_parts(name)?;
             let requirement = range.parse::<Requirement>().map_err(|error| {

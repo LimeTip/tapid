@@ -1,0 +1,27 @@
+name: Check release signing key
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-key:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: stable-release
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Verify private key matches embedded public identity
+        env:
+          TAPID_RELEASE_SIGNING_KEY: ${{ secrets.TAPID_RELEASE_ED25519_PRIVATE_KEY }}
+          TAPID_RELEASE_SIGNING_KEY_ID: ${{ vars.TAPID_RELEASE_SIGNING_KEY_ID }}
+        run: node --experimental-strip-types tools/release/sign.ts check-key

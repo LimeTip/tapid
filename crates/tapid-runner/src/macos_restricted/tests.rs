@@ -264,6 +264,165 @@ fn reserved_node_preserves_native_bytes_and_exact_empty_caller_path() {
 }
 
 #[test]
+fn reserved_node_rejects_nonrelocatable_macho() {
+    let project = temp_project("macho-project");
+    let runtime_dir = temp_project("macho-runtime");
+    fs::create_dir(runtime_dir.join("bin")).unwrap();
+    fs::create_dir(runtime_dir.join("lib")).unwrap();
+    fs::write(
+        runtime_dir.join("library.c"),
+        "int fixture(void) { return 0; }",
+    )
+    .unwrap();
+    fs::write(
+        runtime_dir.join("main.c"),
+        "extern int fixture(void); int main(void) { return fixture(); }",
+    )
+    .unwrap();
+    let library = runtime_dir.join("lib/libfixture.dylib");
+    let runtime = runtime_dir.join("bin/node");
+    for args in [
+        vec![
+            OsString::from("-dynamiclib"),
+            runtime_dir.join("library.c").into_os_string(),
+            OsString::from("-Wl,-install_name,@rpath/libfixture.dylib"),
+            OsString::from("-o"),
+            library.clone().into_os_string(),
+        ],
+        vec![
+            runtime_dir.join("main.c").into_os_string(),
+            library.into_os_string(),
+            OsString::from("-Wl,-rpath,@loader_path/../lib"),
+            OsString::from("-o"),
+            runtime.clone().into_os_string(),
+        ],
+    ] {
+        let output = Command::new("/usr/bin/clang").args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(Command::new(&runtime).status().unwrap().success());
+    let original = fs::read(&runtime).unwrap();
+    let trusted = super::super::TrustedNodeRuntime::checked(&runtime).unwrap();
+    let error = match ReservedNode::create(&trusted, &project) {
+        Ok(_) => panic!("accepted a runtime whose rpath breaks after relocation"),
+        Err(error) => error,
+    };
+    assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+    assert!(
+        error
+            .to_string()
+            .contains("nonrelocatable Mach-O dependency"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&runtime).unwrap(), original);
+    let request = ExecutionRequest::builder("/bin/sh")
+        .args(["-c", ": > should-not-run"])
+        .executable_search_path(runtime.parent().unwrap())
+        .trusted_node_runtime(&runtime)
+        .project_root(&project)
+        .policy(policy(false, true, Vec::new()))
+        .build()
+        .unwrap();
+    assert!(super::super::execute(&request).is_err());
+    assert!(!project.join("should-not-run").exists());
+    fs::remove_dir_all(project).unwrap();
+    fs::remove_dir_all(runtime_dir).unwrap();
+}
+#[test]
+fn reserved_node_executes_standalone_macho() {
+    let project = temp_project("standalone-macho-project");
+    let runtime_dir = temp_project("standalone-macho-runtime");
+    let source = runtime_dir.join("main.c");
+    let runtime = runtime_dir.join("node");
+    fs::write(
+        &source,
+        "#include <stdio.h>\nint main(void) { puts(\"standalone\"); return 0; }",
+    )
+    .unwrap();
+    let output = Command::new("/usr/bin/clang")
+        .arg(&source)
+        .arg("-o")
+        .arg(&runtime)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let original = fs::read(&runtime).unwrap();
+    let request = ExecutionRequest::builder("/bin/sh")
+        .args(["-c", "exec node"])
+        .executable_search_path(&runtime_dir)
+        .trusted_node_runtime(&runtime)
+        .project_root(&project)
+        .policy(policy(false, false, Vec::new()))
+        .build()
+        .unwrap();
+    let outcome = super::super::execute(&request).unwrap();
+    assert_eq!(outcome.termination(), &Termination::Exited(0));
+    assert_eq!(outcome.stdout(), b"standalone\n");
+    assert_eq!(fs::read(&runtime).unwrap(), original);
+    fs::remove_dir_all(project).unwrap();
+    fs::remove_dir_all(runtime_dir).unwrap();
+}
+#[test]
+fn snapshot_dependency_parser_fails_closed() {
+    let directory = temp_project("macho-parser");
+    let path = directory.join("image");
+    let mut header = vec![0; 32];
+    header[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+    for (kind, name) in [
+        (0xc_u32, "@rpath/libnode.dylib"),
+        (0x80000018, "@loader_path/libnode.dylib"),
+        (0x8000001f, "@executable_path/libnode.dylib"),
+        (0x20, "/opt/homebrew/lib/libnode.dylib"),
+        (0x80000023, "/usr/lib/../../project/evil.dylib"),
+        (0xe, "dyld"),
+    ] {
+        let length = (24 + name.len() + 1).next_multiple_of(8);
+        let mut image = header.clone();
+        image[16..20].copy_from_slice(&1_u32.to_le_bytes());
+        image[20..24].copy_from_slice(&(length as u32).to_le_bytes());
+        let mut command = vec![0; length];
+        command[..4].copy_from_slice(&kind.to_le_bytes());
+        command[4..8].copy_from_slice(&(length as u32).to_le_bytes());
+        command[8..12].copy_from_slice(&24_u32.to_le_bytes());
+        command[24..24 + name.len()].copy_from_slice(name.as_bytes());
+        image.extend(command);
+        fs::write(&path, image).unwrap();
+        let error =
+            validate_snapshot_dependencies(&mut fs::File::open(&path).unwrap()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("nonrelocatable Mach-O dependency"),
+            "{name}: {error}"
+        );
+    }
+    let mut oversized = header.clone();
+    oversized[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+    let mut truncated = header.clone();
+    truncated[16..20].copy_from_slice(&1_u32.to_le_bytes());
+    truncated[20..24].copy_from_slice(&8_u32.to_le_bytes());
+    let mut zero_length = truncated.clone();
+    zero_length.extend([0; 8]);
+    for image in [
+        vec![0xca, 0xfe, 0xba, 0xbe],
+        oversized,
+        truncated,
+        zero_length,
+    ] {
+        fs::write(&path, image).unwrap();
+        assert!(validate_snapshot_dependencies(&mut fs::File::open(&path).unwrap()).is_err());
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+#[test]
 fn reserved_node_executes_snapshot_after_source_rename() {
     let root = temp_project("node-source-rename");
     let (runtime_dir, runtime) = temp_node_runtime(
@@ -391,14 +550,14 @@ fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
             rescue SystemCallError => error
               File.write('mutation-denied', error.class.name)
             end
-            abort 'second node failed' unless system('node', '-e', "require('fs').writeFileSync('second-node', 'verified')")
+        abort 'second node failed' unless system('node', 'second-node')
             Process.fork do
               Process.setsid
               STDIN.reopen('/dev/null')
               STDOUT.reopen('descendant.stdout', 'w')
               STDERR.reopen('descendant.stderr', 'w')
               sleep 0.01 until File.exist?('receipt-returned')
-              system('node', '-e', "require('fs').writeFileSync('detached-node', 'verified')")
+          system('node', 'detached-node')
               exit! 0
             end
             File.write('descendant-ready', 'ready')

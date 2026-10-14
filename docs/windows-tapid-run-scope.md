@@ -1,0 +1,56 @@
+# Windows `tapid run` support scope
+
+## Goal
+
+Make the existing `tapid run <SCRIPT> -- <ARGS...>` workflow usable on Windows for real Node.js project scripts, with the same explicit policy and fail-closed behavior as the supported runner contract. Tapid selects the project script and Node runtime; Node executes JavaScript. A runner-only prototype is not completion.
+
+## Initial target
+
+- Windows 11 Pro x64, validated on the Proxmox Windows 11 VM.
+- Node.js 22, matching the Windows target in issue #157 and the checked-in `examples/news-site-consumer` workload.
+- GitHub-hosted `windows-latest` validation is enabled with explicit user approval. These Windows Server checks complement, but do not replace, native Windows 11 acceptance; they do not establish support for every Windows edition/build.
+
+## End-to-end acceptance
+
+Run the checked-in `examples/news-site-consumer` build, test, and start scripts through the integrated `tapid run` CLI on the Windows 11 VM. Use the fixture's Tapid-managed project dependencies; do not substitute `npm run` for the execution path. Verify:
+
+- selected Node runtime and project-local `node_modules/.bin` resolution;
+- exact script argument forwarding, stdout/stderr, exit codes, and start/readiness response;
+- the script runs only after its requested policy is enforced and launch evidence matches that policy;
+- filesystem positive controls for each declared read/write grant and negative controls for undeclared paths, parents/siblings, home/temp, traversal, and reparse/link escapes;
+- network positive/negative controls that match the configured boolean policy, with a reachable control endpoint;
+- explicit environment allowlisting and secret non-inheritance, including descendants;
+- descendants cannot escape the ManagedTree boundary; timeout, output, process-count, and memory limits cover the complete tree; cancellation and normal completion leave no surviving descendants;
+- unsupported OS/configuration, unavailable primitives, or insufficient rights fail before spawn with a structured diagnostic and no child marker.
+
+Native acceptance must run through `tapid run` at the exact integrated commit on Windows 11 Pro. Record the OS build, architecture, Node/Rust versions, artifact digest, exact commands, exit codes, logs, and per-probe results. Cross-compilation and standalone runner tests are useful development checks but are not support evidence. Do not use Windows Server hosted runners as a substitute for the Windows 11 VM.
+
+## Boundaries
+
+This scope covers explicit root project scripts only. It does not enable dependency lifecycle scripts, claim general npm compatibility, or expand Windows install/replay support. Installation/replay and script execution remain separate evidence dimensions. Unsupported policy combinations continue to fail closed; there is no unsandboxed fallback.
+
+## Current status
+
+The complete Windows scope above is **not supported yet**. The source branch now implements read-only AppContainer execution and graceful Ctrl+C cancellation, validated separately from the remaining issue #157 acceptance. Write and network-enabled policies still fail closed. Historical baseline results below describe the earlier release, not the current source branch.
+
+A baseline red run was recorded on Windows 11 Pro x64 build 26300 in Proxmox VM 126 with Node `v22.6.0`. The release `tapid.exe` was built from upstream commit `fc9fa6233e03c0fe9c183e516201d737e4b70280` (SHA-256 `397380dba2c7c7691171c16667c415b0e984ce851a9bfa0fb304f09b51df1cdb`). Running `tapid run test` against the checked-in #150 fixture files failed with exit code 1 before spawning Node:
+
+```text
+sandbox execution failed (unsupported-containment): sandbox containment is unavailable on windows: no platform execution backend is implemented; no process was started and no enforcement receipt was issued
+```
+
+This is only a baseline reproduction of the missing backend, not Windows support acceptance: it did not run the complete build/test/start workload or prove ManagedTree controls. The Windows runner has since been ported to the modular architecture, but it must still pass the exact CLI and native ManagedTree acceptance above before documentation or release claims change.
+
+## Windows ACL restoration evidence boundary
+
+The experimental Windows backend restores temporary AppContainer grants, but does not guarantee byte-identical security metadata for arbitrary legacy-inheritance trees. Windows `SetSecurityInfo`/`SetNamedSecurityInfo` can convert matching explicit ACEs to inherited ACEs and set `SE_DACL_AUTO_INHERITED` while preserving effective permissions. This is distinct from changing the security-significant `SE_DACL_PROTECTED` bit. Such a conversion can also occur in descendants when inheritable ACEs are reapplied.
+
+Native restoration tests establish the current inheritance model on **new disposable fixture roots only**, before taking their baseline. Setup permits only setting the auto-inherited control bit and marking existing ACEs inherited; ACE order, identities, access masks, other flags, and protection must remain unchanged. The library regression additionally checks unchanged descendant ACE bytes during setup. After setup, cleanup comparisons remain exact: integration tests compare the complete `icacls` output, raw DACL bytes, and security-descriptor control bits without masking inheritance. Tests do not normalize shared temp directories, project ancestors, volume roots, or SystemRoot, and this test-only setup is not a production workaround or evidence of arbitrary-metadata restoration.
+
+## Current Windows-write investigation (2026-10-05)
+
+The native `Access is denied` failure in the declared-write path was traced to `WindowsFilesystemGrants::apply` skipping project-policy read grants whenever the canonical path was beneath `SystemRoot`. VM 126 uses `C:\Windows\SystemTemp` for temporary project roots, so the project-root read/traversal grant was skipped even though the writable subtree received its inherited write ACE. The fix now skips only backend-runtime read grants beneath `SystemRoot`; it does not enable Windows write support.
+
+On Windows 11 VM 126, Rust 1.99.0 builds and the actual-child-token probe confirmed the original Win32 error 5, then passed existing-file writes, new-file create/reopen/write, and `cmd.exe` redirection after the project-root grant fix. Ancestor ACL inspection then found that the old parent-traversal path added a per-run ACE to shared SystemTemp even though direct opens of SystemTemp and the volume-root directory returned error 5. The child still performed all declared descendant operations after that ACE was removed. The implementation now avoids parent ACEs below SystemRoot and canonicalizes the ancestor/SystemRoot comparison, failing closed if either cannot be resolved; a regression test failed on the old behavior and passed after the change. During the successful probe, volume-root, Windows-directory, and SystemTemp ACLs stayed unchanged; normal cleanup restored all sampled ACLs exactly. The integrated existing-file write test passed earlier in a one-off diagnostic build with the write gate temporarily bypassed. The gate is restored, and its fail-closed integration test passed natively. The full Rust 1.99.0 native `tapid-runner` unit suite passed 111 tests with 1 diagnostic probe ignored, including a policy-split test where the actual AppContainer child wrote inside the declared subtree and left a read-only sibling unchanged. Normal-exit cleanup left no probe SID ACE on `C:\`, `C:\Windows`, or `C:\Windows\SystemTemp`.
+
+Windows `tapid run` remains **not supported**. Native integration checks verified exact project-root DACL restoration after normal execution, output-limit termination, timeout, pre-spawn missing-executable failure, and graceful Ctrl+C cancellation; these use project read grants only and do not prove write-grant cleanup. Cancellation was tested five times on Windows 11 VM 126 and confirmed `Termination::Cancelled`, complete Job Object cleanup, and exact project DACL restoration. Denial checks for parent directories, undeclared temp/home paths, and reparse/link escapes; nonzero-exit and actual child-creation-failure cleanup; and full `examples/news-site-consumer` CLI acceptance remain pending. The positive write control has not been re-enabled. `cmd.exe` also warns that an extended (`\\?\`) current-directory path is unsupported and defaults to the Windows directory; verify relative-working-directory behavior during CLI acceptance.

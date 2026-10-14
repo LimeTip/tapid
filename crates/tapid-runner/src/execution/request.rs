@@ -157,6 +157,7 @@ pub struct ExecutionRequest {
     pub(super) windows_verbatim_arguments: bool,
     pub(super) allow_process_memory_stats: bool,
     pub(super) project_root: PathBuf,
+    pub(super) working_directory: Option<PathBuf>,
     pub(super) policy: SandboxPolicy,
     pub(super) environment: BTreeMap<OsString, OsString>,
 }
@@ -171,6 +172,7 @@ impl ExecutionRequest {
             windows_verbatim_arguments: false,
             allow_process_memory_stats: false,
             project_root: PathBuf::from("."),
+            working_directory: None,
             policy: SandboxPolicy::default(),
             environment: BTreeMap::new(),
         }
@@ -210,6 +212,12 @@ impl ExecutionRequest {
     }
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+    /// Directory used as the child process working directory, confined beneath `project_root`.
+    pub fn working_directory(&self) -> &Path {
+        self.working_directory
+            .as_deref()
+            .unwrap_or(&self.project_root)
     }
     pub fn policy(&self) -> &SandboxPolicy {
         &self.policy
@@ -281,16 +289,19 @@ impl ExecutionRequest {
         #[cfg(not(target_os = "linux"))]
         if self.allow_process_memory_stats {
             return Err(invalid_request(
-                "process memory statistics opt-in is supported only by the Linux Restricted backend",
+                "process memory statistics opt-in is supported only by Linux containment backends",
             ));
         }
         #[cfg(target_os = "linux")]
         if self.allow_process_memory_stats
             && (self.policy.mode() != SandboxMode::Required
-                || self.policy.assurance() != AssuranceLevel::Restricted)
+                || !matches!(
+                    self.policy.assurance(),
+                    AssuranceLevel::Restricted | AssuranceLevel::ManagedTree
+                ))
         {
             return Err(invalid_request(
-                "process memory statistics opt-in requires required sandbox mode and Linux Restricted assurance",
+                "process memory statistics opt-in requires required sandbox mode and Linux Restricted or ManagedTree assurance",
             ));
         }
         #[cfg(target_os = "linux")]
@@ -323,7 +334,21 @@ impl ExecutionRequest {
             }
         }
         #[cfg(windows)]
-        validate_windows_command_line_units(program_units, argument_units.iter().copied())?;
+        {
+            validate_windows_command_line_units(program_units, argument_units.iter().copied())?;
+            use std::os::windows::ffi::OsStrExt;
+            let program = self.program.encode_wide().collect::<Vec<_>>();
+            let arguments = self
+                .arguments
+                .iter()
+                .map(|argument| argument.encode_wide().collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            serialize_windows_command_line_units(
+                &program,
+                &arguments,
+                self.windows_verbatim_arguments,
+            )?;
+        }
         #[cfg(not(windows))]
         if argv_units > MAX_ARGV_UNITS {
             return Err(invalid_request(format!(
@@ -337,6 +362,28 @@ impl ExecutionRequest {
         )?;
         if self.project_root.as_os_str().is_empty() {
             return Err(invalid_request("project root must not be empty"));
+        }
+        if let Some(working_directory) = &self.working_directory {
+            validate_os_value(
+                "working directory",
+                working_directory.as_os_str(),
+                MAX_PROJECT_ROOT_UNITS,
+            )?;
+            if working_directory.as_os_str().is_empty() {
+                return Err(invalid_request("working directory must not be empty"));
+            }
+            let canonical_root = canonical_path(&self.project_root, "project root")?;
+            let canonical_working_directory =
+                canonical_path(working_directory, "working directory")?;
+            if canonical_root != self.project_root
+                || canonical_working_directory != *working_directory
+                || !canonical_working_directory.starts_with(&canonical_root)
+                || !canonical_working_directory.is_dir()
+            {
+                return Err(invalid_request(
+                    "working directory must be canonical, existing, and contained beneath project root",
+                ));
+            }
         }
         let executable_search_path =
             validate_executable_search_paths(&self.executable_search_paths)?;
@@ -392,6 +439,8 @@ impl ExecutionRequest {
                 )));
             }
         }
+        #[cfg(windows)]
+        windows_environment_block_units(&self.child_environment())?;
         Ok(())
     }
 }
@@ -406,6 +455,7 @@ pub struct ExecutionRequestBuilder {
     windows_verbatim_arguments: bool,
     allow_process_memory_stats: bool,
     project_root: PathBuf,
+    working_directory: Option<PathBuf>,
     policy: SandboxPolicy,
     environment: BTreeMap<OsString, OsString>,
 }
@@ -472,6 +522,12 @@ impl ExecutionRequestBuilder {
         self
     }
 
+    /// Sets the child process working directory, which must resolve inside `project_root`.
+    pub fn working_directory(mut self, working_directory: impl Into<PathBuf>) -> Self {
+        self.working_directory = Some(working_directory.into());
+        self
+    }
+
     pub fn policy(mut self, policy: SandboxPolicy) -> Self {
         self.policy = policy;
         self
@@ -499,6 +555,32 @@ impl ExecutionRequestBuilder {
     }
 
     pub fn build(self) -> Result<ExecutionRequest, ExecutionError> {
+        let working_directory = self
+            .working_directory
+            .as_ref()
+            .map(|working_directory| {
+                let project_root = fs::canonicalize(&self.project_root)
+                    .map_err(|error| path_error("project root", &self.project_root, error))?;
+                if !project_root.is_dir() {
+                    return Err(invalid_request(
+                        "project root must be an existing directory",
+                    ));
+                }
+                let working_path = if working_directory.is_absolute() {
+                    working_directory.clone()
+                } else {
+                    project_root.join(working_directory)
+                };
+                let working_directory = fs::canonicalize(&working_path)
+                    .map_err(|error| path_error("working directory", &working_path, error))?;
+                if !working_directory.is_dir() || !working_directory.starts_with(&project_root) {
+                    return Err(invalid_request(
+                        "working directory must be an existing directory beneath project root",
+                    ));
+                }
+                Ok(working_directory)
+            })
+            .transpose()?;
         let trusted_node_runtime = self
             .trusted_node_runtime
             .as_deref()
@@ -515,6 +597,7 @@ impl ExecutionRequestBuilder {
             windows_verbatim_arguments: self.windows_verbatim_arguments,
             allow_process_memory_stats: self.allow_process_memory_stats,
             project_root: self.project_root,
+            working_directory,
             policy: self.policy,
             environment: self.environment,
         };
@@ -562,7 +645,24 @@ pub(super) fn validate_executable_search_paths(
     Ok(joined)
 }
 
-fn join_executable_search_paths(paths: &[PathBuf]) -> Result<OsString, ExecutionError> {
+pub(super) fn join_executable_search_paths(paths: &[PathBuf]) -> Result<OsString, ExecutionError> {
+    let paths = {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::{OsStrExt, OsStringExt};
+            paths
+                .iter()
+                .map(|path| {
+                    let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+                    PathBuf::from(OsString::from_wide(&windows_environment_path_units(&units)))
+                })
+                .collect::<Vec<_>>()
+        }
+        #[cfg(not(windows))]
+        {
+            paths.to_vec()
+        }
+    };
     std::env::join_paths(paths).map_err(|error| {
         invalid_request(format!(
             "executable search directory cannot be joined into PATH: {error}"
@@ -584,6 +684,67 @@ fn environment_block_too_large() -> ExecutionError {
 
 fn invalid_request(message: impl Into<String>) -> ExecutionError {
     ExecutionError::new(ExecutionErrorCategory::InvalidRequest, message)
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn serialize_windows_command_line_units(
+    program: &[u16],
+    arguments: &[Vec<u16>],
+    verbatim_last: bool,
+) -> Result<Vec<u16>, ExecutionError> {
+    if program.is_empty() || program.contains(&0) || arguments.iter().any(|arg| arg.contains(&0)) {
+        return Err(invalid_request(
+            "Windows command line contains an empty program or embedded NUL",
+        ));
+    }
+    if verbatim_last && arguments.is_empty() {
+        return Err(invalid_request(
+            "Windows verbatim command line requires a final command payload",
+        ));
+    }
+
+    fn quote(argument: &[u16], output: &mut Vec<u16>) {
+        let slash = u16::from(b'\\');
+        let quote = u16::from(b'"');
+        output.push(quote);
+        let mut backslashes = 0usize;
+        for &unit in argument {
+            if unit == slash {
+                backslashes += 1;
+            } else if unit == quote {
+                output.extend(std::iter::repeat_n(slash, backslashes * 2 + 1));
+                output.push(quote);
+                backslashes = 0;
+            } else {
+                output.extend(std::iter::repeat_n(slash, backslashes));
+                output.push(unit);
+                backslashes = 0;
+            }
+        }
+        output.extend(std::iter::repeat_n(slash, backslashes * 2));
+        output.push(quote);
+    }
+
+    let mut command_line = Vec::new();
+    quote(program, &mut command_line);
+    for argument in arguments {
+        command_line.push(u16::from(b' '));
+        if verbatim_last {
+            // The checked verbatim boundary permits only /D /S /C and one
+            // command payload. cmd.exe parses its own command line: quoting
+            // these switches changes how it finds and strips payload quotes.
+            command_line.extend_from_slice(argument);
+        } else {
+            quote(argument, &mut command_line);
+        }
+    }
+    command_line.push(0);
+    if command_line.len() > MAX_ARGV_UNITS {
+        return Err(invalid_request(format!(
+            "serialized Windows command line exceeds {MAX_ARGV_UNITS} UTF-16 code units"
+        )));
+    }
+    Ok(command_line)
 }
 
 /// Returns a conservative upper bound rather than the exact Windows command-line serialization.
@@ -622,6 +783,157 @@ pub(super) fn validate_windows_command_line_units(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
+pub(super) fn windows_environment_block_units(
+    environment: &BTreeMap<OsString, OsString>,
+) -> Result<Vec<u16>, ExecutionError> {
+    let mut entries = Vec::with_capacity(environment.len());
+    for (name, value) in environment {
+        let name = name.to_str().ok_or_else(|| {
+            invalid_request("Windows environment variable names must be valid UTF-8")
+        })?;
+        validate_environment_name(name).map_err(|error| invalid_request(error.to_string()))?;
+        let name_units = name.encode_utf16().collect::<Vec<_>>();
+        let value_units = {
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStrExt;
+                value.encode_wide().collect::<Vec<_>>()
+            }
+            #[cfg(not(windows))]
+            {
+                value.to_string_lossy().encode_utf16().collect::<Vec<_>>()
+            }
+        };
+        entries.push((name_units, value_units));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
+            ExecutionError::new(
+                ExecutionErrorCategory::UnsupportedContainment,
+                "Windows AppContainer launch requires the runner's LOCALAPPDATA environment variable",
+            )
+        })?;
+        let system_root = std::env::var_os("SystemRoot").ok_or_else(|| {
+            ExecutionError::new(
+                ExecutionErrorCategory::UnsupportedContainment,
+                "Windows AppContainer launch requires the runner's SystemRoot environment variable",
+            )
+        })?;
+        let local_app_data_units = local_app_data.encode_wide().collect::<Vec<_>>();
+        let system_root_units = system_root.encode_wide().collect::<Vec<_>>();
+        entries = windows_appcontainer_environment_entries(
+            entries,
+            &local_app_data_units,
+            &system_root_units,
+        );
+    }
+    assemble_windows_environment_block(entries)
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn windows_appcontainer_environment_entries(
+    mut entries: Vec<(Vec<u16>, Vec<u16>)>,
+    host_local_app_data: &[u16],
+    host_system_root: &[u16],
+) -> Vec<(Vec<u16>, Vec<u16>)> {
+    for (name, value) in [
+        ("LOCALAPPDATA", host_local_app_data),
+        ("SYSTEMROOT", host_system_root),
+    ] {
+        let required_name = name.encode_utf16().collect::<Vec<_>>();
+        entries
+            .retain(|(candidate, _)| !windows_environment_names_equal(candidate, &required_name));
+        entries.push((required_name, value.to_vec()));
+    }
+    entries
+}
+
+#[cfg(any(windows, test))]
+fn windows_environment_names_equal(left: &[u16], right: &[u16]) -> bool {
+    fn fold_ascii_case(unit: u16) -> u16 {
+        if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {
+            unit + u16::from(b'a' - b'A')
+        } else {
+            unit
+        }
+    }
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(&left, &right)| fold_ascii_case(left) == fold_ascii_case(right))
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn assemble_windows_environment_block(
+    mut entries: Vec<(Vec<u16>, Vec<u16>)>,
+) -> Result<Vec<u16>, ExecutionError> {
+    fn fold_ascii_case(unit: u16) -> u16 {
+        if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {
+            unit + u16::from(b'a' - b'A')
+        } else {
+            unit
+        }
+    }
+    fn compare_names(left: &[u16], right: &[u16]) -> std::cmp::Ordering {
+        left.iter()
+            .map(|unit| fold_ascii_case(*unit))
+            .cmp(right.iter().map(|unit| fold_ascii_case(*unit)))
+    }
+
+    for (name, value) in &entries {
+        if name.is_empty()
+            || name
+                .iter()
+                .any(|unit| *unit == 0 || *unit == u16::from(b'='))
+        {
+            return Err(invalid_request("invalid Windows environment variable name"));
+        }
+        if value.contains(&0) {
+            return Err(invalid_request(
+                "Windows environment value contains an embedded NUL",
+            ));
+        }
+    }
+    entries.sort_by(|left, right| compare_names(&left.0, &right.0));
+    if entries
+        .windows(2)
+        .any(|pair| compare_names(&pair[0].0, &pair[1].0).is_eq())
+    {
+        return Err(invalid_request(
+            "Windows environment contains case-insensitive duplicate names",
+        ));
+    }
+    let mut units: usize = if entries.is_empty() { 2 } else { 1 };
+    for (name, value) in &entries {
+        units = units
+            .checked_add(name.len())
+            .and_then(|count| count.checked_add(1))
+            .and_then(|count| count.checked_add(value.len()))
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(environment_block_too_large)?;
+    }
+    if units > MAX_ENVIRONMENT_BLOCK_UNITS {
+        return Err(environment_block_too_large());
+    }
+    if entries.is_empty() {
+        return Ok(vec![0, 0]);
+    }
+
+    let mut block = Vec::with_capacity(units);
+    for (name, value) in entries {
+        block.extend(name);
+        block.push(u16::from(b'='));
+        block.extend(value);
+        block.push(0);
+    }
+    block.push(0);
+    Ok(block)
+}
+
 /// Mirrors `std::env::join_paths` on Windows so its separator quoting remains host-testable.
 #[cfg(test)]
 pub(super) fn join_windows_path_units<'a>(
@@ -646,6 +958,21 @@ pub(super) fn join_windows_path_units<'a>(
         }
     }
     Ok(joined)
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn windows_environment_path_units(path: &[u16]) -> Vec<u16> {
+    const EXTENDED_PREFIX: [u16; 4] = [92, 92, 63, 92];
+    const EXTENDED_UNC_PREFIX: [u16; 8] = [92, 92, 63, 92, 85, 78, 67, 92];
+    if path.starts_with(&EXTENDED_UNC_PREFIX) {
+        let mut ordinary = vec![92, 92];
+        ordinary.extend_from_slice(&path[EXTENDED_UNC_PREFIX.len()..]);
+        ordinary
+    } else if path.starts_with(&EXTENDED_PREFIX) {
+        path[EXTENDED_PREFIX.len()..].to_vec()
+    } else {
+        path.to_vec()
+    }
 }
 
 #[cfg(any(windows, test))]

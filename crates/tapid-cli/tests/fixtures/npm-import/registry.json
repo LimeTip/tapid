@@ -1,0 +1,53 @@
+{
+  "packages": [
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "parent",
+      "version": "1.0.0",
+      "integrity": "sha512-g3zA9Bxdzo9gumL/0PSMLyuFX61qSsTl7aPrdQTghvcF0FhKl+RB0TvsO6aHo30tRfvsAFIJ++k0UNJ4wGmjWA==",
+      "artifact": "base64:H4sIAAAAAAAC/+3UwUvDMBTH8Zz9K0rO0iWldLAx8F8J60OrNg1NJ4Ox/923bnrYxYsOxe/n8pJHQg7JLylsX8KjLNK5ls95iOabOdXU9VzVdXW+Wn6O5773TdWYwpkb2OUpjHq8+Z8ONoZe7MqmMEqc7L19kzF3Q9SWL13ptNOH7jTtYit7fSDaaSWJzuK2k2xXB5ufdHera6p5y/Fo8Ddccr/4uNyfOOOr/LvaX+f/VMj/DfRDu3uVUvZpGKdcbIrLR/BwDv/6jogAAAAAAAAAAAAAAAD8au+tY2NzACgAAA==",
+      "dependencies": {
+        "shared": "2.0.0"
+      },
+      "peerDependencies": {}
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "shared",
+      "version": "1.0.0",
+      "integrity": "sha512-yy/SfIkupQhLqYGoubOppkEX5ZLGqZH9Ky1iIr3ViFNSFAS95Fi1Xmot1B68+TN9MwRgXU15JlkRlqkQ8+saUQ==",
+      "artifact": "base64:H4sIAAAAAAAC/+3UvQrCMBSG4cxeRcks/ZFaQRG8lWCDVu0PTSsF8d5NbUXo4qJF9H2Wk5wMZ0i+FGp7VDvtFV11DybPxJv5VhSG92oNqz2cP9dtPwii2UI4vhhBbSpV2vHiP11kplItl9LsValjOZVnXZokz2wrcH3Xt51UJe02yWLd2AcirwK/os+997jcT8x4mf8wGOa/LeR/BGke1yft6qbIy8o4a6f/CDZd+FcTIgIAAAAAAAAAAAAAAPDVbhiYi9QAKAAA",
+      "dependencies": {},
+      "peerDependencies": {}
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "shared",
+      "version": "2.0.0",
+      "integrity": "sha512-tKFsM1F9DuInaIqRY0XoDBScexjudC92EzL4LE8AL00E/d9mOblXBOqr6geQ/fsL1MpSFWucRm2ILGV3ejSzAg==",
+      "artifact": "base64:H4sIAAAAAAAC/+3UTwuCMBjH8Z17FbJzmIoZFEFvZeQoK//gNITovTfTCLx0KYn6fi7P9uzwHLbfCrU9qp2eFV11DybPxJt5VhSG92oNqz2cP9dt3/ejYCEcT4ygNpUq7Xjxny4yU6mWS2n2qtSxnMqzLk2SZ7YVuJ7r2U6qknabZLFu7AORV4Ff0ed+9rjcT8x4mf/QH+a/LeR/BGke1yft6qbIy8o4a6f/CDZd+FcTIgIAAAAAAAAAAAAAAPDVbpBKQyUAKAAA",
+      "dependencies": {},
+      "peerDependencies": {}
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "consumer",
+      "version": "1.0.0",
+      "integrity": "sha512-O/4aCnmS0/IY3G9y5Q0tK4TLoAIDMcv4fUwn65rGWobqAs8V5tXVYx1LgCfEBD0U7XbTlKlgUCWIAcyorBfDfQ==",
+      "artifact": "base64:H4sIAAAAAAAC/+3UsW7CMBSFYc88ReQZBQcCA1WlDryIlVy1oY1t2aRCQrw7LrQZWLq0CIn/W25ypOgO9kmwzbt9lVm4zHKbvFN/zGSruj7P7HqaarEcn895Va3mS1UYdQND2tmY16vHdNDO9qLXuvEuDb1EPdWfElPnXQ6r0pQmJ73tvl4718o+X5GcBJG4kSA5cU0nSa8POr3ZKO342fGocO++ez/7Odr/2PFb/029uO6/MXP6fwu9b4cPKWUffNyl4rkYfwQvlxY/TSgJAAAAAAAAAAAAAADAHTsBgEvalAAoAAA=",
+      "dependencies": {},
+      "peerDependencies": {
+        "shared": "1.0.0"
+      }
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "native",
+      "version": "1.0.0",
+      "integrity": "sha512-khKIUanfAqv6ZH7ReBrpeDMRZgv2F+ksGxvB++qTrXzYIfD2xRUUdF6JvYuOmwJVU0+pqFH7TKJPc84N9a7l3w==",
+      "artifact": "base64:H4sIAAAAAAAC/+3UvWrDMBiFYc25CqO5dqTWZEgo9D5CB1GLoraWhCWHQOi9V84PhSxdktDS91mO/Xn4Buk4mpd382rn8ZDNWwpeXJgqFm27z+I8lX74ft7PtV7cK1EpcQNjymYo68X/tJPe9FYuS2S3sfJObuyQXPBlpBvVqDLpjZtene/stlyQMglJLtcym+i6OtuU69GnMcYwZNvV5ePzp8CfcOz9/HS419jxU/9Vq8/7PwX9v4E+dOOHbex2Km+qHqvjj+DpUP7VjIoAAAAAAAAAAAAAAAD8al9KTpmDACgAAA==",
+      "dependencies": {},
+      "peerDependencies": {}
+    }
+  ]
+}

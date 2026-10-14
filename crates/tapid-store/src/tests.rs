@@ -51,6 +51,15 @@ fn coordinator(project: &Path, state: &str) -> PathBuf {
     path
 }
 
+fn version_two_coordinator(project: &Path, state: &str) -> PathBuf {
+    let path = coordinator(project, state);
+    let mut decision: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    decision["version"] = serde_json::Value::from(2);
+    fs::write(&path, decision.to_string()).unwrap();
+    path
+}
+
 #[test]
 fn prepared_coordinator_recovery_removes_only_transaction_created_tree() {
     let root = root();
@@ -133,6 +142,35 @@ fn coordinator_larger_than_store_journal_limit_is_supported() {
     Store::new(&store_root).recover_transactions().unwrap();
 
     assert!(!store_root.join("trees").join(digest.as_str()).exists());
+    assert!(!store_root.join(STORE_JOURNAL).exists());
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(project);
+}
+
+#[test]
+fn version_two_coordinator_recovery_removes_prepared_transaction_tree() {
+    let root = root();
+    let project = root.with_extension("v2-coordinator-project");
+    let store_root = root.join("store");
+    fs::create_dir_all(&store_root).unwrap();
+    let created_digest = make_marked_tree(&store_root, "version two transaction");
+    let coordinator = version_two_coordinator(&project, "Prepared");
+    write_store_journal(
+        &store_root,
+        &coordinator,
+        &[created_digest.as_str().to_owned()],
+        false,
+    )
+    .unwrap();
+
+    Store::new(&store_root).recover_transactions().unwrap();
+
+    assert!(
+        !store_root
+            .join("trees")
+            .join(created_digest.as_str())
+            .exists()
+    );
     assert!(!store_root.join(STORE_JOURNAL).exists());
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(project);
@@ -824,4 +862,25 @@ fn reader_failure_does_not_activate_partial_file() {
     assert!(store.ingest(&expected, Failing).is_err());
     assert!(!store.artifact_path(&expected).exists());
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn publication_snapshot_survives_rollback_without_reentering_store_lock() {
+    let project = tapid_test_support::TempProject::new("publication-snapshot").unwrap();
+    let source = project.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("package.json"), b"{}").unwrap();
+    let digest: ArtifactDigest = tapid_archive::canonical_tree_digest(&source)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let store = Store::new(project.path().join("store"));
+    let mut transaction = store.transaction();
+    transaction.stage_verified_tree(&digest, &source).unwrap();
+    let publication = transaction.publish().unwrap();
+    let snapshot = publication.verified_tree_snapshot(&digest).unwrap();
+    publication.rollback().unwrap();
+    assert_eq!(fs::read(snapshot.join("package.json")).unwrap(), b"{}");
+    assert!(store.verified_tree_path(&digest).is_err());
+    fs::remove_dir_all(snapshot).unwrap();
 }

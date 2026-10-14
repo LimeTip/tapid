@@ -1,6 +1,6 @@
 # ADR 0004: GitHub-native client releases
 
-Status: Accepted
+Status: Accepted. Manual promotion and separate crates.io dispatch/approval superseded by [ADR 0007](0007-one-candidate-one-release-approval.md).
 Date: 2026-09-03
 Supersedes: ADR 0001 for current client releases
 
@@ -39,6 +39,10 @@ Received signed-discovery metadata that fails parsing, freshness, target selecti
 This amendment authorizes a development-release self-update path within the existing GitHub trust boundary, not the independently authenticated provider-neutral release system proposed in ADR 0001. Archive checks and staged executable replacement remain required. Published installer and upgrade smoke evidence must be evaluated separately, including platform scope and same-version replacement versus a previous-version upgrade.
 
 ### Amendment for the next release, expected 0.0.11
+
+The unsigned-record and eight-asset decisions below are superseded by
+[ADR 0006](0006-immutable-release-signatures.md). The final flow signs immutable
+records, publishes eleven assets, and generates installers that use a checksum-pinned native verifier.
 
 Tapid owns its public discovery address while GitHub remains the initial release host. The installers and default `tapid upgrade` read a small [release record](../release-record-v1.md) through `tapid.dev/releases/v1/latest.tsv`. Versioned records use `tapid.dev/releases/v1/vVERSION.tsv`. These routes redirect to provider-hosted assets; future provider changes do not require another client discovery protocol.
 

@@ -1,0 +1,137 @@
+
+running 124 tests
+test config::tests::accepts_portable_names_that_only_contain_reserved_name_substrings ... ok
+test config::tests::accepts_registry_configuration_alongside_strict_run_policy ... ok
+test config::tests::accepts_standard_toml_strings_comments_and_multiline_arrays ... ok
+test config::tests::assurance_defaults_to_managed_tree_and_can_be_restricted_explicitly ... ok
+test config::tests::defaults_are_fail_closed_and_profiles_override_individual_fields ... ok
+test config::tests::empty_config_uses_required_project_only_defaults ... ok
+test config::tests::exact_profile_lookup_never_falls_back_to_defaults ... ok
+test config::tests::filesystem_policy_bounds_grant_string_bytes_at_the_published_limit ... ok
+test config::tests::filesystem_policy_bounds_total_grant_count_at_the_published_limit ... ok
+test config::tests::parsing_applies_environment_count_limit_to_every_profile ... ok
+test config::tests::parsing_bounds_profile_name_bytes_at_the_published_limit ... ok
+test config::tests::parsing_bounds_script_profile_count_at_the_published_limit ... ok
+test config::tests::parsing_rejects_config_bytes_above_the_published_limit ... ok
+test config::tests::profile_lookup_is_exact_and_deterministic ... ok
+test config::tests::public_policy_constructors_validate_untrusted_values ... ok
+test config::tests::rejects_absolute_traversing_and_backslash_grants_on_every_platform ... ok
+test config::tests::rejects_invalid_environment_names ... ok
+test config::tests::rejects_nonportable_and_ambiguous_grant_components_on_every_platform ... ok
+test config::tests::rejects_unknown_keys_and_malformed_field_types ... ok
+test config::tests::rejects_zero_and_overflowing_limits ... ok
+test config::tests::sandbox_policy_bounds_environment_count_at_the_published_limit ... ok
+test config::tests::sandbox_policy_bounds_environment_name_bytes_at_the_published_limit ... ok
+test execution::platform_backend::tests::trusted_node_appcontainer_options_preserve_caller_options_and_are_idempotent ... ok
+test execution::tests::backend_identity_is_checked_and_bounded ... ok
+test execution::tests::backend_memory_termination_without_exact_preflight_limit_is_rejected_after_spawn ... ok
+test execution::tests::backend_output_over_exact_preflight_limit_is_rejected_after_spawn ... ok
+test execution::tests::backend_output_termination_without_exact_preflight_limit_is_rejected_after_spawn ... ok
+test execution::tests::backend_process_termination_without_exact_preflight_limit_is_rejected_after_spawn ... ok
+test execution::tests::backend_terminations_coherent_with_exact_preflight_limits_are_accepted ... ok
+test execution::tests::backend_timeout_without_exact_preflight_limit_is_rejected_after_spawn ... ok
+test execution::tests::captured_output_accounting_rejects_length_overflow ... ok
+test execution::tests::checked_outcome_accepts_success_only_with_a_complete_receipt ... ok
+test execution::tests::checked_receipt_rejects_disabled_sandbox_policy ... ok
+test execution::tests::checked_receipt_rejects_every_extra_or_missing_dimension ... ok
+test execution::tests::checked_receipt_requires_declared_and_observed_evidence ... ok
+test execution::tests::complete_environment_block_limit_counts_mandatory_path ... ok
+test execution::tests::complete_environment_combined_bound_includes_joined_path_and_has_no_off_by_one ... ok
+test execution::tests::completion_evidence_is_distinct_and_managed_tree_requires_complete_cleanup ... ok
+test execution::tests::completion_keeps_backend_observation_evidence ... ok
+test execution::tests::disabled_mode_makes_zero_prepare_attempts ... ok
+test execution::tests::empty_search_list_produces_an_explicitly_empty_child_path ... ok
+test execution::tests::every_search_directory_is_bounded_and_joinable_before_duplicate_comparison ... ok
+test execution::tests::executable_search_path_payload_bounds_and_duplicates_are_rejected ... ok
+test execution::tests::explicit_environment_must_be_named_and_allowlisted_by_policy ... ok
+test execution::tests::invalid_backend_identity_prevents_runtime_additions_and_spawn ... ok
+test execution::tests::invalid_search_directories_fail_generic_preflight_before_spawn ... ok
+test execution::tests::malformed_request_is_rejected_before_support_probing ... ok
+test execution::tests::malformed_search_path_payload_is_rejected_before_support_probing ... ok
+test execution::tests::malformed_supported_preflight_makes_zero_prepare_attempts ... ok
+test execution::tests::managed_completion_confirms_only_lifecycle_and_cleanup_dimensions ... ok
+test execution::tests::managed_tree_reports_lifecycle_ownership_as_an_independent_dimension ... ok
+test execution::tests::missing_dimension_metadata_fails_before_spawn ... ok
+test execution::tests::missing_read_grant_fails_before_backend_binding_or_spawn ... ok
+test execution::tests::missing_write_requires_adapter_materialization_and_never_prepares_by_default ... ok
+test execution::tests::noncanonical_runtime_additions_fail_before_spawn ... ok
+test execution::tests::over_limit_complete_environment_is_rejected_before_support_probing ... ok
+test execution::tests::post_spawn_failure_returns_only_after_checked_cleanup ... ok
+test execution::tests::process_creation_error_cannot_escape_owned_cleanup ... ok
+test execution::tests::process_memory_stats_access_is_rejected_off_linux ... ok
+test execution::tests::project_root_limit_and_nul_are_rejected_before_support_probing ... ok
+test execution::tests::public_outcome_contract_distinguishes_termination_and_enforcement ... ok
+test execution::tests::receipt_grants_expose_declared_kind_source_access_and_binding ... ok
+test execution::tests::receipt_keeps_launch_establishment_evidence_distinct_from_support_observation ... ok
+test execution::tests::request_builder_preserves_an_explicit_validated_contract ... ok
+test execution::tests::request_builder_preserves_ordered_executable_search_paths ... ok
+test execution::tests::request_builder_preserves_windows_verbatim_boundary_contract ... ok
+test execution::tests::request_keeps_policy_root_while_selecting_contained_working_directory ... ok
+test execution::tests::request_payload_limits_and_nul_are_enforced ... ok
+test execution::tests::request_rejects_working_directory_outside_policy_root ... ok
+test execution::tests::requested_evidence_distinguishes_subprocess_denial_from_descendant_lifecycle ... ok
+test execution::tests::requested_resource_evidence_reports_each_configured_limit_independently ... ok
+test execution::tests::resolved_policy_rejects_omitted_or_extra_receipt_grants ... ok
+test execution::tests::resolved_preflight_is_the_only_source_of_receipt_filesystem_grants ... ok
+test execution::tests::restricted_completion_does_not_reconfirm_launch_dimensions ... ok
+test execution::tests::restricted_separates_authority_containment_from_managed_tree_ownership ... ok
+test execution::tests::search_directories_are_ordered_backend_runtime_receipt_grants ... ok
+test execution::tests::support_models_declared_and_observed_evidence_separately ... ok
+test execution::tests::support_reports_each_dimension_with_scope_mechanism_and_limitations ... ok
+test execution::tests::unsupported_preflight_makes_zero_prepare_attempts ... ok
+test execution::tests::windows_alias_helper_rejects_ascii_case_equivalent_paths ... ok
+test execution::tests::windows_child_path_strips_extended_prefixes_from_search_directories ... ok
+test execution::tests::windows_command_line_bound_accepts_at_limit_conservative_cases ... ok
+test execution::tests::windows_command_line_bound_counts_full_worst_case_serialization ... ok
+test execution::tests::windows_command_line_bound_rejects_the_prior_raw_unit_limit ... ok
+test execution::tests::windows_command_line_preserves_validated_verbatim_command_payload ... ok
+test execution::tests::windows_command_line_serializes_quoted_arguments_and_trailing_backslashes ... ok
+test execution::tests::windows_environment_block_pins_the_host_local_appdata_for_appcontainer_creation ... ok
+test execution::tests::windows_environment_block_rejects_case_insensitive_duplicate_names ... ok
+test execution::tests::windows_environment_block_sorts_names_and_has_double_termination ... ok
+test execution::tests::windows_join_paths_helper_matches_quoted_separator_semantics ... ok
+test execution::tests::windows_support_report_matches_the_integrated_backend_contract ... ok
+test execution::tests::windows_verbatim_boundary_rejects_non_cmd_shapes_and_line_injection ... ok
+test execution::windows_cancellation::tests::ctrl_c_with_active_execution_advances_generation_and_is_handled ... ok
+test execution::windows_cancellation::tests::ctrl_c_without_active_execution_is_unhandled ... ok
+test execution::windows_cancellation::tests::later_execution_does_not_inherit_an_earlier_ctrl_c ... ok
+test execution::windows_cancellation::tests::unrelated_console_event_is_unhandled ... ok
+test execution::windows_job::filesystem::tests::acl_mutation_lock_child ... ok
+test execution::windows_job::filesystem::tests::acl_mutation_lock_serializes_separate_processes ... ok
+test execution::windows_job::filesystem::tests::declared_grant_leaves_ancestor_and_sibling_dacls_unchanged ... declared grant preparation=1.2435ms cleanup=336.1µs
+ok
+test execution::windows_job::filesystem::tests::directory_write_grant_propagates_to_existing_files ... ok
+test execution::windows_job::filesystem::tests::project_grant_does_not_modify_systemtemp_ancestor ... SystemTemp-specific ACL check skipped: temp directory is outside SystemRoot
+ok
+test execution::windows_job::filesystem::tests::representative_node_modules_acl_measurement ... ignored, native Windows large-project measurement; creates 25,000 disposable files
+test execution::windows_job::filesystem::tests::runtime_preexisting_access_does_not_require_write_dac ... ok
+test execution::windows_job::filesystem::tests::runtime_preexisting_allow_ace_does_not_override_execute_deny ... runtime check error: ExecutionError { category: UnsupportedContainment, message: "Windows verify existing AppContainer runtime access failed: Access is denied. (os error 5)", completion: None }
+ok
+test execution::windows_job::tests::appcontainer_actual_token_file_access_probe ... ignored, one-off Windows 11 ACL diagnosis; not a support acceptance test
+test execution::windows_job::tests::appcontainer_child_can_write_a_granted_tree_and_loses_access_on_restore ... Access is denied.
+Access is denied.
+ok
+test execution::windows_job::tests::appcontainer_child_cannot_write_an_ungranted_temp_file ... Access is denied.
+ok
+test execution::windows_job::tests::appcontainer_child_captures_stdout_and_stderr_separately ... ok
+test execution::windows_job::tests::appcontainer_child_is_verified_and_assigned_before_resume ... ok
+test execution::windows_job::tests::appcontainer_output_limit_terminates_and_bounds_combined_capture ... ok
+test execution::windows_job::tests::appcontainer_policy_only_allows_declared_write_subtree ... Access is denied.
+ok
+test execution::windows_job::tests::appcontainer_timeout_terminates_and_reaps_the_job ... ok
+test execution::windows_job::tests::assigning_an_invalid_process_handle_fails_closed ... ok
+test execution::windows_job::tests::disabled_subprocess_policy_caps_the_job_to_its_root_process ... ok
+test execution::windows_job::tests::explicit_job_termination_signals_a_suspended_assigned_child ... ok
+test execution::windows_job::tests::job_completion_port_reports_when_the_last_member_exits ... ok
+test execution::windows_job::tests::job_limits_are_job_wide_and_kill_members_when_owner_closes ... ok
+test execution::windows_job::tests::restoring_appcontainer_grant_preserves_concurrent_dacl_changes ... ok
+test tests::approval_binds_exact_artifact_and_normalized_script ... ok
+test tests::approval_cannot_override_policy_denial ... ok
+test tests::changed_script_cannot_reuse_approval ... ok
+test tests::existing_public_api_remains_source_compatible ... ok
+test tests::unattended_promptable_evidence_fails_closed ... ok
+test tests::unsupported_os_is_explicit_and_not_containment ... ok
+
+test result: ok. 122 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 1.33s
+
+EXIT=0
