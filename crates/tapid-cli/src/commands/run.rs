@@ -1,4 +1,5 @@
 use clap::Args as ClapArgs;
+mod permissions;
 use std::{
     env,
     ffi::OsString,
@@ -10,7 +11,7 @@ use std::{
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
-    /// Script name from package.json. Requires a matching [run.scripts.<name>] profile in tapid.toml.
+    /// Script name from package.json. Use a configured profile or explicit invocation permission flags.
     pub(crate) script: String,
     /// Project directory containing package.json.
     #[arg(long, default_value = ".")]
@@ -27,6 +28,8 @@ pub(crate) struct Args {
     /// Allow process-memory statistics in required Linux sandbox mode by creating a private PID/mount namespace with read-only procfs.
     #[arg(long, visible_aliases = ["allow-procfs", "allow-memory-read"])]
     pub(crate) allow_process_memory_stats: bool,
+    #[command(flatten)]
+    pub(crate) permissions: permissions::InvocationPermissions,
     /// Arguments forwarded after `--` to the script.
     #[arg(last = true)]
     pub(crate) arguments: Vec<OsString>,
@@ -110,6 +113,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
         return ExitCode::from(1);
     };
     let config_path = project_dir.join("tapid.toml");
+    let invocation_mode = args.permissions.enabled();
     let config_bytes = match read_run_config(&config_path) {
         Ok(bytes) => bytes,
         Err(ConfigReadError::CapacityExceeded) => {
@@ -117,12 +121,16 @@ pub(crate) fn run(args: Args) -> ExitCode {
             return ExitCode::from(1);
         }
         Err(ConfigReadError::Io(error)) => {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                eprintln!("error: required run configuration is missing: tapid.toml");
+            if error.kind() == std::io::ErrorKind::NotFound && invocation_mode {
+                Vec::new()
             } else {
-                eprintln!("error: cannot read run configuration 'tapid.toml': {error}");
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    eprintln!("error: required run configuration is missing: tapid.toml");
+                } else {
+                    eprintln!("error: cannot read run configuration 'tapid.toml': {error}");
+                }
+                return ExitCode::from(1);
             }
-            return ExitCode::from(1);
         }
     };
     let config = match tapid_runner::RunConfig::parse_toml_bytes(&config_bytes) {
@@ -135,13 +143,23 @@ pub(crate) fn run(args: Args) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if config.exact_profile(&args.script).is_none() {
+    if !invocation_mode && config.exact_profile(&args.script).is_none() {
         eprintln!(
             "error: run policy profile is missing for script: {}",
             args.script
         );
         return ExitCode::from(1);
     }
+    let selection = match args.permissions.select(&config, &args.script) {
+        Ok(selection) => selection,
+        Err(error) => {
+            eprintln!(
+                "error: invalid invocation permissions ({})",
+                config_error_category(error.category())
+            );
+            return ExitCode::from(1);
+        }
+    };
     let registry_config = match crate::registry::RegistryConfig::parse_toml_bytes(&config_bytes) {
         Ok(config) => config,
         Err(error) => {
@@ -150,21 +168,14 @@ pub(crate) fn run(args: Args) -> ExitCode {
         }
     };
     let registry_credential_names = registry_config.credential_environment_names();
-    if registry_config.allowlist_contains_registry_credentials(
-        config
-            .exact_profile(&args.script)
-            .expect("exact profile was checked")
-            .environment(),
-        cfg!(windows),
-    ) {
+    if registry_config
+        .allowlist_contains_registry_credentials(selection.policy.environment(), cfg!(windows))
+    {
         eprintln!("error: registry credential environment variables cannot be passed to scripts");
         return ExitCode::from(1);
     }
     let ambient_environment = match crate::run::read_allowlisted_environment_with_denied(
-        config
-            .exact_profile(&args.script)
-            .expect("exact profile was checked")
-            .environment(),
+        selection.policy.environment(),
         &registry_credential_names,
     ) {
         Ok(environment) => environment,
@@ -178,7 +189,23 @@ pub(crate) fn run(args: Args) -> ExitCode {
         .is_none()
         .then(|| env::var_os("PATH"))
         .flatten();
-    let prepared_result = if args.workspace.is_some() {
+    let host = crate::run::HostExecutionEnvironment {
+        node_runtime: args.node_runtime.as_deref(),
+        path: host_path.as_deref(),
+        allowlisted: &ambient_environment,
+        allow_process_memory_stats: args.allow_process_memory_stats,
+    };
+    let prepared_result = if invocation_mode {
+        crate::run::prepare_execution_request_with_policy(
+            &project_dir,
+            &working_directory,
+            &selection.policy,
+            selection.ceiling.as_ref(),
+            &script,
+            &args.arguments,
+            host,
+        )
+    } else if args.workspace.is_some() {
         crate::run::prepare_execution_request_with_working_directory(
             &project_dir,
             &working_directory,
@@ -186,12 +213,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
             &config,
             &script,
             &args.arguments,
-            crate::run::HostExecutionEnvironment {
-                node_runtime: args.node_runtime.as_deref(),
-                path: host_path.as_deref(),
-                allowlisted: &ambient_environment,
-                allow_process_memory_stats: args.allow_process_memory_stats,
-            },
+            host,
         )
     } else {
         crate::run::prepare_execution_request(
@@ -200,12 +222,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
             &config,
             &script,
             &args.arguments,
-            crate::run::HostExecutionEnvironment {
-                node_runtime: args.node_runtime.as_deref(),
-                path: host_path.as_deref(),
-                allowlisted: &ambient_environment,
-                allow_process_memory_stats: args.allow_process_memory_stats,
-            },
+            host,
         )
     };
     let prepared = match prepared_result {
@@ -216,7 +233,11 @@ pub(crate) fn run(args: Args) -> ExitCode {
         }
     };
     match crate::run::execute_checked(&prepared) {
-        Ok(outcome) => render_outcome(&outcome, args.receipt_json),
+        Ok(outcome) => render_outcome(
+            &outcome,
+            args.receipt_json,
+            invocation_mode.then(|| selection.provenance(&args.permissions)),
+        ),
         Err(error) => {
             if error.category() == tapid_runner::ExecutionErrorCategory::UnsupportedContainment {
                 eprintln!(
@@ -379,7 +400,11 @@ fn forward_child_output_for_cli(
     }
 }
 
-fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> ExitCode {
+fn render_outcome(
+    outcome: &tapid_runner::ExecutionOutcome,
+    machine: bool,
+    provenance: Option<serde_json::Value>,
+) -> ExitCode {
     let output_error = forward_child_output_for_cli(
         outcome.stdout(),
         outcome.stderr(),
@@ -387,7 +412,10 @@ fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> Ex
         &mut io::stderr(),
     )
     .err();
-    let value = receipt_value(outcome);
+    let mut value = receipt_value(outcome);
+    if let Some(provenance) = provenance {
+        value["policy_inputs"] = provenance;
+    }
     if machine {
         eprintln!("\n{value}");
     } else {

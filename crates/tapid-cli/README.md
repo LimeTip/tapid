@@ -46,7 +46,7 @@ tapid upgrade [OPTIONS]
 tapid cache info [--store-dir <PATH>]
 tapid cache clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid clean [--dry-run | --yes] [--store-dir <PATH>]
-tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
+tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
@@ -217,6 +217,23 @@ Ordinary installation also replays a matching lock. Changed manifests retain com
 
 ## Experimental Node.js root-script runner and `.bin` handling
 
+The invocation permission names are the same on Windows, macOS and Linux:
+
+```text
+tapid run test --allow-read . --allow-subprocess
+tapid run build --allow-read . --allow-write .next --allow-write .tmp --allow-env CI --allow-subprocess
+```
+
+`--allow-read <PATH>`, `--allow-write <PATH>` and `--allow-env <NAME>` may be repeated. Filesystem paths use portable project-relative syntax with forward slashes; they are relative to the policy project root, including when `--workspace` selects a member. Environment arguments are names, not `NAME=VALUE` assignments. `PATH` stays controlled by runtime/tool resolution, and registry credential names remain forbidden. `--allow-subprocess` allows descendants under the same containment policy. `--allow-network` (alias `--allow-net`) requests the existing unrestricted network permission; it does not restrict networking by host, port or loopback address. Arguments after `--` remain script arguments and never grant permissions.
+
+Supplying any of these permission flags enables invocation-only policy selection without requiring a script profile or creating/editing `tapid.toml`. With no configured policy, the baseline is Required/Restricted assurance with no project read, write, environment, network or subprocess grants. Backend runtime grants remain necessary and are disclosed separately. Node scripts normally need `--allow-read . --allow-subprocess` because the launcher uses a platform shell. Restricted does not promise complete descendant cleanup or ManagedTree resource guarantees.
+
+An exact script profile, or explicitly configured `[run.defaults]` when there is no exact profile, remains a ceiling. A supplied read/write/environment list replaces that dimension with the selected narrower grants; omitted dimensions keep the configured grants. Flags cannot exceed configured filesystem scope, enable denied network/subprocess authority, weaken assurance or remove resource ceilings. To authorize broader access, deliberately change the configuration. Empty explicit defaults still preserve the legacy ManagedTree default. With no invocation permission flags, exact-profile requirements and existing configuration behavior are unchanged.
+
+Names and policy selection are portable; enforcement availability still depends on the backend. For example, Windows currently rejects requested networking and missing/unsafe write targets before execution. Prepare writable directories such as `.next` and `.tmp` before a Windows run. No unsupported request falls back to unrestricted execution.
+
+Invocation-mode receipts add `policy_inputs` with the configuration source, invocation grants and effective project policy. These contain environment names, never values. `effective_filesystem` and established backend evidence describe resolved/runtime authority; input provenance alone is not enforcement evidence. The existing receipt channel and child exit/output behavior remain unchanged.
+
 `tapid run` is a separate root-script launcher, not Tapid's package-management core and not a general JavaScript runtime selector. It currently launches Node.js scripts only. It cannot select Bun, Deno, or another runtime; use the runtime's own tooling for those projects. Its execution-containment feature is experimental and supported only on the documented platform/configuration combinations.
 
 ```text
@@ -244,7 +261,7 @@ Paths are project-relative. Grant only the access the script needs: `network = f
 
 Restricted is an authority boundary, **not** full process-tree management or a promise that arbitrary script code is safe. Tapid does not guarantee cleanup or termination of detached descendants. Configured tree-wide timeout, output, process-count, and memory limits require Linux ManagedTree. A requested restriction the backend cannot enforce causes the run to fail before the target starts; Tapid does not silently run it without containment. Linux Restricted uses Landlock and seccomp and requires kernel support; it has targeted Ubuntu 24.04.5 x86_64 validation. macOS Restricted is experimental and uses deprecated/private Seatbelt APIs.
 
-The command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution. Omitting `assurance` retains the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before the shell starts.
+Without invocation permission flags, the command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution. Omitting `assurance` in configuration retains the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before the shell starts.
 
 The command constructs a minimal environment rather than preserving inherited variables: `PATH` is reserved and cannot be allowlisted, while other declared names are retrieved individually from the caller only when present. Windows environment-name matching is case-insensitive and case-equivalent allowlist duplicates are rejected. The current `network` field is boolean: `true` grants unrestricted networking. `--hostname`, `--port`, and other forwarded application arguments do not constrain authority; declared listen/connect scopes remain future work.
 

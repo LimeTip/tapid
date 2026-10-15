@@ -167,6 +167,7 @@ pub struct ExecutionRequest {
     pub(super) project_root: PathBuf,
     pub(super) working_directory: Option<PathBuf>,
     pub(super) policy: SandboxPolicy,
+    pub(super) policy_ceiling: Option<SandboxPolicy>,
     pub(super) environment: BTreeMap<OsString, OsString>,
 }
 
@@ -182,6 +183,7 @@ impl ExecutionRequest {
             project_root: PathBuf::from("."),
             working_directory: None,
             policy: SandboxPolicy::default(),
+            policy_ceiling: None,
             environment: BTreeMap::new(),
         }
     }
@@ -465,6 +467,7 @@ pub struct ExecutionRequestBuilder {
     project_root: PathBuf,
     working_directory: Option<PathBuf>,
     policy: SandboxPolicy,
+    policy_ceiling: Option<SandboxPolicy>,
     environment: BTreeMap<OsString, OsString>,
 }
 
@@ -541,6 +544,13 @@ impl ExecutionRequestBuilder {
         self
     }
 
+    /// Restricts project permissions to a configured policy, checked using canonical
+    /// grant kinds before backend runtime additions and before project execution.
+    pub fn policy_ceiling(mut self, ceiling: SandboxPolicy) -> Self {
+        self.policy_ceiling = Some(ceiling);
+        self
+    }
+
     /// Adds one explicit child environment value.
     pub fn env(mut self, name: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.environment.insert(name.into(), value.into());
@@ -609,9 +619,13 @@ impl ExecutionRequestBuilder {
             project_root: self.project_root,
             working_directory,
             policy: self.policy,
+            policy_ceiling: self.policy_ceiling,
             environment: self.environment,
         };
         request.validate()?;
+        if request.policy_ceiling.is_some() {
+            resolve_policy(&request, RuntimeFilesystemAdditions::default())?;
+        }
         Ok(request)
     }
 }
