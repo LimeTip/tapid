@@ -9,9 +9,35 @@ use std::{
 };
 use tapid_lockfile::Lockfile;
 
+#[path = "cli_cases/cache.rs"]
+mod cache_tests;
 #[path = "cli_cases/ci.rs"]
 mod ci_tests;
+#[path = "cli_cases/explain.rs"]
+mod explain_tests;
+#[path = "cli_cases/run_permissions.rs"]
+mod run_permission_tests;
+
 mod workspace_acceptance;
+
+#[test]
+fn run_help_lists_portable_invocation_permission_flags() {
+    let project = tapid_test_support::TempProject::new("run-permission-help").unwrap();
+    let output = isolated_command(project.path(), &["run", "--help"], true)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for flag in [
+        "--allow-read",
+        "--allow-write",
+        "--allow-env",
+        "--allow-subprocess",
+        "--allow-network",
+    ] {
+        assert!(help.contains(flag), "missing portable flag {flag}: {help}");
+    }
+}
 
 /// Verifies exact license output with no application environment and invalid project files.
 #[test]
@@ -2176,22 +2202,37 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
     fs::create_dir_all(member.join("bin")).unwrap();
     fs::write(
         member.join("package.json"),
-        r#"{"name":"tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js"}}"#,
+        r#"{"name":"tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js","workspace-direct":"bin/direct.exe"}}"#,
     )
     .unwrap();
     let bin_source = member.join("bin/tool.js");
     fs::write(
         &bin_source,
-        "#!/usr/bin/env node\\nconsole.log('workspace tool');\\n",
+        "#!/usr/bin/env node\nconsole.log('workspace tool');\n",
     )
     .unwrap();
+    let direct_source = member.join("bin/direct.exe");
+    #[cfg(windows)]
+    let system_root = std::env::var_os("SystemRoot").unwrap();
+    #[cfg(windows)]
+    fs::copy(
+        PathBuf::from(&system_root).join("System32").join("cmd.exe"),
+        &direct_source,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    fs::write(&direct_source, "#!/bin/sh\nexit 7\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&bin_source, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&direct_source, fs::Permissions::from_mode(0o755)).unwrap();
     }
     #[cfg(unix)]
-    let mode_before = fs::metadata(&bin_source).unwrap().permissions();
+    let mode_before = (
+        fs::metadata(&bin_source).unwrap().permissions(),
+        fs::metadata(&direct_source).unwrap().permissions(),
+    );
 
     let install = run(
         &dir,
@@ -2220,10 +2261,29 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
             fs::canonicalize(&shim).unwrap(),
             fs::canonicalize(&bin_source).unwrap()
         );
+        let direct_shim = dir
+            .join("node_modules")
+            .join(".bin")
+            .join("workspace-direct");
+        assert!(
+            fs::symlink_metadata(&direct_shim)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::canonicalize(&direct_shim).unwrap(),
+            fs::canonicalize(&direct_source).unwrap()
+        );
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             fs::metadata(&bin_source).unwrap().permissions().mode(),
-            mode_before.mode(),
+            mode_before.0.mode(),
+            "install must not change workspace source permissions"
+        );
+        assert_eq!(
+            fs::metadata(&direct_source).unwrap().permissions().mode(),
+            mode_before.1.mode(),
             "install must not change workspace source permissions"
         );
     }
@@ -2231,6 +2291,25 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
     {
         assert!(shim.with_extension("cmd").is_file());
         assert!(shim.with_extension("ps1").is_file());
+        let direct_shim = dir
+            .join("node_modules")
+            .join(".bin")
+            .join("workspace-direct");
+        assert!(direct_shim.with_extension("cmd").is_file());
+        assert!(direct_shim.with_extension("ps1").is_file());
+        use std::os::windows::process::CommandExt;
+        let command = direct_shim.with_extension("cmd");
+        let command = command.to_string_lossy();
+        let command = command.strip_prefix(r"\\?\").unwrap_or(&command);
+        let executed = Command::new(PathBuf::from(&system_root).join("System32").join("cmd.exe"))
+            .args(["/D", "/S", "/C"])
+            .raw_arg(format!("\"\"{command}\" /D /C exit 7\""))
+            .env_clear()
+            .env("SystemRoot", &system_root)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(executed.status.code(), Some(7), "{executed:?}");
     }
     cleanup(dir);
 }
@@ -4873,11 +4952,13 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
     )
     .unwrap();
     let policy = "[run.scripts.dev]\nenvironment = [\"SECRET_TOKEN\"]\n";
-    // Windows supports read-only profiles. Request a specifically unsupported
-    // write grant so this remains a pre-spawn containment rejection, not a
-    // failure caused by executing the stand-in Node binary.
+    // Existing-target writes are supported; network-enabled profiles still
+    // reject before spawn, independent of the stand-in Node binary.
     #[cfg(windows)]
-    let policy = format!("{policy}write = [\"SHOULD_NOT_EXIST\"]\n");
+    let policy = {
+        fs::create_dir(dir.join("writable")).unwrap();
+        format!("{policy}network = true\nwrite = [\"writable\"]\n")
+    };
     fs::write(dir.join("tapid.toml"), policy).unwrap();
     let secret = "tapid-super-secret-value";
     let runtime = dir.join(if cfg!(windows) { "node.exe" } else { "node" });
@@ -4907,16 +4988,112 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
     );
     #[cfg(windows)]
     assert!(
-        stderr.contains("project write policies remain unsupported until declared writes and ACL revocation are natively verified"),
+        stderr.contains("network-enabled profiles are unsupported until AppContainer network capabilities are implemented"),
         "{stderr}"
     );
-    assert!(stderr.contains("no process was started"));
     assert!(stderr.contains("no enforcement receipt was issued"));
     assert!(!stderr.contains(secret));
     assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
     assert!(output.stdout.is_empty());
     assert!(!dir.join("SHOULD_NOT_EXIST").exists());
     cleanup(dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn run_windows_existing_target_writes_preserve_binding_and_assurance_receipts() {
+    let node = PathBuf::from(
+        std::env::var_os("TAPID_TEST_NODE")
+            .expect("native Windows CLI acceptance requires CI-provisioned TAPID_TEST_NODE"),
+    );
+    assert!(node.is_absolute() && node.is_file());
+    for (assurance, target, kind) in [
+        ("restricted", "writable", "DirectorySubtree"),
+        ("managed-tree", "writable", "DirectorySubtree"),
+        ("restricted", "exact.txt", "ExactFile"),
+    ] {
+        let owner = tapid_test_support::TempProject::new("cli-windows-write").unwrap();
+        let root = fs::canonicalize(owner.path()).unwrap();
+        fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+        let existing = if kind == "ExactFile" {
+            root.join(target)
+        } else {
+            fs::create_dir(root.join(target)).unwrap();
+            root.join(target).join("existing.txt")
+        };
+        fs::write(&existing, b"old").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"demo","version":"1.0.0","scripts":{"probe":"node probe.js"}}"#,
+        )
+        .unwrap();
+        let relative = if kind == "ExactFile" {
+            "exact.txt"
+        } else {
+            "writable/existing.txt"
+        };
+        fs::write(root.join("probe.js"), format!(
+            "const fs=require('node:fs'),a=require('node:assert/strict');fs.writeFileSync('{relative}','overwrite');fs.appendFileSync('{relative}','append');fs.truncateSync('{relative}',3);a.throws(()=>fs.writeFileSync('outside.txt','escape'),e=>['EPERM','EACCES'].includes(e.code));console.log('CLI_WRITE_OK');"
+        )).unwrap();
+        let limits = if assurance == "managed-tree" {
+            "timeout_seconds = 10\nmax_output_bytes = 65536\nmax_processes = 8\nmax_memory_bytes = 536870912\n"
+        } else {
+            ""
+        };
+        fs::write(root.join("tapid.toml"), format!(
+            "[run.scripts.probe]\nassurance = \"{assurance}\"\nread = [\".\"]\nwrite = [\"{target}\"]\nnetwork = false\n{limits}"
+        )).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .args(["run", "probe", "--receipt-json", "--node-runtime"])
+            .arg(&node)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(output.stdout, b"CLI_WRITE_OK\n");
+        assert_eq!(fs::read(&existing).unwrap(), b"ove");
+        assert!(!root.join("outside.txt").exists());
+        let receipt: serde_json::Value =
+            serde_json::from_str(stderr.lines().find(|line| line.starts_with('{')).unwrap())
+                .unwrap();
+        let managed = assurance == "managed-tree";
+        assert_eq!(
+            receipt["backend"]["name"],
+            "tapid-runner/windows-appcontainer-job"
+        );
+        assert_eq!(
+            receipt["assurance"],
+            if managed { "ManagedTree" } else { "Restricted" }
+        );
+        assert_eq!(receipt["enforced"]["process_tree_membership"], managed);
+        assert_eq!(
+            receipt["completion"]["confirmed"]["complete_cleanup"],
+            managed
+        );
+        assert_eq!(
+            receipt["completion"]["cleanup_confidence"],
+            if managed {
+                "KernelOwnedComplete"
+            } else {
+                "BestEffortObserved"
+            }
+        );
+        let writes: Vec<_> = receipt["effective_filesystem"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|grant| grant["access"] == "Write")
+            .collect();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(
+            writes[0]["path"],
+            root.join(target).to_string_lossy().as_ref()
+        );
+        assert_eq!(writes[0]["kind"], kind);
+        assert_eq!(writes[0]["source"], "ProjectPolicy");
+        assert_eq!(writes[0]["binding"], "CanonicalPath");
+    }
 }
 
 #[test]
@@ -6495,6 +6672,27 @@ fn copied_file_tarballs_keep_source_identity_and_reject_changed_bytes_on_replay(
     let lock = Lockfile::from_json(std::str::from_utf8(&locked).unwrap()).unwrap();
     assert_eq!(lock.packages().len(), 2);
     assert!(lock.root_bindings()["copied"].starts_with("file:vendor/pkg.tgz#sha256-"));
+    let why = run(dir, &["--json", "why", "h3"]);
+    assert!(
+        why.status.success(),
+        "{}",
+        String::from_utf8_lossy(&why.stderr)
+    );
+    let explanation: serde_json::Value = serde_json::from_slice(&why.stdout).unwrap();
+    let copied = explanation["data"]["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|path| path["steps"][0]["key"] == lock.root_bindings()["copied"])
+        .expect("why must retain the copied source path alongside the registry path");
+    assert_eq!(copied["steps"][0]["sourceKind"], "copied");
+    let why = run(dir, &["why", "h3"]);
+    assert!(
+        why.status.success(),
+        "{}",
+        String::from_utf8_lossy(&why.stderr)
+    );
+    assert!(String::from_utf8_lossy(&why.stdout).contains("file:vendor/pkg.tgz#sha256-"));
     for flags in [
         vec!["install", "--offline", "--frozen"],
         vec!["ci", "--offline"],
@@ -7109,4 +7307,375 @@ fn dist_tag_workspace_peers_validate_exact_targets_during_resolution_and_replay(
     );
     assert!(!refresh.status.success());
     assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), locked);
+}
+
+#[test]
+fn why_traverses_a_persisted_peer_edge_without_treating_manifest_peer_as_a_root() {
+    use tapid_core::PeerContext;
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-persisted-peer-edge").unwrap();
+    let manifest = br#"{"name":"demo","version":"1.0.0","dependencies":{"plugin":"1.0.0"},"peerDependencies":{"peer":"1.0.0"}}"#;
+    project.write("package.json", manifest).unwrap();
+    let mut lock = lock_for_manifest(std::str::from_utf8(manifest).unwrap());
+    let peer_context =
+        PeerContext::default().with("peer".parse().unwrap(), "1.0.0".parse().unwrap());
+    let plugin = LockedPackage::new_with_context_and_provenance(
+        "https://registry.npmjs.org",
+        "plugin",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        (
+            &peer_context,
+            &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+        ),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let peer = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "peer",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "d".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let plugin_key = plugin.key();
+    lock.insert_packages([plugin, peer]).unwrap();
+    lock.set_roots([plugin_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "plugin".to_owned(),
+        plugin_key,
+    )]))
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+
+    let text = run(project.path(), &["why", "peer"]);
+    assert!(text.status.success());
+    assert!(String::from_utf8_lossy(&text.stdout).contains("peer (peer)"));
+
+    let json = run(project.path(), &["why", "peer", "--json"]);
+    assert!(json.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(result["data"]["paths"][0]["steps"][1]["edgeKind"], "peer");
+    assert_eq!(result["data"]["paths"][0]["steps"][1]["via"], "peer");
+    assert_eq!(result["data"]["graph_warnings"], serde_json::json!([]));
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+}
+
+#[test]
+fn why_warns_when_generic_transitive_edge_kinds_are_unavailable() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-generic-transitive-warning").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut app = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "app",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let nested = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "nested",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "b".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    app.add_dependency("nested", &nested.key()).unwrap();
+    let app_key = app.key();
+    lock.insert_packages([app, nested]).unwrap();
+    lock.set_roots([app_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "app".to_owned(),
+        app_key,
+    )]))
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+
+    let output = run(project.path(), &["why", "nested", "--json"]);
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["data"]["graph_warnings"],
+        serde_json::json!([
+            "transitive dependency edge kinds are not recorded in the lockfile; those edges are labeled dependency"
+        ])
+    );
+}
+
+#[test]
+fn why_rejects_a_legacy_root_outside_the_manifest_version_range() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-stale-legacy-root").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"^2.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut app = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "app",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let target = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "target",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "b".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    app.add_dependency("target", &target.key()).unwrap();
+    let app_key = app.key();
+    lock.insert_packages([app, target]).unwrap();
+    lock.set_roots([app_key]).unwrap();
+    let lock_bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+
+    let output = run(project.path(), &["why", "target", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["outcome"], "failure");
+    assert_eq!(result["errors"][0]["code"], "LOCKFILE_INVALID");
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest.as_bytes()
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_bytes.as_bytes()
+    );
+}
+
+#[test]
+fn why_rejects_a_stale_recorded_root_binding() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-stale-root-binding").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"^2.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let app = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "app",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let app_key = app.key();
+    lock.insert_packages([app]).unwrap();
+    lock.set_roots([app_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "app".to_owned(),
+        app_key,
+    )]))
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+
+    let output = run(project.path(), &["why", "app", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["outcome"], "failure");
+    assert_eq!(result["errors"][0]["code"], "LOCKFILE_INVALID");
+}
+
+#[test]
+fn why_reports_an_incomplete_empty_search_as_success() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-truncated-empty").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"package-0":"1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut packages = (0..=129)
+        .map(|index| {
+            LockedPackage::new_with_provenance(
+                "https://registry.npmjs.org",
+                &format!("package-{index}"),
+                "1.0.0",
+                &format!("sha512-{}==", "A".repeat(86)),
+                &format!("sha256-{:064x}", index),
+                RegistryIntegrityProvenance::RegistryDeclared,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let keys = packages.iter().map(LockedPackage::key).collect::<Vec<_>>();
+    for index in 0..129 {
+        packages[index]
+            .add_dependency(&format!("package-{}", index + 1), &keys[index + 1])
+            .unwrap();
+    }
+    let root_key = packages[0].key();
+    lock.insert_packages(packages).unwrap();
+    lock.set_roots([root_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "package-0".to_owned(),
+        root_key,
+    )]))
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+
+    let output = run(project.path(), &["why", "missing"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No complete path to 'missing' was found before the search safety bound"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("result is incomplete"), "{stdout}");
+}
+
+#[test]
+fn why_confirmed_absent_package_still_exits_one() {
+    let project = tapid_test_support::TempProject::new("why-confirmed-absent").unwrap();
+    let manifest = br#"{"name":"demo","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    project
+        .write(
+            "tapid.lock",
+            lock_for_manifest(std::str::from_utf8(manifest).unwrap())
+                .to_json()
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+
+    let output = run(project.path(), &["why", "missing"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("No path to 'missing' was found in the resolved dependency graph.")
+    );
+}
+
+#[test]
+fn why_reports_a_deterministic_path_from_a_direct_root_without_mutation() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-transitive").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let mut app = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "app",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let target = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "target",
+        "2.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "b".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    app.add_dependency("target", &target.key()).unwrap();
+    let app_key = app.key();
+    lock.insert_packages([app, target]).unwrap();
+    lock.set_roots([app_key.clone()]).unwrap();
+    lock.set_root_bindings(std::collections::BTreeMap::from([(
+        "app".to_owned(),
+        app_key,
+    )]))
+    .unwrap();
+    let lock_bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+    let before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let text = run(project.path(), &["why", "target"]);
+    assert!(text.status.success());
+    assert!(String::from_utf8_lossy(&text.stdout).contains("dependencies (app)"));
+    assert!(String::from_utf8_lossy(&text.stdout).contains("dependency (target)"));
+    let json = run(project.path(), &["why", "target", "--json"]);
+    assert!(json.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        result["data"]["paths"][0]["steps"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+}
+
+#[test]
+fn why_reconstructs_only_manifest_matching_roots_and_reports_nested_instances() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+
+    let project = tapid_test_support::TempProject::new("why-legacy-roots").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"foo":"^1.0.0"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    let foo_one = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "foo",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "1".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let foo_two = LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "foo",
+        "2.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "2".repeat(64)),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let root_key = foo_one.key();
+    lock.insert_packages([foo_one, foo_two]).unwrap();
+    lock.set_roots([root_key]).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("rootBindings");
+    project
+        .write("tapid.lock", serde_json::to_vec(&value).unwrap().as_slice())
+        .unwrap();
+    let output = run(project.path(), &["--json", "why", "foo"]);
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let paths = result["data"]["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 1);
+    assert!(
+        paths[0]["steps"][0]["key"]
+            .as_str()
+            .unwrap()
+            .contains("|foo@1.0.0|")
+    );
 }

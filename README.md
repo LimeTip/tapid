@@ -133,7 +133,7 @@ The package-management toolchain also includes:
 
 - `init`, `install`/`i`, `add`, `remove`, and `update` for project manifests and dependencies.
 - `ci` to install the exact graph in `tapid.lock`, downloading missing verified packages without resolving versions again.
-- `outdated` to compare locked versions with registry metadata, and `prune` to remove unreachable managed packages.
+- `outdated` to compare locked versions with registry metadata, `prune` to remove unreachable managed packages, and `why <PACKAGE>` to trace why a locked package is reachable (including `--json` output).
 - A content-addressed local store and lockfile replay for offline installs, with transactional activation of managed `node_modules`.
 - Safe archive extraction and integrity checks, plus generated package `bin` shims. Dependency lifecycle scripts are denied by default; [exact checked-in approvals](docs/dependency-lifecycle.md) can produce verified derived trees through Linux ManagedTree.
 
@@ -217,6 +217,12 @@ tapid install --frozen --project-dir ./example
 ```
 
 Ordinary install reuses a matching lock. Changed manifests preserve compatible locked selections; `tapid update` requests a fresh graph. Frozen installation with a native lock keeps the exact graph and lock bytes, and can download missing pinned archives without resolving metadata. Imported npm locks preserve selections but may record verified tree receipts. Offline installation forbids downloads, including with `--frozen`. Native lock hydration requires a pinned HTTPS URL and registry-declared SHA-512 provenance, then verifies the archive and locked tree digest. Replay validates manifest digests, registry routes, platform contexts, tree markers, and managed output before atomic activation. `--store-dir PATH` selects another verified store root. See [locked installation decisions](docs/adr/0008-locked-install-selection-and-hydration.md).
+
+## Inspect and clear the package cache
+
+Use `tapid cache info` to see published package counts and logical byte sizes. `tapid clean` or `tapid cache clean` previews removal; add `--yes` to clear the recognized published cache without prompting. These commands work offline, support `--store-dir <PATH>` and global `--json`, and leave project files, staging, lifecycle keys, recovery state, and unrecognized entries intact.
+
+Cleaning refuses competing replay or publication operations. Installed projects keep their files, but future offline or frozen replay may need the cache repopulated. See the [cache command contract](crates/tapid-cli/README.md#inspect-and-clear-the-package-cache) for scope, safety checks, and failure behavior.
 
 ## Supported subset and limitations
 

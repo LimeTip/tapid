@@ -203,7 +203,7 @@ where
     Ok(root.join("tapid/store"))
 }
 
-fn default_store_root() -> Result<PathBuf, String> {
+pub(crate) fn default_store_root() -> Result<PathBuf, String> {
     default_store_root_for(std::env::consts::OS, |name| std::env::var_os(name))
 }
 
