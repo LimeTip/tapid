@@ -8,7 +8,8 @@ import { prepare, verify } from './ci_binary.ts';
 const sha = 'a'.repeat(40);
 const env = { GITHUB_REPOSITORY: 'owner/repo', GITHUB_SHA: sha, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2', GITHUB_JOB: 'platform-consumer-validation', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64', ImageOS: 'win25', ImageVersion: '20261001.1', RUSTFLAGS: '-Dwarnings' };
 const receipts: Record<string, string> = { git: sha, cargo: 'cargo 1.90.0 (840b83a10 2025-07-30)', rustc: 'rustc 1.90.0 (1159e78c4 2025-09-14)\nbinary: rustc\ncommit-hash: 1159e78c4747b02ef996e55082b704c09b970588\ncommit-date: 2025-09-14\nhost: x86_64-pc-windows-msvc\nrelease: 1.90.0\nLLVM version: 20.1.8', rustup: 'stable-x86_64-pc-windows-msvc (default)' };
-const consumerContext = { env, readCommand: async (command: string) => receipts[command] };
+const consumerEnv = { ...env, TAPID_CI_PRODUCER_IMAGE_VERSION: env.ImageVersion };
+const consumerContext = { env: consumerEnv, readCommand: async (command: string) => receipts[command] };
 const context = { ...consumerContext, env: { ...env, CARGO_INCREMENTAL: '0' } };
 async function fixture(run: (root: string) => Promise<void>) {
   // Resolve platform temp aliases before the verifier's strict ancestor checks.
@@ -28,7 +29,7 @@ test('pinned Rust action incremental setting is recorded and toolchain-free cons
   const provenance = JSON.parse(await readFile(join(directory, 'provenance.json'), 'utf8'));
   assert.equal(provenance.settings.CARGO_INCREMENTAL, '0', 'retain actual producer receipt');
   const readCommand = async (command: string) => { assert.equal(command, 'git', 'consumer must not discover Rust'); return sha; };
-  assert.equal(await verify(directory, join(root, 'target/debug/tapid.exe'), { ...context, root, env: { ...env, CARGO_INCREMENTAL: undefined }, readCommand }), '1.2.3');
+  assert.equal(await verify(directory, join(root, 'target/debug/tapid.exe'), { ...context, root, env: { ...consumerEnv, CARGO_INCREMENTAL: undefined }, readCommand }), '1.2.3');
 }));
 
 test('Windows handoff prepares two files and verifies exact identity before materializing', async () => fixture(async root => {
@@ -39,13 +40,25 @@ test('Windows handoff prepares two files and verifies exact identity before mate
   assert.equal(await verify(directory, destination, { ...consumerContext, root }), '1.2.3');
   assert.deepEqual(await readFile(destination), await readFile(join(root, 'source.exe')));
 }));
-for (const [name, badEnv] of Object.entries({ 'incremental zero': { CARGO_INCREMENTAL: '0' }, 'incremental enabled': { CARGO_INCREMENTAL: '1' }, 'encoded flags': { CARGO_ENCODED_RUSTFLAGS: '' }, 'target directory': { CARGO_TARGET_DIR: 'other' }, 'target override': { CARGO_BUILD_TARGET: 'x86_64-pc-windows-msvc' }, 'wrong flags': { RUSTFLAGS: '' } })) test(`consumer rejects ${name} before destination effects`, async () => fixture(async root => {
+test('Windows handoff verifies the producer image receipt across hosted image rollouts', async () => fixture(async root => {
+  const directory = join(root, 'handoff');
+  await prepare(directory, join(root, 'source.exe'), { ...context, root });
+  const before = await readFile(join(directory, 'provenance.json'));
+  const destination = join(root, 'target/debug/tapid.exe');
+  assert.equal(await verify(directory, destination, {
+    ...consumerContext, root,
+    env: { ...env, ImageVersion: '20260925.250.1', TAPID_CI_PRODUCER_IMAGE_VERSION: env.ImageVersion },
+  }), '1.2.3');
+  assert.deepEqual(await readFile(destination), await readFile(join(root, 'source.exe')));
+  assert.deepEqual(await readFile(join(directory, 'provenance.json')), before);
+}));
+for (const [name, badEnv] of Object.entries({ 'missing producer image': { TAPID_CI_PRODUCER_IMAGE_VERSION: undefined }, 'malformed producer image': { TAPID_CI_PRODUCER_IMAGE_VERSION: 'bad image' }, 'wrong producer image': { TAPID_CI_PRODUCER_IMAGE_VERSION: '20261002.2' }, 'incremental zero': { CARGO_INCREMENTAL: '0' }, 'incremental enabled': { CARGO_INCREMENTAL: '1' }, 'encoded flags': { CARGO_ENCODED_RUSTFLAGS: '' }, 'target directory': { CARGO_TARGET_DIR: 'other' }, 'target override': { CARGO_BUILD_TARGET: 'x86_64-pc-windows-msvc' }, 'wrong flags': { RUSTFLAGS: '' } })) test(`consumer rejects ${name} before destination effects`, async () => fixture(async root => {
   const directory = join(root, 'handoff');
   await prepare(directory, join(root, 'source.exe'), { ...context, root });
   for (const existing of [false, true]) {
     const destination = join(root, existing ? 'existing.exe' : 'absent/target.exe');
     if (existing) await writeFile(destination, 'unchanged');
-    await assert.rejects(() => verify(directory, destination, { ...consumerContext, root, env: { ...env, ...badEnv } }), /unexpected build flags\/target settings/);
+    await assert.rejects(() => verify(directory, destination, { ...consumerContext, root, env: { ...consumerEnv, ...badEnv } }), /unexpected build flags\/target settings|invalid image identity|provenance mismatch: imageVersion/);
     if (existing) assert.equal(await readFile(destination, 'utf8'), 'unchanged');
     else await assert.rejects(() => readdir(join(root, 'absent')), { code: 'ENOENT' });
   }
