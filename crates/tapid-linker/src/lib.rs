@@ -21,8 +21,8 @@ pub use layout::{
 };
 pub use platform::{Capability, Platform, PlatformCapabilities};
 pub use shims::{
-    ShimEntry, ShimPackage, ShimPlan, ShimStrategy, WorkspaceShimPackage, plan_shims,
-    plan_shims_with_workspace_packages,
+    ShimEntry, ShimInterpreter, ShimPackage, ShimPlan, ShimStrategy, WorkspaceShimPackage,
+    plan_shims, plan_shims_with_workspace_packages,
 };
 pub use workspace::{WorkspaceLink, WorkspaceLinkPlan, WorkspacePackage, plan_workspace_links};
 

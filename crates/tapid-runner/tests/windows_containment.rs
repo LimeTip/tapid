@@ -771,6 +771,202 @@ fn windows_node_runtime_can_resolve_a_script_file_inside_the_project_grant() {
 }
 
 #[test]
+fn windows_native_addon_launch_preserves_stock_node_metadata() {
+    let project = tapid_test_support::TempProject::new("native-addon-launch").unwrap();
+    let runtime = tapid_test_support::TempProject::new("native-addon-runtime").unwrap();
+    let ancestor = fs::canonicalize(project.path()).unwrap();
+    let root = ancestor.join("project");
+    fs::create_dir(&root).unwrap();
+    windows_acl::initialize_inheritance(&ancestor);
+    let acl = Command::new(
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("icacls.exe"),
+    )
+    .arg(&ancestor)
+    .args(["/grant", "*S-1-15-2-1:(RX)"])
+    .output()
+    .unwrap();
+    assert!(acl.status.success(), "{acl:?}");
+    let node = runtime.path().join("node.exe");
+    fs::copy(std::env::var_os("TAPID_TEST_NODE").unwrap(), &node).unwrap();
+    let node = fs::canonicalize(node).unwrap();
+    windows_acl::initialize_inheritance(&root);
+    windows_acl::initialize_inheritance(node.parent().unwrap());
+    let source =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/windows_node_launcher.rs");
+    let mut compiler = Command::new("rustc");
+    compiler
+        .args([
+            "--crate-type",
+            "cdylib",
+            "--edition",
+            "2024",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "panic=abort",
+        ])
+        .arg(source)
+        .arg("-o")
+        .arg(root.join("launcher.node"));
+    if let Ok(flags) = std::env::var("RUSTFLAGS") {
+        compiler.args(flags.split_whitespace());
+    }
+    let compiled = compiler.output().unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let script = format!(
+        r#"
+const assert = require('node:assert/strict');
+const addon = require('./launcher.node');
+assert.equal(addon.reopen({:?}, ""), 0, "metadata handle must not reopen with listing rights");
+const code = "require('node:fs').lstatSync(require('node:path').parse(process.cwd()).root);const child=require('node:child_process').fork('unused', {{execArgv:['-e', 'process.send(7)'],stdio:['ignore','inherit','inherit','ipc']}});child.on('message', value=>{{require('node:assert/strict').equal(value,7);console.log('ADDON_CHILD_METADATA_OK')}});";
+assert.equal(addon.launch(process.execPath, code), 0);
+"#,
+        ancestor.file_name().unwrap().to_str().unwrap()
+    );
+    let request = ExecutionRequest::builder(node.as_os_str())
+        .args(["-e", &script])
+        .executable_search_path(node.parent().unwrap())
+        .trusted_node_runtime(&node)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(10), Some(4096), Some(4), None).unwrap(),
+            true,
+            false,
+        ))
+        .build()
+        .unwrap();
+    let outcome = execute(&request).unwrap();
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "{}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert_eq!(outcome.stdout(), b"ADDON_CHILD_METADATA_OK\n");
+}
+
+#[test]
+fn windows_standard_node_ipc_and_ancestor_metadata_preserve_denied_authority() {
+    use tapid_runner::{FilesystemAccess, FilesystemGrantKind, FilesystemGrantSource};
+    let project = tapid_test_support::TempProject::new("stock-node-compatibility").unwrap();
+    let runtime = tapid_test_support::TempProject::new("stock-node-runtime").unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
+    let node = runtime.path().join("node.exe");
+    fs::copy(
+        std::env::var_os("TAPID_TEST_NODE").expect("standard Node is required"),
+        &node,
+    )
+    .unwrap();
+    let node = fs::canonicalize(node).unwrap();
+    windows_acl::initialize_inheritance(&root);
+    windows_acl::initialize_inheritance(node.parent().unwrap());
+    fs::write(root.join("readable.txt"), b"read control").unwrap();
+    let before = windows_acl::read_acl(&root);
+    let script = r#"
+const fs=require('node:fs'),p=require('node:path'),a=require('node:assert/strict'),{spawn}=require('node:child_process');
+const root=p.parse(process.cwd()).root;
+a.equal(fs.lstatSync(root).isDirectory(),true);
+a.throws(()=>fs.readdirSync(root),e=>['EPERM','EACCES'].includes(e.code));
+a.equal(fs.realpathSync.native('readable.txt'),p.join(process.cwd(),'readable.txt'));
+a.throws(()=>fs.writeFileSync('readable.txt','overwrite'),e=>['EPERM','EACCES'].includes(e.code));
+const leaf="const fs=require('node:fs'),p=require('node:path'),a=require('node:assert/strict');a.equal(fs.lstatSync(p.parse(process.cwd()).root).isDirectory(),true);a.equal(fs.realpathSync.native('readable.txt'),p.join(process.cwd(),'readable.txt'));process.on('message',m=>process.send(m,()=>process.disconnect()));";
+let finished=0;
+for(let i=0;i<2;i++) {
+ const c=spawn(process.execPath,['-e',leaf],{stdio:['ignore','inherit','inherit','ipc']});let replied=false;
+ c.on('error',e=>{console.error(e);process.exit(2);});
+ c.on('message',m=>{a.equal(m,'roundtrip');replied=true;});
+ c.on('exit',n=>{a.equal(n,0);a.equal(replied,true);if(++finished===2)console.log('STOCK_NODE_COMPAT_OK');});
+ c.send('roundtrip');
+}
+"#;
+    let request = ExecutionRequest::builder(node.as_os_str())
+        .args([OsString::from("-e"), OsString::from(script)])
+        .executable_search_path(node.parent().unwrap())
+        .trusted_node_runtime(&node)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(5), Some(4096), Some(4), None).unwrap(),
+            true,
+            false,
+        ))
+        .build()
+        .unwrap();
+    let outcome = execute(&request).expect("standard Node must execute with containment");
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "{}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert_eq!(outcome.stdout(), b"STOCK_NODE_COMPAT_OK\n");
+    assert!(
+        outcome
+            .enforcement()
+            .resolved_filesystem()
+            .grants()
+            .iter()
+            .any(|grant| grant.access() == FilesystemAccess::ReadMetadata
+                && grant.kind() == FilesystemGrantKind::ExactDirectory
+                && grant.source() == FilesystemGrantSource::BackendRuntime
+                && grant.path().parent().is_none())
+    );
+    assert_eq!(
+        fs::read(root.join("readable.txt")).unwrap(),
+        b"read control"
+    );
+    assert_eq!(windows_acl::read_acl(&root), before);
+    let outside = tapid_test_support::TempProject::new("stock-node-outside").unwrap();
+    let sentinel = outside.path().join("private.txt");
+    fs::write(&sentinel, b"outside control").unwrap();
+    let sentinel_js = sentinel
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
+    fs::write(root.join("stock.test.mjs"),format!(r#"
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';import {{spawn}} from 'node:child_process';
+test('default test isolation retains ancestor capabilities and denied access',async()=>{{
+ assert.equal(fs.lstatSync(path.parse(process.cwd()).root).isDirectory(),true);
+ assert.throws(()=>fs.readFileSync('{sentinel_js}'),e=>['EPERM','EACCES'].includes(e.code));
+ const leaf="const fs=require('node:fs'),p=require('node:path'),a=require('node:assert/strict');a.equal(fs.lstatSync(p.parse(process.cwd()).root).isDirectory(),true);a.equal(fs.realpathSync.native('readable.txt'),p.join(process.cwd(),'readable.txt'));process.on('message',m=>process.send(m,()=>process.disconnect()));";
+ const middle="const {{spawn}}=require('node:child_process');const c=spawn(process.execPath,['-e',"+JSON.stringify(leaf)+"],{{stdio:['ignore','inherit','inherit','ipc']}});let replied=false;c.on('message',m=>{{if(m!=='grandchild')process.exit(7);replied=true;}});c.on('error',()=>process.exit(8));c.on('exit',n=>process.exit(n||(!replied?9:0)));c.send('grandchild');";
+ await new Promise((resolve,reject)=>{{const c=spawn(process.execPath,['-e',middle],{{stdio:'inherit'}});c.on('error',reject);c.on('exit',n=>n?reject(new Error('grandchild exit '+n)):resolve());}});
+}});
+"#)).unwrap();
+    let request = ExecutionRequest::builder(node.as_os_str())
+        .args(["--test", "stock.test.mjs"])
+        .executable_search_path(node.parent().unwrap())
+        .trusted_node_runtime(&node)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(5), Some(4096), Some(4), None).unwrap(),
+            true,
+            false,
+        ))
+        .build()
+        .unwrap();
+    let outcome = execute(&request).unwrap();
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "{}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert!(
+        String::from_utf8_lossy(outcome.stdout())
+            .lines()
+            .any(|line| line.ends_with(" pass 1"))
+    );
+    assert_eq!(fs::read(sentinel).unwrap(), b"outside control");
+    assert_eq!(windows_acl::read_acl(&root), before);
+}
+
+#[test]
 fn windows_node_runtime_can_be_launched_directly_when_test_runtime_is_configured() {
     let Some(local_app_data) = std::env::var_os("TAPID_TEST_LOCALAPPDATA").map(PathBuf::from)
     else {
@@ -992,11 +1188,14 @@ fn windows_runtime_directory_ace_allows_launching_read_execute_binaries() {
 }
 
 #[test]
-fn windows_write_policy_fails_closed_before_spawn_until_native_acceptance() {
-    let root = temporary_project("write-policy-pending");
+fn windows_missing_write_target_fails_closed_without_materialization() {
+    let root = temporary_project("write-target-missing");
     let writable = root.join("writable");
-    fs::create_dir(&writable).unwrap();
     let marker = writable.join("must-not-spawn.txt");
+    let outside = root.join("outside sentinel.txt");
+    fs::write(&outside, b"host-positive-control").unwrap();
+    let paths = [&root, &outside];
+    let baselines: Vec<_> = paths.iter().map(|path| project_dacl(path)).collect();
     let command = format!("echo should-not-run>\"{}\"", marker.display());
     let policy = SandboxPolicy::new_with_assurance(
         SandboxMode::Required,
@@ -1010,36 +1209,31 @@ fn windows_write_policy_fails_closed_before_spawn_until_native_acceptance() {
     .unwrap();
     let request = command_request_with_policy(&root, &command, policy);
 
-    let error = execute(&request).expect_err("unverified Windows writes must fail closed");
+    let error = execute(&request).expect_err("missing Windows write target must fail closed");
+    assert!(!writable.exists(), "missing target was materialized");
     assert_eq!(
         error.category(),
         ExecutionErrorCategory::UnsupportedContainment
     );
     assert!(!marker.exists(), "unsupported write policy started a child");
+    assert_eq!(fs::read(&outside).unwrap(), b"host-positive-control");
+    for (path, before) in paths.iter().zip(baselines) {
+        assert_eq!(
+            project_dacl(path),
+            before,
+            "prelaunch rejection changed ACLs"
+        );
+    }
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-#[ignore = "re-enable after AppContainer existing-file writes pass on Windows 11"]
 fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
     let root = temporary_project("write-existing-file");
     let writable = root.join("writable");
     fs::create_dir(&writable).unwrap();
     let authorized = writable.join("authorized.txt");
     fs::write(&authorized, "preexisting content").unwrap();
-    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
-    let icacls = fs::canonicalize(PathBuf::from(system_root).join("System32/icacls.exe")).unwrap();
-    let label = Command::new(&icacls)
-        .arg(&writable)
-        .args(["/setintegritylevel", "(OI)(CI)L", "/c"])
-        .output()
-        .unwrap();
-    assert!(
-        label.status.success(),
-        "icacls failed to set the test low-integrity label: {}{}",
-        String::from_utf8_lossy(&label.stdout),
-        String::from_utf8_lossy(&label.stderr)
-    );
     let command = format!("echo TAPID_WRITE_GRANTED>\"{}\"", authorized.display());
     let policy = SandboxPolicy::new_with_assurance(
         SandboxMode::Required,
