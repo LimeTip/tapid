@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+mod cache;
 mod ci;
+mod explain;
 pub(crate) mod init;
 pub(crate) mod install;
 mod license;
@@ -12,6 +14,7 @@ mod npm_import;
 mod release_verification;
 pub(crate) mod run;
 pub(crate) mod upgrade;
+pub(crate) mod why;
 
 #[cfg(test)]
 mod documentation;
@@ -48,6 +51,16 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Summarize integrity, provenance, and missing security checks for an exact npm version.
+    #[command(
+        long_about = "Inspect full npm registry metadata for <package>@<exact-version>. Distinguishes registry claims, byte verification, and missing checks. Reads tapid.toml routing without requiring package.json. Does not install, recover transactions, or write project/store files. Signatures and provenance references are unverified. Vulnerability feeds, malware analysis, and publisher identity verification are unsupported. Use --artifact-file to verify local bytes against the reported SHA-512 digest; a mismatch exits 1.",
+        after_help = "Examples:\n  tapid explain react@19.0.0\n  tapid explain @example/pkg@1.2.3 --artifact-file package.tgz\n  tapid --json explain react@19.0.0"
+    )]
+    Explain(explain::Args),
+    /// Inspect or safely clear the published package cache.
+    Cache(cache::Args),
+    /// Preview package-cache removal. Pass --yes to delete published cache entries.
+    Clean(cache::CleanArgs),
     /// Print the Apache-2.0 license and copyright attribution.
     License,
     #[command(name = "__verify-release-record", hide = true)]
@@ -139,6 +152,12 @@ pub(crate) enum Command {
   tapid prune --store-dir ./verified-store"
     )]
     Prune(lifecycle::ReadOnlyArgs),
+    /// Explain which dependency paths bring a package into the project.
+    #[command(
+        long_about = "Trace a package through the resolved graph in package.json and tapid.lock. Reads local project files only and does not contact registries or change the manifest, lockfile, store, or node_modules. Direct dependency kinds are read from the selected manifest; the lockfile currently does not preserve kinds for transitive edges.",
+        after_help = "Examples:\n  tapid why react\n  tapid why @scope/package --project-dir ./app\n  tapid --json why lodash --workspace web"
+    )]
+    Why(why::Args),
     /// Download, verify, and install the latest stable Tapid release.
     #[command(
         long_about = "Download and verify the latest stable Tapid release for this platform, then replace the current executable or --destination.\n\nUses the signed release record from tapid.dev by default. If release discovery is unavailable, a cached release may be used for recovery; the command reports when it cannot check the latest version.",
@@ -152,6 +171,9 @@ pub(crate) enum Command {
 impl Command {
     fn operation(&self) -> &'static str {
         match self {
+            Self::Explain(_) => "explain",
+            Self::Cache(_) => "cache",
+            Self::Clean(_) => "clean",
             Self::License => "license",
             Self::VerifyReleaseRecord(_) => "__verify-release-record",
             Self::PrepareReleaseInstall(_) => "__prepare-release-install",
@@ -167,6 +189,7 @@ impl Command {
             Self::Update(_) => "update",
             Self::Outdated(_) => "outdated",
             Self::Prune(_) => "prune",
+            Self::Why(_) => "why",
             Self::Upgrade(_) => "upgrade",
         }
     }
@@ -178,12 +201,16 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         && !matches!(
             command,
             Some(
-                Command::Install(_)
+                Command::Cache(_)
+                    | Command::Clean(_)
+                    | Command::Install(_)
+                    | Command::Explain(_)
                     | Command::Add(_)
                     | Command::Remove(_)
                     | Command::Update(_)
                     | Command::Outdated(_)
                     | Command::Prune(_)
+                    | Command::Why(_)
             )
         )
     {
@@ -194,6 +221,9 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         );
     }
     match command {
+        Some(Command::Explain(args)) => explain::run(args, json),
+        Some(Command::Cache(args)) => cache::run(args, json),
+        Some(Command::Clean(args)) => cache::clean(args, json),
         Some(Command::License) => license::run(),
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
         Some(Command::PrepareReleaseInstall(args)) => release_verification::prepare_install(args),
@@ -214,6 +244,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::Update(args)) => lifecycle::update(args, json),
         Some(Command::Outdated(args)) => lifecycle::outdated(args, json),
         Some(Command::Prune(args)) => lifecycle::prune(args, json),
+        Some(Command::Why(args)) => why::run(args, json),
         Some(Command::Upgrade(args)) => upgrade::run(args),
     }
 }

@@ -10,6 +10,9 @@ use url::Url;
 const NPM_INSTALL_V1_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 const NPM_FULL_METADATA_ACCEPT: &str = "application/json";
 
+mod inspection;
+pub use inspection::NpmPackageEvidence;
+
 /// Read-only npm metadata and artifact client over an injected transport.
 pub struct NpmRegistry<T> {
     transport: T,
@@ -509,13 +512,20 @@ mod tests {
     use super::*;
     use crate::TransportError;
 
-    struct Fake {
+    pub(super) struct Fake {
         body: Vec<u8>,
         url: String,
         status: u16,
         content_type: Option<String>,
+        pub(super) expected_accept: Option<&'static str>,
     }
     impl HttpTransport for Fake {
+        fn get_with_accept(&self, url: &str, accept: &str) -> Result<HttpResponse, TransportError> {
+            if let Some(expected) = self.expected_accept {
+                assert_eq!(accept, expected);
+            }
+            self.get(url)
+        }
         fn get(&self, url: &str) -> Result<HttpResponse, TransportError> {
             assert_eq!(url, self.url);
             Ok(HttpResponse {
@@ -525,12 +535,13 @@ mod tests {
             })
         }
     }
-    fn fake(body: &[u8], url: &str) -> Fake {
+    pub(super) fn fake(body: &[u8], url: &str) -> Fake {
         Fake {
             body: body.to_vec(),
             url: url.into(),
             status: 200,
             content_type: Some("application/json; charset=utf-8".into()),
+            expected_accept: None,
         }
     }
 

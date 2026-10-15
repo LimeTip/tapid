@@ -13,7 +13,7 @@ const MAX_TEXT_BYTES: usize = 4096;
 
 // Metadata is data, never a diagnostic or recovery instruction. Remove terminal
 // controls and redact credential-bearing URLs before bounding each scalar.
-fn text(value: impl std::fmt::Display) -> (String, bool) {
+pub(crate) fn text(value: impl std::fmt::Display) -> (String, bool) {
     let value = crate::application::outcome::sanitize(&value.to_string());
     let mut result = String::new();
     for character in value.chars().filter(|c| !c.is_control()) {
@@ -134,6 +134,83 @@ pub(crate) fn information(operation: &str, data: Value) -> ExitCode {
     emit(result, 0)
 }
 
+pub(crate) fn explain(
+    report: Result<
+        &crate::application::explain::ExplainReport,
+        &crate::application::outcome::OperationalError,
+    >,
+) -> ExitCode {
+    let report = match report {
+        Ok(report) => report,
+        Err(error) => {
+            let mut result = envelope("explain", "failure", None);
+            result["errors"] = json!([{"code": error.kind.code(), "phase": "operation"}]);
+            return emit(result, 1);
+        }
+    };
+    let mismatch = report.byte_integrity == crate::application::explain::ByteIntegrity::Mismatch;
+    let mut result = envelope(
+        "explain",
+        if mismatch { "failure" } else { "success" },
+        None,
+    );
+    let mut truncated = Vec::new();
+    let evidence = &report.evidence;
+    let source = recorded_text(&report.source, "/data/source", &mut truncated);
+    let artifact = evidence
+        .artifact_url
+        .as_ref()
+        .map(|url| recorded_text(url, "/data/artifact", &mut truncated));
+    let attestation = evidence
+        .attestation_url
+        .as_ref()
+        .map(|url| recorded_text(url, "/data/provenance/reference", &mut truncated));
+    let name = recorded_text(&evidence.identity.name, "/data/package", &mut truncated);
+    let version = recorded_text(&evidence.identity.version, "/data/version", &mut truncated);
+    let registry = recorded_text(
+        &evidence.identity.registry,
+        "/data/registry",
+        &mut truncated,
+    );
+    result["data"] = json!({
+        "package": name,
+        "version": version,
+        "registry": registry,
+        "source": source,
+        "metadata_fetched_at": report.metadata_fetched_at,
+        "metadata_read_at": report.metadata_read_at,
+        "source_timestamp": evidence.modified_at,
+        "source_timestamp_status": if evidence.modified_at.is_some() { "reported" } else { "missing" },
+        "published_at": evidence.published_at,
+        "freshness": "unknown",
+        "artifact": artifact,
+        "registry_integrity": {
+            "status": if evidence.integrity.is_some() { "reported" } else { "missing" },
+            "value": evidence.integrity.as_ref().map(ToString::to_string),
+        },
+        "byte_integrity": {"status": report.byte_integrity, "actual": report.actual_integrity, "scope": report.actual_integrity.as_ref().map(|_| "supplied_local_artifact"), "checked_at": report.bytes_checked_at},
+        "registry_signatures": {"status": if evidence.signature_count.is_some() { "unverified" } else { "missing" }, "count": evidence.signature_count},
+        "provenance": {"status": if evidence.attestation_url.is_some() { "unverified" } else { "missing" }, "reference": attestation, "fetched": false},
+        "publisher_identity": {"status": "not_verified"},
+        "vulnerabilities": {"status": "unavailable", "reason": "no_provider_queried"},
+        "malware_analysis": {"status": "not_performed"},
+        "human_review": {"status": "unavailable"},
+        "limitations": ["Digest matches do not establish package safety, publisher identity, or intended content.", "Registry signatures and attestation references are not verified.", "Observation times and registry-reported timestamps do not establish evidence freshness."]
+    });
+    truncated.sort();
+    result["truncated_fields"] = json!(truncated);
+    if mismatch {
+        result["errors"] = json!([{"code": "INTEGRITY_MISMATCH", "phase": "operation"}]);
+    }
+    emit(result, u8::from(mismatch))
+}
+
+pub(crate) fn operation_error(operation: &str, code: &str) -> ExitCode {
+    let mut result = envelope(operation, "failure", None);
+    result["errors"] = json!([{"code": code, "phase": "operation"}]);
+    emit(result, 1)
+}
+
 pub(crate) fn protocol_error(operation: &str, code: &str, status: u8) -> ExitCode {
     let mut result = envelope(operation, "failure", None);
     result["errors"] = json!([{"code": code}]);
@@ -166,6 +243,46 @@ fn failure_result(failure: &OperationFailure, operation: &str) -> Value {
         RetryAdvice::RecoverFirst => "recover_first",
     });
     result
+}
+
+pub(crate) fn why_success(
+    report: &crate::application::why::WhyReport,
+    project: &std::path::Path,
+) -> ExitCode {
+    let (result, status) = why_result(report, project);
+    emit(result, status)
+}
+
+fn why_result(
+    report: &crate::application::why::WhyReport,
+    project: &std::path::Path,
+) -> (Value, u8) {
+    let outcome = OperationOutcome::unchanged(project);
+    let not_found = report.paths.is_empty() && !report.truncated;
+    let mut result = envelope(
+        "why",
+        if report.truncated {
+            "partial"
+        } else {
+            "success"
+        },
+        Some(&outcome),
+    );
+    result["data"] = json!({
+        "package": &report.package,
+        "paths": &report.paths,
+        "truncated": report.truncated,
+        "not_found": not_found,
+        "graph_warnings": &report.warnings,
+    });
+    (result, u8::from(not_found))
+}
+
+pub(crate) fn why_failure(project: &std::path::Path, code: &str) -> ExitCode {
+    let outcome = OperationOutcome::unchanged(project);
+    let mut result = envelope("why", "failure", Some(&outcome));
+    result["errors"] = json!([{"code": code, "phase": "operation"}]);
+    emit(result, 1)
 }
 
 pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
@@ -220,6 +337,58 @@ fn outdated_result(report: &OutdatedReport, operation: &str, limit: usize) -> Va
     result["truncated_fields"] = json!(truncated_fields);
     result["data"] = json!({"entries": entries, "total_entries": report.entries.len(), "truncated": limit != 0 && report.entries.len() > limit});
     result
+}
+
+pub(crate) fn cache_result(
+    operation: &str,
+    root: &std::path::Path,
+    clean: bool,
+    remove: bool,
+    report: Result<tapid_store::CacheSummary, tapid_store::IngestError>,
+) -> ExitCode {
+    let mut result = envelope(
+        operation,
+        if report.is_ok() { "success" } else { "failure" },
+        None,
+    );
+    let mut truncated = Vec::new();
+    result["data"] = json!({
+        "scope": "published_package_data",
+        "store": recorded_text(root.display(), "/data/store", &mut truncated),
+        "store_path": paths::encode(root),
+        "action": if remove { "clean" } else if clean { "preview" } else { "info" },
+        "summary": null,
+    });
+    result["truncated_fields"] = json!(truncated);
+    match report {
+        Ok(summary) => {
+            result["data"]["summary"] = json!({
+                "artifacts": {"entries": summary.artifacts.entries, "bytes": summary.artifacts.bytes},
+                "trees": {"entries": summary.trees.entries, "bytes": summary.trees.bytes},
+                "preserved_entries": summary.preserved_entries,
+            });
+            if remove && (summary.artifacts.entries != 0 || summary.trees.entries != 0) {
+                result["changes"]["state"] = json!("committed");
+            }
+            emit(result, 0)
+        }
+        Err(error) => {
+            let busy = matches!(&error, tapid_store::IngestError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock);
+            let invalid_path = matches!(
+                &error,
+                tapid_store::IngestError::InvalidRoot | tapid_store::IngestError::CachePath(_)
+            );
+            result["errors"] = json!([{"code": if busy { "CACHE_BUSY" } else if invalid_path { "CACHE_PATH_INVALID" } else { "CACHE_MAINTENANCE_FAILED" }, "phase": "operation"}]);
+            if busy {
+                result["retry"] = json!("after_contention");
+            } else if matches!(error, tapid_store::IngestError::CacheCleanup(_)) {
+                // A deletion failure can leave a partially cleared cache. No
+                // project state or recovery transaction is involved.
+                result["changes"]["state"] = json!("committed_cleanup_pending");
+            }
+            emit(result, 1)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -339,5 +508,24 @@ mod tests {
         let shortened = result["truncated_fields"].as_array().unwrap();
         assert!(shortened.contains(&json!("/project")));
         assert!(shortened.contains(&json!("/data/entries/0/identity")));
+    }
+
+    #[test]
+    fn truncated_empty_why_result_is_partial_and_successful() {
+        let report = crate::application::why::WhyReport {
+            schema_version: 1,
+            operation: "why",
+            outcome: "not_found",
+            effective_project: "project".into(),
+            changes: Vec::new(),
+            warnings: Vec::new(),
+            package: "missing".into(),
+            paths: Vec::new(),
+            truncated: true,
+        };
+        let (result, status) = why_result(&report, Path::new("project"));
+        assert_eq!(result["outcome"], "partial");
+        assert_eq!(result["data"]["not_found"], false);
+        assert_eq!(status, 0);
     }
 }

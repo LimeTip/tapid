@@ -78,6 +78,39 @@ fn expected_search_directories(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 #[test]
+fn planning_preserves_declared_existing_writes_and_network_without_materialization() {
+    let (project, runtime) = project();
+    fs::create_dir(project.join("writable")).unwrap();
+    fs::write(project.join("exact.txt"), b"existing").unwrap();
+    let config = RunConfig::parse_toml(
+        "[run.scripts.probe]\nassurance = \"restricted\"\nwrite = [\"writable\", \"exact.txt\", \"missing/nested\"]\nnetwork = true\n",
+    ).unwrap();
+    let ambient = BTreeMap::new();
+    let prepared = run::prepare_execution_request(
+        &project,
+        "probe",
+        &config,
+        "node probe.js",
+        &[],
+        run::HostExecutionEnvironment {
+            node_runtime: Some(&runtime),
+            path: None,
+            allow_process_memory_stats: false,
+            allowlisted: &ambient,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.request().policy().filesystem().write(),
+        ["writable", "exact.txt", "missing/nested"]
+    );
+    assert!(prepared.request().policy().network());
+    assert!(!project.join("missing").exists());
+    assert_eq!(fs::read(project.join("exact.txt")).unwrap(), b"existing");
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
 fn prepared_request_uses_npm_shell_exact_arguments_and_controlled_search_directories() {
     let (project, runtime) = project();
     let config = RunConfig::parse_toml(
