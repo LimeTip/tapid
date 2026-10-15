@@ -401,6 +401,7 @@ function assertWindowsHandoff(ci: string) {
   assert.match(verifier, /name: Windows installer contract\n    runs-on: windows-latest\n    needs: \[platform-consumer-validation\]\n    if: \$\{\{ always\(\) && !cancelled\(\) \}\}\n    steps:/);
   assert.match(producer, /name: Consumer validation \(\$\{\{ matrix.os \}\}\)/);
   assert.match(producer, /fail-fast: false/);
+  assert(producer.includes('    outputs:\n      windows-image-version: ${{ steps.windows-cli-provenance.outputs.image-version }}\n'));
   assert.match(step(producer, 'Build Tapid binary'), /run: cargo build --bin tapid --locked\n/);
   for (const [name, condition, timeout] of [
     ['Verify install and lifecycle suppression; reject unsupported Linux containment', "runner.os == 'Linux'", ''],
@@ -410,7 +411,8 @@ function assertWindowsHandoff(ci: string) {
   const prepare = step(producer, 'Prepare same-run Windows CLI handoff');
   const upload = step(producer, 'Retain same-run Windows CLI');
   for (const s of [prepare, upload]) assert.match(s, /if: runner.os == 'Windows'\n/);
-  assert.match(prepare, /run: node --experimental-strip-types tools\/release\/ci_binary.ts prepare --directory "\$env:RUNNER_TEMP\/tapid-ci-cli" --binary target\/debug\/tapid.exe\n/);
+  assert.match(prepare, /id: windows-cli-provenance\n/);
+  assert(prepare.includes('node --experimental-strip-types tools/release/ci_binary.ts prepare --directory "$env:RUNNER_TEMP/tapid-ci-cli" --binary target/debug/tapid.exe\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n          "image-version=$env:ImageVersion" >> $env:GITHUB_OUTPUT\n'));
   assert(producer.indexOf(prepare) > producer.indexOf(step(producer, 'Verify native Restricted child, forwarding and exit codes (macOS)')));
   assert(producer.indexOf(upload) > producer.indexOf(prepare));
   assert.match(upload, /uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7/);
@@ -420,6 +422,7 @@ function assertWindowsHandoff(ci: string) {
   for (const text of [`name: ${handoffName}\n`, 'path: ${{ runner.temp }}/tapid-ci-cli-download\n', 'digest-mismatch: error\n']) assert(download.includes(text));
   const verify = step(verifier, 'Verify same-run native verifier');
   assert.match(verify, /shell: pwsh/);
+  assert(verify.includes('        env:\n          TAPID_CI_PRODUCER_IMAGE_VERSION: ${{ needs.platform-consumer-validation.outputs.windows-image-version }}\n'));
   assert(verify.includes('node --experimental-strip-types tools/release/ci_binary.ts verify --directory "$env:RUNNER_TEMP/tapid-ci-cli-download" --destination target/debug/tapid.exe\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'));
   assert(verify.includes('$actual = & target/debug/tapid.exe --version\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'));
   assert(verify.includes('if ($actual -cne "tapid $expected") { throw "Unexpected native version: $actual" }'));
@@ -448,6 +451,12 @@ test('Windows handoff contract rejects ownership, stale-attempt, bypass and fixt
     ci.replace(verifier, verifier.replace('    steps:', '    if: false\n    steps:')),
     ci.replace('digest-mismatch: error', 'digest-mismatch: warn'),
     ci.replaceAll('${{ github.run_attempt }}-', ''),
+    ci.replace('      windows-image-version: ${{ steps.windows-cli-provenance.outputs.image-version }}\n', ''),
+    ci.replace('steps.windows-cli-provenance.outputs.image-version', 'steps.windows-cli.outputs.image-version'),
+    ci.replace('        id: windows-cli-provenance\n', ''),
+    ci.replace('          "image-version=$env:ImageVersion" >> $env:GITHUB_OUTPUT\n', ''),
+    ci.replace('          TAPID_CI_PRODUCER_IMAGE_VERSION: ${{ needs.platform-consumer-validation.outputs.windows-image-version }}\n', ''),
+    ci.replace('needs.platform-consumer-validation.outputs.windows-image-version', 'env.ImageVersion'),
     ci.replace(verifier, verifier.replace(`name: ${handoffName}`, 'pattern: ci-cli-*')),
     ci.replace(verifier, verifier.replace('digest-mismatch: error', 'digest-mismatch: error\n          github-token: ${{ github.token }}')),
     ci.replace(verifier, verifier.replace('digest-mismatch: error', 'digest-mismatch: error\n          run-id: 123')),
