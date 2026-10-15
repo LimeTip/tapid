@@ -418,6 +418,10 @@ fn run_hook(
             trees,
             false,
             &tapid_linker::WorkspaceLinkPlan::default(),
+            stage
+                .0
+                .parent()
+                .ok_or_else(|| error("stage has no parent"))?,
             |_, _| {},
         )
         .map_err(error)?;

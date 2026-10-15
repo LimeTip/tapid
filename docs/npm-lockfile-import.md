@@ -23,7 +23,7 @@ An existing npm `node_modules` tree needs an explicit ownership opt-in before Ta
 tapid install --frozen
 ```
 
-The first frozen install can download the exact pinned tarballs. It does not fetch registry metadata or choose versions. Tapid verifies SHA-512, archive safety, and package name/version before recording verified tree digests. Store publication, lockfile receipts, and `node_modules` activation use the existing recoverable install transaction. Dependency lifecycle scripts remain disabled.
+The first frozen install can download the exact pinned tarballs. It does not fetch registry metadata or choose versions. Tapid verifies SHA-512, archive safety, and package name/version before recording verified tree digests. Store publication, lockfile receipts, and root and member `node_modules` activation share one durable install decision. Tapid stages every layout before activation and keeps previous trees until commit. Recovery restores all trees and receipts after an interrupted prepared transaction, or keeps all committed layouts and removes their backups. The directory replacements occur sequentially; after a crash, run Tapid to complete recovery before using the project. Dependency lifecycle scripts remain disabled.
 
 Once the applicable packages are verified in the selected store, replay needs no network:
 
@@ -39,9 +39,15 @@ A plain `tapid install` also preserves an imported graph. Explicit dependency mu
 
 The importer accepts v3 `packages` entries for registry tarballs with canonical, credential-free HTTPS URLs, a conventional package/version tarball path, and one canonical padded SHA-512 integrity value. It supports nested duplicate versions, npm aliases with explicit actual package names, already selected ancestor peer providers, and distinct peer contexts when the resulting Tapid instance graph can represent them. It retains ordinary npm descriptive metadata, including license, engines, funding, deprecation, bin metadata, and install-script flags. Retaining engines metadata does not add runtime engine enforcement.
 
-Links and workspace entries fail explicitly in this first import slice, including projects that use Tapid's otherwise supported workspace installation. Git/file sources, SHA-1 or multiple SRI values, bundled packages, unknown fields, unreachable entries, self-instance edges, and conflicting placements for the same Tapid instance fail before writing. A diagnostic identifies the JSON pointer, package, field, and reason. Duplicate JSON keys are rejected. Unsupported versions include instructions for producing a v3 lock.
+Workspace imports accept `node_modules/<name>` links at the root or directly inside declared, contained workspace members. Member names, versions, dependency sections, peer metadata, and bins must match the npm lock. Bin comparison accepts equivalent string and object forms, including npm's conversion of a string bin to a command named after the unscoped package name. Tapid records each member manifest digest and rejects changed manifests or membership on replay. Tapid preserves these local link placements, including links to members not named in root dependencies. Member registry dependencies and peers can use root-hoisted, member-local, and nested registry placements. Different members can select different versions of the same dependency. Selection follows npm ancestor lookup and checks the nearest provider against the declared requirement. Selected local member dependencies must satisfy their declared ranges.
 
-The importer does not reproduce npm's physical hoisting layout. Tapid's managed layout binds the exact selected dependency and peer instances by their local import names. The committed reference fixture checks nested versions and peer lookup with Node, compares selected package versions with offline `npm ci`, and checks byte-stable import output.
+Remove unmanaged `node_modules` trees inside members or between a member and the workspace root before import and replay. Tapid accepts regular member trees it owns through a valid `.tapid-managed` marker and replaces them during installation. It rejects symlinked trees and trees in undeclared ancestor directories. Import leaves every tree untouched. When a dependency mutation converts the imported lock to native resolution, installation clears prior managed member selections so they cannot override the new root selections.
+
+Renamed local links, local links inside registry packages, links to undeclared targets, and registry dependencies on local members remain unsupported and fail explicitly.
+
+Git/file sources, SHA-1 or multiple SRI values, bundled packages, unknown fields, unreachable entries, self-instance edges, and conflicting placements for the same Tapid instance fail before writing. A diagnostic identifies the JSON pointer, package, field, and reason. Duplicate JSON keys are rejected. Unsupported versions include instructions for producing a v3 lock.
+
+The importer does not reproduce npm's physical hoisting layout. Tapid's managed layout binds the exact selected dependency and peer instances by their local import names. The committed reference fixture checks nested versions and peer lookup with Node, compares selected package versions with offline `npm ci`, and checks byte-stable import output. Workspace tests check scoped links, member-level links and bins, conflicting member versions, ancestor peer lookup, optional omission, frozen installation, offline replay, native conversion, and rollback across root and member trees.
 
 ## Optional packages and platforms
 
@@ -51,7 +57,7 @@ Tapid differs from `npm ci` when an applicable optional package fails download, 
 
 ## Rollback
 
-Import failures leave the manifest, previous lock, store, and active dependencies unchanged. Import refuses pending install recovery instead of attempting it. Restore your saved `tapid.lock` to undo a successful import. Import itself has not changed `node_modules`.
+Import failures leave root and member manifests, the previous lock, store, and active dependencies unchanged. Import refuses pending install recovery instead of attempting it. Restore your saved `tapid.lock` to undo a successful import. Import itself has not changed `node_modules`.
 
 After an install, restore the saved lock and matching manifest, then replay their verified trees, or restore the saved npm project and run `npm ci`. Keep the npm lock backup until you have checked your application with its chosen runtime and tools.
 
