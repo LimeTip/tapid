@@ -280,18 +280,16 @@ fn parse_npm(
             let object = value
                 .as_object()
                 .ok_or_else(|| MetadataError::InvalidJson("dist-tags must be an object".into()))?;
-            object
-                .iter()
-                .map(|(tag, value)| {
-                    let version = value.as_str().ok_or_else(|| {
-                        MetadataError::InvalidJson("dist-tag version must be a string".into())
-                    })?;
-                    let version = version
-                        .parse::<PackageVersion>()
-                        .map_err(|_| MetadataError::InvalidVersion(version.into()))?;
-                    Ok((tag.clone(), version))
-                })
-                .collect::<Result<BTreeMap<_, _>, MetadataError>>()
+            Ok::<_, MetadataError>(
+                object
+                    .iter()
+                    .filter_map(|(tag, value)| {
+                        // Match version-key handling: unusable targets are not candidates.
+                        let version = value.as_str()?.parse::<PackageVersion>().ok()?;
+                        Some((tag.clone(), version))
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+            )
         })
         .transpose()
         .map_err(RegistryClientError::Metadata)?
@@ -537,7 +535,7 @@ mod tests {
     use crate::TransportError;
 
     #[test]
-    fn dist_tags_preserve_exact_targets_and_reject_malformed_metadata() {
+    fn dist_tags_preserve_exact_targets_and_skip_unusable_targets() {
         let origin = "https://registry.npmjs.org".parse().unwrap();
         let name = "pkg".parse().unwrap();
         let body = serde_json::json!({"name":"pkg", "dist-tags":{"next":"2.0.0-beta.1", "latest":"1.0.0", "missing":"3.0.0"}, "versions": {
@@ -555,10 +553,32 @@ mod tests {
             };
             assert_eq!(artifact.dist_tags, BTreeSet::from([expected.into()]));
         }
+        for target in [
+            serde_json::json!(123),
+            serde_json::json!(null),
+            serde_json::json!("^1"),
+            serde_json::json!("1.0.0+build"),
+        ] {
+            let mut mixed = body.clone();
+            mixed["dist-tags"]["latest"] = target;
+            let artifacts =
+                parse_npm(&origin, &name, &serde_json::to_vec(&mixed).unwrap(), true).unwrap();
+            assert_eq!(artifacts.len(), 2);
+            assert!(
+                artifacts
+                    .iter()
+                    .all(|artifact| !artifact.dist_tags.contains("latest"))
+            );
+            assert!(
+                artifacts
+                    .iter()
+                    .any(|artifact| artifact.dist_tags.contains("next"))
+            );
+        }
         for tags in [
             serde_json::json!([]),
-            serde_json::json!({"latest":123}),
-            serde_json::json!({"latest":"^1"}),
+            serde_json::json!(null),
+            serde_json::json!("latest"),
         ] {
             let mut invalid = body.clone();
             invalid["dist-tags"] = tags;

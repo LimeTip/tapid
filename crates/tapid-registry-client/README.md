@@ -13,7 +13,7 @@ Read-only, validated registry metadata and artifact-download boundary for Tapid.
 
 `NpmRegistry` accepts an HTTPS npm registry origin, normally `https://registry.npmjs.org`, and package names such as `foo` or `@scope/name`. It requests npm's abbreviated install metadata, validates package and version identity, exposes string dependency requirements, and requires an HTTPS `dist.tarball`. Normal fetches require a valid SHA-512 `dist.integrity`, normalize equivalent padded and unpadded Base64 to canonical padded SRI, and exclude historical records that omit integrity. The explicit compatibility option can retain missing-integrity records for an interactive install, but those artifacts are not registry-authenticated and the CLI warns before proceeding.
 
-`RegistryArtifact::dist_tags` carries the npm tags pointing to that exact version. Tag targets must be concrete versions. Missing target versions are not replaced with another candidate. Malformed tag maps fail metadata validation.
+`RegistryArtifact::dist_tags` carries the npm tags pointing to that exact version. Targets that are not strings or cannot be parsed as supported concrete versions are skipped, matching version-key handling. Missing or unusable tag targets are not replaced with another candidate. A `dist-tags` value that is not an object fails metadata validation.
 
 ## JSR
 
