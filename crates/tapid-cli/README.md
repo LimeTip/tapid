@@ -30,16 +30,23 @@ The next-release installers, expected for 0.0.11, select archives through `https
 ```text
 tapid init [PATH]
 tapid license
+tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
 tapid lock verify
 tapid import-package-lock <PATH>
 tapid install [OPTIONS]
 tapid ci [OPTIONS]
+tapid add <PACKAGE>... [OPTIONS]
+tapid remove <PACKAGE>... [OPTIONS]
+tapid update [OPTIONS]
+tapid outdated [OPTIONS]
+tapid prune [OPTIONS]
+tapid why <PACKAGE> [OPTIONS]
 tapid upgrade [OPTIONS]
 tapid cache info [--store-dir <PATH>]
 tapid cache clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid clean [--dry-run | --yes] [--store-dir <PATH>]
-tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
+tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
@@ -50,19 +57,42 @@ executing a script.
 
 `tapid license` prints the complete Apache-2.0 license and LimeTip AB copyright attribution embedded in the executable. It works offline and does not require a project.
 
+`tapid explain react@19.0.0` reads full npm metadata for an exact version using
+the current directory's `tapid.toml` registry routing. It requires no manifest
+and writes no project, lockfile, store, or installed files. Scoped names and
+`npm:` prefixes are supported; ranges, tags, aliases, and JSR are unsupported.
+Use `--project-dir` to select registry configuration, or `--registry-metadata`
+to inspect a local full npm metadata JSON snapshot without network access.
+
+The summary separates registry-reported SHA-512 integrity, signatures, and
+attestation references from verified bytes. `--artifact-file package.tgz`
+checks a local regular file against the reported digest without extracting it.
+A mismatch exits 1; missing expected integrity remains unknown. Files are
+bounded to 32 MiB for metadata and 512 MiB for artifacts. The command does not
+download artifacts or attestations, verify publisher identity or provenance,
+query vulnerability providers, scan for malware, or obtain human review. It
+marks those checks and missing evidence explicitly. It records when Tapid fetched
+live metadata, read a local snapshot, or checked local bytes. Registry-reported
+publication and metadata modification times appear when present, after RFC 3339
+validation, and remain unverified. Missing timestamps stay unavailable. These
+times do not establish evidence freshness, which remains unknown.
+A digest match does not establish package safety or
+intended content. `--json` emits the versioned evidence summary, including on a
+byte mismatch; see the [JSON protocol](../../docs/json-results.md).
+
 `tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
 
 Dependency hooks remain denied without exact checked-in approval. Online installs offer separate invocation-only `--allow-unapproved-dependency-scripts` and `--unsafe-no-dependency-sandbox` overrides. The first retains required containment; the second explicitly permits host access but does not authorize unapproved hooks by itself. Override outputs never enter the authenticated build cache. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md) for limits, warnings, and platform requirements. These flags do not change `tapid run`.
 
 ## Inspect and clear the package cache
 
-`tapid cache` and `tapid cache info` report the package-store path, counts, and logical file bytes for published artifacts and marked package trees. They work offline without a project and do not create files or recover transactions. The default path is the same platform cache location used by installation. Use `--store-dir <PATH>` to inspect an explicit store. Sizes exclude directory overhead, symlink targets, staging, and unrecognized entries. They are not a measurement of allocated disk space.
+`tapid cache` and `tapid cache info` report the package-store path, counts, and logical file bytes for published artifacts and marked package trees. They work offline without a project and do not create files or recover transactions. The default path is the same platform cache location used by installation. Use `--store-dir <PATH>` to inspect an explicit store. Human inspection and preview output labels sizes as logical bytes. Sizes exclude directory overhead, symlink targets, staging, and unrecognized entries. They measure file content lengths, not allocated disk space or predicted disk space reclaimed by cleaning. Hard links, compression, sparse files, and filesystem metadata can make those quantities differ.
 
 `tapid clean` and `tapid cache clean` preview that scope by default. Pass `--yes` to delete the currently recognized published entries without prompting. `--dry-run` explicitly requests the preview and conflicts with `--yes`. All forms support global `--json` with schema version 1 results.
 
 Cleaning preserves project `node_modules`, manifests, lockfiles, lifecycle authentication keys, staging, recovery journals, and unrecognized entries. Installed projects keep their materialized files. Future offline or frozen replay may fail until the required cache trees are populated again. Release-upgrade recovery data is outside this command's scope. This is explicit eviction of reusable package data, not automatic garbage collection based on which projects use it.
 
-Maintenance uses the existing cross-process store lock and fails immediately when a competing publication or replay prevents safe access. Symlinked roots, cache directories, and lock files are rejected. Opened directories remain pinned during maintenance, and no-follow traversal prevents concurrent parent replacements from redirecting deletion. Symlink entries are preserved; links inside a recognized tree are never followed. A pending transaction must be recovered by installation before maintenance. A populated legacy store without a lock also requires an install before maintenance. Filesystem errors fail the command; deletion errors can leave a partially cleared cache and are reported as cleanup pending in JSON. Inspection and retry are safe.
+Maintenance uses the existing cross-process store lock and fails immediately when a competing publication or replay prevents safe access. Symlinked roots, cache directories, and lock files are rejected. Opened directories remain pinned during maintenance, and no-follow traversal prevents concurrent parent replacements from redirecting deletion. Symlink entries are preserved; links inside a recognized tree are never followed. A pending transaction must be recovered by installation before maintenance. A populated legacy store without a lock also requires an install before maintenance. A deletion or directory-sync failure stops cleanup and exits nonzero; some entries may already have been removed. Inspect the cache or retry after correcting the filesystem error. No background cleanup is scheduled. JSON reports these failures as `committed_cleanup_pending`; failures before eviction remain `unchanged`. This state describes a stopped, possibly partial cache eviction, not a queued cleanup task.
 
 ## Upgrade Tapid
 
@@ -88,6 +118,10 @@ When that option is enabled, existing lock entries with locally computed integri
 are resolved and fetched again. Ordinary online installs still preserve compatible
 registry-verified selections. Offline, frozen, and CI replay reject locally computed
 integrity even when the artifact is cached.
+
+`tapid why <PACKAGE>` reads the selected project's `package.json` and `tapid.lock` and lists deterministic dependency paths from direct roots to each reachable locked instance of that package. Use `--project-dir PATH` to select a project and `--workspace NAME` for a workspace member. It is strictly read-only and offline: it does not contact registries, recover transactions, inspect or modify the store, or materialize `node_modules`. Direct install roots retain their manifest kind (`dependencies`, `devDependencies`, or `optionalDependencies`); recorded package peer-context relationships are labeled `peer`, while transitive lockfile dependency edges are labeled `dependency` because the current schema does not preserve their original kind. The consuming project's own `peerDependencies` are declarations, not install roots. Registry identity, version, and workspace source are shown to disambiguate instances. A confirmed absent match prints an explicit message and exits with status `1`; a bounded search is reported as partial instead.
+
+`tapid --json why PACKAGE` emits the version 1 JSON envelope with `schema_version: 1`, `operation: "why"`, `outcome`, `project`, `changes`, `warnings`, `errors`, `retry`, and a command-specific `data` object. The `data` object contains `package`, `paths`, `truncated`, `not_found`, and `graph_warnings`. Results are deterministic and bounded to 50 paths, 128 dependency levels, and 10,000 graph visits; `truncated: true` means the search is partial, so `not_found` is false and the command exits successfully even when no path was found. Transitive edge-kind limitations are surfaced in `data.graph_warnings`.
 
 ## Install and lifecycle outcomes
 
@@ -185,6 +219,23 @@ Ordinary installation also replays a matching lock. Changed manifests retain com
 
 ## Experimental Node.js root-script runner and `.bin` handling
 
+The invocation permission names are the same on Windows, macOS and Linux:
+
+```text
+tapid run test --allow-read . --allow-subprocess
+tapid run build --allow-read . --allow-write .next --allow-write .tmp --allow-env CI --allow-subprocess
+```
+
+`--allow-read <PATH>`, `--allow-write <PATH>` and `--allow-env <NAME>` may be repeated. Filesystem paths use portable project-relative syntax with forward slashes; they are relative to the policy project root, including when `--workspace` selects a member. Environment arguments are names, not `NAME=VALUE` assignments. `PATH` stays controlled by runtime/tool resolution, and registry credential names remain forbidden. `--allow-subprocess` allows descendants under the same containment policy. `--allow-network` (alias `--allow-net`) requests the existing unrestricted network permission; it does not restrict networking by host, port or loopback address. Arguments after `--` remain script arguments and never grant permissions.
+
+Supplying any of these permission flags enables invocation-only policy selection without requiring a script profile or creating/editing `tapid.toml`. With no configured policy, the baseline is Required/Restricted assurance with no project read, write, environment, network or subprocess grants. Backend runtime grants remain necessary and are disclosed separately. Node scripts normally need `--allow-read . --allow-subprocess` because the launcher uses a platform shell. Restricted does not promise complete descendant cleanup or ManagedTree resource guarantees.
+
+An exact script profile, or explicitly configured `[run.defaults]` when there is no exact profile, remains a ceiling. A supplied read/write/environment list replaces that dimension with the selected narrower grants; omitted dimensions keep the configured grants. Flags cannot exceed configured filesystem scope, enable denied network/subprocess authority, weaken assurance or remove resource ceilings. To authorize broader access, deliberately change the configuration. Empty explicit defaults still preserve the legacy ManagedTree default. With no invocation permission flags, exact-profile requirements and existing configuration behavior are unchanged.
+
+Names and policy selection are portable; enforcement availability still depends on the backend. For example, Windows currently rejects requested networking and missing/unsafe write targets before execution. Prepare writable directories such as `.next` and `.tmp` before a Windows run. No unsupported request falls back to unrestricted execution.
+
+Invocation-mode receipts add `policy_inputs` with the configuration source, invocation grants and effective project policy. These contain environment names, never values. `effective_filesystem` and established backend evidence describe resolved/runtime authority; input provenance alone is not enforcement evidence. The existing receipt channel and child exit/output behavior remain unchanged.
+
 `tapid run` is a separate root-script launcher, not Tapid's package-management core and not a general JavaScript runtime selector. It currently launches Node.js scripts only. It cannot select Bun, Deno, or another runtime; use the runtime's own tooling for those projects. Its execution-containment feature is experimental and supported only on the documented platform/configuration combinations.
 
 ```text
@@ -212,7 +263,7 @@ Paths are project-relative. Grant only the access the script needs: `network = f
 
 Restricted is an authority boundary, **not** full process-tree management or a promise that arbitrary script code is safe. Tapid does not guarantee cleanup or termination of detached descendants. Configured tree-wide timeout, output, process-count, and memory limits require Linux ManagedTree. A requested restriction the backend cannot enforce causes the run to fail before the target starts; Tapid does not silently run it without containment. Linux Restricted uses Landlock and seccomp and requires kernel support; it has targeted Ubuntu 24.04.5 x86_64 validation. macOS Restricted is experimental and uses deprecated/private Seatbelt APIs.
 
-The command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution. Omitting `assurance` retains the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before the shell starts.
+Without invocation permission flags, the command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution. Omitting `assurance` in configuration retains the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before the shell starts.
 
 The command constructs a minimal environment rather than preserving inherited variables: `PATH` is reserved and cannot be allowlisted, while other declared names are retrieved individually from the caller only when present. Windows environment-name matching is case-insensitive and case-equivalent allowlist duplicates are rejected. The current `network` field is boolean: `true` grants unrestricted networking. `--hostname`, `--port`, and other forwarded application arguments do not constrain authority; declared listen/connect scopes remain future work.
 

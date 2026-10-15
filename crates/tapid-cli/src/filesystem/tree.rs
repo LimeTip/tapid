@@ -373,16 +373,34 @@ pub(crate) fn cmd_batch_path(value: &str) -> String {
     value.replace('%', "%%")
 }
 
-pub(crate) fn cmd_shim_contents(parent: &Path, source: &Path) -> String {
+pub(crate) fn cmd_shim_contents(
+    parent: &Path,
+    source: &Path,
+    interpreter: tapid_linker::ShimInterpreter,
+) -> String {
+    let interpreter = if interpreter == tapid_linker::ShimInterpreter::Node {
+        "node "
+    } else {
+        ""
+    };
     format!(
-        "@echo off\r\n@setlocal DisableDelayedExpansion\r\n\"%~dp0{}\" %*\r\n",
+        "@echo off\r\n@setlocal DisableDelayedExpansion\r\n{interpreter}\"%~dp0{}\" %*\r\n",
         cmd_batch_path(&relative_path(parent, source).display().to_string())
     )
 }
 
-pub(crate) fn powershell_shim_contents(parent: &Path, source: &Path) -> String {
+pub(crate) fn powershell_shim_contents(
+    parent: &Path,
+    source: &Path,
+    interpreter: tapid_linker::ShimInterpreter,
+) -> String {
+    let interpreter = if interpreter == tapid_linker::ShimInterpreter::Node {
+        "node "
+    } else {
+        ""
+    };
     format!(
-        "& (Join-Path $PSScriptRoot '{}') $args\r\n",
+        "& {interpreter}(Join-Path $PSScriptRoot '{}') $args\r\nexit $LASTEXITCODE\r\n",
         powershell_single_quoted(&relative_path(parent, source).display().to_string())
     )
 }
@@ -492,10 +510,16 @@ fn materialize_package_shims(
             tapid_linker::ShimStrategy::WindowsCmdAndPowerShell => {
                 let cmd = entry.target.with_extension("cmd");
                 let ps1 = entry.target.with_extension("ps1");
-                fs::write(cmd, cmd_shim_contents(parent, &entry.source))
-                    .map_err(|e| e.to_string())?;
-                fs::write(ps1, powershell_shim_contents(parent, &entry.source))
-                    .map_err(|e| e.to_string())?;
+                fs::write(
+                    cmd,
+                    cmd_shim_contents(parent, &entry.source, entry.interpreter),
+                )
+                .map_err(|e| e.to_string())?;
+                fs::write(
+                    ps1,
+                    powershell_shim_contents(parent, &entry.source, entry.interpreter),
+                )
+                .map_err(|e| e.to_string())?;
             }
         }
     }
@@ -1198,14 +1222,8 @@ mod copy_tests {
             ("tool.cmd", "tool.ps1", true),
             ("σ", "ς", true),
         ] {
-            let root = std::env::temp_dir().join(format!(
-                "tapid-native-shim-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let fixture = tapid_test_support::TempProject::new("native-shim").unwrap();
+            let root = fixture.path().join("shim project with spaces");
             fs::create_dir_all(&root).unwrap();
             let root = fs::canonicalize(root).unwrap();
             let source = root.join("store-tree");
@@ -1215,11 +1233,13 @@ mod copy_tests {
             fs::create_dir_all(&project).unwrap();
             let manifest = serde_json::json!({
                 "name": "example", "version": "1.0.0",
-                "bin": {first: "first.js", second: "second.js", "aaa": "first.js"}
+                "bin": {first: "first-bin", second: "second.exe", "aaa": "first-bin"}
             });
             fs::write(source.join("package.json"), manifest.to_string()).unwrap();
-            fs::write(source.join("first.js"), "first payload").unwrap();
-            fs::write(source.join("second.js"), "second payload").unwrap();
+            fs::write(source.join("first-bin"), "#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)));process.exit(7);\n").unwrap();
+            let system32 =
+                std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+            fs::copy(system32.join("cmd.exe"), source.join("second.exe")).unwrap();
             let digest = tapid_archive::canonical_tree_digest(&source).unwrap();
             let instance = PackageInstance {
                 id: PackageInstanceId::new(
@@ -1268,9 +1288,9 @@ mod copy_tests {
             } else {
                 result.unwrap();
                 for (command, source) in [
-                    (first, "first.js"),
-                    (second, "second.js"),
-                    ("aaa", "first.js"),
+                    (first, "first-bin"),
+                    (second, "second.exe"),
+                    ("aaa", "first-bin"),
                 ] {
                     for extension in ["cmd", "ps1"] {
                         let contents =
@@ -1280,6 +1300,55 @@ mod copy_tests {
                     }
                 }
                 assert_eq!(fs::read_dir(&bin).unwrap().count(), 6);
+                let node = std::path::PathBuf::from(
+                    std::env::var_os("TAPID_TEST_NODE")
+                        .expect("native shim execution requires TAPID_TEST_NODE"),
+                );
+                let system32 = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                    .join("System32");
+                let path =
+                    std::env::join_paths([node.parent().unwrap(), system32.as_path()]).unwrap();
+                let bin_text = bin.to_string_lossy();
+                let bin =
+                    std::path::PathBuf::from(bin_text.strip_prefix(r"\\?\").unwrap_or(&bin_text));
+                use std::os::windows::process::CommandExt;
+                let output = std::process::Command::new(system32.join("cmd.exe"))
+                    .args(["/D", "/S", "/C"])
+                    .raw_arg(format!(
+                        "\"\"{}\" \"two words\" \"literal&value\"\"",
+                        bin.join(first).with_extension("cmd").display()
+                    ))
+                    .env("PATH", &path)
+                    .output()
+                    .unwrap();
+                assert_eq!(output.status.code(), Some(7), "{output:?}");
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    r#"["two words","literal&value"]"#
+                );
+                let direct = std::process::Command::new(system32.join("cmd.exe"))
+                    .args(["/D", "/S", "/C"])
+                    .raw_arg(format!(
+                        "\"\"{}\" /D /C exit 7\"",
+                        bin.join(second).with_extension("cmd").display()
+                    ))
+                    .output()
+                    .unwrap();
+                assert_eq!(direct.status.code(), Some(7), "{direct:?}");
+                let output = std::process::Command::new(
+                    system32.join("WindowsPowerShell/v1.0/powershell.exe"),
+                )
+                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                .arg(bin.join(first).with_extension("ps1"))
+                .args(["two words", "literal&value"])
+                .env("PATH", &path)
+                .output()
+                .unwrap();
+                assert_eq!(output.status.code(), Some(7), "{output:?}");
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    r#"["two words","literal&value"]"#
+                );
             }
             fs::remove_dir_all(root).unwrap();
         }

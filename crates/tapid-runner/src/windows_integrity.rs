@@ -1,5 +1,5 @@
-//! Writable grants require low labels; only freshly copied dependency trees are labelled here.
-use super::{ExecutionError, ExecutionErrorCategory, FilesystemGrantKind, ResolvedGrant};
+//! Only freshly copied dependency trees are labelled here; general write preflight is separate.
+use super::{ExecutionError, ExecutionErrorCategory};
 use std::{
     ffi::c_void,
     fs::{self, File, OpenOptions},
@@ -156,19 +156,6 @@ pub fn prepare_private_dependency_write_tree(root: &Path) -> Result<(), Executio
     })
 }
 
-pub(super) fn verify_write_grant(grant: &ResolvedGrant) -> Result<(), ExecutionError> {
-    visit(
-        &grant.path,
-        grant.kind == FilesystemGrantKind::DirectorySubtree,
-        false,
-        |file, is_directory| {
-            verify_label(
-                file,
-                is_directory && grant.kind == FilesystemGrantKind::DirectorySubtree,
-            )
-        },
-    )
-}
 fn verify_label(file: &File, inherits: bool) -> Result<(), ExecutionError> {
     let mut sacl: *mut ACL = null_mut();
     let mut descriptor = null_mut();

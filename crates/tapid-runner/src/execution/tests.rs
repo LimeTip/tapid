@@ -5,6 +5,196 @@ use crate::config::{
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[test]
+fn invocation_policy_ceiling_rejects_widening_before_backend_support_checks() {
+    let owner = tapid_test_support::TempProject::new("invocation-ceiling-before-support").unwrap();
+    let ceiling = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![], vec![]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::default(),
+    )
+    .unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![], vec![]).unwrap(),
+        true,
+        vec![],
+        true,
+        ExecutionLimits::default(),
+    )
+    .unwrap();
+    let error = ExecutionRequest::builder("test-child")
+        .project_root(owner.path())
+        .policy(policy)
+        .policy_ceiling(ceiling)
+        .build()
+        .unwrap_err();
+    assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds the configured run policy")
+    );
+}
+
+#[test]
+fn invocation_policy_ceiling_checks_canonical_scopes_and_component_boundaries() {
+    let owner = tapid_test_support::TempProject::new("invocation-ceiling").unwrap();
+    let root = fs::canonicalize(owner.path()).unwrap();
+    fs::create_dir_all(root.join("allowed/nested")).unwrap();
+    fs::create_dir(root.join("allowed-other")).unwrap();
+    let ceiling = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec!["allowed".into()], vec!["allowed".into()]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::default(),
+    )
+    .unwrap();
+    for (path, permitted) in [("allowed/nested", true), ("allowed-other", false)] {
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![path.into()], vec![path.into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let resolved = ExecutionRequest::builder("test-child")
+            .project_root(&root)
+            .policy(policy)
+            .policy_ceiling(ceiling.clone())
+            .build()
+            .and_then(|request| resolve_policy(&request, RuntimeFilesystemAdditions::default()));
+        assert_eq!(resolved.is_ok(), permitted, "{path}: {resolved:?}");
+        if let Err(error) = resolved {
+            assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+        }
+    }
+}
+
+#[test]
+fn invocation_policy_ceiling_preserves_network_environment_and_subprocess_denials() {
+    let owner = tapid_test_support::TempProject::new("invocation-ceiling-denials").unwrap();
+    let root = fs::canonicalize(owner.path()).unwrap();
+    let policy = |network, environment, subprocess| {
+        SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![], vec![]).unwrap(),
+            network,
+            environment,
+            subprocess,
+            ExecutionLimits::default(),
+        )
+        .unwrap()
+    };
+    let ceiling = policy(false, vec!["CI".into()], false);
+    for requested in [
+        policy(true, vec![], false),
+        policy(false, vec!["OTHER".into()], false),
+        policy(false, vec![], true),
+    ] {
+        let resolved = ExecutionRequest::builder("test-child")
+            .project_root(&root)
+            .policy(requested)
+            .policy_ceiling(ceiling.clone())
+            .build()
+            .and_then(|request| resolve_policy(&request, RuntimeFilesystemAdditions::default()));
+        assert_eq!(
+            resolved.unwrap_err().category(),
+            ExecutionErrorCategory::PolicyViolation
+        );
+    }
+}
+
+#[test]
+fn invocation_policy_ceiling_preserves_assurance_and_all_resource_limits() {
+    let owner = tapid_test_support::TempProject::new("invocation-ceiling-limits").unwrap();
+    let policy = |assurance, limits| {
+        SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            assurance,
+            FilesystemPolicy::new(vec![], vec![]).unwrap(),
+            false,
+            vec![],
+            false,
+            limits,
+        )
+        .unwrap()
+    };
+    let ceiling = policy(
+        AssuranceLevel::ManagedTree,
+        ExecutionLimits::new(Some(5), Some(10), Some(2), Some(100)).unwrap(),
+    );
+    for (assurance, limits) in [
+        (AssuranceLevel::Restricted, ceiling.limits().clone()),
+        (AssuranceLevel::ManagedTree, ExecutionLimits::default()),
+        (
+            AssuranceLevel::ManagedTree,
+            ExecutionLimits::new(Some(6), Some(10), Some(2), Some(100)).unwrap(),
+        ),
+        (
+            AssuranceLevel::ManagedTree,
+            ExecutionLimits::new(Some(5), Some(11), Some(2), Some(100)).unwrap(),
+        ),
+        (
+            AssuranceLevel::ManagedTree,
+            ExecutionLimits::new(Some(5), Some(10), Some(3), Some(100)).unwrap(),
+        ),
+        (
+            AssuranceLevel::ManagedTree,
+            ExecutionLimits::new(Some(5), Some(10), Some(2), Some(101)).unwrap(),
+        ),
+    ] {
+        let resolved = ExecutionRequest::builder("test-child")
+            .project_root(owner.path())
+            .policy(policy(assurance, limits))
+            .policy_ceiling(ceiling.clone())
+            .build()
+            .and_then(|request| resolve_policy(&request, RuntimeFilesystemAdditions::default()));
+        assert_eq!(
+            resolved.unwrap_err().category(),
+            ExecutionErrorCategory::PolicyViolation
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn invocation_policy_ceiling_checks_alias_destinations_inside_the_project() {
+    let owner = tapid_test_support::TempProject::new("invocation-ceiling-alias").unwrap();
+    let root = fs::canonicalize(owner.path()).unwrap();
+    fs::create_dir_all(root.join("allowed/nested")).unwrap();
+    fs::create_dir(root.join("other")).unwrap();
+    std::os::unix::fs::symlink(root.join("other"), root.join("allowed/escape")).unwrap();
+    std::os::unix::fs::symlink(root.join("allowed/nested"), root.join("alias")).unwrap();
+    let policy = |path: &str| {
+        SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![path.into()], vec![]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap()
+    };
+    for (path, permitted) in [("allowed/escape", false), ("alias", true)] {
+        let resolved = ExecutionRequest::builder("test-child")
+            .project_root(&root)
+            .policy(policy(path))
+            .policy_ceiling(policy("allowed"))
+            .build()
+            .and_then(|request| resolve_policy(&request, RuntimeFilesystemAdditions::default()));
+        assert_eq!(resolved.is_ok(), permitted);
+    }
+}
+
 fn required_policy() -> SandboxPolicy {
     SandboxPolicy::new(
         SandboxMode::Required,

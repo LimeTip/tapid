@@ -4,25 +4,30 @@ use super::*;
 
 #[cfg(windows)]
 fn windows_file_identity(path: &Path) -> Result<(u32, u64), ExecutionError> {
-    use std::mem::MaybeUninit;
     use std::os::windows::io::AsRawHandle;
+    let file =
+        fs::File::open(path).map_err(|error| path_error("trusted Node runtime", path, error))?;
+    windows_handle_identity(file.as_raw_handle() as isize)
+}
+
+#[cfg(windows)]
+pub(super) fn windows_handle_identity(handle: isize) -> Result<(u32, u64), ExecutionError> {
+    use std::mem::MaybeUninit;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
 
-    let file =
-        fs::File::open(path).map_err(|error| path_error("trusted Node runtime", path, error))?;
     let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
-    // SAFETY: `file` keeps a valid owned handle alive for the call and `information` points to
+    // SAFETY: the caller keeps the owned handle alive and `information` points to
     // writable storage of the exact structure required by `GetFileInformationByHandle`.
-    let succeeded = unsafe {
-        GetFileInformationByHandle(file.as_raw_handle() as isize, information.as_mut_ptr())
-    };
+    let succeeded = unsafe { GetFileInformationByHandle(handle, information.as_mut_ptr()) };
     if succeeded == 0 {
-        return Err(path_error(
-            "trusted Node runtime identity",
-            path,
-            std::io::Error::last_os_error(),
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::PolicyViolation,
+            format!(
+                "cannot inspect held Windows filesystem identity: {}",
+                std::io::Error::last_os_error()
+            ),
         ));
     }
     // SAFETY: a successful API call initialized the complete output structure.
@@ -147,6 +152,9 @@ fn is_node_executable_name(path: &Path) -> bool {
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRequest {
+    #[cfg(windows)]
+    pub(super) windows_compatibility:
+        Option<std::sync::Arc<platform_backend::compatibility::Binding>>,
     #[cfg(target_os = "macos")]
     pub(super) reserved_node: Option<platform_backend::ReservedNodeBinding>,
     pub(super) launcher: Option<crate::PrivateLauncher>,
@@ -159,6 +167,7 @@ pub struct ExecutionRequest {
     pub(super) project_root: PathBuf,
     pub(super) working_directory: Option<PathBuf>,
     pub(super) policy: SandboxPolicy,
+    pub(super) policy_ceiling: Option<SandboxPolicy>,
     pub(super) environment: BTreeMap<OsString, OsString>,
 }
 
@@ -174,6 +183,7 @@ impl ExecutionRequest {
             project_root: PathBuf::from("."),
             working_directory: None,
             policy: SandboxPolicy::default(),
+            policy_ceiling: None,
             environment: BTreeMap::new(),
         }
     }
@@ -457,6 +467,7 @@ pub struct ExecutionRequestBuilder {
     project_root: PathBuf,
     working_directory: Option<PathBuf>,
     policy: SandboxPolicy,
+    policy_ceiling: Option<SandboxPolicy>,
     environment: BTreeMap<OsString, OsString>,
 }
 
@@ -533,6 +544,13 @@ impl ExecutionRequestBuilder {
         self
     }
 
+    /// Restricts project permissions to a configured policy, checked using canonical
+    /// grant kinds before backend runtime additions and before project execution.
+    pub fn policy_ceiling(mut self, ceiling: SandboxPolicy) -> Self {
+        self.policy_ceiling = Some(ceiling);
+        self
+    }
+
     /// Adds one explicit child environment value.
     pub fn env(mut self, name: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.environment.insert(name.into(), value.into());
@@ -587,6 +605,8 @@ impl ExecutionRequestBuilder {
             .map(TrustedNodeRuntime::checked)
             .transpose()?;
         let request = ExecutionRequest {
+            #[cfg(windows)]
+            windows_compatibility: None,
             #[cfg(target_os = "macos")]
             reserved_node: None,
             launcher: crate::LAUNCHER.get().cloned(),
@@ -599,9 +619,13 @@ impl ExecutionRequestBuilder {
             project_root: self.project_root,
             working_directory,
             policy: self.policy,
+            policy_ceiling: self.policy_ceiling,
             environment: self.environment,
         };
         request.validate()?;
+        if request.policy_ceiling.is_some() {
+            resolve_policy(&request, RuntimeFilesystemAdditions::default())?;
+        }
         Ok(request)
     }
 }
