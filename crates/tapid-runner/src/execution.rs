@@ -1,3 +1,4 @@
+mod policy_ceiling;
 mod request;
 #[cfg(target_os = "macos")]
 use request::TrustedNodeRuntime;
@@ -1458,6 +1459,7 @@ fn resolve_policy(
         .iter()
         .map(|grant| resolve_project_grant(&project_root, grant, FilesystemAccess::Write))
         .collect::<Result<Vec<_>, _>>()?;
+    policy_ceiling::validate(request, &project_root, &read, &write)?;
     let executable_search_paths = request
         .executable_search_paths()
         .iter()

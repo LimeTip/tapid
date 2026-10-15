@@ -15,8 +15,29 @@ mod cache_tests;
 mod ci_tests;
 #[path = "cli_cases/explain.rs"]
 mod explain_tests;
+#[path = "cli_cases/run_permissions.rs"]
+mod run_permission_tests;
 
 mod workspace_acceptance;
+
+#[test]
+fn run_help_lists_portable_invocation_permission_flags() {
+    let project = tapid_test_support::TempProject::new("run-permission-help").unwrap();
+    let output = isolated_command(project.path(), &["run", "--help"], true)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for flag in [
+        "--allow-read",
+        "--allow-write",
+        "--allow-env",
+        "--allow-subprocess",
+        "--allow-network",
+    ] {
+        assert!(help.contains(flag), "missing portable flag {flag}: {help}");
+    }
+}
 
 /// Verifies exact license output with no application environment and invalid project files.
 #[test]

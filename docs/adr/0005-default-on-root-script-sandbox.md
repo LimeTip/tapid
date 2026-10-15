@@ -51,6 +51,8 @@ The portable `network` field remains boolean. `network = false` requests network
 
 ### Restricted assurance
 
+Invocation permission flags use one vocabulary on Windows, macOS and Linux: `--allow-read`, `--allow-write`, `--allow-env`, `--allow-subprocess` and `--allow-network` (`--allow-net`). They select scoped authority for one run without persisting configuration. An exact configured profile, or explicitly configured defaults, remains a ceiling; flags may select narrower grants but cannot bypass denials, lower assurance or remove resource limits. Without a configured policy, explicit invocation grants select Required/Restricted with no project permissions beyond those grants. This is an explicitly selected invocation interface, not a fallback after failed ManagedTree setup. Profile-only invocations retain their previous exact-profile requirements and ManagedTree default. Unsupported native dimensions remain prelaunch failures, and standard Node remains unchanged.
+
 Restricted requires all of the following before untrusted execution starts:
 
 - an explicit child environment and controlled `PATH`, without ambient credential, proxy, agent-socket, or loader-variable inheritance;
