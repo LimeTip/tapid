@@ -270,6 +270,38 @@ pub fn plan_named_layout(
     input: NamedLayoutInput,
     platform: Platform,
 ) -> Result<MaterializationPlan, PlanError> {
+    plan_named_layout_inner(root, input, platform, &std::collections::BTreeSet::new())
+}
+
+/// Preserve local workspace bindings while hoisting the selected registry graph.
+pub fn plan_workspace_layout(
+    root: ManagedRoot,
+    input: NamedLayoutInput,
+    links: &crate::WorkspaceLinkPlan,
+    platform: Platform,
+) -> Result<MaterializationPlan, PlanError> {
+    let mut reserved = std::collections::BTreeSet::new();
+    for link in &links.links {
+        let expected = root
+            .path
+            .join("node_modules")
+            .join(package_name_path(link.name.as_str()));
+        if link.target != expected || !root.contains(&link.target) {
+            return Err(PlanError::PathOutsideManagedRoot(link.target.clone()));
+        }
+        if !reserved.insert(expected.clone()) {
+            return Err(PlanError::ConflictingTarget(expected));
+        }
+    }
+    plan_named_layout_inner(root, input, platform, &reserved)
+}
+
+fn plan_named_layout_inner(
+    root: ManagedRoot,
+    input: NamedLayoutInput,
+    platform: Platform,
+    reserved: &std::collections::BTreeSet<PathBuf>,
+) -> Result<MaterializationPlan, PlanError> {
     let kind = match platform {
         Platform::Unix => LinkKind::Symlink,
         Platform::Windows => LinkKind::Junction,
@@ -353,6 +385,9 @@ pub fn plan_named_layout(
             return Err(PlanError::UnknownInstance(child.id));
         }
         let target = root_base.join(package_name_path(dependency.name.as_str()));
+        if reserved.contains(&target) {
+            return Err(PlanError::ConflictingTarget(target));
+        }
         if let Some(existing) = placements.insert(target.clone(), child.clone()) {
             if existing != child {
                 return Err(PlanError::ConflictingTarget(target));
@@ -386,6 +421,10 @@ pub fn plan_named_layout(
             if !root.contains(&target) {
                 return Err(PlanError::PathOutsideManagedRoot(target));
             }
+            if reserved.contains(&target) {
+                shadowed_at = Some(index);
+                break;
+            }
             if let Some(existing) = placements.get(&target) {
                 already_resolves = existing == &child;
                 if !already_resolves {
@@ -402,7 +441,7 @@ pub fn plan_named_layout(
         let mut selected = None;
         for (index, base) in bases.iter().enumerate().skip(first_candidate) {
             let target = base.join(package_name_path(dependency.name.as_str()));
-            if !placements.contains_key(&target) {
+            if !placements.contains_key(&target) && !reserved.contains(&target) {
                 selected = Some((index, target));
                 break;
             }
@@ -617,6 +656,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workspace_bindings_reserve_names_before_registry_hoisting() {
+        let parent = instance("parent", "1.0.0", PeerContext::default());
+        let shared = instance("shared", "2.0.0", PeerContext::default());
+        let root = test_managed_root();
+        let link = crate::WorkspaceLink {
+            name: "shared".parse().unwrap(),
+            version: "1.0.0".parse().unwrap(),
+            source: root.path.join("packages/shared"),
+            target: root.path.join("node_modules/shared"),
+        };
+        let links = crate::WorkspaceLinkPlan { links: vec![link] };
+        let mut input = NamedLayoutInput {
+            instances: vec![parent.clone(), shared.clone()],
+            root_dependencies: vec![NamedDependency {
+                name: "parent".parse().unwrap(),
+                child: InstanceKey::from(&parent),
+            }],
+            dependency_edges: vec![NamedDependencyEdge {
+                parent: InstanceKey::from(&parent),
+                dependency: NamedDependency {
+                    name: "shared".parse().unwrap(),
+                    child: InstanceKey::from(&shared),
+                },
+            }],
+        };
+        let plan =
+            plan_workspace_layout(root.clone(), input.clone(), &links, Platform::Unix).unwrap();
+        assert!(
+            plan.activation.steps.iter().any(
+                |step| step.target == root.path.join("node_modules/parent/node_modules/shared")
+            )
+        );
+        assert!(
+            !plan
+                .activation
+                .steps
+                .iter()
+                .any(|step| step.target == root.path.join("node_modules/shared"))
+        );
+        input.root_dependencies.push(NamedDependency {
+            name: "shared".parse().unwrap(),
+            child: InstanceKey::from(&shared),
+        });
+        assert!(matches!(
+            plan_workspace_layout(root.clone(), input.clone(), &links, Platform::Unix),
+            Err(PlanError::ConflictingTarget(_))
+        ));
+        let mut invalid = links.clone();
+        invalid.links[0].target = root.path.join("../outside");
+        assert!(matches!(
+            plan_workspace_layout(root, input, &invalid, Platform::Unix),
+            Err(PlanError::PathOutsideManagedRoot(_))
+        ));
+    }
     #[test]
     fn cross_registry_aliases_have_distinct_storage_and_activation_sources() {
         let mut npm = instance("@s/foo", "1.0.0", PeerContext::default());
