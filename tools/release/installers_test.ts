@@ -19,7 +19,18 @@ const target = platform === "darwin"
   : (arch === "arm64" ? "aarch64-unknown-linux-gnu" : "x86_64-unknown-linux-gnu");
 const archive = `tapid-${version}-${target}.tar.gz`;
 
+const shell = platform === "win32"
+  ? await run("where.exe", ["sh"]).then(result => result.stdout.trim().split(/\r?\n/)[0], () => undefined)
+  : "/bin/sh";
+const shellOptions = { skip: shell ? false : "POSIX shell is unavailable" };
+/** Convert native fixture paths for the POSIX shell used to execute installer artifacts. */
+function shellPath(path: string): string {
+  return platform === "win32" ? path.replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive) => "/" + drive.toLowerCase()) : path;
+}
+
+/** Build an isolated release fixture with generated installers and local download/verifier stubs. */
 async function fixture() {
+  if (!shell) throw new Error("POSIX shell is unavailable");
   const directory = await mkdtemp(join(tmpdir(), "tapid-record-installer-"));
   const payload = join(directory, "payload");
   const bin = join(directory, "bin");
@@ -64,6 +75,10 @@ esac
     await writeFile(join(bin, name), "#!/bin/sh\necho unexpected-runtime >&2\nexit 99\n");
     await chmod(join(bin, name), 0o755);
   }
+  if (platform === "win32") {
+    await writeFile(join(bin, "uname"), `#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo ${arch === "arm64" ? "aarch64" : "x86_64"} ;; esac\n`);
+    await chmod(join(bin, "uname"), 0o755);
+  }
   const bootstrapDir = join(directory, "bootstrap-assets");
   await mkdir(bootstrapDir);
   for (const bootstrapTarget of ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "x86_64-pc-windows-msvc"]) {
@@ -73,13 +88,15 @@ esac
   }
   await renderInstallers(bootstrapDir, version, "https://bootstrap.example/releases/v1.2.3");
   const installer = join(bootstrapDir, "install.sh");
-  const env: Record<string, string | undefined> = { ...processEnv, HOME: fixtureHome, SHELL: "/bin/sh", PATH: `${bin}:${processEnv.PATH}`, INSTALLER_FIXTURE: directory };
+  const shellSearchPath = platform === "win32" ? `${bin};${processEnv.PATH ?? processEnv.Path}` : `${bin}:${processEnv.PATH}`;
+  const env: Record<string, string | undefined> = { ...processEnv, HOME: shellPath(fixtureHome), SHELL: "/bin/sh", PATH: shellSearchPath, INSTALLER_FIXTURE: shellPath(directory) };
+  for (const name of Object.keys(env)) if (name !== "PATH" && name.toUpperCase() === "PATH") delete env[name];
   for (const name of ["TAPID_REPO", "TAPID_RELEASE_BASE_URL", "TAPID_RELEASE_DISCOVERY_URL", "TAPID_RELEASE_RECORD_URL"]) delete env[name];
   return { directory, install, bytes, hash, record, env, installer,
     installShell: (args: string[] = [], additions: Record<string, string> = {}) =>
-      run("/bin/sh", [installer, "--install-dir", install, ...args], { env: { ...env, ...additions } }),
+      run(shell, [shellPath(installer), "--install-dir", shellPath(install), ...args], { env: { ...env, ...additions } }),
     defaultInstallShell: (home: string, additions: Record<string, string> = {}) =>
-      run("/bin/sh", [installer], { env: { ...env, HOME: home, SHELL: "/bin/zsh", ...additions } }),
+      run(shell, ["-c", 'PATH="$INSTALLER_FIXTURE/bin:$PATH"; export PATH; exec /bin/sh "$1"', "installer", shellPath(installer)], { env: { ...env, HOME: shellPath(home), SHELL: "/bin/zsh", ...additions } }),
     requests: async () => (await readFile(join(directory, "requests"), "utf8"))
       .split("\n")
       .filter((request: string) => request && !request.endsWith(".sig") && !request.startsWith("https://bootstrap.example/"))
@@ -459,3 +476,67 @@ Write-Output 'Policy rejection preserved installation'
     match(result.stdout, /Policy rejection preserved installation/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+for (const [name, original, preserved] of [
+  ["no final newline", 'export PATH="$HOME/bin:$PATH"', 'export PATH="$HOME/bin:$PATH"\n'],
+  ["final newline", 'export PATH="$HOME/bin:$PATH"\n', 'export PATH="$HOME/bin:$PATH"\n'],
+  ["empty profile", "", ""],
+  ["existing managed block", '# before\n# tapid-path-managed-v1\nexport PATH="$HOME/.local/bin:$PATH"\n# end tapid-path-managed-v1\n# after\n', '# before\n# after\n'],
+]) {
+  test(`Unix PATH management preserves ${name} across repeated install and uninstall`, shellOptions, async () => {
+    const f = await fixture();
+    const home = join(f.directory, "home");
+    const profile = join(home, ".profile");
+    try {
+      await mkdir(home);
+      await writeFile(profile, original);
+      const install = () => f.defaultInstallShell(home, { SHELL: "/bin/sh" });
+      await install();
+      const first = await readFile(profile, "utf8");
+      const managed = '# tapid-path-managed-v1\nexport PATH="$HOME/.local/bin:$PATH"\n# end tapid-path-managed-v1\n';
+      equal(first, name === "existing managed block" ? original : preserved + managed);
+      const resolved = await run(shell, ["-c", '. "$HOME/.profile"; command -v tapid'], { env: { ...f.env, HOME: shellPath(home) } });
+      equal(resolved.stdout, shellPath(join(home, ".local", "bin", "tapid")) + "\n");
+      await install();
+      equal(await readFile(profile, "utf8"), first);
+      await run(shell, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(join(home, ".local", "bin"))], { env: { ...f.env, HOME: shellPath(home) } });
+      equal(await readFile(profile, "utf8"), preserved);
+    } finally { await f.cleanup(); }
+  });
+}
+
+test("Unix PATH management refuses malformed managed blocks without changing the profile", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "home");
+  const profile = join(home, ".profile");
+  try {
+    await mkdir(home);
+    for (const original of [
+      '# before\n# tapid-path-managed-v1\n# user data\n',
+      '# end tapid-path-managed-v1\nexport PATH="$HOME/.local/bin:$PATH"\n# tapid-path-managed-v1\n# user data\n',
+      '# tapid-path-managed-v1\n# user data\n# end tapid-path-managed-v1\nexport PATH="$HOME/.local/bin:$PATH"\n',
+    ]) {
+      await writeFile(profile, original);
+      await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
+      equal(await readFile(profile, "utf8"), original);
+    }
+  } finally { await f.cleanup(); }
+});
+
+for (const copyStatus of [0, 1]) {
+  test(`Unix PATH management preserves original on invalid staged bytes with copy status ${copyStatus}`, shellOptions, async () => {
+    const f = await fixture();
+    const home = join(f.directory, "home");
+    const profile = join(home, ".profile");
+    const original = '# preserve user configuration\nexport EXISTING=1\n';
+    try {
+      await mkdir(home);
+      await writeFile(profile, original);
+      // A truncated prefix ending in LF must be rejected even if copying reports success.
+      await writeFile(join(f.directory, "bin", "cat"), `#!/bin/sh\ncase "$1" in */.profile) printf '# preserve user configuration\\n'; exit ${copyStatus} ;; *) exec /bin/cat "$@" ;; esac\n`);
+      await chmod(join(f.directory, "bin", "cat"), 0o755);
+      await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
+      equal(await readFile(profile, "utf8"), original);
+    } finally { await f.cleanup(); }
+  });
+}

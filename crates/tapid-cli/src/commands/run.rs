@@ -220,7 +220,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
         Err(error) => {
             if error.category() == tapid_runner::ExecutionErrorCategory::UnsupportedContainment {
                 eprintln!(
-                    "error: sandbox execution failed (unsupported-containment): {error}; no process was started and no enforcement receipt was issued"
+                    "error: sandbox execution failed (unsupported-containment): {error}; no enforcement receipt was issued"
                 );
             } else {
                 eprintln!(
