@@ -1,6 +1,8 @@
 use crate::{
     HttpResponse, HttpTransport, MetadataError, PackagePlatform, RegistryArtifact,
-    RegistryClientError, RegistryKind, RegistryPackageId, artifact::download_artifact,
+    RegistryClientError, RegistryKind, RegistryPackageId,
+    artifact::download_artifact,
+    response::{json_object, json_response},
     transport::request_url_is_safe,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,26 +77,6 @@ impl<T: HttpTransport> NpmRegistry<T> {
     ) -> Result<HttpResponse, RegistryClientError> {
         download_artifact(&self.transport, artifact_url)
     }
-}
-
-fn json_response(response: &HttpResponse) -> Result<&[u8], RegistryClientError> {
-    if response.status != 200 {
-        return Err(RegistryClientError::Metadata(MetadataError::HttpStatus(
-            response.status,
-        )));
-    }
-    let Some(content_type) = response.content_type.as_deref() else {
-        return Err(RegistryClientError::Metadata(
-            MetadataError::UnsupportedContentType("missing content type".into()),
-        ));
-    };
-    let media_type = content_type.split(';').next().unwrap_or_default().trim();
-    if media_type != "application/json" && !media_type.ends_with("+json") {
-        return Err(RegistryClientError::Metadata(
-            MetadataError::UnsupportedContentType(content_type.into()),
-        ));
-    }
-    Ok(&response.body)
 }
 
 fn needs_full_libc_metadata(
@@ -241,15 +223,6 @@ fn merge_full_libc_metadata(
     serde_json::to_vec(&abbreviated).map_err(|error| {
         RegistryClientError::Metadata(MetadataError::InvalidJson(error.to_string()))
     })
-}
-
-fn json_object(body: &[u8]) -> Result<serde_json::Map<String, serde_json::Value>, MetadataError> {
-    let value: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|error| MetadataError::InvalidJson(error.to_string()))?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| MetadataError::InvalidJson("metadata must be an object".into()))
 }
 
 fn required_str<'a>(

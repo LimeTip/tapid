@@ -7,6 +7,7 @@ mod errors;
 mod jsr;
 mod models;
 mod npm;
+mod response;
 mod transport;
 
 pub use client::{RegistryClient, RegistryTransport};
