@@ -2186,22 +2186,37 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
     fs::create_dir_all(member.join("bin")).unwrap();
     fs::write(
         member.join("package.json"),
-        r#"{"name":"tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js"}}"#,
+        r#"{"name":"tool","version":"1.0.0","bin":{"workspace-tool":"bin/tool.js","workspace-direct":"bin/direct.exe"}}"#,
     )
     .unwrap();
     let bin_source = member.join("bin/tool.js");
     fs::write(
         &bin_source,
-        "#!/usr/bin/env node\\nconsole.log('workspace tool');\\n",
+        "#!/usr/bin/env node\nconsole.log('workspace tool');\n",
     )
     .unwrap();
+    let direct_source = member.join("bin/direct.exe");
+    #[cfg(windows)]
+    let system_root = std::env::var_os("SystemRoot").unwrap();
+    #[cfg(windows)]
+    fs::copy(
+        PathBuf::from(&system_root).join("System32").join("cmd.exe"),
+        &direct_source,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    fs::write(&direct_source, "#!/bin/sh\nexit 7\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&bin_source, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&direct_source, fs::Permissions::from_mode(0o755)).unwrap();
     }
     #[cfg(unix)]
-    let mode_before = fs::metadata(&bin_source).unwrap().permissions();
+    let mode_before = (
+        fs::metadata(&bin_source).unwrap().permissions(),
+        fs::metadata(&direct_source).unwrap().permissions(),
+    );
 
     let install = run(
         &dir,
@@ -2230,10 +2245,29 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
             fs::canonicalize(&shim).unwrap(),
             fs::canonicalize(&bin_source).unwrap()
         );
+        let direct_shim = dir
+            .join("node_modules")
+            .join(".bin")
+            .join("workspace-direct");
+        assert!(
+            fs::symlink_metadata(&direct_shim)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::canonicalize(&direct_shim).unwrap(),
+            fs::canonicalize(&direct_source).unwrap()
+        );
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             fs::metadata(&bin_source).unwrap().permissions().mode(),
-            mode_before.mode(),
+            mode_before.0.mode(),
+            "install must not change workspace source permissions"
+        );
+        assert_eq!(
+            fs::metadata(&direct_source).unwrap().permissions().mode(),
+            mode_before.1.mode(),
             "install must not change workspace source permissions"
         );
     }
@@ -2241,6 +2275,25 @@ fn workspace_member_bin_is_materialized_as_a_node_modules_bin_shim() {
     {
         assert!(shim.with_extension("cmd").is_file());
         assert!(shim.with_extension("ps1").is_file());
+        let direct_shim = dir
+            .join("node_modules")
+            .join(".bin")
+            .join("workspace-direct");
+        assert!(direct_shim.with_extension("cmd").is_file());
+        assert!(direct_shim.with_extension("ps1").is_file());
+        use std::os::windows::process::CommandExt;
+        let command = direct_shim.with_extension("cmd");
+        let command = command.to_string_lossy();
+        let command = command.strip_prefix(r"\\?\").unwrap_or(&command);
+        let executed = Command::new(PathBuf::from(&system_root).join("System32").join("cmd.exe"))
+            .args(["/D", "/S", "/C"])
+            .raw_arg(format!("\"\"{command}\" /D /C exit 7\""))
+            .env_clear()
+            .env("SystemRoot", &system_root)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(executed.status.code(), Some(7), "{executed:?}");
     }
     cleanup(dir);
 }
@@ -4883,11 +4936,13 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
     )
     .unwrap();
     let policy = "[run.scripts.dev]\nenvironment = [\"SECRET_TOKEN\"]\n";
-    // Windows supports read-only profiles. Request a specifically unsupported
-    // write grant so this remains a pre-spawn containment rejection, not a
-    // failure caused by executing the stand-in Node binary.
+    // Existing-target writes are supported; network-enabled profiles still
+    // reject before spawn, independent of the stand-in Node binary.
     #[cfg(windows)]
-    let policy = format!("{policy}write = [\"SHOULD_NOT_EXIST\"]\n");
+    let policy = {
+        fs::create_dir(dir.join("writable")).unwrap();
+        format!("{policy}network = true\nwrite = [\"writable\"]\n")
+    };
     fs::write(dir.join("tapid.toml"), policy).unwrap();
     let secret = "tapid-super-secret-value";
     let runtime = dir.join(if cfg!(windows) { "node.exe" } else { "node" });
@@ -4917,16 +4972,112 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
     );
     #[cfg(windows)]
     assert!(
-        stderr.contains("project write policies remain unsupported until declared writes and ACL revocation are natively verified"),
+        stderr.contains("network-enabled profiles are unsupported until AppContainer network capabilities are implemented"),
         "{stderr}"
     );
-    assert!(stderr.contains("no process was started"));
     assert!(stderr.contains("no enforcement receipt was issued"));
     assert!(!stderr.contains(secret));
     assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
     assert!(output.stdout.is_empty());
     assert!(!dir.join("SHOULD_NOT_EXIST").exists());
     cleanup(dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn run_windows_existing_target_writes_preserve_binding_and_assurance_receipts() {
+    let node = PathBuf::from(
+        std::env::var_os("TAPID_TEST_NODE")
+            .expect("native Windows CLI acceptance requires CI-provisioned TAPID_TEST_NODE"),
+    );
+    assert!(node.is_absolute() && node.is_file());
+    for (assurance, target, kind) in [
+        ("restricted", "writable", "DirectorySubtree"),
+        ("managed-tree", "writable", "DirectorySubtree"),
+        ("restricted", "exact.txt", "ExactFile"),
+    ] {
+        let owner = tapid_test_support::TempProject::new("cli-windows-write").unwrap();
+        let root = fs::canonicalize(owner.path()).unwrap();
+        fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+        let existing = if kind == "ExactFile" {
+            root.join(target)
+        } else {
+            fs::create_dir(root.join(target)).unwrap();
+            root.join(target).join("existing.txt")
+        };
+        fs::write(&existing, b"old").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"demo","version":"1.0.0","scripts":{"probe":"node probe.js"}}"#,
+        )
+        .unwrap();
+        let relative = if kind == "ExactFile" {
+            "exact.txt"
+        } else {
+            "writable/existing.txt"
+        };
+        fs::write(root.join("probe.js"), format!(
+            "const fs=require('node:fs'),a=require('node:assert/strict');fs.writeFileSync('{relative}','overwrite');fs.appendFileSync('{relative}','append');fs.truncateSync('{relative}',3);a.throws(()=>fs.writeFileSync('outside.txt','escape'),e=>['EPERM','EACCES'].includes(e.code));console.log('CLI_WRITE_OK');"
+        )).unwrap();
+        let limits = if assurance == "managed-tree" {
+            "timeout_seconds = 10\nmax_output_bytes = 65536\nmax_processes = 8\nmax_memory_bytes = 536870912\n"
+        } else {
+            ""
+        };
+        fs::write(root.join("tapid.toml"), format!(
+            "[run.scripts.probe]\nassurance = \"{assurance}\"\nread = [\".\"]\nwrite = [\"{target}\"]\nnetwork = false\n{limits}"
+        )).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .args(["run", "probe", "--receipt-json", "--node-runtime"])
+            .arg(&node)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(output.stdout, b"CLI_WRITE_OK\n");
+        assert_eq!(fs::read(&existing).unwrap(), b"ove");
+        assert!(!root.join("outside.txt").exists());
+        let receipt: serde_json::Value =
+            serde_json::from_str(stderr.lines().find(|line| line.starts_with('{')).unwrap())
+                .unwrap();
+        let managed = assurance == "managed-tree";
+        assert_eq!(
+            receipt["backend"]["name"],
+            "tapid-runner/windows-appcontainer-job"
+        );
+        assert_eq!(
+            receipt["assurance"],
+            if managed { "ManagedTree" } else { "Restricted" }
+        );
+        assert_eq!(receipt["enforced"]["process_tree_membership"], managed);
+        assert_eq!(
+            receipt["completion"]["confirmed"]["complete_cleanup"],
+            managed
+        );
+        assert_eq!(
+            receipt["completion"]["cleanup_confidence"],
+            if managed {
+                "KernelOwnedComplete"
+            } else {
+                "BestEffortObserved"
+            }
+        );
+        let writes: Vec<_> = receipt["effective_filesystem"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|grant| grant["access"] == "Write")
+            .collect();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(
+            writes[0]["path"],
+            root.join(target).to_string_lossy().as_ref()
+        );
+        assert_eq!(writes[0]["kind"], kind);
+        assert_eq!(writes[0]["source"], "ProjectPolicy");
+        assert_eq!(writes[0]["binding"], "CanonicalPath");
+    }
 }
 
 #[test]
