@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { findCargoLockfiles, planPublication, registryState } from "./publish.ts";
 import type { CargoMetadata, Package, RegistryLookup } from "./publish.ts";
 import { releaseVersion } from "./release.ts";
+import { compareStableVersions } from "./version.ts";
 
 const execFileAsync = promisify(execFile);
 type Run = (command: string, args: string[]) => Promise<string>;
@@ -18,9 +19,7 @@ function stable(version: string): bigint[] {
 }
 
 function newer(version: string, baseline: string): boolean {
-  const left = stable(version), right = stable(baseline);
-  const index = left.findIndex((part, i) => part !== right[i]);
-  return index >= 0 && left[index] > right[index];
+  return compareStableVersions(version, baseline) > 0;
 }
 
 export function nextProductVersion(current: string, requested: string, baseline: string = current): string {
