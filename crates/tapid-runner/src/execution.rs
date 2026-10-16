@@ -1,3 +1,4 @@
+mod policy_ceiling;
 mod request;
 #[cfg(target_os = "macos")]
 use request::TrustedNodeRuntime;
@@ -1422,7 +1423,9 @@ impl std::error::Error for ExecutionError {}
 pub fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
     #[cfg(target_os = "macos")]
     return platform_backend::execute_reserved(request);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    return platform_backend::compatibility::execute(request);
+    #[cfg(not(any(target_os = "macos", windows)))]
     execute_with_backend(request, &platform_backend::PlatformBackend)
 }
 
@@ -1456,6 +1459,7 @@ fn resolve_policy(
         .iter()
         .map(|grant| resolve_project_grant(&project_root, grant, FilesystemAccess::Write))
         .collect::<Result<Vec<_>, _>>()?;
+    policy_ceiling::validate(request, &project_root, &read, &write)?;
     let executable_search_paths = request
         .executable_search_paths()
         .iter()
@@ -1733,12 +1737,18 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
 #[cfg(windows)]
 #[path = "windows_execution.rs"]
 mod platform_backend;
+#[cfg(all(windows, test))]
+#[path = "../tests/support/windows_acl.rs"]
+mod windows_acl;
 #[cfg(any(windows, test))]
 #[path = "windows_cancellation.rs"]
 mod windows_cancellation;
 #[cfg(windows)]
 #[path = "windows_job.rs"]
 mod windows_job;
+#[cfg(windows)]
+#[path = "windows_write_validation.rs"]
+mod windows_write_validation;
 
 #[cfg(target_os = "macos")]
 #[path = "macos_restricted.rs"]

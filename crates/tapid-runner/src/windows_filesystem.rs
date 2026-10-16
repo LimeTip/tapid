@@ -6,6 +6,15 @@ use std::sync::{Mutex, MutexGuard};
 // Windows exposes no compare-and-swap DACL update; serialize Tapid's ACL transactions within this process.
 static WINDOWS_ACL_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 
+// Thread-local, one-shot native failure seams: no production bypass or validator change.
+#[cfg(test)]
+std::thread_local! {
+    static GRANT_FAILURE_COUNTDOWN: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static RESTORE_FAILURE_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ON_GRANT_FAILURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static RESTORE_ORDER: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 struct AclMutationGuard {
     _process_guard: MutexGuard<'static, ()>,
     named_mutex: HANDLE,
@@ -78,6 +87,36 @@ pub struct WindowsPathAcl {
     appcontainer_sid: Box<[u32]>,
 }
 
+pub(in crate::execution) fn write_permissions(
+    is_directory: bool,
+    subtree: bool,
+    descendant: bool,
+) -> u32 {
+    use windows_sys::Win32::Storage::FileSystem::*;
+    if descendant {
+        FILE_GENERIC_WRITE | DELETE
+    } else if is_directory && subtree {
+        FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA
+    } else if is_directory {
+        FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA
+    } else {
+        FILE_GENERIC_WRITE
+    }
+}
+
+fn validate_metadata_grant(
+    access: FilesystemAccess,
+    kind: FilesystemGrantKind,
+) -> Result<(), ExecutionError> {
+    if access == FilesystemAccess::ReadMetadata && kind == FilesystemGrantKind::ExactDirectory {
+        return Err(ExecutionError::new(
+            ExecutionErrorCategory::UnsupportedContainment,
+            "Windows non-propagating exact-directory metadata ACL grants are unavailable; no DACL was changed",
+        ));
+    }
+    Ok(())
+}
+
 impl WindowsPathAcl {
     pub fn grant(
         path: &std::path::Path,
@@ -104,6 +143,26 @@ impl WindowsPathAcl {
         kind: FilesystemGrantKind,
         allow_execute: bool,
     ) -> Result<Self, ExecutionError> {
+        validate_metadata_grant(access, kind)?;
+        #[cfg(test)]
+        if GRANT_FAILURE_COUNTDOWN.with(|remaining| match remaining.get() {
+            Some(0) => {
+                remaining.set(None);
+                true
+            }
+            Some(count) => {
+                remaining.set(Some(count - 1));
+                false
+            }
+            None => false,
+        }) {
+            ON_GRANT_FAILURE.with(|callback| {
+                if let Some(callback) = callback.borrow_mut().take() {
+                    callback();
+                }
+            });
+            return Err(unsupported_acl("injected grant-time denial", 5));
+        }
         let _transaction = lock_acl_mutations()?;
         // Existing AppContainer traversal semantics suffice for declared targets; inaccessible
         // targets remain denied. Do not add implicit ancestor traversal ACEs: SetSecurityInfo
@@ -138,10 +197,9 @@ impl WindowsPathAcl {
             UNPROTECTED_DACL_SECURITY_INFORMATION,
         };
         use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileW, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_EXECUTE,
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
-            FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_EA, OPEN_EXISTING, READ_CONTROL,
+            CreateFileW, FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ,
+            FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
             WRITE_DAC,
         };
 
@@ -152,6 +210,11 @@ impl WindowsPathAcl {
             ));
         }
         let appcontainer_sid = own_sid(sid)?;
+        let selected_write_target = if access == FilesystemAccess::Write {
+            Some(crate::execution::windows_write_validation::PinnedWriteTarget::open(path)?)
+        } else {
+            None
+        };
         let metadata = std::fs::metadata(path).map_err(|error| {
             unsupported_acl(
                 "inspect filesystem grant target",
@@ -188,7 +251,12 @@ impl WindowsPathAcl {
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 null(),
                 OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
+                FILE_FLAG_BACKUP_SEMANTICS
+                    | if selected_write_target.is_some() {
+                        windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT
+                    } else {
+                        0
+                    },
                 0,
             )
         };
@@ -197,6 +265,13 @@ impl WindowsPathAcl {
                 &format!("open filesystem grant for DACL update at {display_path}"),
                 std::io::Error::last_os_error().raw_os_error().unwrap_or(1) as u32,
             ));
+        }
+
+        if let Some(selected) = selected_write_target
+            && let Err(error) = selected.verify(handle, kind)
+        {
+            unsafe { CloseHandle(handle) };
+            return Err(error);
         }
 
         let mut original_dacl: *mut ACL = null_mut();
@@ -277,11 +352,7 @@ impl WindowsPathAcl {
             }
             FilesystemAccess::ReadMetadata => FILE_READ_ATTRIBUTES | FILE_READ_EA,
             FilesystemAccess::Read => FILE_GENERIC_READ,
-            FilesystemAccess::Write if is_directory && subtree => {
-                FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA
-            }
-            FilesystemAccess::Write if is_directory => FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA,
-            FilesystemAccess::Write => FILE_GENERIC_WRITE,
+            FilesystemAccess::Write => write_permissions(is_directory, subtree, false),
         };
         let root_permissions = if allow_execute {
             root_permissions | FILE_EXECUTE
@@ -309,8 +380,11 @@ impl WindowsPathAcl {
         let mut entries = Vec::with_capacity(4);
         if access == FilesystemAccess::Write && is_directory && subtree {
             entries.push(make_entry(root_permissions, 0));
+            // Internal rename/unlink requires DELETE on descendants, never on the declared
+            // root. Do not grant FILE_DELETE_CHILD (which could override child denial),
+            // WRITE_DAC, ownership, or parent-entry replacement for ExactFile grants.
             entries.push(make_entry(
-                FILE_GENERIC_WRITE,
+                write_permissions(is_directory, subtree, true),
                 inheritance | windows_sys::Win32::Security::INHERIT_ONLY_ACE,
             ));
         } else {
@@ -390,6 +464,10 @@ impl WindowsPathAcl {
     }
 
     pub fn restore(&mut self) -> Result<(), ExecutionError> {
+        #[cfg(test)]
+        if RESTORE_FAILURE_ONCE.with(|failure| failure.replace(false)) {
+            return Err(unsupported_acl("injected rollback denial", 5));
+        }
         let _transaction = lock_acl_mutations()?;
         self.restore_unlocked()
     }
@@ -562,7 +640,7 @@ fn runtime_dacl_is_writable(path: &std::path::Path) -> Result<bool, ExecutionErr
     }
 }
 
-fn verify_existing_runtime_access(
+fn verify_effective_filesystem_access(
     container: &WindowsAppContainer,
     grant: &ResolvedFilesystemGrant,
 ) -> Result<(), ExecutionError> {
@@ -574,6 +652,72 @@ fn verify_existing_runtime_access(
     use windows_sys::Win32::System::Threading::{
         GetCurrentThread, OpenProcessToken, OpenThreadToken,
     };
+
+    // Enumerate as the host before impersonation: write-only authority must not require
+    // read/list access. Kernel opens below still check every selected object's authority.
+    let mut pending = vec![grant.path.clone()];
+    let mut targets = Vec::new();
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            unsupported_acl(
+                "inspect filesystem access target",
+                error.raw_os_error().unwrap_or(1) as u32,
+            )
+        })?;
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(unsupported_acl(
+                "filesystem access target contains a reparse point",
+                5,
+            ));
+        }
+        if path == grant.path
+            && !match grant.kind() {
+                FilesystemGrantKind::ExactFile => metadata.is_file(),
+                FilesystemGrantKind::ExactDirectory | FilesystemGrantKind::DirectorySubtree => {
+                    metadata.is_dir()
+                }
+                FilesystemGrantKind::CharacterDevice => false,
+            }
+        {
+            return Err(unsupported_acl("filesystem access target kind changed", 87));
+        }
+        let desired = match grant.access() {
+            FilesystemAccess::Read => FILE_GENERIC_READ | FILE_EXECUTE,
+            FilesystemAccess::ReadData => FILE_READ_DATA,
+            FilesystemAccess::ReadMetadata => FILE_READ_ATTRIBUTES | FILE_READ_EA,
+            FilesystemAccess::Write => write_permissions(
+                metadata.is_dir(),
+                grant.kind() == FilesystemGrantKind::DirectorySubtree,
+                path != grant.path,
+            ),
+        } | if metadata.is_dir() { FILE_EXECUTE } else { 0 };
+        if metadata.is_dir() && grant.kind() == FilesystemGrantKind::DirectorySubtree {
+            for entry in std::fs::read_dir(&path).map_err(|error| {
+                unsupported_acl(
+                    "enumerate filesystem access subtree",
+                    error.raw_os_error().unwrap_or(1) as u32,
+                )
+            })? {
+                pending.push(
+                    entry
+                        .map_err(|error| {
+                            unsupported_acl(
+                                "inspect filesystem access descendant",
+                                error.raw_os_error().unwrap_or(1) as u32,
+                            )
+                        })?
+                        .path(),
+                );
+            }
+        }
+        targets.push((
+            path,
+            desired,
+            metadata.is_dir(),
+            metadata.permissions().readonly(),
+        ));
+    }
 
     struct Token(HANDLE);
     impl Drop for Token {
@@ -657,6 +801,68 @@ fn verify_existing_runtime_access(
         ));
     }
     let duplicate = Token(duplicate);
+    for (path, desired, _, _) in targets
+        .iter()
+        .filter(|_| grant.access() == FilesystemAccess::Write)
+    {
+        use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        let wide = runtime_path_wide(path);
+        let mut descriptor = null_mut();
+        // SAFETY: terminated path and writable descriptor output; allocation is released below.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != 0 || descriptor.is_null() {
+            if !descriptor.is_null() {
+                unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+            }
+            return Err(unsupported_acl(
+                "inspect effective AppContainer filesystem access",
+                status.max(1),
+            ));
+        }
+        let mapping = GENERIC_MAPPING {
+            GenericRead: FILE_GENERIC_READ,
+            GenericWrite: FILE_GENERIC_WRITE,
+            GenericExecute: FILE_GENERIC_EXECUTE,
+            GenericAll: FILE_ALL_ACCESS,
+        };
+        let mut privileges = [0usize; 128];
+        let mut length = std::mem::size_of_val(&privileges) as u32;
+        let mut granted = 0;
+        let mut allowed = 0;
+        // SAFETY: complete live descriptor, verified child token, aligned bounded privilege
+        // storage and writable outputs. A larger required buffer fails closed.
+        let checked = unsafe {
+            AccessCheck(
+                descriptor,
+                duplicate.0,
+                *desired,
+                &mapping,
+                privileges.as_mut_ptr().cast(),
+                &mut length,
+                &mut granted,
+                &mut allowed,
+            )
+        };
+        let error = unsafe { GetLastError() };
+        unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+        if checked == 0 || allowed == 0 || granted & desired != *desired {
+            return Err(unsupported_acl(
+                "verify effective AppContainer filesystem access",
+                if checked == 0 { error } else { 5 },
+            ));
+        }
+    }
     if unsafe { ImpersonateLoggedOnUser(duplicate.0) } == 0 {
         return Err(unsupported_acl(
             "impersonate runtime access-check token",
@@ -664,43 +870,22 @@ fn verify_existing_runtime_access(
         ));
     }
     let _impersonation = Impersonation;
-    let mut pending = vec![grant.path.clone()];
-    while let Some(path) = pending.pop() {
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-            unsupported_acl(
-                "inspect immutable runtime target",
-                error.raw_os_error().unwrap_or(1) as u32,
-            )
-        })?;
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(unsupported_acl(
-                "immutable runtime contains a reparse point",
-                5,
-            ));
+    for (path, mut desired, is_directory, readonly) in targets {
+        if grant.access() == FilesystemAccess::Write && is_directory {
+            // Directory creation rights were checked against the child token above. Opening
+            // a directory adds listing/synchronization requirements that write-only grants
+            // deliberately omit. Do not broaden the grant to satisfy this probe.
+            continue;
         }
-        if path == grant.path
-            && !match grant.kind() {
-                FilesystemGrantKind::ExactFile => metadata.is_file(),
-                FilesystemGrantKind::ExactDirectory | FilesystemGrantKind::DirectorySubtree => {
-                    metadata.is_dir()
-                }
-                FilesystemGrantKind::CharacterDevice => false,
-            }
-        {
-            return Err(unsupported_acl("immutable runtime target kind changed", 87));
-        }
-        let desired = match grant.access() {
-            FilesystemAccess::Read => FILE_GENERIC_READ | FILE_EXECUTE,
-            FilesystemAccess::ReadData => FILE_READ_DATA,
-            FilesystemAccess::ReadMetadata => FILE_READ_ATTRIBUTES | FILE_READ_EA,
-            FilesystemAccess::Write => {
-                return Err(unsupported_acl("immutable runtime write check", 5));
-            }
-        } | if metadata.is_dir() { FILE_EXECUTE } else { 0 };
         let wide = runtime_path_wide(&path);
-        // A real kernel open includes deny ACE ordering, both AppContainer access checks,
-        // traversal, and mandatory integrity policy. ACE-presence/host-token checks do not.
+        if grant.access() == FilesystemAccess::Write && readonly && !is_directory {
+            // The full DACL authority was checked above. The readonly attribute prevents
+            // data writes until the child clears it using its granted WRITE_ATTRIBUTES.
+            use windows_sys::Win32::Storage::FileSystem::{FILE_APPEND_DATA, FILE_WRITE_DATA};
+            desired &= !(FILE_WRITE_DATA | FILE_APPEND_DATA);
+        }
+        // Keep the existing kernel-open check for files and runtime access. Explicit write
+        // integrity labels are independently rejected by the read-only topology preflight.
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
@@ -708,36 +893,21 @@ fn verify_existing_runtime_access(
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 null(),
                 OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
                 0,
             )
         };
         if handle == INVALID_HANDLE_VALUE {
             return Err(unsupported_acl(
-                "verify existing AppContainer runtime access",
+                if grant.access() == FilesystemAccess::Write {
+                    "verify effective AppContainer filesystem access"
+                } else {
+                    "verify existing AppContainer runtime access"
+                },
                 unsafe { GetLastError() },
             ));
         }
         unsafe { CloseHandle(handle) };
-        if metadata.is_dir() && grant.kind() == FilesystemGrantKind::DirectorySubtree {
-            for entry in std::fs::read_dir(&path).map_err(|error| {
-                unsupported_acl(
-                    "enumerate immutable runtime subtree",
-                    error.raw_os_error().unwrap_or(1) as u32,
-                )
-            })? {
-                pending.push(
-                    entry
-                        .map_err(|error| {
-                            unsupported_acl(
-                                "inspect immutable runtime descendant",
-                                error.raw_os_error().unwrap_or(1) as u32,
-                            )
-                        })?
-                        .path(),
-                );
-            }
-        }
     }
     Ok(())
 }
@@ -748,59 +918,93 @@ pub struct WindowsFilesystemGrants {
 }
 
 impl WindowsFilesystemGrants {
+    #[cfg(test)]
+    pub(crate) fn fail_next_restore_for_test() {
+        RESTORE_FAILURE_ONCE.with(|failure| failure.set(true));
+    }
+
     pub fn apply(
         container: &WindowsAppContainer,
         grants: &[ResolvedFilesystemGrant],
     ) -> Result<Self, ExecutionError> {
+        for grant in grants {
+            validate_metadata_grant(grant.access(), grant.kind())?;
+        }
+        crate::execution::windows_write_validation::validate_existing_write_grants(grants)?;
         let sid = container.sid();
         let system_root =
             std::env::var_os("SystemRoot").and_then(|path| std::fs::canonicalize(path).ok());
         let mut applied = Vec::with_capacity(grants.len());
-        for grant in grants {
-            if grant.kind == FilesystemGrantKind::CharacterDevice {
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::UnsupportedContainment,
-                    "Windows AppContainer filesystem policy cannot grant character devices",
-                ));
+        let preparation = (|| -> Result<(), ExecutionError> {
+            for grant in grants {
+                if grant.kind == FilesystemGrantKind::CharacterDevice {
+                    return Err(ExecutionError::new(
+                        ExecutionErrorCategory::UnsupportedContainment,
+                        "Windows AppContainer filesystem policy cannot grant character devices",
+                    ));
+                }
+                // Backend system files already grant read/execute access to application packages.
+                // Do not rewrite TrustedInstaller-owned DACLs for backend-runtime paths. Project grants
+                // are still applied when the project happens to live below SystemRoot (for example,
+                // Windows' default SystemTemp directory).
+                if grant.access != FilesystemAccess::Write
+                    && grant.source() == crate::execution::FilesystemGrantSource::BackendRuntime
+                    && system_root.as_ref().is_some_and(|root| {
+                        grant.path == *root || grant.path == root.join("System32")
+                    })
+                {
+                    continue;
+                }
+                // An immutable installation may permit the actual AppContainer to use the runtime
+                // while denying the host WRITE_DAC. Only that specific pre-mutation denial permits
+                // an alternative: a kernel open under a verified token with this execution's SID.
+                // Never swallow a failed ACL update, or infer effective access from an allow ACE.
+                if grant.source() == crate::execution::FilesystemGrantSource::BackendRuntime
+                    && grant.access() != FilesystemAccess::Write
+                    && !runtime_dacl_is_writable(&grant.path)?
+                {
+                    verify_effective_filesystem_access(container, grant)?;
+                    continue;
+                }
+                // Readable project code includes native addons, just as readable scripts
+                // can execute in the selected runtime. Reuse runtime read/execute rights;
+                // this adds neither writes nor access beyond the explicit read target.
+                let acl = if grant.access() == FilesystemAccess::Read {
+                    WindowsPathAcl::grant_executable(&grant.path, sid, grant.access(), grant.kind())
+                } else {
+                    WindowsPathAcl::grant(&grant.path, sid, grant.access(), grant.kind())
+                }?;
+                applied.push(acl);
             }
-            // Backend system files already grant read/execute access to application packages.
-            // Do not rewrite TrustedInstaller-owned DACLs for backend-runtime paths. Project grants
-            // are still applied when the project happens to live below SystemRoot (for example,
-            // Windows' default SystemTemp directory).
-            if grant.access != FilesystemAccess::Write
-                && grant.source() == crate::execution::FilesystemGrantSource::BackendRuntime
-                && system_root
-                    .as_ref()
-                    .is_some_and(|root| grant.path.starts_with(root))
+            // Check after every grant is installed, so declared read-root/write-child
+            // overlaps provide traversal without making writes imply read authority.
+            for grant in grants
+                .iter()
+                .filter(|grant| grant.access() == FilesystemAccess::Write)
             {
-                continue;
+                verify_effective_filesystem_access(container, grant)?;
             }
-            // An immutable installation may permit the actual AppContainer to use the runtime
-            // while denying the host WRITE_DAC. Only that specific pre-mutation denial permits
-            // an alternative: a kernel open under a verified token with this execution's SID.
-            // Never swallow a failed ACL update, or infer effective access from an allow ACE.
-            if grant.source() == crate::execution::FilesystemGrantSource::BackendRuntime
-                && grant.access() != FilesystemAccess::Write
-                && !runtime_dacl_is_writable(&grant.path)?
-            {
-                verify_existing_runtime_access(container, grant)?;
-                continue;
+            Ok(())
+        })();
+        let mut transaction = Self { grants: applied };
+        if let Err(mut error) = preparation {
+            // All loop failures (including runtime inspection/fallback) reach observable,
+            // reverse-order rollback. Individual grant Drop remains emergency retry only.
+            if let Err(rollback) = transaction.restore() {
+                error
+                    .message
+                    .push_str(&format!("; filesystem grant rollback failed: {rollback}"));
             }
-            let acl = if grant.source() == crate::execution::FilesystemGrantSource::BackendRuntime
-                && grant.access() == FilesystemAccess::Read
-            {
-                WindowsPathAcl::grant_executable(&grant.path, sid, grant.access(), grant.kind())
-            } else {
-                WindowsPathAcl::grant(&grant.path, sid, grant.access(), grant.kind())
-            }?;
-            applied.push(acl);
+            return Err(error);
         }
-        Ok(Self { grants: applied })
+        Ok(transaction)
     }
 
     pub fn restore(&mut self) -> Result<(), ExecutionError> {
         let mut first_error = None;
-        for grant in self.grants.iter_mut().rev() {
+        for (_index, grant) in self.grants.iter_mut().enumerate().rev() {
+            #[cfg(test)]
+            RESTORE_ORDER.with(|order| order.borrow_mut().push(_index));
             if let Err(error) = grant.restore()
                 && first_error.is_none()
             {
@@ -848,14 +1052,265 @@ fn unsupported_acl(operation: &str, code: u32) -> ExecutionError {
 }
 
 #[cfg(test)]
-#[path = "../tests/support/windows_acl.rs"]
-mod windows_acl;
+pub(super) use crate::execution::windows_acl;
 
 #[cfg(test)]
 mod tests {
     use super::lock_acl_mutations;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn explicit_appcontainer_write_denial_rolls_back() {
+        rejected_effective_write(false, false);
+    }
+
+    #[test]
+    fn explicit_descendant_write_denial_rolls_back() {
+        rejected_effective_write(false, true);
+    }
+
+    #[test]
+    fn explicit_medium_integrity_write_denial_rolls_back() {
+        rejected_effective_write(true, false);
+    }
+
+    #[test]
+    fn explicit_medium_integrity_descendant_is_rejected_before_mutation() {
+        rejected_effective_write(true, true);
+    }
+
+    fn rejected_effective_write(medium_integrity: bool, subtree: bool) {
+        use super::windows_acl::{initialize_inheritance, read_acl};
+        use super::*;
+        use crate::execution::{FilesystemBindingMode, FilesystemGrantSource};
+        let fixture = tapid_test_support::TempProject::new("effective-write-denial").unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let directory = root.join("declared");
+        std::fs::create_dir(&directory).unwrap();
+        let file = directory.join("existing.txt");
+        std::fs::write(&file, b"host-positive-control").unwrap();
+        initialize_inheritance(&root);
+        let mut container = WindowsAppContainer::create().unwrap();
+        let icacls = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/icacls.exe");
+        let mut command = Command::new(icacls);
+        command.arg(&file);
+        if medium_integrity {
+            command.args(["/setintegritylevel", "M"]);
+        } else {
+            command.args(["/deny", "*S-1-1-0:(WD)"]);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "denial fixture: {output:?}");
+        let paths = [&root, &directory, &file];
+        let before: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        let grant = ResolvedFilesystemGrant {
+            path: if subtree {
+                directory.clone()
+            } else {
+                file.clone()
+            },
+            access: FilesystemAccess::Write,
+            kind: if subtree {
+                FilesystemGrantKind::DirectorySubtree
+            } else {
+                FilesystemGrantKind::ExactFile
+            },
+            source: FilesystemGrantSource::ProjectPolicy,
+            binding: FilesystemBindingMode::CanonicalPath,
+        };
+        let traversal = ResolvedFilesystemGrant {
+            path: root.clone(),
+            access: FilesystemAccess::ReadMetadata,
+            kind: FilesystemGrantKind::DirectorySubtree,
+            source: FilesystemGrantSource::ProjectPolicy,
+            binding: FilesystemBindingMode::CanonicalPath,
+        };
+        let result = WindowsFilesystemGrants::apply(&container, &[traversal, grant]);
+        let error = match result {
+            Err(error) => error,
+            Ok(mut grants) => {
+                grants.restore().unwrap();
+                container.cleanup().unwrap();
+                panic!("host ACL installation must not establish effective child write access");
+            }
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("effective AppContainer filesystem access"),
+            "{error}"
+        );
+        assert_eq!(
+            paths.iter().map(|path| read_acl(path)).collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"host-positive-control");
+        assert!(!directory.join("child-marker").exists());
+        container.cleanup().unwrap();
+    }
+
+    #[test]
+    fn partial_write_application_rolls_back_without_cleanup_failure() {
+        partial_application(false, false, false);
+    }
+
+    #[test]
+    fn partial_write_application_surfaces_rollback_failure() {
+        partial_application(false, false, true);
+    }
+
+    #[test]
+    fn runtime_inspection_failure_after_write_surfaces_rollback_failure() {
+        partial_application(true, false, true);
+    }
+
+    #[test]
+    fn partial_write_rollback_preserves_current_unrelated_aces() {
+        partial_application(false, true, true);
+    }
+
+    fn partial_application(runtime_failure: bool, concurrent_change: bool, rollback_failure: bool) {
+        use super::windows_acl::{initialize_inheritance, read_acl};
+        use crate::execution::{
+            FilesystemAccess, FilesystemBindingMode, FilesystemGrantKind, FilesystemGrantSource,
+            ResolvedFilesystemGrant,
+        };
+        let owner = tapid_test_support::TempProject::new("partial-write-rollback").unwrap();
+        let root = std::fs::canonicalize(owner.path()).unwrap();
+        let first = root.join("first");
+        let denied = root.join("denied at grant time");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&denied).unwrap();
+        let child = first.join("existing.txt");
+        std::fs::write(&child, b"existing").unwrap();
+        initialize_inheritance(&root);
+        let paths = [&root, &first, &child, &denied];
+        let before: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        let expected = if concurrent_change {
+            let icacls = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32")
+                .join("icacls.exe");
+            let added = Command::new(&icacls)
+                .arg(&first)
+                .args(["/grant", "*S-1-5-32-545:(OI)(CI)(R)"])
+                .output()
+                .unwrap();
+            assert!(
+                added.status.success(),
+                "unrelated ACE baseline setup failed: {added:?}"
+            );
+            let expected: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+            let removed = Command::new(&icacls)
+                .arg(&first)
+                .args(["/remove:g", "*S-1-5-32-545"])
+                .output()
+                .unwrap();
+            assert!(
+                removed.status.success(),
+                "unrelated ACE setup cleanup failed: {removed:?}"
+            );
+            assert_eq!(
+                paths.iter().map(|path| read_acl(path)).collect::<Vec<_>>(),
+                before
+            );
+            let first = first.clone();
+            super::ON_GRANT_FAILURE.with(|callback| {
+                *callback.borrow_mut() = Some(Box::new(move || {
+                    let added = Command::new(&icacls)
+                        .arg(&first)
+                        .args(["/grant", "*S-1-5-32-545:(OI)(CI)(R)"])
+                        .output()
+                        .unwrap();
+                    assert!(
+                        added.status.success(),
+                        "concurrent unrelated ACE addition failed: {added:?}"
+                    );
+                }))
+            });
+            expected
+        } else {
+            before.clone()
+        };
+        let mut grants: Vec<_> = [&first, &first, &denied]
+            .into_iter()
+            .map(|path| ResolvedFilesystemGrant {
+                path: path.clone(),
+                access: FilesystemAccess::Write,
+                kind: FilesystemGrantKind::DirectorySubtree,
+                source: FilesystemGrantSource::ProjectPolicy,
+                binding: FilesystemBindingMode::CanonicalPath,
+            })
+            .collect();
+        if runtime_failure {
+            grants[2].path = root.join("missing-runtime.exe");
+            grants[2].source = FilesystemGrantSource::BackendRuntime;
+            grants[2].access = FilesystemAccess::Read;
+            grants[2].kind = FilesystemGrantKind::ExactFile;
+        }
+        // Real preflight succeeds; fail only the final grant/inspection, not validation.
+        crate::execution::windows_write_validation::validate_existing_write_grants(&grants)
+            .unwrap();
+        let mut container = crate::execution::windows_job::WindowsAppContainer::create().unwrap();
+        if !runtime_failure {
+            super::GRANT_FAILURE_COUNTDOWN.with(|failure| failure.set(Some(2)));
+        }
+        super::RESTORE_ORDER.with(|order| order.borrow_mut().clear());
+        super::RESTORE_FAILURE_ONCE.with(|failure| failure.set(rollback_failure));
+        let result = super::WindowsFilesystemGrants::apply(&container, &grants);
+        let restoration_order = super::RESTORE_ORDER.with(|order| order.borrow().clone());
+        let observed_after_apply: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        for ((path, expected), observed) in paths.iter().zip(&expected).zip(&observed_after_apply) {
+            eprintln!(
+                "PARTIAL_ROLLBACK_DACL_RECEIPT path={} expected={expected:02x?} observed={observed:02x?}",
+                path.display()
+            );
+        }
+        // Keep a failed RED assertion from leaving a SID ACE behind: retry through a held grant
+        // if the old Drop swallowed the one-shot restoration failure.
+        let mut cleanup = super::WindowsPathAcl::grant(
+            &first,
+            container.sid(),
+            FilesystemAccess::Write,
+            FilesystemGrantKind::DirectorySubtree,
+        )
+        .unwrap();
+        cleanup.restore().unwrap();
+        let after: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        container.cleanup().unwrap();
+        assert_eq!(
+            restoration_order,
+            [1, 0],
+            "explicit rollback must continue in reverse order after one failure"
+        );
+        assert_eq!(
+            after, expected,
+            "exact full current DACL/control restoration"
+        );
+        assert_eq!(
+            observed_after_apply, expected,
+            "rollback must finish before apply returns; rescue cleanup cannot mask a leak"
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("partial preparation succeeded"),
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(if runtime_failure {
+                "inspect runtime DACL authority"
+            } else {
+                "injected grant-time denial"
+            }),
+            "original error lost: {message}"
+        );
+        assert_eq!(
+            message.contains("injected rollback denial"),
+            rollback_failure,
+            "explicit rollback failure disposition incorrect: {message}"
+        );
+    }
 
     #[test]
     #[ignore = "native Windows large-project measurement; creates 25,000 disposable files"]
@@ -1057,7 +1512,7 @@ mod tests {
         let mut outside_grant = resolved[0].clone();
         outside_grant.path = outside.clone();
         assert!(
-            super::verify_existing_runtime_access(&container, &outside_grant).is_err(),
+            super::verify_effective_filesystem_access(&container, &outside_grant).is_err(),
             "token must not gain unrelated read access"
         );
         assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
@@ -1170,6 +1625,99 @@ mod tests {
             after, before,
             "cleanup must restore exact target and descendant ACLs"
         );
+    }
+
+    #[test]
+    fn exact_directory_metadata_rejects_without_rewriting_legacy_security() {
+        let owner = tapid_test_support::TempProject::new("exact-metadata-acl").unwrap();
+        let root = std::fs::canonicalize(owner.path()).unwrap();
+        let child = root.join("child");
+        std::fs::create_dir(&child).unwrap();
+        let file = child.join("data.txt");
+        std::fs::write(&file, b"unchanged").unwrap();
+        use super::windows_acl::read_acl;
+        // Construct explicit matching legacy ACEs inside this owner only. SetFileSecurityW
+        // is used to make the test input deterministic, never as a production ACL API.
+        let sddl: Vec<_> = "D:(A;OICI;FA;;;WD)\0".encode_utf16().collect();
+        let mut descriptor = std::ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(), 1, &mut descriptor, std::ptr::null_mut(),
+            )
+            },
+            0
+        );
+        for path in [&root, &child, &file] {
+            let wide = super::runtime_path_wide(path);
+            assert_ne!(
+                unsafe {
+                    windows_sys::Win32::Security::SetFileSecurityW(
+                        wide.as_ptr(),
+                        windows_sys::Win32::Security::DACL_SECURITY_INFORMATION,
+                        descriptor,
+                    )
+                },
+                0
+            );
+        }
+        unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+        // Deliberately do not initialize/normalize inheritance: shared directories may use
+        // legacy metadata, and granting exact metadata must never rewrite their descendants.
+        let paths = [&root, &child, &file];
+        let before: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        let mut container = crate::execution::windows_job::WindowsAppContainer::create().unwrap();
+        let result = super::WindowsPathAcl::grant(
+            &root,
+            container.sid(),
+            crate::execution::FilesystemAccess::ReadMetadata,
+            crate::execution::FilesystemGrantKind::ExactDirectory,
+        );
+        let after: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        let metadata = crate::execution::ResolvedFilesystemGrant {
+            path: root.clone(),
+            access: crate::execution::FilesystemAccess::ReadMetadata,
+            kind: crate::execution::FilesystemGrantKind::ExactDirectory,
+            source: crate::execution::FilesystemGrantSource::BackendRuntime,
+            binding: crate::execution::FilesystemBindingMode::CanonicalPath,
+        };
+        let mut earlier = metadata.clone();
+        earlier.access = crate::execution::FilesystemAccess::Read;
+        earlier.kind = crate::execution::FilesystemGrantKind::DirectorySubtree;
+        earlier.source = crate::execution::FilesystemGrantSource::ProjectPolicy;
+        super::GRANT_FAILURE_COUNTDOWN.with(|count| count.set(Some(0)));
+        let transaction = super::WindowsFilesystemGrants::apply(&container, &[earlier, metadata]);
+        super::GRANT_FAILURE_COUNTDOWN.with(|count| count.set(None));
+        assert!(transaction.is_err());
+        let transaction_error = transaction.err().unwrap();
+        let transaction_after: Vec<_> = paths.iter().map(|path| read_acl(path)).collect();
+        container.cleanup().unwrap();
+        assert!(
+            result.is_err(),
+            "unproven exact metadata mutations must not be installed"
+        );
+        let error = result.err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("non-propagating exact-directory metadata"),
+            "{error}"
+        );
+        assert_eq!(
+            after, before,
+            "metadata rejection must preserve raw ACL/control bytes"
+        );
+        assert_eq!(
+            transaction_after, before,
+            "unsupported metadata must reject before applying earlier grants"
+        );
+        assert!(
+            transaction_error
+                .to_string()
+                .contains("non-propagating exact-directory metadata"),
+            "metadata preflight must precede all grant attempts: {transaction_error}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"unchanged");
     }
 
     #[test]
