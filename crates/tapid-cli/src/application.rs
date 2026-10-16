@@ -11,6 +11,7 @@ pub(crate) mod outcome;
 mod release_record;
 pub(crate) mod release_verification;
 pub(crate) mod replay;
+pub(crate) mod tools;
 pub(crate) mod upgrade;
 pub(crate) mod why;
 

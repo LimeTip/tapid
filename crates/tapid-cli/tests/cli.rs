@@ -15,6 +15,8 @@ mod cache_tests;
 mod ci_tests;
 #[path = "cli_cases/explain.rs"]
 mod explain_tests;
+#[path = "cli_cases/tools.rs"]
+mod tool_tests;
 
 mod workspace_acceptance;
 

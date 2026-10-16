@@ -315,14 +315,24 @@ pub(crate) struct OperationFailure {
 impl OperationFailure {
     pub(crate) fn new(
         error: OperationalError,
-        mut outcome: OperationOutcome,
+        outcome: OperationOutcome,
         recovery_error: Option<OperationalError>,
     ) -> Self {
+        let paths = ["package.json", "tapid.lock", "node_modules"]
+            .map(|name| outcome.project_dir.join(name));
+        Self::with_recovery_paths(error, outcome, recovery_error, paths)
+    }
+
+    /// Recovery scopes belong to the operation owning the durable outputs.
+    /// Ordinary project operations retain their existing default through new.
+    pub(crate) fn with_recovery_paths(
+        error: OperationalError,
+        mut outcome: OperationOutcome,
+        recovery_error: Option<OperationalError>,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
         if outcome.state == ChangeState::RecoveryRequired {
-            // An older transaction may fail before this attempt records mutations.
-            // Recovery must inspect all durable project outputs, not report zero.
-            for name in ["package.json", "tapid.lock", "node_modules"] {
-                let path = outcome.project_dir.join(name);
+            for path in paths {
                 if !outcome.changed_files.contains(&path) {
                     outcome.changed_files.push(path);
                 }

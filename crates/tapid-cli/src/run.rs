@@ -228,7 +228,9 @@ pub fn prepare_execution_request_with_working_directory(
 
 const MAX_HOST_PATH_DIRECTORIES: usize = 256;
 
-fn discover_node_runtime(host_path: Option<&OsStr>) -> Result<PathBuf, RunPreparationError> {
+pub(crate) fn discover_node_runtime(
+    host_path: Option<&OsStr>,
+) -> Result<PathBuf, RunPreparationError> {
     let Some(host_path) = host_path else {
         return Err(RunPreparationError::MissingNodeRuntime);
     };

@@ -43,6 +43,10 @@ tapid outdated [OPTIONS]
 tapid prune [OPTIONS]
 tapid why <PACKAGE> [OPTIONS]
 tapid upgrade [OPTIONS]
+tapid tool install <PACKAGE> [--tools-dir <PATH>]
+tapid tool list [--tools-dir <PATH>]
+tapid tool update <PACKAGE> [--tools-dir <PATH>]
+tapid tool remove <PACKAGE> [--tools-dir <PATH>]
 tapid cache info [--store-dir <PATH>]
 tapid cache clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid clean [--dry-run | --yes] [--store-dir <PATH>]
@@ -81,6 +85,77 @@ intended content. `--json` emits the versioned evidence summary, including on a
 byte mismatch; see the [JSON protocol](../../docs/json-results.md).
 
 `tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
+
+## Standalone CLI tools
+
+Install a tool without creating a project:
+
+```text
+tapid tool install typescript@^5
+tapid tool list
+tapid tool update typescript
+tapid tool remove typescript
+```
+
+Each tool has its own generated private manifest, ordinary tapid.lock, and
+dependency environment. Tools share the verified package cache. Only the
+explicitly installed package's bin commands are exported; transitive commands
+stay inside that tool's environment. npm names, scoped names, and supported
+semver ranges are accepted. Dist-tags, npm aliases, and JSR tools are not
+supported by this interface.
+
+Update resolves within the requirement recorded at installation. To change that
+requirement, run tool install again with a new spec. List reports the exact
+version, requirement, command mappings, and environment/lock paths; --json uses
+the existing versioned result protocol.
+
+The default tool root is:
+- Windows: %LOCALAPPDATA%/tapid/tools
+- macOS: ~/Library/Application Support/tapid/tools
+- Linux: $XDG_DATA_HOME/tapid/tools, or ~/.local/share/tapid/tools
+
+Add the reported root's bin directory to PATH once using your shell's normal
+configuration. Tapid does not edit shell profiles or the persistent environment.
+For example, on Linux with the default location, the current shell can use
+export PATH="$HOME/.local/share/tapid/tools/bin:$PATH". On Windows, add the
+reported bin directory to your user Path and open a new terminal. --tools-dir
+must be absolute and selects a separate installation. Install/update also accept
+--store-dir and --registry-fixture for the same local fixture/cache seams as
+project installation. Tool commands do not load the caller project's tapid.toml.
+
+JavaScript entry points require an existing Node executable on PATH. Native
+executables are also supported. Windows launchers select Node explicitly for
+recognized Node shebangs; other script interpreters are rejected there. Unix
+entry points use their interpreter/shebang or native executable. Command names
+must contain only letters, numbers, dot, underscore, or hyphen. Launcher paths
+must be UTF-8 and cannot contain double quotes or line breaks. Windows commands
+are exposed through both .cmd and .ps1 files; shell execution policy still applies.
+
+Tool commands run with your user permissions and retain the caller's working
+directory. Dependency isolation does not sandbox execution, and does not change
+tapid run's containment policy. Lifecycle scripts never run during tool
+installation/update. Skipped hooks are reported; generated/native outputs may
+therefore be missing. Additional runtime setup remains a separate command:
+for example, after installing a compatible agent-browser package, explicitly
+invoke agent-browser install to request its browser download. Tapid neither
+performs that download implicitly nor claims the package is fully configured.
+
+A new environment is verified before activation. Cross-tool command collisions,
+Windows case/extension collisions, the reserved tapid command, and unowned
+command files are rejected. Updates/removals verify recorded launcher bytes;
+user replacements and unrecognized files/directories are preserved. A durable
+journal selects the old catalog before commit and the new catalog after commit.
+The next tool operation or invocation settles interrupted publication. List can
+recover pending work and retire inactive owned environments.
+
+A running invocation leases its environment. Cleanup deferred by that lease or
+an open Windows file is reported as committed_cleanup_pending in JSON and retried
+by later tool operations. The lease covers the process waited for by the
+launcher, not detached descendants: finish daemon sessions before replacing
+their tool. Tool state and launchers must not be edited concurrently by other
+host processes. Link/reparse checks reject static redirection; these checks are
+not protection against a host process already allowed to replace managed paths.
+Unknown or inconsistent recovery state fails closed and preserves files.
 
 ## Inspect and clear the package cache
 

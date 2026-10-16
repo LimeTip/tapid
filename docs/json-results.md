@@ -8,6 +8,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | --- | --- |
 | `install`, alias `i` | Install or replay result |
 | `add`, `remove`, `update`, `prune` | Dependency operation result |
+| `tool install`, `tool list`, `tool update`, `tool remove` | Tool inventory and command mappings with operation change/recovery state |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
 | `explain` | Exact package evidence under `data`; registry metadata or a local snapshot, with optional artifact byte verification |
 | `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
@@ -74,3 +75,9 @@ Within schema version 1, existing field types, code meanings, transaction states
 ## Run child output and receipts
 
 `tapid run` preserves the child's stdout, stderr, and exit code. Its existing `--receipt-json` option appends a receipt to stderr after child output. That stream may contain arbitrary child bytes, so it is not a single-object JSON channel. Global `--json` rejects `run` before launch to preserve the package-result stdout guarantee. A future machine result channel for run must be a separately selected file or descriptor, isolated from both child streams, and retain the child exit code. This release does not add that channel or change receipt behavior.
+
+## Standalone tools
+
+Tool commands use operation `tool`. The `data.tools` array is sorted by npm package name and contains `name`, `version`, `requirement`, `environment`, `lockfile`, and a sorted `commands` array of `name`/`target` mappings. Targets are relative to the recorded environment. `data.bin_dir` identifies the PATH directory. Text follows the same bounded/sanitized presentation rules as other results.
+
+Mutations report committed state only after the global command decision. Retained in-use environments or cleanup failures produce `committed_cleanup_pending`; inconsistent pending publication produces recovery failure instead of overwriting unknown files. Listing may settle a previous transaction or clean inactive owned environments. Installed package scripts are never run by these operations. Execution of an installed command is a normal user process and has no sandbox receipt.
