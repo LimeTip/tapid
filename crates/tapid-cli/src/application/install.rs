@@ -527,8 +527,12 @@ fn perform_install(
         if let Some(lock) = &previous_lock {
             let registry_config = crate::registry::RegistryConfig::load(&project_dir)
                 .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-            can_replay_online(&project_dir, lock, &registry_config, &lifecycle_policy)?
-                && replayable
+            super::replay::can_replay_online(
+                &project_dir,
+                lock,
+                &registry_config,
+                &lifecycle_policy,
+            )? && replayable
         } else {
             false
         }
@@ -753,7 +757,11 @@ fn perform_install(
         &workspace,
         &registry_config,
     )?;
-    validate_workspace_dependency_edges(&workspace, &workspace_registry_dependencies, &lock)?;
+    super::replay::validate_workspace_dependency_edges(
+        &workspace,
+        &workspace_registry_dependencies,
+        &lock,
+    )?;
     crate::application::replay::validate_root_bindings(&lock, &root_manifest, &registry_config)?;
     if ci {
         online::validate_locked_artifact_sources(&lock, registry_fixture)?;
@@ -956,108 +964,6 @@ fn read_lock(path: &Path) -> Result<Lockfile, OperationalError> {
     })
 }
 
-pub(super) fn validate_workspace_dependency_edges(
-    workspace: &online::WorkspaceMaterialization,
-    registry_dependencies: &[online::WorkspaceRegistryDependency],
-    lock: &Lockfile,
-) -> Result<(), String> {
-    for current in &workspace.locked {
-        let key = current.key();
-        let locked = lock
-            .workspace_packages()
-            .get(&key)
-            .ok_or_else(|| format!("lockfile is missing workspace package {key}"))?;
-        let mut expected_names = std::collections::BTreeSet::new();
-        for (name, target) in current.dependencies() {
-            expected_names.insert(name.clone());
-            if locked.dependencies().get(name) != Some(target) {
-                return Err(format!(
-                    "lockfile workspace dependency '{name}' for {key} does not match the current local workspace graph"
-                ));
-            }
-            let target_key = target
-                .parse::<tapid_lockfile::LockfilePackageKey>()
-                .map_err(|error| error.to_string())?;
-            if target_key.source.workspace().is_none()
-                || !lock.workspace_packages().contains_key(target)
-            {
-                return Err(format!(
-                    "lockfile workspace dependency '{name}' for {key} does not target a workspace package"
-                ));
-            }
-        }
-        for dependency in registry_dependencies
-            .iter()
-            .filter(|dependency| dependency.member_key == key)
-        {
-            let name = dependency.manifest_name.clone();
-            expected_names.insert(name.clone());
-            let target = locked.dependencies().get(&name).ok_or_else(|| {
-                format!(
-                    "lockfile omits workspace member dependency '{}' from {key}",
-                    dependency.manifest_name
-                )
-            })?;
-            let target_key = target
-                .parse::<tapid_lockfile::LockfilePackageKey>()
-                .map_err(|error| error.to_string())?;
-            if target_key.source.package_source().as_ref() != Some(&dependency.registry)
-                || target_key.name != dependency.package
-                || !dependency
-                    .requirement
-                    .matches_locked_version(&target_key.version)
-                || !lock.packages().contains_key(target)
-            {
-                return Err(format!(
-                    "lockfile target for workspace member dependency '{}' does not satisfy its registry, name, and version requirement",
-                    dependency.manifest_name
-                ));
-            }
-        }
-        let actual_names = locked
-            .dependencies()
-            .keys()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>();
-        if actual_names != expected_names {
-            return Err(format!(
-                "lockfile workspace dependency edges for {key} do not match the current member manifest"
-            ));
-        }
-    }
-    for peer in &workspace.peer_dependencies {
-        let provider_found = match &peer.provider {
-            online::WorkspacePeerProvider::Workspace { key, version } => {
-                let target_key = key
-                    .parse::<tapid_lockfile::LockfilePackageKey>()
-                    .map_err(|error| error.to_string())?;
-                target_key.version == *version
-                    && lock.workspace_packages().contains_key(key)
-                    && workspace.locked.iter().any(|member| member.key() == *key)
-            }
-            online::WorkspacePeerProvider::Registry { registry, package } => {
-                lock.roots().iter().any(|key| {
-                    key.parse::<tapid_lockfile::LockfilePackageKey>()
-                        .ok()
-                        .is_some_and(|target| {
-                            target.source.package_source().as_ref() == Some(registry)
-                                && target.name == *package
-                                && peer.requirement.matches_locked_version(&target.version)
-                                && lock.packages().contains_key(key)
-                        })
-                })
-            }
-        };
-        if !provider_found {
-            return Err(format!(
-                "lockfile has no provider satisfying workspace member peer dependency '{}' from {}",
-                peer.manifest_name, peer.member_key
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn materialize_install(
     project_dir: &Path,
     input: NamedLayoutInput,
@@ -1183,29 +1089,6 @@ fn stage_layout(
         return Err(OperationalError::new(ErrorKind::Materialization, error));
     }
     Ok(stage)
-}
-
-/// The online fast path depends on graph inputs and lifecycle policy, not cache availability.
-pub(super) fn can_replay_online(
-    project: &Path,
-    lock: &Lockfile,
-    config: &crate::registry::RegistryConfig,
-    policy: &tapid_runner::DependencyLifecyclePolicy,
-) -> Result<bool, OperationalError> {
-    let routes_match = online::validate_locked_routes(lock, config)?;
-    let digest_matches = lock.root_manifest_digest() == online::root_digest(project)?;
-    if digest_matches {
-        online::validate_locked_files(project, lock)?;
-    }
-    let workspace = online::workspace_materialization(project, config)?;
-    Ok(routes_match
-        && policy.approvals().is_empty()
-        && lock
-            .packages()
-            .values()
-            .all(|p| p.derived_hooks().is_empty())
-        && digest_matches
-        && online::workspace_matches_lock(&workspace, lock))
 }
 
 #[cfg(test)]

@@ -228,21 +228,28 @@ pub(super) fn resolve_package_graph(
     });
     seed.extend(copied_records.values().cloned());
     let mut metadata_lookups = 0;
+    // Root refresh, tagged workspace peers, incremental resolution, and saved
+    // declarations share fresh metadata for this operation. Keep it separate
+    // from locked evidence, which the resolver reconciles with fetched records.
+    let mut metadata = BTreeMap::<(PackageSource, PackageName), Vec<PackageRecord>>::new();
     let mut fetch_records = |registry: &PackageSource, name: &PackageName| {
+        let key = (registry.clone(), name.clone());
+        if let Some(records) = metadata.get(&key) {
+            return Ok(records.clone());
+        }
         metadata_lookups += 1;
-        if registry.registry().is_none() {
-            return Ok(copied_records
+        let records = if registry.registry().is_none() {
+            copied_records
                 .values()
                 .filter(|record| &record.registry == registry && &record.name == name)
                 .cloned()
-                .collect());
-        }
-        if fixture.is_some() {
-            Ok(fixture_records
+                .collect()
+        } else if fixture.is_some() {
+            fixture_records
                 .values()
                 .filter(|package| &package.registry == registry && &package.name == name)
                 .cloned()
-                .collect())
+                .collect()
         } else {
             let registry = registry
                 .registry()
@@ -260,8 +267,9 @@ pub(super) fn resolve_package_graph(
                 registry,
                 name,
                 allow_missing_integrity,
-            )
-        }
+            )?
+        };
+        Ok(metadata.entry(key).or_insert(records).clone())
     };
     if let Some(request) = update.filter(|request| request.named) {
         update::refresh_selected(
@@ -351,4 +359,126 @@ pub(super) fn workspace_registry_target<'a>(
             "no selected registry package satisfies workspace member dependency '{}' ({:?})",
             dependency.manifest_name, dependency.requirement
         )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::lifecycle::{SavePolicy, plan_update};
+
+    #[test]
+    fn named_update_keeps_metadata_from_distinct_sources_separate() {
+        let project = tapid_test_support::TempProject::new("graph-metadata-sources").unwrap();
+        let text = r#"{"name":"app","version":"1.0.0","dependencies":{"local":"npm:@s/foo@^1","jsr:@s/foo":"^1"}}"#;
+        project.write("package.json", text.as_bytes()).unwrap();
+        let fixture = serde_json::json!({"packages":[
+            {"registry": NPM, "name":"@s/foo", "version":"1.1.0", "integrity":integrity(b"npm").to_string(), "artifact":"never-download"},
+            {"registry": JSR, "name":"@s/foo", "version":"1.2.0", "integrity":integrity(b"jsr").to_string(), "artifact":"never-download"}
+        ]});
+        let fixture = project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let manifest = PackageManifest::parse(text).unwrap();
+        let plan = plan_update(&manifest, &["local".into(), "jsr:@s/foo".into()], false).unwrap();
+        let config = crate::registry::RegistryConfig::default();
+        let target = project.path().join("package.json");
+        let resolved = resolve_package_graph(
+            project.path(),
+            &manifest,
+            workspace_materialization(project.path(), &config).unwrap(),
+            Some(&fixture),
+            false,
+            &config,
+            None,
+            Some(UpdateRequest {
+                plan: &plan,
+                target: &target,
+                named: true,
+                original_root_digest: None,
+                save: Some(SavePolicy::Exact),
+            }),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(resolved.metadata_lookups, 2);
+        assert_eq!(resolved.resolution.selected.len(), 2);
+        for (source, version) in [(NPM, "1.1.0"), (JSR, "1.2.0")] {
+            assert!(
+                resolved
+                    .resolution
+                    .selected
+                    .iter()
+                    .any(|id| id.registry.to_string() == source
+                        && id.name.as_str() == "@s/foo"
+                        && id.version.to_string() == version)
+            );
+        }
+        let saved = resolved.updated_manifest.unwrap();
+        assert_eq!(saved.dependencies()["local"], "npm:@s/foo@1.1.0");
+        assert_eq!(saved.dependencies()["jsr:@s/foo"], "1.2.0");
+    }
+
+    #[test]
+    fn named_update_retrieves_tagged_workspace_peer_metadata_once() {
+        let project = tapid_test_support::TempProject::new("graph-metadata-reuse").unwrap();
+        let manifest_text = r#"{"name":"app","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"host":"^1.0.0"},"peerDependencies":{"host":"latest"}}"#;
+        project
+            .write("package.json", manifest_text.as_bytes())
+            .unwrap();
+        project
+            .write(
+                "packages/plugin/package.json",
+                br#"{"name":"plugin","version":"1.0.0","peerDependencies":{"host":"latest"}}"#,
+            )
+            .unwrap();
+        let registry_fixture = serde_json::json!({"packages":[{
+            "registry": NPM, "name": "host", "version": "1.1.0",
+            "dist_tags": ["latest"], "integrity": integrity(b"fixture").to_string(),
+            "artifact": "never-download"
+        }]});
+        project
+            .write("registry.json", registry_fixture.to_string().as_bytes())
+            .unwrap();
+        let manifest = PackageManifest::parse(manifest_text).unwrap();
+        let plan = plan_update(&manifest, &["host".into()], false).unwrap();
+        let config = crate::registry::RegistryConfig::default();
+        let target = project.path().join("package.json");
+        let fixture_path = project.path().join("registry.json");
+        let resolved = resolve_package_graph(
+            project.path(),
+            &plan.manifest,
+            workspace_materialization(project.path(), &config).unwrap(),
+            Some(&fixture_path),
+            false,
+            &config,
+            None,
+            Some(UpdateRequest {
+                plan: &plan,
+                target: &target,
+                named: true,
+                original_root_digest: None,
+                save: Some(SavePolicy::Exact),
+            }),
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(resolved.resolution.selected.len(), 1);
+        let provider = &resolved.resolution.root_bindings[&(
+            NPM.parse::<PackageSource>().unwrap(),
+            "host".parse().unwrap(),
+        )];
+        assert_eq!(provider.name.as_str(), "host");
+        assert_eq!(provider.version.to_string(), "1.1.0");
+        let saved = resolved.updated_manifest.unwrap();
+        assert_eq!(saved.dependencies()["host"], "1.1.0");
+        assert_eq!(saved.peer_dependencies()["host"], "1.1.0");
+        assert_eq!(
+            resolved.metadata_lookups, 1,
+            "one provider serves root update, workspace peer validation, and saved declarations"
+        );
+        for path in ["tapid.lock", "node_modules", ".tapid-activation.lock"] {
+            assert!(!project.path().join(path).exists(), "{path}");
+        }
+    }
 }
