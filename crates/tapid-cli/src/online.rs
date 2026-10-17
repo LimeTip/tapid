@@ -257,12 +257,13 @@ pub(crate) struct WorkspaceMaterialization {
     pub members: BTreeMap<String, (LocalWorkspaceSource, PackageVersion)>,
     pub registry_dependencies: Vec<WorkspaceRegistryDependency>,
     pub peer_dependencies: Vec<WorkspacePeerDependency>,
+    pub declarations: Vec<crate::application::outcome::RequirementDiagnostic>,
 }
 
 pub(crate) fn workspace_materialization(
     project: &Path,
     registry_config: &crate::registry::RegistryConfig,
-) -> Result<WorkspaceMaterialization, String> {
+) -> Result<WorkspaceMaterialization, OperationalError> {
     workspace_materialization_with_manifest(project, registry_config, None)
 }
 
@@ -270,8 +271,9 @@ pub(super) fn workspace_materialization_with_manifest(
     project: &Path,
     registry_config: &crate::registry::RegistryConfig,
     replacement: Option<(&Path, &PackageManifest)>,
-) -> Result<WorkspaceMaterialization, String> {
-    let workspace = Workspace::discover(project)?;
+) -> Result<WorkspaceMaterialization, OperationalError> {
+    let workspace = Workspace::discover_typed(project)
+        .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))?;
     let root = workspace
         .root_path()
         .parent()
@@ -279,7 +281,7 @@ pub(super) fn workspace_materialization_with_manifest(
     let canonical_project = fs::canonicalize(project)
         .map_err(|error| format!("cannot resolve install project root: {error}"))?;
     if root != canonical_project {
-        return Err("resolved workspace root does not match install project root".to_owned());
+        return Err("resolved workspace root does not match install project root".into());
     }
     let mut packages = Vec::new();
     let mut locked = Vec::new();
@@ -287,10 +289,18 @@ pub(super) fn workspace_materialization_with_manifest(
     let mut locked_by_name = BTreeMap::new();
     let mut registry_dependencies = Vec::new();
     let mut peer_dependencies = Vec::new();
+    let mut declarations = Vec::new();
     for member in workspace.members() {
         let manifest = replacement
             .filter(|(path, _)| *path == member.path())
             .map_or(member.manifest(), |(_, manifest)| manifest);
+        declarations.extend(
+            crate::application::outcome::DiagnosticContext::manifest_requirements(
+                manifest,
+                member.path(),
+                Some(member.name()),
+            ),
+        );
         let member_root = member
             .path()
             .parent()
@@ -305,7 +315,8 @@ pub(super) fn workspace_materialization_with_manifest(
             return Err(format!(
                 "workspace member escapes workspace root: {}",
                 member_root.display()
-            ));
+            )
+            .into());
         }
         let relative = canonical
             .strip_prefix(root)
@@ -366,7 +377,7 @@ pub(super) fn workspace_materialization_with_manifest(
                         range,
                         member.name(),
                         version
-                    ));
+                    ).into());
                 }
                 (
                     requirement,
@@ -381,7 +392,7 @@ pub(super) fn workspace_materialization_with_manifest(
                         "workspace peer dependency '{}' in member '{}' has no local workspace provider; refusing registry fallback",
                         name,
                         member.name()
-                    ));
+                    ).into());
                 }
                 let (registry, package) = dependency_identity(registry_config, name)?;
                 if copied::declaration(range)
@@ -390,7 +401,7 @@ pub(super) fn workspace_materialization_with_manifest(
                 {
                     return Err(format!(
                         "copied dependency '{name}' in a workspace member is unsupported; declare copied artifacts at the project root"
-                    ));
+                    ).into());
                 }
                 let requirement = range.parse::<Requirement>().map_err(|error| {
                     format!(
@@ -424,7 +435,7 @@ pub(super) fn workspace_materialization_with_manifest(
                             "workspace dependency '{}' in member '{}' has no local workspace target; refusing registry fallback",
                             name,
                             member.name()
-                        ));
+                        ).into());
                     }
                     if copied::declaration(range)
                         .map_err(|reason| format!("dependency '{name}': {reason}"))?
@@ -432,7 +443,7 @@ pub(super) fn workspace_materialization_with_manifest(
                     {
                         return Err(format!(
                             "copied workspace member dependency '{name}' is unsupported; declare copied artifacts at the project root"
-                        ));
+                        ).into());
                     }
                     let requirement = range.parse::<Requirement>().map_err(|error| {
                         format!(
@@ -443,12 +454,13 @@ pub(super) fn workspace_materialization_with_manifest(
                     if manifest_registry.to_string() == JSR && requirement.is_alias() {
                         return Err(format!(
                             "npm alias '{name}@{range}' cannot use a JSR dependency name"
-                        ));
+                        )
+                        .into());
                     }
                     if manifest_registry.as_str() == JSR && requirement.dist_tag().is_some() {
                         return Err(format!(
                             "unsupported JSR dist-tag dependency '{name}@{range}': npm dist-tags only are supported"
-                        ));
+                        ).into());
                     }
                     let package = requirement.package_name(&local_package).clone();
                     let registry = registry_for_requirement(registry_config, name, &requirement)?;
@@ -469,7 +481,7 @@ pub(super) fn workspace_materialization_with_manifest(
                         range,
                         member.name(),
                         version
-                    ));
+                    ).into());
                 }
                 let target = LockfilePackageKey::workspace(source.clone()).to_string();
                 locked[package_index]
@@ -485,6 +497,7 @@ pub(super) fn workspace_materialization_with_manifest(
         members,
         registry_dependencies,
         peer_dependencies,
+        declarations,
     })
 }
 
@@ -669,11 +682,18 @@ fn artifact_progress_checkpoint(completed: usize, total: usize) -> bool {
 pub(crate) fn validate_manifest_roots(
     project: &Path,
     manifest: &PackageManifest,
-) -> Result<(), String> {
-    let registry_config = crate::registry::RegistryConfig::load(project)?;
-    copied::validate_declarations(project, manifest)?;
-    let workspace = workspace_materialization(project, &registry_config)?;
-    workspace_root_resolution(manifest, &workspace, &registry_config).map(|_| ())
+) -> Result<(), OperationalError> {
+    let invalid = |error| OperationalError::new(ErrorKind::InvalidRequest, error);
+    let registry_config = crate::registry::RegistryConfig::load(project).map_err(invalid)?;
+    copied::validate_declarations(project, manifest).map_err(invalid)?;
+    let workspace = workspace_materialization(project, &registry_config).map_err(|mut error| {
+        // Preserve the request-validation category while retaining typed evidence.
+        error.kind = ErrorKind::InvalidRequest;
+        error
+    })?;
+    workspace_root_resolution(manifest, &workspace, &registry_config)
+        .map(|_| ())
+        .map_err(invalid)
 }
 
 pub(crate) fn resolved_workspace_registry_dependencies(
@@ -975,8 +995,9 @@ pub(crate) fn resolve_and_fetch_with_lock(
         )
         .map_err(|error| OperationalError::new(ErrorKind::Resolution, error))?;
         platform_contexts.insert(id.clone(), platform_context.clone());
-        let (actual, tree_digest, tree) =
-            artifact_fetcher.prepare(id, &record, pinned, &mut store_transaction)?;
+        let (actual, tree_digest, tree) = artifact_fetcher
+            .prepare(id, &record, pinned, &mut store_transaction)
+            .map_err(|error| error.for_package(id.into()))?;
         let key = LockfilePackageKey::from_source(
             id.registry.clone(),
             id.name.clone(),

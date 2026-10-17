@@ -312,8 +312,7 @@ pub(crate) fn resolve_workspace(
         OperationalError::from_source(ErrorKind::Project, error)
             .context("cannot open project directory")
     })?;
-    let workspace = Workspace::discover(&project_dir)
-        .map_err(|error| OperationalError::new(ErrorKind::Project, error))?;
+    let workspace = Workspace::discover_typed(&project_dir).map_err(OperationalError::from)?;
     let manifest = workspace
         .select(selector)
         .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?
@@ -446,7 +445,7 @@ struct FixturePackage {
     version: String,
 }
 
-fn kind_name(kind: DependencyKind) -> &'static str {
+pub(crate) fn kind_name(kind: DependencyKind) -> &'static str {
     match kind {
         DependencyKind::Dependencies => "dependencies",
         DependencyKind::DevDependencies => "devDependencies",
@@ -455,7 +454,9 @@ fn kind_name(kind: DependencyKind) -> &'static str {
     }
 }
 
-fn direct_dependencies(manifest: &PackageManifest) -> Vec<(String, String, DependencyKind)> {
+pub(crate) fn direct_dependencies(
+    manifest: &PackageManifest,
+) -> Vec<(String, String, DependencyKind)> {
     [
         (manifest.dependencies(), DependencyKind::Dependencies),
         (manifest.dev_dependencies(), DependencyKind::DevDependencies),
@@ -618,6 +619,14 @@ fn outdated_entries(
                 })
                 .map(|key| key.version)
                 .max();
+            let diagnostic = (!compatible).then(|| {
+                    OperationalError::new(
+                        ErrorKind::InvalidRequest,
+                        format!(
+                            "local workspace version {local_version} does not satisfy declared range {declared}"
+                        ),
+                    ).at_dependency(&selection.manifest_path, kind_name(kind), &identity, &declared)
+                });
             entries.push(OutdatedEntry {
                 identity,
                 kind: kind_name(kind).to_owned(),
@@ -625,14 +634,7 @@ fn outdated_entries(
                 locked: locked_version.map(|version| version.to_string()),
                 newest_compatible: compatible.then(|| local_version.to_string()),
                 newest_available: Some(local_version.to_string()),
-                diagnostic: (!compatible).then(|| {
-                    OperationalError::new(
-                        ErrorKind::InvalidRequest,
-                        format!(
-                            "local workspace version {local_version} does not satisfy declared range {declared}"
-                        ),
-                    )
-                }),
+                diagnostic,
             });
             continue;
         }
@@ -760,6 +762,20 @@ fn outdated_entries(
                 Some(error.context("registry metadata unavailable")),
             ),
         };
+        let diagnostic = diagnostic.map(|error| {
+            error
+                .for_package(super::outcome::DiagnosticPackage {
+                    source: origin.to_string(),
+                    name: package_name.to_string(),
+                    version: None,
+                })
+                .at_dependency(
+                    &selection.manifest_path,
+                    kind_name(kind),
+                    &identity,
+                    &declared,
+                )
+        });
         entries.push(OutdatedEntry {
             identity,
             kind: kind_name(kind).to_owned(),

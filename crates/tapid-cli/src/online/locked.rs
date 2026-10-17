@@ -1,5 +1,6 @@
 //! Verification and hydration of the graph already selected by a lockfile.
 use super::*;
+use crate::application::outcome::DiagnosticContext;
 
 /// Validate every registry identity and report whether the locked target can replay.
 pub(crate) fn validate_locked_routes(
@@ -148,7 +149,18 @@ fn hydrate_with_fetch(
             return Err(OperationalError::new(
                 ErrorKind::Integrity,
                 "locked artifact lacks registry-declared integrity provenance",
-            ));
+            )
+            .with_diagnostic(DiagnosticContext::comparison(
+                "integrity_provenance",
+                None,
+                "registry_declared",
+                if package.registry_integrity_declared() == Some(false) {
+                    "locally_computed"
+                } else {
+                    "missing"
+                },
+            ))
+            .for_package((&key).into()));
         }
         let url = package.artifact_url().or_else(|| key.source.copied().map(PackageSource::as_str)).ok_or_else(|| {
             OperationalError::new(
@@ -165,7 +177,14 @@ fn hydrate_with_fetch(
             return Err(OperationalError::new(
                 ErrorKind::Integrity,
                 format!("integrity mismatch for locked package {}", key.name),
-            ));
+            )
+            .with_diagnostic(DiagnosticContext::comparison(
+                "artifact_integrity",
+                Some("sha512"),
+                &expected,
+                integrity(&bytes),
+            ))
+            .for_package((&key).into()));
         }
         fs::create_dir_all(store.root())
             .map_err(|error| OperationalError::from_source(ErrorKind::Store, error))?;
@@ -193,7 +212,14 @@ fn hydrate_with_fetch(
             return Err(OperationalError::new(
                 ErrorKind::Integrity,
                 format!("locked tree digest mismatch for {}", key.name),
-            ));
+            )
+            .with_diagnostic(DiagnosticContext::comparison(
+                "tree_digest",
+                Some("sha256"),
+                &digest,
+                &actual,
+            ))
+            .for_package((&key).into()));
         }
         if staged.insert(digest.to_string()) {
             transaction
@@ -571,7 +597,14 @@ pub(crate) fn prepare_locked_install(
                 return Err(OperationalError::new(
                     ErrorKind::Integrity,
                     "locked artifact integrity mismatch",
-                ));
+                )
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "artifact_integrity",
+                    Some("sha512"),
+                    &expected,
+                    integrity(&bytes),
+                ))
+                .for_package(key.into()));
             }
             let temp_id = NEXT_TEMP_TREE_ID.fetch_add(1, Ordering::Relaxed);
             let temporary = TemporaryTree(
