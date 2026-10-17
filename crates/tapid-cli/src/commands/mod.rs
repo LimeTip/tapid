@@ -13,6 +13,7 @@ pub(crate) mod manifest;
 mod npm_import;
 mod release_verification;
 pub(crate) mod run;
+mod sandbox;
 pub(crate) mod upgrade;
 pub(crate) mod why;
 
@@ -63,6 +64,8 @@ pub(crate) enum Command {
     Clean(cache::CleanArgs),
     /// Print the Apache-2.0 license and copyright attribution.
     License,
+    /// Manage the administrator-installed Windows network guard for unattended contained runs.
+    Sandbox(sandbox::Args),
     #[command(name = "__verify-release-record", hide = true)]
     VerifyReleaseRecord(release_verification::Args),
     #[command(name = "__prepare-release-install", hide = true)]
@@ -176,6 +179,7 @@ impl Command {
             Self::Cache(_) => "cache",
             Self::Clean(_) => "clean",
             Self::License => "license",
+            Self::Sandbox(_) => "sandbox",
             Self::VerifyReleaseRecord(_) => "__verify-release-record",
             Self::PrepareReleaseInstall(_) => "__prepare-release-install",
             Self::Init(_) => "init",
@@ -230,6 +234,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::Cache(args)) => cache::run(args, json),
         Some(Command::Clean(args)) => cache::clean(args, json),
         Some(Command::License) => license::run(),
+        Some(Command::Sandbox(args)) => sandbox::run(args),
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
         Some(Command::PrepareReleaseInstall(args)) => release_verification::prepare_install(args),
         None => {
