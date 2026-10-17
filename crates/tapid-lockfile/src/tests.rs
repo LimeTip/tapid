@@ -913,10 +913,35 @@ fn package_key_roundtrips_contexts_without_loss() {
     let key = package.key();
     let parsed = key.parse::<super::LockfilePackageKey>().unwrap();
     assert_eq!(parsed.to_string(), key);
+    assert_eq!(parsed.peer_context().unwrap(), peer);
+    assert_eq!(parsed.platform_context().unwrap(), platform);
     assert!(key.contains("foo%2Dbar"));
     assert!(key.contains("linux%2Dgnu"));
     assert!(key.contains("x86_64%2Dunknown"));
     assert!(key.contains("musl%2Dextra"));
+}
+
+#[test]
+fn typed_context_accessors_reject_noncanonical_public_field_mutations() {
+    let key: super::LockfilePackageKey = package_fixture().key().parse().unwrap();
+    for peer in [
+        "react@1.0.0",
+        "name=react;version=%31.0.0",
+        "name=react;version=1.0.0,name=react;version=1.0.0",
+    ] {
+        let mut changed = key.clone();
+        changed.peer_context = peer.into();
+        assert!(changed.peer_context().is_err(), "accepted {peer}");
+    }
+    for platform in [
+        "linux-x64",
+        "os=linux;libc=;cpu=x64",
+        "os=%6Cinux;cpu=x64;libc=",
+    ] {
+        let mut changed = key.clone();
+        changed.platform_context = platform.into();
+        assert!(changed.platform_context().is_err(), "accepted {platform}");
+    }
 }
 
 #[test]

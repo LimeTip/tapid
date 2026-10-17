@@ -23,6 +23,12 @@ use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 use tapid_store::Store;
 
+#[derive(Clone, Copy)]
+pub(crate) struct ManifestEdit<'a> {
+    pub(crate) expected: &'a PackageManifest,
+    pub(crate) updated: &'a PackageManifest,
+}
+
 #[derive(Debug)]
 pub(crate) struct InstallReport {
     pub(crate) package_count: usize,
@@ -140,9 +146,10 @@ impl InstallSession {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum InstallMode {
+pub(crate) enum InstallMode<'a> {
     Online,
     Refresh,
+    Update(super::lifecycle::UpdateRequest<'a>),
     Offline,
     Frozen,
     Ci,
@@ -207,83 +214,45 @@ pub(crate) fn default_store_root() -> Result<PathBuf, String> {
     default_store_root_for(std::env::consts::OS, |name| std::env::var_os(name))
 }
 
+pub(crate) enum ManifestMutation<'a> {
+    None,
+    AddPackage(&'a str),
+    ReplaceManifest(ManifestEdit<'a>),
+}
+
+pub(crate) struct InstallRequest<'a> {
+    pub(crate) project_dir: &'a Path,
+    pub(crate) target_manifest_path: &'a Path,
+    pub(crate) mutation: ManifestMutation<'a>,
+    pub(crate) store_root: Option<&'a Path>,
+    pub(crate) mode: InstallMode<'a>,
+    pub(crate) registry_fixture: Option<&'a Path>,
+    pub(crate) allow_unverified_registry_artifacts: bool,
+}
+
 pub(crate) fn run(
-    project_dir: &Path,
-    package: Option<&str>,
-    store_root: Option<&Path>,
-    mode: InstallMode,
-    registry_fixture: Option<&Path>,
-    allow_unverified_registry_artifacts: bool,
+    request: InstallRequest<'_>,
     report_replay_progress: impl FnMut(Progress),
 ) -> Result<InstallReport, OperationFailure> {
-    run_with_manifest(
+    let InstallRequest {
         project_dir,
-        None,
-        package,
-        store_root,
         mode,
-        registry_fixture,
         allow_unverified_registry_artifacts,
-        report_replay_progress,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_with_manifest(
-    project_dir: &Path,
-    manifest_override: Option<&PackageManifest>,
-    package: Option<&str>,
-    store_root: Option<&Path>,
-    mode: InstallMode,
-    registry_fixture: Option<&Path>,
-    allow_unverified_registry_artifacts: bool,
-    report_replay_progress: impl FnMut(Progress),
-) -> Result<InstallReport, OperationFailure> {
-    run_with_manifest_target(
-        project_dir,
-        Path::new("package.json"),
-        manifest_override,
-        package,
-        store_root,
-        mode,
-        registry_fixture,
-        allow_unverified_registry_artifacts,
-        report_replay_progress,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_with_manifest_target(
-    project_dir: &Path,
-    target_manifest_path: &Path,
-    manifest_override: Option<&PackageManifest>,
-    package: Option<&str>,
-    store_root: Option<&Path>,
-    mode: InstallMode,
-    registry_fixture: Option<&Path>,
-    allow_unverified_registry_artifacts: bool,
-    report_replay_progress: impl FnMut(Progress),
-) -> Result<InstallReport, OperationFailure> {
+        ..
+    } = request;
     let mut session = InstallSession::new(project_dir);
     if allow_unverified_registry_artifacts
-        && matches!(mode, InstallMode::Online | InstallMode::Refresh)
+        && matches!(
+            mode,
+            InstallMode::Online | InstallMode::Refresh | InstallMode::Update(_)
+        )
     {
         session
             .outcome
             .warnings
             .push(Warning::UnverifiedRegistryArtifactsAllowed);
     }
-    match perform_install(
-        &mut session,
-        target_manifest_path,
-        manifest_override,
-        package,
-        store_root,
-        mode,
-        registry_fixture,
-        allow_unverified_registry_artifacts,
-        report_replay_progress,
-    ) {
+    match perform_install(&mut session, request, report_replay_progress) {
         Ok((package_count, replayed)) => Ok(InstallReport {
             package_count,
             replayed,
@@ -294,18 +263,25 @@ pub(crate) fn run_with_manifest_target(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn perform_install(
     session: &mut InstallSession,
-    target_manifest_path: &Path,
-    manifest_override: Option<&PackageManifest>,
-    package: Option<&str>,
-    store_root: Option<&Path>,
-    mode: InstallMode,
-    registry_fixture: Option<&Path>,
-    allow_unverified_registry_artifacts: bool,
+    request: InstallRequest<'_>,
     mut report_replay_progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
+    let InstallRequest {
+        target_manifest_path,
+        mutation,
+        store_root,
+        mode,
+        registry_fixture,
+        allow_unverified_registry_artifacts,
+        ..
+    } = request;
+    let (manifest_override, package) = match mutation {
+        ManifestMutation::None => (None, None),
+        ManifestMutation::AddPackage(package) => (None, Some(package)),
+        ManifestMutation::ReplaceManifest(manifest) => (Some(manifest), None),
+    };
     let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
     let ci = matches!(mode, InstallMode::Ci | InstallMode::CiOffline);
     let frozen = matches!(mode, InstallMode::Frozen) || ci;
@@ -319,12 +295,6 @@ fn perform_install(
         return Err(OperationalError::new(
             ErrorKind::InvalidRequest,
             "--allow-unverified-registry-artifacts cannot be used with --offline or --frozen",
-        ));
-    }
-    if manifest_override.is_some() && package.is_some() {
-        return Err(OperationalError::new(
-            ErrorKind::InvalidRequest,
-            "cannot combine a manifest override with a package argument",
         ));
     }
     let project_dir = fs::canonicalize(&session.outcome.project_dir).map_err(|error| {
@@ -370,11 +340,9 @@ fn perform_install(
         ));
     }
     let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
-    online::validate_manifest_roots(&project_dir, &preflight_manifest)
-        .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+    online::validate_manifest_roots(&project_dir, &preflight_manifest)?;
     if let Some(updated) = manifest_override {
-        online::validate_manifest_roots(&project_dir, updated)
-            .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+        online::validate_manifest_roots(&project_dir, updated.updated)?;
     }
     if let Some(spec) = package {
         let (name, requirement) = package_spec::parse(spec);
@@ -391,8 +359,7 @@ fn perform_install(
         let candidate = read_manifest(&manifest_path)?
             .with_dependency(name, requirement)
             .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
-        online::validate_manifest_roots(&project_dir, &candidate)
-            .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+        online::validate_manifest_roots(&project_dir, &candidate)?;
     }
     let lock_path = project_dir.join("tapid.lock");
     let mut imported = if lock_path.is_file() {
@@ -437,6 +404,14 @@ fn perform_install(
         return Ok((0, false));
     }
     let current_manifest = read_manifest(&manifest_path)?;
+    if let Some(edit) = manifest_override
+        && edit.expected != &current_manifest
+    {
+        return Err(OperationalError::new(
+            ErrorKind::ProjectChanged,
+            "package.json changed after planning; retry the dependency command against the current manifest",
+        ));
+    }
     let original_manifest = fs::read(&manifest_path).map_err(|error| {
         OperationalError::from_source(ErrorKind::Transaction, error)
             .context("cannot preserve package.json for recovery")
@@ -472,8 +447,11 @@ fn perform_install(
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?,
         );
     }
+    let original_root_digest = online::root_digest(&project_dir)?;
+    let preserve_manifest_bytes = matches!(mode, InstallMode::Update(request) if request.save.is_none())
+        && manifest_override.is_some_and(|edit| edit.updated == &current_manifest);
     let manifest = if let Some(updated) = manifest_override {
-        updated.clone()
+        updated.updated.clone()
     } else if let Some(spec) = package {
         let (name, requirement) = package_spec::parse(spec);
         current_manifest
@@ -485,7 +463,7 @@ fn perform_install(
     } else {
         current_manifest
     };
-    if manifest_override.is_some() || package.is_some() {
+    if (manifest_override.is_some() || package.is_some()) && !preserve_manifest_bytes {
         let bytes = manifest.to_json();
         if bytes.as_bytes() != original_manifest {
             session.outcome.changed_files.push(manifest_path.clone());
@@ -525,7 +503,10 @@ fn perform_install(
             Ok(()) => {}
             Err(tapid_lockfile::LockfileError::UnverifiedRegistryArtifact(_))
                 if allow_unverified_registry_artifacts
-                    && matches!(mode, InstallMode::Online | InstallMode::Refresh) =>
+                    && matches!(
+                        mode,
+                        InstallMode::Online | InstallMode::Refresh | InstallMode::Update(_)
+                    ) =>
             {
                 // Compatibility installs must resolve these entries again, never replay them.
                 replayable = false;
@@ -533,34 +514,21 @@ fn perform_install(
             Err(error) => return Err(OperationalError::from(error)),
         }
     }
-    let preserve = matches!(mode, InstallMode::Online);
-    let replay_existing = if preserve {
+    let update = match mode {
+        InstallMode::Update(mut request) => {
+            request.original_root_digest = Some(&original_root_digest);
+            Some(request)
+        }
+        _ => None,
+    };
+    let preserve =
+        matches!(mode, InstallMode::Online) || update.is_some_and(|request| request.named);
+    let replay_existing = if preserve && update.is_none() {
         if let Some(lock) = &previous_lock {
             let registry_config = crate::registry::RegistryConfig::load(&project_dir)
                 .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-            replayable &= online::validate_locked_routes(lock, &registry_config)?;
-            if lock.root_manifest_digest() == online::root_digest(&project_dir)? {
-                online::validate_locked_files(&project_dir, lock)?;
-            }
-            let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
-            let current = workspace
-                .locked
-                .iter()
-                .map(|p| (p.key(), p.manifest_digest().to_owned()))
-                .collect::<BTreeMap<_, _>>();
-            let locked = lock
-                .workspace_packages()
-                .iter()
-                .map(|(k, p)| (k.clone(), p.manifest_digest().to_owned()))
-                .collect::<BTreeMap<_, _>>();
-            replayable
-                && lifecycle_policy.approvals().is_empty()
-                && lock
-                    .packages()
-                    .values()
-                    .all(|p| p.derived_hooks().is_empty())
-                && lock.root_manifest_digest() == online::root_digest(&project_dir)?
-                && current == locked
+            can_replay_online(&project_dir, lock, &registry_config, &lifecycle_policy)?
+                && replayable
         } else {
             false
         }
@@ -570,32 +538,53 @@ fn perform_install(
     if imported.is_some() || !offline && !frozen && !replay_existing {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-        let (mut lock, mut input, mut trees, mut store_transaction, mut workspace_plan) =
-            if let Some(imported) = imported.as_mut() {
-                online::fetch_imported(
-                    imported,
+        let online::PreparedInstall {
+            mut lock,
+            layout:
+                online::PreparedLayout {
+                    mut input,
+                    mut trees,
+                    workspace: mut workspace_plan,
+                },
+            transaction: mut store_transaction,
+        } = if let Some(imported) = imported.as_mut() {
+            online::fetch_imported(
+                imported,
+                &project_dir,
+                &store,
+                offline,
+                registry_fixture,
+                &registry_config,
+            )?
+        } else {
+            online::resolve_and_fetch_with_lock(
+                &project_dir,
+                &root_manifest,
+                &store,
+                registry_fixture,
+                allow_unverified_registry_artifacts,
+                &registry_config,
+                if preserve {
+                    previous_lock.as_ref()
+                } else {
+                    None
+                },
+                update,
+                &mut report_replay_progress,
+            )?
+        };
+        if let (Some(request), Some(previous)) = (update, previous_lock.as_ref()) {
+            session
+                .outcome
+                .warnings
+                .extend(super::lifecycle::update_change_warnings(
                     &project_dir,
-                    &store,
-                    offline,
-                    registry_fixture,
-                    &registry_config,
-                )?
-            } else {
-                online::resolve_and_fetch_with_lock(
-                    &project_dir,
-                    &root_manifest,
-                    &store,
-                    registry_fixture,
-                    allow_unverified_registry_artifacts,
-                    &registry_config,
-                    if preserve {
-                        previous_lock.as_ref()
-                    } else {
-                        None
-                    },
-                    &mut report_replay_progress,
-                )?
-            };
+                    request,
+                    previous,
+                    &lock,
+                )?);
+        }
+
         if session.journal.is_none() {
             session.journal = Some(
                 crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
@@ -618,6 +607,7 @@ fn perform_install(
         journal
             .set_store_root(store.root())
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+        let mut lifecycle_snapshots = Vec::new();
         if imported.is_none() {
             session
                 .outcome
@@ -631,6 +621,7 @@ fn perform_install(
                     &store,
                     Some(&mut store_transaction),
                     activation_lock,
+                    &mut lifecycle_snapshots,
                 )?);
         }
         let lock_json = if let Some(imported) = imported.as_ref() {
@@ -649,18 +640,17 @@ fn perform_install(
                 OperationalError::from(error).context("cannot publish verified store trees")
             })?;
         crate::filesystem::activation::test_crash_at("store_published");
-        let trees = trees
-            .into_iter()
-            .map(|(key, path)| (key, publication.resolve_path(&path)))
-            .collect();
-        for instance in &mut input.instances {
-            instance.tree.root = publication.resolve_path(&instance.tree.root);
-        }
-        for member in workspace_plan.members.values_mut() {
-            for instance in &mut member.input.instances {
-                instance.tree.root = publication.resolve_path(&instance.tree.root);
-            }
-        }
+        let mut layout = online::PreparedLayout {
+            input,
+            trees,
+            workspace: workspace_plan,
+        };
+        layout.rebase(&publication);
+        let online::PreparedLayout {
+            input,
+            trees,
+            workspace: workspace_plan,
+        } = layout;
         if original_lock.as_deref() != Some(lock_json.as_bytes()) {
             session.outcome.changed_files.push(lock_path.clone());
         }
@@ -746,22 +736,13 @@ fn perform_install(
     lock.validate_replay(&current_manifest_digest)
         .map_err(|error| {
             OperationalError::from(error)
+                .at_manifest(&project_dir.join("package.json"))
                 .context(format!("invalid lockfile {}", lock_path.display()))
         })?;
     let registry_config = crate::registry::RegistryConfig::load(&project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
-    let current_workspace = workspace
-        .locked
-        .iter()
-        .map(|package| (package.key(), package.manifest_digest().to_owned()))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let locked_workspace = lock
-        .workspace_packages()
-        .iter()
-        .map(|(key, package)| (key.clone(), package.manifest_digest().to_owned()))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    if current_workspace != locked_workspace {
+    if !online::workspace_matches_lock(&workspace, &lock) {
         return Err(
             "workspace membership or member manifest changed; regenerate tapid.lock with an online install"
                 .into(),
@@ -817,17 +798,25 @@ fn perform_install(
                 .values()
                 .any(|p| !p.derived_hooks().is_empty()))
     {
-        let (mut input, mut trees, transaction, mut cached_snapshots) =
-            online::prepare_locked_install(
-                &lock,
-                &root_manifest,
-                &store,
-                &registry_config,
-                registry_fixture,
-                &project_dir,
-                |completed, total| report_replay_progress(Progress::Replay(completed, total)),
-            )?;
-        let source_trees = trees.clone();
+        let online::PreparedLockedInstall {
+            layout:
+                online::PreparedLayout {
+                    mut input,
+                    mut trees,
+                    ..
+                },
+            transaction,
+            snapshots: _cached_snapshots,
+        } = online::prepare_locked_install(
+            &lock,
+            &root_manifest,
+            &store,
+            &registry_config,
+            registry_fixture,
+            &project_dir,
+            |completed, total| report_replay_progress(Progress::Replay(completed, total)),
+        )?;
+        let mut lifecycle_snapshots = Vec::new();
         session
             .outcome
             .warnings
@@ -840,24 +829,24 @@ fn perform_install(
                 &store,
                 None,
                 activation_lock,
+                &mut lifecycle_snapshots,
             )?);
-        for (key, tree) in &trees {
-            if source_trees.get(key) != Some(tree) {
-                cached_snapshots.retain(tree.clone());
-            }
-        }
         session.mutated = true;
         let publication = transaction
             .publish_for_lifecycle(&journal.coordinator_path())
             .map_err(OperationalError::from)?;
         crate::filesystem::activation::test_crash_at("store_published");
-        let trees = trees
-            .into_iter()
-            .map(|(key, path)| (key, publication.resolve_path(&path)))
-            .collect();
-        for instance in &mut input.instances {
-            instance.tree.root = publication.resolve_path(&instance.tree.root);
-        }
+        let mut layout = online::PreparedLayout {
+            input,
+            trees,
+            workspace: workspace_plan,
+        };
+        layout.rebase(&publication);
+        let online::PreparedLayout {
+            input,
+            trees,
+            workspace: workspace_plan,
+        } = layout;
         session
             .outcome
             .changed_files
@@ -902,7 +891,11 @@ fn perform_install(
         );
         crate::filesystem::activation::test_crash_at("store_published");
     }
-    let (mut input, mut trees) = crate::application::replay::replay_input_with_publication(
+    let crate::application::replay::ReplayInput {
+        mut input,
+        mut trees,
+        mut snapshots,
+    } = crate::application::replay::replay_input_with_publication(
         &lock,
         &root_manifest,
         &store,
@@ -910,7 +903,6 @@ fn perform_install(
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         publication.as_ref(),
     )?;
-    let source_trees = trees.clone();
     let hook_warnings = super::dependency_scripts::apply(
         &project_dir,
         &lifecycle_policy,
@@ -920,17 +912,8 @@ fn perform_install(
         &store,
         None,
         activation_lock,
+        &mut snapshots,
     );
-    if hook_warnings.is_err() {
-        crate::application::replay::cleanup_replay_snapshots(&source_trees);
-        crate::application::replay::cleanup_replay_snapshots(&trees);
-    } else {
-        let replaced = source_trees
-            .into_iter()
-            .filter(|(key, path)| trees.get(key) != Some(path))
-            .collect();
-        crate::application::replay::cleanup_replay_snapshots(&replaced);
-    }
     session.outcome.warnings.extend(hook_warnings?);
     session.mutated = true;
     session
@@ -973,7 +956,7 @@ fn read_lock(path: &Path) -> Result<Lockfile, OperationalError> {
     })
 }
 
-fn validate_workspace_dependency_edges(
+pub(super) fn validate_workspace_dependency_edges(
     workspace: &online::WorkspaceMaterialization,
     registry_dependencies: &[online::WorkspaceRegistryDependency],
     lock: &Lockfile,
@@ -1153,9 +1136,6 @@ fn materialize_with_lock(
         }
         Ok(())
     })();
-    if replayed {
-        crate::application::replay::cleanup_replay_snapshots(&trees);
-    }
     for (_, stage, _) in stages {
         let _ = fs::remove_dir_all(stage);
     }
@@ -1203,6 +1183,29 @@ fn stage_layout(
         return Err(OperationalError::new(ErrorKind::Materialization, error));
     }
     Ok(stage)
+}
+
+/// The online fast path depends on graph inputs and lifecycle policy, not cache availability.
+pub(super) fn can_replay_online(
+    project: &Path,
+    lock: &Lockfile,
+    config: &crate::registry::RegistryConfig,
+    policy: &tapid_runner::DependencyLifecyclePolicy,
+) -> Result<bool, OperationalError> {
+    let routes_match = online::validate_locked_routes(lock, config)?;
+    let digest_matches = lock.root_manifest_digest() == online::root_digest(project)?;
+    if digest_matches {
+        online::validate_locked_files(project, lock)?;
+    }
+    let workspace = online::workspace_materialization(project, config)?;
+    Ok(routes_match
+        && policy.approvals().is_empty()
+        && lock
+            .packages()
+            .values()
+            .all(|p| p.derived_hooks().is_empty())
+        && digest_matches
+        && online::workspace_matches_lock(&workspace, lock))
 }
 
 #[cfg(test)]

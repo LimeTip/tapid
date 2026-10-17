@@ -13,7 +13,11 @@ The CLI also replays verified package trees at `STORE/trees/<sha256-...>/`. Each
 
 `tapid-archive` is a direct dependency used to validate extraction limits and canonical tree digests before activation. `StoreTransaction` stages verified package trees privately, publishes them under a cross-process store lock, and keeps rollback available until the caller commits. Readers that consume a verified tree path across operations must hold `StoreReadGuard` for the duration; replay snapshots acquire that guard while copying.
 
-`StorePublication::verified_tree_snapshot` verifies and copies a tree under the publication's existing exclusive lock. Frozen hydration uses these snapshots before activation, and retains rollback until the project commit decision. The snapshot is independent of subsequent publication rollback.
+`StorePublication::verified_tree_snapshot` verifies and copies a tree under the publication's existing exclusive lock. Frozen hydration uses these snapshots before activation, and retains rollback until the project commit decision. The returned `VerifiedTreeSnapshot` owns its private reservation and lease, removes the reservation on drop, and exposes a borrowed path through `path()`. Keep the owner alive while using that path. The snapshot is independent of subsequent publication rollback.
+
+Verified-tree reads report `IngestError::TreeMissing` only when the tree directory
+is absent. An existing tree with a missing marker, a symlink, or an invalid digest
+remains an error; callers must not treat it as an ordinary cache miss.
 
 Lifecycle outputs carry store-local HMAC-SHA256 attestations over their recipe and output tree identities. An owner-only 32-byte `.tapid-lifecycle-key` is separate from ingested archives. Replay verifies the tag and tree together; missing, forged, symlinked, or publicly readable key material fails closed. Key creation is durable store infrastructure, while derived tree publication retains the existing transaction rollback boundary.
 

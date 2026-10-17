@@ -1,3 +1,4 @@
+import { compareStableVersions } from "./versions.ts";
 import { execFile } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -69,19 +70,6 @@ function publishableToCratesIo(pkg: MetadataPackage): boolean {
   return pkg.publish === undefined || pkg.publish === null || pkg.publish.includes("crates-io");
 }
 
-function compareStableVersions(left: string, right: string): number | undefined {
-  const parse = (version: string): bigint[] | undefined => {
-    const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.exec(version);
-    return match ? match.slice(1).map(BigInt) : undefined;
-  };
-  const leftParts = parse(left);
-  const rightParts = parse(right);
-  if (!leftParts || !rightParts) return undefined;
-  for (let index = 0; index < 3; index++) {
-    if (leftParts[index] !== rightParts[index]) return leftParts[index] > rightParts[index] ? 1 : -1;
-  }
-  return 0;
-}
 
 /**
  * Builds a deterministic, dependency-first plan for missing crates.io versions.

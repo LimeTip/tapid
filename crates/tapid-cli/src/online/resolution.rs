@@ -2,6 +2,43 @@
 use crate::application::outcome::{ErrorKind, OperationalError};
 
 use super::*;
+use crate::application::outcome::RequirementDiagnostic;
+
+fn resolution_error(
+    error: ResolveError,
+    roots: &[Dependency],
+    records: &BTreeMap<PackageRecordKey, PackageRecord>,
+) -> OperationalError {
+    let mut result = OperationalError::from(error);
+    if let Some(context) = &mut result.diagnostic
+        && context.peer.is_some()
+        && let Some(package) = &context.package
+    {
+        let record = records.get(&(
+            package.source.clone(),
+            package.name.clone(),
+            package.version.clone().unwrap_or_default(),
+        ));
+        context.requirements = roots
+            .iter()
+            .filter(|root| {
+                root.registry.to_string() == package.source
+                    && root.requirement.package_name(&root.name).as_str() == package.name
+                    && record.is_some_and(|record| {
+                        root.requirement
+                            .matches_tagged_version(&record.version, &record.dist_tags)
+                    })
+            })
+            .map(|root| RequirementDiagnostic {
+                local_name: Some(root.name.to_string()),
+                requirement: root.requirement.raw.clone(),
+                package: None,
+                declaration: None,
+            })
+            .collect();
+    }
+    result
+}
 
 #[derive(Clone)]
 pub(super) struct NormalizedRecord {
@@ -286,6 +323,70 @@ fn overridden_requirement(name: &PackageName, previous: &str, replacement: &Requ
     replacement.raw.clone()
 }
 
+/// Locate effective ranges using the same override rules as metadata and workspace roots.
+pub(super) fn locate_override_requirements(
+    context: &mut crate::application::outcome::DiagnosticContext,
+    declarations: &[RequirementDiagnostic],
+    manifest: &PackageManifest,
+    path: &Path,
+    overrides: &BTreeMap<PackageName, Requirement>,
+) {
+    use crate::application::outcome::Declaration;
+    let mut located = Vec::new();
+    for requirement in &context.requirements {
+        let mut origins = Vec::new();
+        for selector in manifest.overrides().keys() {
+            let Ok((_, name)) = dep_parts(selector) else {
+                continue;
+            };
+            let Some(replacement) = overrides.get(&name) else {
+                continue;
+            };
+            let metadata_override = requirement.package.as_ref().is_some_and(|package| {
+                package.source == NPM
+                    && requirement.local_name.as_deref() == Some(name.as_str())
+                    && overridden_requirement(&name, &requirement.requirement, replacement)
+                        == requirement.requirement
+            });
+            let workspace_override = requirement.package.is_none()
+                && requirement.declaration.as_ref().is_none_or(|declaration| {
+                    declaration.workspace.is_some() && declaration.selects_resolver_root()
+                })
+                && declarations.iter().any(|candidate| {
+                    candidate.local_name == requirement.local_name
+                        && candidate.declaration.as_ref().is_some_and(|declaration| {
+                            declaration.workspace.is_some() && declaration.selects_resolver_root()
+                        })
+                        && candidate
+                            .requirement
+                            .parse::<Requirement>()
+                            .is_ok_and(|original| {
+                                candidate.local_name.as_deref().is_some_and(|local| {
+                                    local
+                                        .parse::<PackageName>()
+                                        .is_ok_and(|local| original.package_name(&local) == &name)
+                                })
+                            })
+                        && requirement.requirement == replacement.raw
+                });
+            if metadata_override || workspace_override {
+                let mut effective = requirement.clone();
+                effective.declaration = Some(Declaration::manifest(
+                    path,
+                    Declaration::pointer("overrides", selector),
+                ));
+                origins.push(effective);
+            }
+        }
+        if origins.is_empty() {
+            located.push(requirement.clone());
+        } else {
+            located.extend(origins);
+        }
+    }
+    context.requirements = located;
+}
+
 fn discarded_version_diagnostics(
     normalized: &NormalizedRecords,
     registry: &str,
@@ -402,6 +503,22 @@ where
     )
 }
 
+pub(super) fn preserve_pinned_record(
+    package: PackageRecord,
+    pinned: &PackageRecord,
+) -> PackageRecord {
+    // Preserve exact edges, platform constraints, and artifact pins. Fresh metadata
+    // may fill an absent registry URL and recover tags and original peer ranges.
+    let mut preserved = pinned.clone();
+    if preserved.artifact.is_empty() && !package.fixture {
+        preserved.artifact = package.artifact;
+    }
+    preserved.dist_tags = package.dist_tags;
+    preserved.peer_dependencies = package.peer_dependencies;
+    preserved.optional_peer_dependencies = package.optional_peer_dependencies;
+    preserved
+}
+
 pub(super) fn resolve_with_preferences<R, F>(
     roots: &[Dependency],
     mut registry_for_dependency: R,
@@ -415,6 +532,7 @@ where
     R: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
     F: FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
 {
+    let mut roots = roots.to_vec();
     let mut fetched = BTreeSet::<(String, String)>::new();
     let mut records = BTreeMap::<PackageRecordKey, PackageRecord>::new();
     let mut normalized = NormalizedRecords::new();
@@ -444,16 +562,7 @@ where
                         package.version.to_string(),
                     );
                     if let Some(pinned) = pinned_records.get(&key) {
-                        // Preserve exact edges, platform constraints, and artifact pins.
-                        // Metadata may fill an absent registry URL and recover peer ranges.
-                        let mut preserved = pinned.clone();
-                        if preserved.artifact.is_empty() && !package.fixture {
-                            preserved.artifact = package.artifact;
-                        }
-                        preserved.dist_tags = package.dist_tags;
-                        preserved.peer_dependencies = package.peer_dependencies;
-                        preserved.optional_peer_dependencies = package.optional_peer_dependencies;
-                        preserved
+                        preserve_pinned_record(package, pinned)
                     } else {
                         package
                     }
@@ -475,7 +584,7 @@ where
         RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
 
         match tapid_resolver::resolve_graph_with_preferences(
-            roots,
+            &roots,
             &metadata,
             ResolutionOptions::default(),
             |parent, dependency| registry_for_dependency(parent, dependency),
@@ -576,9 +685,9 @@ where
                 if !fetched.insert(key) {
                     let discarded = discarded_version_diagnostics(&normalized, &registry, &name);
                     return if discarded.is_empty() {
-                        Err(OperationalError::from(error).context("resolution failed"))
+                        Err(resolution_error(error, &roots, &records).context("resolution failed"))
                     } else {
-                        Err(OperationalError::from(error)
+                        Err(resolution_error(error, &roots, &records)
                             .context(format!("resolution failed; {discarded}")))
                     };
                 }
@@ -605,7 +714,7 @@ where
                     package,
                     peer,
                     requirement,
-                    ..
+                    provider,
                 } = &error
                 else {
                     unreachable!()
@@ -638,9 +747,7 @@ where
                             record.registry.clone(),
                             record.name.clone(),
                             record.version.clone(),
-                        )
-                        .to_string()
-                            == *package
+                        ) == **package
                     })
                     .map(|record| {
                         (
@@ -650,7 +757,9 @@ where
                         )
                     });
                 let Some((registry, name, version)) = candidate else {
-                    return Err(OperationalError::from(error).context("resolution failed"));
+                    return Err(
+                        resolution_error(error, &roots, &records).context("resolution failed")
+                    );
                 };
                 if fetched.insert((registry.to_string(), name.to_string())) {
                     if metadata_progress_checkpoint(fetched.len()) {
@@ -681,11 +790,54 @@ where
                             }))
                     });
                     if !removed {
-                        return Err(OperationalError::from(error).context("resolution failed"));
+                        let Some(root) = roots
+                            .iter()
+                            .find(|root| root.name.as_str() == peer)
+                            .cloned()
+                        else {
+                            return Err(resolution_error(error, &roots, &records)
+                                .context("resolution failed"));
+                        };
+                        let actual = root.requirement.package_name(&root.name).clone();
+                        let provider_version = provider.as_deref().map(|id| id.version.clone());
+                        let released_version = provider_version.is_some_and(|version| {
+                            preferred.versions.contains(&(
+                                root.registry.clone(),
+                                actual.clone(),
+                                version,
+                            ))
+                        });
+                        let released_root = preferred
+                            .roots
+                            .remove(&(root.registry.clone(), root.name.clone(), actual.clone()))
+                            .is_some();
+                        let refreshed = preferred.refresh_roots.insert((
+                            root.registry.clone(),
+                            root.name.clone(),
+                            actual.clone(),
+                        ));
+                        if !(released_root || released_version && refreshed) {
+                            return Err(resolution_error(error, &roots, &records)
+                                .context("resolution failed"));
+                        }
+                        // Keep the provider's declared range and intersect the new peer
+                        // constraint. Releasing a preference never overrides a manifest pin.
+                        let peer_requirement: Requirement =
+                            requirement.parse().map_err(OperationalError::from)?;
+                        let constraint = if peer_requirement.is_alias() || actual == root.name {
+                            peer_requirement
+                        } else {
+                            format!("npm:{actual}@{requirement}")
+                                .parse()
+                                .map_err(OperationalError::from)?
+                        };
+                        roots.push(Dependency::new(root.registry, root.name, constraint));
                     }
                 }
             }
-            Err(error) => return Err(OperationalError::from(error).context("resolution failed")),
+            Err(error) => {
+                return Err(resolution_error(error, &roots, &records).context("resolution failed"));
+            }
         }
     }
 }

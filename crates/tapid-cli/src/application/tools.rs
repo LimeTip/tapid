@@ -124,14 +124,16 @@ fn stage(
         manifest.to_json().as_bytes(),
         false,
     )?;
-    let report = install::run_with_manifest(
-        &environment,
-        None,
-        None,
-        options.store_dir,
-        InstallMode::Online,
-        options.registry_fixture,
-        false,
+    let report = install::run(
+        install::InstallRequest {
+            project_dir: &environment,
+            target_manifest_path: Path::new("package.json"),
+            mutation: install::ManifestMutation::None,
+            store_root: options.store_dir,
+            mode: InstallMode::Online,
+            registry_fixture: options.registry_fixture,
+            allow_unverified_registry_artifacts: false,
+        },
         progress,
     )
     .map_err(|failure| *failure.error)?;

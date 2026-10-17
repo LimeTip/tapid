@@ -19,16 +19,19 @@ pub(crate) struct Args {
 
 pub(crate) fn run(args: Args) -> ExitCode {
     let result = crate::application::install::run(
-        &args.project_dir,
-        None,
-        args.store_dir.as_deref(),
-        if args.offline {
-            crate::application::install::InstallMode::CiOffline
-        } else {
-            crate::application::install::InstallMode::Ci
+        crate::application::install::InstallRequest {
+            project_dir: &args.project_dir,
+            target_manifest_path: std::path::Path::new("package.json"),
+            mutation: crate::application::install::ManifestMutation::None,
+            store_root: args.store_dir.as_deref(),
+            mode: if args.offline {
+                crate::application::install::InstallMode::CiOffline
+            } else {
+                crate::application::install::InstallMode::Ci
+            },
+            registry_fixture: args.registry_fixture.as_deref(),
+            allow_unverified_registry_artifacts: false,
         },
-        args.registry_fixture.as_deref(),
-        false,
         |event| match event {
             crate::application::install::Progress::Replay(completed, total) => {
                 eprintln!("Locked install progress: {completed}/{total}")
