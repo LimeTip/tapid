@@ -3,7 +3,7 @@ use super::{SERVICE, wide};
 use sha2::{Digest, Sha256};
 use std::{
     mem::zeroed,
-    ptr::{null, null_mut},
+    ptr::{NonNull, null, null_mut},
 };
 use windows_sys::{
     Win32::{Foundation::*, NetworkManagement::WindowsFilteringPlatform::*},
@@ -66,17 +66,10 @@ impl Engine {
         Ok(engine)
     }
     pub fn count(&self) -> Result<u32, u32> {
-        let mut template: FWPM_FILTER_ENUM_TEMPLATE0 = unsafe { zeroed() };
-        let mut provider = self.provider;
-        template.providerKey = &mut provider;
-        template.enumType = FWP_FILTER_ENUM_FULLY_CONTAINED;
-        template.actionMask = u32::MAX;
+        // A non-null template requires a real layer key. Enumerate all layers,
+        // then retain only our provider, including filters outside the usual bind layers.
         let mut enumerator = 0;
-        let error = unsafe { FwpmFilterCreateEnumHandle0(self.handle, &template, &mut enumerator) };
-        if error == FWP_E_PROVIDER_NOT_FOUND as u32 {
-            return Ok(0);
-        }
-        check(error)?;
+        check(unsafe { FwpmFilterCreateEnumHandle0(self.handle, null(), &mut enumerator) })?;
         let result = (|| {
             let mut total = 0u32;
             loop {
@@ -85,12 +78,32 @@ impl Engine {
                 check(unsafe {
                     FwpmFilterEnum0(self.handle, enumerator, 128, &mut entries, &mut count)
                 })?;
-                if !entries.is_null() {
+                let mut owned = 0;
+                if let Some(entries_ptr) = NonNull::new(entries) {
+                    for index in 0..count as usize {
+                        // WFP owns this page and its filter/provider pointers until FreeMemory.
+                        let filter = unsafe { *entries_ptr.as_ptr().add(index) };
+                        if let Some(filter) = NonNull::new(filter)
+                            && let Some(provider) =
+                                NonNull::new(unsafe { filter.as_ref() }.providerKey)
+                        {
+                            let provider = unsafe { provider.as_ref() };
+                            if provider.data1 == self.provider.data1
+                                && provider.data2 == self.provider.data2
+                                && provider.data3 == self.provider.data3
+                                && provider.data4 == self.provider.data4
+                            {
+                                owned += 1;
+                            }
+                        }
+                    }
                     unsafe {
                         FwpmFreeMemory0((&mut entries as *mut *mut *mut FWPM_FILTER0).cast());
                     }
+                } else if count != 0 {
+                    return Err(ERROR_INVALID_DATA);
                 }
-                total = total.checked_add(count).ok_or(ERROR_NOT_ENOUGH_QUOTA)?;
+                total = total.checked_add(owned).ok_or(ERROR_NOT_ENOUGH_QUOTA)?;
                 if count == 0 {
                     return Ok(total);
                 }
@@ -198,6 +211,18 @@ fn keys(sid: &[u32]) -> [GUID; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires administrator WFP enumeration access; read-only native control"]
+    fn guard_owned_namespace_removal_count_accepts_an_absent_provider_across_layers() {
+        let mut engine = Engine::connect().unwrap();
+        assert_eq!(
+            unsafe { windows_sys::Win32::System::Com::CoCreateGuid(&mut engine.provider) },
+            0
+        );
+        // Read-only control: no service, provider, sublayer, or filter is installed.
+        assert_eq!(engine.count(), Ok(0));
+    }
 
     #[test]
     #[ignore = "requires administrator WFP access; CI runs this against unique metadata-only GUIDs"]
