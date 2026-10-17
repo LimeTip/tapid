@@ -2,7 +2,8 @@ use crate::transport::request_url_is_safe;
 use crate::{HttpResponse, HttpTransport, MetadataError, RegistryClientError, TransportError};
 use url::Url;
 
-pub(crate) fn download_artifact<T: HttpTransport>(
+/// Downloads one canonical HTTPS artifact and requires a complete HTTP 200 response.
+pub fn download_artifact<T: HttpTransport>(
     transport: &T,
     artifact_url: &str,
 ) -> Result<HttpResponse, RegistryClientError> {
