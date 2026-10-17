@@ -86,20 +86,13 @@ fn display_key(encoded: &str) -> String {
     } else {
         key.platform_context.clone()
     };
-    match key.source {
-        LockfilePackageSource::Registry(origin) => {
-            format!(
-                "{}@{} [{}; peer={peer}; platform={platform}]",
-                key.name, key.version, origin
-            )
-        }
-        LockfilePackageSource::Workspace(source) => {
-            format!(
-                "{}@{} [workspace:{}; peer={peer}; platform={platform}]",
-                key.name,
-                key.version,
-                source.path()
-            )
-        }
-    }
+    let source = match key.source {
+        LockfilePackageSource::Registry(origin) => origin.to_string(),
+        LockfilePackageSource::Copied(source) => source.to_string(),
+        LockfilePackageSource::Workspace(source) => format!("workspace:{}", source.path()),
+    };
+    format!(
+        "{}@{} [{source}; peer={peer}; platform={platform}]",
+        key.name, key.version
+    )
 }

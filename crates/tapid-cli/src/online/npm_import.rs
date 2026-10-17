@@ -227,7 +227,7 @@ pub(crate) fn fetch_imported(
                 continue;
             }
             let target_key = &keys[target];
-            let key = LockfilePackageKey::new(
+            let key = LockfilePackageKey::from_source(
                 target_key.id.registry.clone(),
                 target_key.id.name.clone(),
                 target_key.id.version.clone(),
@@ -261,7 +261,7 @@ pub(crate) fn fetch_imported(
             continue;
         }
         let key = &keys[path];
-        let encoded = LockfilePackageKey::new(
+        let encoded = LockfilePackageKey::from_source(
             key.id.registry.clone(),
             key.id.name.clone(),
             key.id.version.clone(),
