@@ -416,6 +416,14 @@ jobs:
           node-version: 22
       - name: Build Tapid binary
         run: cargo build --bin tapid --locked
+      - name: Install Windows network guard for consumer validation
+        if: runner.os == 'Windows'
+        id: consumer-guard
+        run: |
+          & target/debug/tapid.exe sandbox install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & target/debug/tapid.exe sandbox status
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Create dynamic Node fixture project
         run: |
           node tests/fixtures/create_consumer_project.js
@@ -453,6 +461,11 @@ jobs:
           ARTIFACT_ID: ${{ steps.windows-cli.outputs.artifact-id }}
           ARTIFACT_DIGEST: ${{ steps.windows-cli.outputs.artifact-digest }}
         run: Write-Host "Windows CLI artifact $env:ARTIFACT_ID digest $env:ARTIFACT_DIGEST"
+      - name: Remove Windows network guard after consumer validation
+        if: always() && runner.os == 'Windows' && steps.consumer-guard.outcome != 'skipped'
+        run: |
+          & target/debug/tapid.exe sandbox uninstall
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   pr-published-binary-smoke:
     # Exact PR runner + immutable published binary: pre-merge regression evidence only.

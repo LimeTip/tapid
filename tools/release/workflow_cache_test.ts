@@ -117,6 +117,23 @@ test('ARM contracts reject cache bypass, matrix, flags, ordering and pin mutatio
 });
 
 const installerNames = ['Validate Unix developer installer at the checked head', 'Validate Windows developer installer'];
+test('Windows consumer validation provisions and cleans up its own network guard', async () => {
+  const consumer = job((await source('.github/workflows/ci.yml')).replaceAll('\r\n', '\n'), 'platform-consumer-validation');
+  const install = step(consumer, 'Install Windows network guard for consumer validation');
+  const cleanup = step(consumer, 'Remove Windows network guard after consumer validation');
+  assert.match(install, /if: runner.os == 'Windows'/);
+  assert(install.includes('& target/debug/tapid.exe sandbox install\n'));
+  assert(install.includes('& target/debug/tapid.exe sandbox status\n'));
+  assert(install.includes('if ($LASTEXITCODE -ne 0)'));
+  assert(consumer.indexOf(step(consumer, 'Build Tapid binary')) < consumer.indexOf(install));
+  assert(consumer.indexOf(install) < consumer.indexOf(step(consumer, 'Verify native read-only child, forwarding and exit codes (Windows)')));
+  assert(cleanup.includes("if: always() && runner.os == 'Windows' && steps.consumer-guard.outcome != 'skipped'"));
+  assert(cleanup.includes('& target/debug/tapid.exe sandbox uninstall\n'));
+  assert(cleanup.includes('if ($LASTEXITCODE -ne 0)'));
+  assert(consumer.indexOf(cleanup) > consumer.indexOf(step(consumer, 'Record Windows handoff artifact identity')));
+  assert.doesNotMatch(install + cleanup, /continue-on-error|\|\| true/);
+});
+
 const compilerEnv = '        env:\n          CARGO_TARGET_DIR: ${{ github.workspace }}/target\n';
 const guardNames = [
   'Install Windows network guard for native containment tests',
