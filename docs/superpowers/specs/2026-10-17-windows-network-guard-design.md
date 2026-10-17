@@ -34,7 +34,7 @@ Filters are PERSISTENT in a persistent service-owned provider/sublayer, not dyna
 
 The service holds the caller process and already-authorized Job. On caller exit/disconnect it terminates that Job and keeps denial until the kernel's active-process count is zero. On normal FINISH it likewise verifies zero before deleting exactly its two filters. Failed proof/removal retains filters and reports failure; no elapsed time is treated as emptiness. On ordinary service stop, stop accepting new work, terminate/drain owned Jobs, remove only proven-safe filters, then stop. Unexpected crash may leave orphan deny filters; report them and retain them rather than guessing that descendants exited. Administrative host tampering/BFE replacement remains a trusted-host boundary.
 
-The parent retains its guard channel through verified-empty-Job cleanup and requires the service cleanup acknowledgement before successful outcome. The mechanism/limitations disclose the guard. Missing guard is not silently accepted as full network denial. Tests exercising the production no-network path require an installed guard; hosted Windows setup must install it once before native tests; the workflow mutation remains pending explicit approval.
+The parent retains its guard channel through verified-empty-Job cleanup and requires the service cleanup acknowledgement before successful outcome. The mechanism/limitations disclose the guard. Missing guard is not silently accepted as full network denial. Tests exercising the production no-network path require an installed guard; hosted Windows setup installs it once before native tests and uninstalls the idle guard afterward.
 
 ## Structure and reuse
 

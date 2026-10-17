@@ -1,4 +1,4 @@
-use super::outcome::{ErrorKind, OperationFailure, OperationOutcome, OperationalError, Warning};
+use super::outcome::{ErrorKind, OperationFailure, OperationOutcome, OperationalError};
 use serde::Deserialize;
 use std::{
     collections::BTreeSet,
@@ -34,6 +34,32 @@ pub(crate) struct LifecyclePlan {
     pub(crate) manifest: PackageManifest,
     pub(crate) mutations: Vec<DependencyMutation>,
     pub(crate) diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SavePolicy {
+    Exact,
+    Caret,
+    Tilde,
+}
+
+impl SavePolicy {
+    pub(crate) fn requirement(self, version: &PackageVersion) -> String {
+        match self {
+            Self::Exact => version.to_string(),
+            Self::Caret => format!("^{version}"),
+            Self::Tilde => format!("~{version}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct UpdateRequest<'a> {
+    pub(crate) plan: &'a LifecyclePlan,
+    pub(crate) target: &'a Path,
+    pub(crate) named: bool,
+    pub(crate) original_root_digest: Option<&'a str>,
+    pub(crate) save: Option<SavePolicy>,
 }
 
 pub(crate) fn plan_add(
@@ -137,7 +163,10 @@ pub(crate) fn plan_update(
                 continue;
             };
             declared = true;
-            let requirement = if latest {
+            let requirement = if latest
+                && !requirement.starts_with("workspace:")
+                && crate::online::copied_declaration(requirement)?.is_none()
+            {
                 let parsed = requirement.parse::<Requirement>().map_err(|error| {
                     OperationalError::from_source(ErrorKind::InvalidRequest, error)
                         .context(format!("invalid dependency '{name}'"))
@@ -180,6 +209,89 @@ pub(crate) fn plan_update(
     })
 }
 
+pub(super) fn update_change_warnings(
+    project: &Path,
+    request: UpdateRequest<'_>,
+    before: &Lockfile,
+    after: &Lockfile,
+) -> Result<Vec<crate::application::outcome::Warning>, OperationalError> {
+    use crate::application::outcome::Warning;
+    let selected = request
+        .plan
+        .mutations
+        .iter()
+        .map(|m| m.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let selected_bindings = |lock: &Lockfile| {
+        if request.target == project.join("package.json") {
+            lock.root_bindings()
+                .iter()
+                .filter(|(name, _)| selected.contains(name.as_str()))
+                .map(|(_, key)| key.clone())
+                .collect::<BTreeSet<_>>()
+        } else {
+            let relative = request
+                .target
+                .parent()
+                .and_then(|path| path.strip_prefix(project).ok());
+            lock.workspace_packages()
+                .values()
+                .filter(|member| {
+                    relative.is_some_and(|path| {
+                        member
+                            .key()
+                            .parse::<LockfilePackageKey>()
+                            .ok()
+                            .and_then(|key| {
+                                key.source
+                                    .workspace()
+                                    .map(|source| Path::new(source.path()) == path)
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .flat_map(|member| member.dependencies().iter())
+                .filter(|(name, _)| selected.contains(name.as_str()))
+                .map(|(_, key)| key.clone())
+                .collect()
+        }
+    };
+    let mut direct = selected_bindings(before);
+    direct.extend(selected_bindings(after));
+    let reasons = super::why::requiring_edges(after)?;
+    let mut warnings = Vec::new();
+    for key in after
+        .packages()
+        .keys()
+        .filter(|key| !before.packages().contains_key(*key) && !direct.contains(*key))
+    {
+        let parents = reasons.get(key).map(Vec::as_slice).unwrap_or_default();
+        let reason = if parents.is_empty() {
+            "the previous direct pin cannot satisfy the current manifest or peer constraints"
+                .to_owned()
+        } else {
+            format!(
+                "required by {} after the selected update",
+                parents.join(", ")
+            )
+        };
+        warnings.push(Warning::UpdateGraphChange {
+            package: key.replace('|', " "),
+            reason,
+        });
+    }
+    for key in before
+        .packages()
+        .keys()
+        .filter(|key| !after.packages().contains_key(*key) && !direct.contains(*key))
+    {
+        warnings.push(Warning::UpdateGraphChange {
+            package: key.replace('|', " "), reason: "removed because this exact package instance is no longer reachable after the selected update".into(),
+        });
+    }
+    Ok(warnings)
+}
+
 pub(crate) struct WorkspaceSelection {
     pub(crate) root_dir: PathBuf,
     pub(crate) manifest_path: PathBuf,
@@ -200,8 +312,7 @@ pub(crate) fn resolve_workspace(
         OperationalError::from_source(ErrorKind::Project, error)
             .context("cannot open project directory")
     })?;
-    let workspace = Workspace::discover(&project_dir)
-        .map_err(|error| OperationalError::new(ErrorKind::Project, error))?;
+    let workspace = Workspace::discover_typed(&project_dir).map_err(OperationalError::from)?;
     let manifest = workspace
         .select(selector)
         .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?
@@ -228,8 +339,10 @@ pub(crate) fn resolve_workspace(
 }
 
 pub(crate) fn format_outdated_entry(entry: &OutdatedEntry) -> String {
+    let compatible = entry.impact(entry.newest_compatible.as_deref());
+    let available = entry.impact(entry.newest_available.as_deref());
     format!(
-        "{} [{}] declared={} locked={} compatible={} available={}{}",
+        "{} [{}] declared={} locked={} compatible={} available={}{}\n  compatible-change={} compatible-lockfile={}\n  available-change={} available-lockfile={} available-manifest={}",
         entry.identity,
         entry.kind,
         entry.declared,
@@ -240,7 +353,12 @@ pub(crate) fn format_outdated_entry(entry: &OutdatedEntry) -> String {
             .diagnostic
             .as_ref()
             .map(|value| format!(" diagnostic={value}"))
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        compatible.version_change,
+        compatible.lockfile,
+        available.version_change,
+        available.lockfile,
+        available.manifest,
     )
 }
 
@@ -255,18 +373,79 @@ pub(crate) struct OutdatedEntry {
     pub(crate) diagnostic: Option<OperationalError>,
 }
 
+/// Impact of selecting one metadata version, without resolving its dependencies.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct OutdatedImpact {
+    pub(crate) version_change: &'static str,
+    pub(crate) lockfile: &'static str,
+    pub(crate) manifest: &'static str,
+}
+
+impl OutdatedEntry {
+    pub(crate) fn impact(&self, target: Option<&str>) -> OutdatedImpact {
+        // Peer declarations constrain consumers; they do not select installed roots.
+        let peer_declaration = self.kind == kind_name(DependencyKind::PeerDependencies);
+        let Some(target) = target.and_then(|value| value.parse::<PackageVersion>().ok()) else {
+            return OutdatedImpact {
+                version_change: "unknown",
+                lockfile: if peer_declaration {
+                    "unchanged"
+                } else {
+                    "unknown"
+                },
+                manifest: "unknown",
+            };
+        };
+        let locked = self
+            .locked
+            .as_deref()
+            .and_then(|value| value.parse::<PackageVersion>().ok());
+        let version_change = match locked.as_ref() {
+            None if self.locked.is_none() => "unlocked",
+            None => "unknown",
+            Some(locked) if target == *locked => "unchanged",
+            Some(locked) if target < *locked => "downgrade",
+            Some(locked) if target.major() != locked.major() => "major",
+            Some(locked) if target.minor() != locked.minor() => "minor",
+            Some(locked) if target.patch() != locked.patch() => "patch",
+            Some(_) => "prerelease",
+        };
+        let lockfile = if peer_declaration {
+            "unchanged"
+        } else {
+            match version_change {
+                "unknown" => "unknown",
+                "unchanged" => "unchanged",
+                _ => "changed",
+            }
+        };
+        let manifest = match crate::online::workspace_requirement(&self.declared, &target) {
+            Ok(requirement) if requirement.matches(&target) => "unchanged",
+            Ok(_) => "changed",
+            Err(_) => "unknown",
+        };
+        OutdatedImpact {
+            version_change,
+            lockfile,
+            manifest,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Fixture {
     packages: Vec<FixturePackage>,
 }
 #[derive(Debug, Deserialize)]
 struct FixturePackage {
+    #[serde(default)]
+    dist_tags: BTreeSet<String>,
     registry: String,
     name: String,
     version: String,
 }
 
-fn kind_name(kind: DependencyKind) -> &'static str {
+pub(crate) fn kind_name(kind: DependencyKind) -> &'static str {
     match kind {
         DependencyKind::Dependencies => "dependencies",
         DependencyKind::DevDependencies => "devDependencies",
@@ -275,7 +454,9 @@ fn kind_name(kind: DependencyKind) -> &'static str {
     }
 }
 
-fn direct_dependencies(manifest: &PackageManifest) -> Vec<(String, String, DependencyKind)> {
+pub(crate) fn direct_dependencies(
+    manifest: &PackageManifest,
+) -> Vec<(String, String, DependencyKind)> {
     [
         (manifest.dependencies(), DependencyKind::Dependencies),
         (manifest.dev_dependencies(), DependencyKind::DevDependencies),
@@ -300,7 +481,7 @@ fn versions_from_fixture(
     path: &Path,
     origin: &RegistryOrigin,
     name: &PackageName,
-) -> Result<Vec<PackageVersion>, OperationalError> {
+) -> Result<Vec<(PackageVersion, BTreeSet<String>)>, OperationalError> {
     let fixture: Fixture = serde_json::from_str(&fs::read_to_string(path).map_err(|error| {
         OperationalError::from_source(ErrorKind::RegistryMetadata, error)
             .context("cannot read registry fixture")
@@ -319,6 +500,7 @@ fn versions_from_fixture(
             package
                 .version
                 .parse()
+                .map(|version| (version, package.dist_tags))
                 .map_err(|error: tapid_core::DomainError| {
                     OperationalError::from_source(ErrorKind::RegistryMetadata, error)
                 })
@@ -330,7 +512,7 @@ fn versions_from_registry(
     transport: &HttpsTransport,
     origin: &RegistryOrigin,
     name: &PackageName,
-) -> Result<Vec<PackageVersion>, OperationalError> {
+) -> Result<Vec<(PackageVersion, BTreeSet<String>)>, OperationalError> {
     let artifacts = if origin.to_string() == "https://jsr.io" {
         JsrRegistry::new(transport, origin.clone())
             .fetch(&name.to_string())
@@ -342,7 +524,7 @@ fn versions_from_registry(
     };
     Ok(artifacts
         .into_iter()
-        .map(|artifact| artifact.identity.version)
+        .map(|artifact| (artifact.identity.version, artifact.dist_tags))
         .collect())
 }
 
@@ -356,12 +538,14 @@ pub(crate) fn outdated_report(
     project_dir: &Path,
     workspace_selector: Option<&str>,
     registry_fixture: Option<&Path>,
+    offline: bool,
 ) -> Result<OutdatedReport, OperationFailure> {
     let mut outcome = OperationOutcome::unchanged(project_dir);
     match outdated_entries(
         project_dir,
         workspace_selector,
         registry_fixture,
+        offline,
         &mut outcome,
     ) {
         Ok(entries) => Ok(OutdatedReport { entries, outcome }),
@@ -378,33 +562,22 @@ fn outdated_entries(
     project_dir: &Path,
     workspace_selector: Option<&str>,
     registry_fixture: Option<&Path>,
+    offline: bool,
     outcome: &mut OperationOutcome,
 ) -> Result<Vec<OutdatedEntry>, OperationalError> {
     let selection = resolve_workspace(project_dir, workspace_selector)?;
     outcome.project_dir = selection.root_dir.clone();
     let project_dir = selection.root_dir.as_path();
-    let mut manifest = selection.manifest;
+    let manifest = selection.manifest;
     let registry_config = crate::registry::RegistryConfig::load(project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-    let recovery_lock = if crate::filesystem::lifecycle_journal::has_pending(project_dir)
+    if crate::filesystem::lifecycle_journal::has_pending(project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::Recovery, error))?
     {
-        Some(crate::filesystem::activation::ActivationLock::acquire(
-            project_dir,
-        )?)
-    } else {
-        None
-    };
-    if recovery_lock.is_some() {
-        let recovered_manifest = fs::read_to_string(&selection.manifest_path).map_err(|error| {
-            OperationalError::from_source(ErrorKind::Recovery, error)
-                .context("cannot read recovered package manifest")
-        })?;
-        manifest = PackageManifest::parse(&recovered_manifest).map_err(|error| {
-            OperationalError::new(ErrorKind::Manifest, error)
-                .context("invalid recovered package manifest")
-        })?;
-        outcome.warnings.push(Warning::PreviousTransactionRecovered);
+        return Err(OperationalError::new(
+            ErrorKind::Recovery,
+            "recovery required: an interrupted transaction is pending; run tapid install to recover before inspecting outdated dependencies",
+        ));
     }
     let lock_path = project_dir.join("tapid.lock");
     let bytes = fs::read_to_string(&lock_path).map_err(|error| {
@@ -428,7 +601,6 @@ fn outdated_entries(
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    drop(recovery_lock);
     let mut transports = std::collections::BTreeMap::new();
     let allowed_origins = registry_config.configured_origins();
     let mut entries = Vec::new();
@@ -447,6 +619,14 @@ fn outdated_entries(
                 })
                 .map(|key| key.version)
                 .max();
+            let diagnostic = (!compatible).then(|| {
+                    OperationalError::new(
+                        ErrorKind::InvalidRequest,
+                        format!(
+                            "local workspace version {local_version} does not satisfy declared range {declared}"
+                        ),
+                    ).at_dependency(&selection.manifest_path, kind_name(kind), &identity, &declared)
+                });
             entries.push(OutdatedEntry {
                 identity,
                 kind: kind_name(kind).to_owned(),
@@ -454,14 +634,7 @@ fn outdated_entries(
                 locked: locked_version.map(|version| version.to_string()),
                 newest_compatible: compatible.then(|| local_version.to_string()),
                 newest_available: Some(local_version.to_string()),
-                diagnostic: (!compatible).then(|| {
-                    OperationalError::new(
-                        ErrorKind::InvalidRequest,
-                        format!(
-                            "local workspace version {local_version} does not satisfy declared range {declared}"
-                        ),
-                    )
-                }),
+                diagnostic,
             });
             continue;
         }
@@ -472,6 +645,38 @@ fn outdated_entries(
                     "workspace dependency '{identity}@{declared}' has no matching local workspace member; refusing registry fallback"
                 ),
             ));
+        }
+        if crate::online::copied_declaration(&declared)
+            .map_err(|reason| {
+                OperationalError::new(
+                    ErrorKind::InvalidRequest,
+                    format!("dependency '{identity}': {reason}"),
+                )
+            })?
+            .is_some()
+        {
+            let pinned = lock
+                .root_bindings()
+                .get(&identity)
+                .and_then(|key| key.parse::<LockfilePackageKey>().ok())
+                .filter(|key| {
+                    crate::online::validate_copied_root_binding(
+                        &manifest,
+                        &identity,
+                        key.source.copied(),
+                    )
+                    .unwrap_or(false)
+                });
+            entries.push(OutdatedEntry {
+                identity,
+                kind: kind_name(kind).into(),
+                declared,
+                locked: pinned.map(|key| key.version.to_string()),
+                newest_compatible: None,
+                newest_available: None,
+                diagnostic: None,
+            });
+            continue;
         }
         let (manifest_origin, local_name) = crate::online::dep_parts(&identity)?;
         let requirement = declared.parse::<Requirement>().ok();
@@ -496,13 +701,20 @@ fn outdated_entries(
                     LockfilePackageSource::Registry(registry)
                         if registry == &origin
                             && key.name == package_name
-                            && bound_root.is_none_or(|target| key.to_string() == *target)
+                            && match bound_root {
+                                Some(target) => key.to_string() == *target,
+                                None => lock.roots().contains(&key.to_string()),
+                            }
                 )
             })
             .map(|(key, _)| key.version.clone())
             .max();
         let versions = match registry_fixture {
             Some(path) => versions_from_fixture(path, &origin, &package_name),
+            None if offline => Err(OperationalError::new(
+                ErrorKind::RegistryMetadataUnavailable,
+                "offline: newer registry versions were not checked; use online outdated or --registry-fixture",
+            )),
             None => {
                 let transport = crate::online::metadata_transport_for_package(
                     &mut transports,
@@ -520,11 +732,12 @@ fn outdated_entries(
         let (newest_compatible, newest_available, diagnostic) = match versions {
             Ok(mut versions) => {
                 versions.sort();
-                let available = versions.last().cloned();
+                let available = versions.last().map(|(version, _)| version.clone());
                 let compatible = requirement.as_ref().and_then(|requirement| {
                     versions
                         .iter()
-                        .filter(|version| requirement.matches(version))
+                        .filter(|(version, tags)| requirement.matches_tagged_version(version, tags))
+                        .map(|(version, _)| version)
                         .max()
                         .cloned()
                 });
@@ -549,6 +762,20 @@ fn outdated_entries(
                 Some(error.context("registry metadata unavailable")),
             ),
         };
+        let diagnostic = diagnostic.map(|error| {
+            error
+                .for_package(super::outcome::DiagnosticPackage {
+                    source: origin.to_string(),
+                    name: package_name.to_string(),
+                    version: None,
+                })
+                .at_dependency(
+                    &selection.manifest_path,
+                    kind_name(kind),
+                    &identity,
+                    &declared,
+                )
+        });
         entries.push(OutdatedEntry {
             identity,
             kind: kind_name(kind).to_owned(),
@@ -559,12 +786,117 @@ fn outdated_entries(
             diagnostic,
         });
     }
+    entries.sort_by(|a, b| (&a.identity, &a.kind).cmp(&(&b.identity, &b.kind)));
     Ok(entries)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outdated_impact_compares_versions_and_reuses_declared_range_semantics() {
+        for (locked, target, declared, change, lockfile, manifest) in [
+            (
+                Some("1.0.0"),
+                Some("1.0.1"),
+                "^1.0.0",
+                "patch",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("1.0.0"),
+                Some("1.2.0"),
+                "npm:other@^1.0.0",
+                "minor",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("1.0.0"),
+                Some("2.0.0"),
+                "npm:@scope/other@^1.0.0",
+                "major",
+                "changed",
+                "changed",
+            ),
+            (
+                Some("0.1.0"),
+                Some("0.2.0"),
+                "^0.1.0",
+                "minor",
+                "changed",
+                "changed",
+            ),
+            (
+                Some("1.0.0-beta.1"),
+                Some("1.0.0"),
+                "^1.0.0-beta.1",
+                "prerelease",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("1.0.0-beta.1"),
+                Some("1.0.0-beta.2"),
+                "^1.0.0-beta.1",
+                "prerelease",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("2.0.0"),
+                Some("1.0.0"),
+                "*",
+                "downgrade",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("1.0.0"),
+                Some("1.0.0"),
+                "^1.0.0",
+                "unchanged",
+                "unchanged",
+                "unchanged",
+            ),
+            (None, Some("1.0.0"), "*", "unlocked", "changed", "unchanged"),
+            (Some("1.0.0"), None, "*", "unknown", "unknown", "unknown"),
+            (
+                Some("1.0.0"),
+                Some("2.0.0"),
+                "workspace:^",
+                "major",
+                "changed",
+                "unchanged",
+            ),
+            (
+                Some("1.0.0"),
+                Some("2.0.0"),
+                "git:unsupported",
+                "major",
+                "changed",
+                "unknown",
+            ),
+        ] {
+            let entry = OutdatedEntry {
+                identity: "example".into(),
+                kind: "dependencies".into(),
+                declared: declared.into(),
+                locked: locked.map(str::to_owned),
+                newest_compatible: None,
+                newest_available: target.map(str::to_owned),
+                diagnostic: None,
+            };
+            let impact = entry.impact(target);
+            assert_eq!(
+                (impact.version_change, impact.lockfile, impact.manifest),
+                (change, lockfile, manifest),
+                "{entry:?}"
+            );
+        }
+    }
 
     #[test]
     fn outdated_missing_lock_reports_typed_unchanged_context() {
@@ -574,7 +906,7 @@ mod tests {
             r#"{"name":"app","version":"1.0.0"}"#,
         )
         .unwrap();
-        let failure = outdated_report(project.path(), None, None).unwrap_err();
+        let failure = outdated_report(project.path(), None, None, false).unwrap_err();
         assert_eq!(failure.error.kind, ErrorKind::LockfileMissing);
         assert_eq!(
             failure.outcome.state,

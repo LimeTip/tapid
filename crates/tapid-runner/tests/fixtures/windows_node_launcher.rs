@@ -1,7 +1,7 @@
 //! Native test addon: resolve N-API from unchanged Node; import process creation normally.
 use std::{
     ffi::{CStr, c_void},
-    ptr,
+    ptr::{self, NonNull},
 };
 type Value = *mut c_void;
 type Callback = unsafe extern "C" fn(Value, Value) -> Value;
@@ -57,15 +57,16 @@ unsafe extern "C" fn lookup_recovery(env: Value, _: Value) -> Value {
         }
         hints.flags = 2;
         for _ in 0..128 {
+            let mut result = ptr::null_mut();
             let error =
                 unsafe { GetAddrInfoW(name.as_ptr(), service.as_ptr(), &hints, &mut result) };
             if error != 0 {
                 return error;
             }
-            if result.is_null() {
+            let Some(head) = NonNull::new(result) else {
                 return 2;
-            }
-            let info = unsafe { &*result };
+            };
+            let info = unsafe { head.as_ref() };
             let valid = matches!((info.family, info.length), (2, 16) | (23, 28))
                 && !info.address.is_null()
                 && !info.canonical.is_null();
@@ -75,18 +76,22 @@ unsafe extern "C" fn lookup_recovery(env: Value, _: Value) -> Value {
             }
         }
         for head_first in [false, true] {
+            let mut result = ptr::null_mut();
             let error =
                 unsafe { GetAddrInfoW(name.as_ptr(), service.as_ptr(), &hints, &mut result) };
             if error != 0 {
                 return error;
             }
-            let tail = unsafe { (*result).next };
+            let Some(mut head) = NonNull::new(result) else {
+                return 2;
+            };
+            let tail = unsafe { head.as_ref().next };
             if tail.is_null() {
                 unsafe { FreeAddrInfoW(result) };
                 return 4;
             }
             unsafe {
-                (*result).next = ptr::null_mut();
+                head.as_mut().next = ptr::null_mut();
             }
             if head_first {
                 unsafe {

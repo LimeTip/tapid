@@ -14,7 +14,7 @@ use std::{
         io::{AsRawHandle, FromRawHandle},
     },
     path::{Path, PathBuf},
-    ptr::{null, null_mut},
+    ptr::{NonNull, null, null_mut},
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
@@ -139,14 +139,13 @@ fn protected(path: &Path) -> Result<(), u32> {
         let mut acl = null_mut();
         if unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut acl, &mut defaulted) } == 0
             || present == 0
-            || acl.is_null()
         {
             return Err(ERROR_ACCESS_DENIED);
         }
-        Ok(
-            unsafe { std::slice::from_raw_parts(acl.cast::<u8>(), (*acl).AclSize as usize) }
-                .to_vec(),
-        )
+        let acl = NonNull::new(acl).ok_or(ERROR_ACCESS_DENIED)?;
+        // The descriptor owns the validated non-null ACL throughout this copy.
+        let length = unsafe { acl.as_ref().AclSize } as usize;
+        Ok(unsafe { std::slice::from_raw_parts(acl.as_ptr().cast::<u8>(), length) }.to_vec())
     };
     let mut control = 0;
     let mut revision = 0;
@@ -357,9 +356,11 @@ fn uninstall(path: &Path) -> Result<(), u32> {
     } else if query(&service)?.dwCurrentState != SERVICE_STOPPED {
         return Err(ERROR_BUSY);
     }
-    if super::filtering::Engine::connect()?.count()? != 0 {
+    let engine = super::filtering::Engine::connect()?;
+    if engine.count()? != 0 {
         return Err(ERROR_BUSY);
     }
+    engine.remove_owned_objects()?;
     if unsafe { DeleteService(service.0) } == 0 {
         return Err(unsafe { GetLastError() });
     }

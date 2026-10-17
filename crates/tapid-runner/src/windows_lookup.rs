@@ -152,6 +152,7 @@ impl Drop for Lookup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ptr::NonNull;
     #[test]
     fn native_lookup_preserves_null_and_empty_host_semantics() {
         let _winsock = super::super::Winsock::start().unwrap();
@@ -179,16 +180,17 @@ mod tests {
                 0
             );
             let mut expected = std::collections::BTreeSet::new();
-            let mut at = baseline;
-            while !at.is_null() {
-                let info = unsafe { &*at };
+            let mut at = NonNull::new(baseline);
+            while let Some(entry) = at {
+                // The successful resolver owns each node until the list is freed below.
+                let info = unsafe { entry.as_ref() };
                 expected.insert(
                     unsafe {
                         std::slice::from_raw_parts(info.ai_addr.cast::<u8>(), info.ai_addrlen)
                     }
                     .to_vec(),
                 );
-                at = info.ai_next;
+                at = NonNull::new(info.ai_next);
             }
             unsafe { FreeAddrInfoW(baseline) };
             let mut lookup = Lookup::start(wire::Query {

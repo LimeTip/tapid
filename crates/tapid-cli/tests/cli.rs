@@ -652,7 +652,7 @@ fn npm_alias_cli_add_update_latest_and_outdated_keep_the_actual_target() {
     );
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(dir.join("package.json")).unwrap()).unwrap();
-    assert_eq!(manifest["dependencies"]["local"], "npm:h3@*");
+    assert_eq!(manifest["dependencies"]["local"], "npm:h3@^2.0.0");
     let installed: serde_json::Value =
         serde_json::from_slice(&fs::read(dir.join("node_modules/local/package.json")).unwrap())
             .unwrap();
@@ -740,12 +740,7 @@ fn npm_alias_routes_by_actual_scope_and_rejects_a_changed_route_on_replay() {
 
 #[test]
 fn invalid_npm_aliases_fail_before_project_or_store_mutation() {
-    for declaration in [
-        "npm:../outside@1",
-        "npm:actual@npm:other@1",
-        "npm:actual@latest",
-        "npm:actual@",
-    ] {
+    for declaration in ["npm:../outside@1", "npm:actual@npm:other@1", "npm:actual@"] {
         let dir = temp_dir("invalid-npm-alias");
         let manifest = serde_json::json!({"name":"demo", "version":"1.0.0", "dependencies":{"local":declaration}}).to_string();
         fs::write(dir.join("package.json"), &manifest).unwrap();
@@ -1080,7 +1075,8 @@ fn read_only_lifecycle_commands_fail_closed_without_writing() {
 fn outdated_reports_versions_without_mutating_project_state() {
     use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
 
-    let dir = temp_dir("outdated-read-only");
+    let project = tapid_test_support::TempProject::new("outdated-read-only").unwrap();
+    let dir = project.path().to_path_buf();
     let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"is-char":"^1.0.0"}}"#;
     fs::write(dir.join("package.json"), manifest).unwrap();
     let mut lock = lock_for_manifest(manifest);
@@ -1127,6 +1123,13 @@ fn outdated_reports_versions_without_mutating_project_state() {
     assert!(stdout.contains(
         "is-char [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.1.0 available=2.0.0"
     ));
+    assert!(stdout.contains("compatible-change=minor compatible-lockfile=changed"));
+    assert!(
+        stdout.contains(
+            "available-change=major available-lockfile=changed available-manifest=changed"
+        )
+    );
+    assert!(stdout.contains("Transitive lockfile changes require resolution"));
     assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest_before);
     assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_before);
     assert_eq!(
@@ -1138,7 +1141,6 @@ fn outdated_reports_versions_without_mutating_project_state() {
         .map(|entry| entry.unwrap().file_name())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(entries_after, entries_before);
-    cleanup(dir);
 }
 
 #[test]
@@ -1188,6 +1190,9 @@ fn outdated_reports_local_workspace_versions_without_registry_lookup() {
     assert!(stdout.contains(
         "local-star [dependencies] declared=workspace:* locked=2.0.0 compatible=2.0.0 available=2.0.0"
     ));
+    let offline = run(&dir, &["outdated", "--offline"]);
+    assert!(offline.status.success());
+    assert_eq!(offline.stdout, outdated.stdout);
     assert!(!stdout.contains("registry metadata returned no versions"));
     assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_before);
     cleanup(dir);
@@ -1197,7 +1202,8 @@ fn outdated_reports_local_workspace_versions_without_registry_lookup() {
 fn outdated_uses_configured_private_registry_identity() {
     use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
 
-    let dir = temp_dir("outdated-private-registry");
+    let project = tapid_test_support::TempProject::new("outdated-private-registry").unwrap();
+    let dir = project.path().to_path_buf();
     let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"@acme/widget":"^1.0.0"}}"#;
     fs::write(dir.join("package.json"), manifest).unwrap();
     fs::write(
@@ -1239,7 +1245,20 @@ fn outdated_uses_configured_private_registry_identity() {
     assert!(String::from_utf8_lossy(&output.stdout).contains(
         "@acme/widget [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.1.0 available=2.0.0"
     ));
-    cleanup(dir);
+    fs::write(
+        dir.join("tapid.toml"),
+        "[registries.'@acme']\nurl='https://packages.acme.example'\ntoken-env='TAPID_TEST_OUTDATED_PRIVATE_TOKEN'\n",
+    ).unwrap();
+    let offline = isolated_command(&dir, &["outdated", "--offline"], false)
+        .env_remove("TAPID_TEST_OUTDATED_PRIVATE_TOKEN")
+        .output()
+        .unwrap();
+    assert!(offline.status.success());
+    let stdout = String::from_utf8_lossy(&offline.stdout);
+    assert!(stdout.contains("locked=1.0.0 compatible=unavailable available=unavailable"));
+    assert!(stdout.contains("offline: newer registry versions were not checked"));
+    assert!(stdout.contains("available-lockfile=unknown"));
+    assert!(!stdout.contains("up to date"));
 }
 
 #[test]
@@ -1325,7 +1344,7 @@ fn update_latest_preserves_overlapping_dependency_sections() {
             "h3",
             "^1.0.0",
             ">=1.0.0",
-            "*",
+            "^2.0.0",
         ),
         (
             "dependencies",
@@ -1333,7 +1352,7 @@ fn update_latest_preserves_overlapping_dependency_sections() {
             "h3",
             "^1.0.0",
             ">=1.0.0",
-            "*",
+            "^2.0.0",
         ),
         (
             "devDependencies",
@@ -1341,7 +1360,7 @@ fn update_latest_preserves_overlapping_dependency_sections() {
             "local",
             "npm:h3@^1.0.0",
             "npm:h3@>=1.0.0",
-            "npm:h3@*",
+            "npm:h3@^2.0.0",
         ),
     ] {
         for select_all in [false, true] {
@@ -1360,8 +1379,11 @@ fn update_latest_preserves_overlapping_dependency_sections() {
                 project
                     .write("package.json", manifest.to_string().as_bytes())
                     .unwrap();
+                let mut registry: serde_json::Value =
+                    serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+                registry["packages"].as_array_mut().unwrap().push(serde_json::json!({"registry":"https://registry.npmjs.org","name":"unselected","version":"4.2.0","artifact":"unused-peer-artifact","integrity":"sha512-SP3u8B5tYPrOW7kCfDRmZoQY3yTbvjwDgFzW0WVF1BCnjLdQxdsaAA0oOtdILLuhK+j+koC8cegztMLHxAMoxg=="}));
                 let fixture = project
-                    .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+                    .write("registry.json", registry.to_string().as_bytes())
                     .unwrap();
                 let store = dir.join("store");
                 let mut args = vec!["update"];
@@ -1396,7 +1418,11 @@ fn update_latest_preserves_overlapping_dependency_sections() {
                 );
                 assert_eq!(
                     updated["peerDependencies"]["unselected"],
-                    if latest && select_all { "*" } else { "^4.0.0" }
+                    if latest && select_all {
+                        "^4.2.0"
+                    } else {
+                        "^4.0.0"
+                    }
                 );
                 assert_eq!(updated["scripts"], manifest["scripts"]);
                 assert_eq!(updated["customMetadata"], manifest["customMetadata"]);
@@ -1515,6 +1541,354 @@ fn update_latest_restores_overlapping_sections_after_install_failure() {
 }
 
 #[test]
+fn named_workspace_update_saves_member_and_preserves_other_bindings() {
+    let project = tapid_test_support::TempProject::new("workspace-update-save").unwrap();
+    let dir = project.path();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"root-pin":"npm:h3@*"}}"#).unwrap();
+    project.write("packages/web/package.json", br#"{"name":"web","version":"1.0.0","dependencies":{"selected":"npm:h3@*","member-pin":"npm:h3@*","local":"workspace:^"}}"#).unwrap();
+    project
+        .write(
+            "packages/local/package.json",
+            br#"{"name":"local","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let full: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    let mut initial = full.clone();
+    initial["packages"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|p| p["name"] != "h3" || p["version"] == "1.0.0");
+    let fixture = project
+        .write("registry.json", initial.to_string().as_bytes())
+        .unwrap();
+    let store = dir.join("store");
+    let common = [
+        "--registry-fixture",
+        fixture.to_str().unwrap(),
+        "--store-dir",
+        store.to_str().unwrap(),
+    ];
+    let mut install = vec!["install"];
+    install.extend(common);
+    let output = run(dir, &install);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::write(&fixture, full.to_string()).unwrap();
+    let root_bytes = fs::read(dir.join("package.json")).unwrap();
+    let mut update = vec![
+        "update",
+        "selected",
+        "local",
+        "--workspace",
+        "web",
+        "--latest",
+        "--save-tilde",
+    ];
+    update.extend(common);
+    let output = run(dir, &update);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(dir.join("package.json")).unwrap(), root_bytes);
+    let member: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("packages/web/package.json")).unwrap()).unwrap();
+    assert_eq!(member["dependencies"]["selected"], "npm:h3@~2.0.0");
+    assert_eq!(member["dependencies"]["member-pin"], "npm:h3@*");
+    assert_eq!(member["dependencies"]["local"], "workspace:^");
+    let lock = Lockfile::from_json(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
+    assert!(lock.root_bindings()["root-pin"].contains("h3@1.0.0"));
+    let member = lock
+        .workspace_packages()
+        .values()
+        .find(|member| member.dependencies().contains_key("selected"))
+        .unwrap();
+    assert!(member.dependencies()["member-pin"].contains("h3@1.0.0"));
+    assert!(member.dependencies()["selected"].contains("h3@2.0.0"));
+    let output = run(
+        dir,
+        &[
+            "install",
+            "--frozen",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn update_rejects_conflicting_save_policies_before_mutation() {
+    let project = tapid_test_support::TempProject::new("update-save-conflict").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1"}}"#,
+        )
+        .unwrap();
+    let original = fs::read(project.path().join("package.json")).unwrap();
+    for flags in [
+        ["--save-exact", "--save-caret"],
+        ["--save-exact", "--save-tilde"],
+        ["--save-caret", "--save-tilde"],
+    ] {
+        let output = run(project.path(), &["update", "h3", flags[0], flags[1]]);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            original
+        );
+        assert!(!project.path().join("tapid.lock").exists());
+    }
+}
+
+#[test]
+fn named_update_keeps_ranges_and_explains_required_transitive_changes() {
+    for (peer, pinned) in [(false, false), (true, false), (true, true)] {
+        let unselected = if peer { "h3" } else { "unrelated" };
+        let project = tapid_test_support::TempProject::new("update-transitive").unwrap();
+        let dir = project.path();
+        project.write("package.json", serde_json::json!({"name":"app","version":"1.0.0","dependencies":{"alias-parent":"*", unselected: if pinned { "npm:h3@1.0.0" } else { "npm:h3@*" }}}).to_string().as_bytes()).unwrap();
+        let mut registry: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+        let packages = registry["packages"].as_array_mut().unwrap();
+        packages.retain(|p| p["name"] != "h3" || p["version"] == "1.0.0");
+        let parent = packages
+            .iter_mut()
+            .find(|p| p["name"] == "alias-parent")
+            .unwrap();
+        parent["dependencies"] = if peer {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"child": "npm:h3@^1"})
+        };
+        if peer {
+            parent["peerDependencies"] = serde_json::json!({"h3": "^1"});
+        }
+        let fixture = project
+            .write("registry.json", registry.to_string().as_bytes())
+            .unwrap();
+        let store = dir.join("store");
+        let common = [
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ];
+        let mut install = vec!["install"];
+        install.extend(common);
+        let output = run(dir, &install);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let original_manifest = fs::read(dir.join("package.json")).unwrap();
+        let mut parent = registry["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "alias-parent")
+            .unwrap()
+            .clone();
+        parent["version"] = "2.0.0".into();
+        parent["dependencies"] = if peer {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"child": "npm:h3@^2"})
+        };
+        if peer {
+            parent["peerDependencies"] = serde_json::json!({"h3": "^2"});
+        }
+        registry["packages"].as_array_mut().unwrap().push(parent);
+        let full: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+        registry["packages"].as_array_mut().unwrap().push(
+            full["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == "h3" && p["version"] == "2.0.0")
+                .unwrap()
+                .clone(),
+        );
+        fs::write(&fixture, registry.to_string()).unwrap();
+        let original_lock = fs::read(dir.join("tapid.lock")).unwrap();
+        let mut update = if peer {
+            vec!["--json", "update", "alias-parent"]
+        } else {
+            vec!["update", "alias-parent"]
+        };
+        update.extend(common);
+        let output = run(dir, &update);
+        if pinned {
+            assert!(!output.status.success());
+            assert_eq!(
+                fs::read(dir.join("package.json")).unwrap(),
+                original_manifest
+            );
+            assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), original_lock);
+            continue;
+        }
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read(dir.join("package.json")).unwrap(),
+            original_manifest
+        );
+        let lock =
+            Lockfile::from_json(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
+        assert!(lock.root_bindings()[unselected].contains(if peer {
+            "h3@2.0.0"
+        } else {
+            "h3@1.0.0"
+        }));
+        assert!(lock.root_bindings()["alias-parent"].contains("alias-parent@2.0.0"));
+        assert!(lock.packages().keys().any(|key| key.contains("h3@2.0.0")));
+        let explanation = if peer {
+            assert!(output.stderr.is_empty());
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                report["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|code| code == "UPDATE_GRAPH_CHANGE")
+            );
+            assert!(
+                !report["data"]["graph_changes"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            report["data"]["graph_changes"].to_string()
+        } else {
+            String::from_utf8_lossy(&output.stderr).into_owned()
+        };
+        assert!(
+            explanation.contains("h3@2.0.0")
+                && explanation.contains("alias-parent@2.0.0")
+                && explanation.contains(if peer { "peer" } else { "child" }),
+            "{explanation}"
+        );
+    }
+}
+
+#[test]
+fn named_update_preserves_unselected_alias_pin_and_saves_explicit_policies() {
+    for (flag, expected, latest) in [
+        ("--save-exact", "2.0.0", true),
+        ("--save-exact", "2.0.0", false),
+        ("--save-caret", "^2.0.0", true),
+        ("--save-caret", "^2.0.0", false),
+        ("--save-tilde", "~2.0.0", true),
+        ("--save-tilde", "~2.0.0", false),
+    ] {
+        let project = tapid_test_support::TempProject::new("named-update").unwrap();
+        let dir = project.path();
+        project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"selected":"npm:h3@*","unrelated":"npm:h3@*","alias-parent":"*"}}"#).unwrap();
+        let mut full: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+        full["packages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"] == "alias-parent")
+            .unwrap()["dependencies"] = serde_json::json!({"child": "npm:h3@*"});
+        let mut next_parent = full["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "alias-parent")
+            .unwrap()
+            .clone();
+        next_parent["version"] = "2.0.0".into();
+        full["packages"].as_array_mut().unwrap().push(next_parent);
+        let mut initial = full.clone();
+        initial["packages"].as_array_mut().unwrap().retain(|p| {
+            (p["name"] != "h3" && p["name"] != "alias-parent") || p["version"] == "1.0.0"
+        });
+        let fixture = project
+            .write("registry.json", initial.to_string().as_bytes())
+            .unwrap();
+        let store = dir.join("store");
+        let common = [
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ];
+        let mut install = vec!["install"];
+        install.extend(common);
+        let output = run(dir, &install);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::write(&fixture, full.to_string()).unwrap();
+        let mut update = vec!["update", "selected", "alias-parent", flag];
+        if latest {
+            update.push("--latest");
+        }
+        update.extend(common);
+        let output = run(dir, &update);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("package.json")).unwrap()).unwrap();
+        assert_eq!(
+            manifest["dependencies"]["selected"],
+            format!("npm:h3@{expected}")
+        );
+        assert_eq!(manifest["dependencies"]["unrelated"], "npm:h3@*");
+        for (name, version) in [("selected", "2.0.0"), ("unrelated", "1.0.0")] {
+            let installed: serde_json::Value = serde_json::from_slice(
+                &fs::read(dir.join("node_modules").join(name).join("package.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(installed["version"], version);
+        }
+        let lock =
+            Lockfile::from_json(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
+        let parent = lock
+            .packages()
+            .values()
+            .find(|package| package.name() == "alias-parent")
+            .unwrap();
+        assert!(
+            parent.dependencies()["child"].contains("h3@1.0.0"),
+            "unrelated transitive pin changed: {:?}",
+            parent.dependencies()
+        );
+        let mut replay = vec!["install", "--offline", "--frozen"];
+        replay.extend(["--store-dir", store.to_str().unwrap()]);
+        let output = run(dir, &replay);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn update_preserves_ranges_unless_latest_is_requested() {
     let dir = temp_dir("update-range-behavior");
     let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"is-char":"^1.0.0"}}"#;
@@ -1547,7 +1921,7 @@ fn update_preserves_ranges_unless_latest_is_requested() {
         String::from_utf8_lossy(&update.stderr)
     );
     let after_update = fs::read_to_string(dir.join("package.json")).unwrap();
-    assert!(after_update.contains("\"is-char\": \"^1.0.0\""));
+    assert_eq!(after_update, manifest);
     let lock: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
     assert!(
@@ -1575,7 +1949,7 @@ fn update_preserves_ranges_unless_latest_is_requested() {
         String::from_utf8_lossy(&latest.stderr)
     );
     let after_latest = fs::read_to_string(dir.join("package.json")).unwrap();
-    assert!(after_latest.contains("\"is-char\": \"*\""));
+    assert!(after_latest.contains("\"is-char\": \"^2.0.0\""));
     let latest_lock: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
     assert!(
@@ -3971,9 +4345,34 @@ fn run_lifecycle_recovery_crash_case(crash_point: &str) {
         "crash hook did not terminate process"
     );
 
-    let recovery = run(
+    let pending_manifest = fs::read(dir.join("package.json")).unwrap();
+    let pending_lock = fs::read(dir.join("tapid.lock")).unwrap();
+    let pending_journal = fs::read(dir.join(".tapid-lifecycle-journal.json")).unwrap();
+    let inspection = run(
         &dir,
         &["outdated", "--registry-fixture", fixture.to_str().unwrap()],
+    );
+    assert_eq!(inspection.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&inspection.stderr).contains("recovery required"));
+    assert_eq!(
+        fs::read(dir.join("package.json")).unwrap(),
+        pending_manifest
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), pending_lock);
+    assert_eq!(
+        fs::read(dir.join(".tapid-lifecycle-journal.json")).unwrap(),
+        pending_journal
+    );
+    let recovery = run_with_env(
+        &dir,
+        &[
+            "install",
+            "--offline",
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ],
+        "TAPID_TEST_RECOVER_ONLY",
+        "1",
     );
     assert!(
         recovery.status.success(),
@@ -6153,9 +6552,25 @@ fn frozen_cold_cache_recovery_preserves_lock_bytes_and_publication_decision() {
         }
         #[cfg(not(unix))]
         assert!(!crash.status.success());
-        let recovery = run(
+        let journal_path = dir.join(".tapid-lifecycle-journal.json");
+        let pending_journal = fs::read(&journal_path).unwrap();
+        let inspection = run(
             &dir,
             &["outdated", "--registry-fixture", fixture.to_str().unwrap()],
+        );
+        assert!(!inspection.status.success());
+        assert!(String::from_utf8_lossy(&inspection.stderr).contains("recovery required"));
+        assert_eq!(fs::read(&journal_path).unwrap(), pending_journal);
+        let recovery = run_with_env(
+            &dir,
+            &[
+                "install",
+                "--offline",
+                "--store-dir",
+                cold.to_str().unwrap(),
+            ],
+            "TAPID_TEST_RECOVER_ONLY",
+            "1",
         );
         assert!(
             recovery.status.success(),
@@ -6447,6 +6862,880 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
             .unwrap()
             .success()
     );
+}
+
+#[test]
+fn dist_tags_pin_prereleases_and_replay_after_tags_move_or_disappear() {
+    let project = tapid_test_support::TempProject::new("dist-tags").unwrap();
+    let dir = project.path();
+    fs::write(dir.join("package.json"), r#"{"name":"demo","version":"1.0.0","dependencies":{"local":"npm:h3@next","@local/direct":"npm:@actual/scoped@latest"}}"#).unwrap();
+    let mut fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    for package in fixture["packages"].as_array_mut().unwrap() {
+        if package["name"] == "h3" && package["version"] == "2.0.1-rc.20" {
+            package["dist_tags"] = serde_json::json!(["next"]);
+        }
+        if package["name"] == "@actual/scoped" {
+            package["dist_tags"] = serde_json::json!(["latest"]);
+        }
+    }
+    let fixture_path = dir.join("registry.json");
+    fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+    let store = dir.join("store");
+    let install = run(
+        dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let mut pinned: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
+    for package in pinned["packages"].as_object_mut().unwrap().values_mut() {
+        package["artifactUrl"] = serde_json::json!(format!(
+            "https://registry.npmjs.org/{}/-/fixture.tgz",
+            package["name"].as_str().unwrap()
+        ));
+    }
+    fs::write(dir.join("tapid.lock"), serde_json::to_vec(&pinned).unwrap()).unwrap();
+    let locked = fs::read(dir.join("tapid.lock")).unwrap();
+    for package in fixture["packages"].as_array_mut().unwrap() {
+        package.as_object_mut().unwrap().remove("dist_tags");
+        if package["name"] == "h3" && package["version"] == "2.0.0" {
+            package["dist_tags"] = serde_json::json!(["next"]);
+        }
+    }
+    fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+    for flags in [
+        vec!["install"],
+        vec!["install", "--frozen"],
+        vec!["install", "--offline"],
+        vec!["ci", "--offline"],
+    ] {
+        fs::remove_dir_all(dir.join("node_modules")).unwrap();
+        let mut args = flags;
+        args.extend([
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ]);
+        let output = run(dir, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), locked);
+        assert!(
+            fs::read_to_string(dir.join("node_modules/local/index.js"))
+                .unwrap()
+                .contains("prerelease")
+        );
+        assert!(
+            dir.join("node_modules/.bin/scoped-tool").exists()
+                || dir.join("node_modules/.bin/scoped-tool.cmd").exists()
+        );
+    }
+    fs::remove_dir_all(dir.join("node_modules")).unwrap();
+    let cold_store = dir.join("cold-store");
+    let hydrate = run(
+        dir,
+        &[
+            "install",
+            "--frozen",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            cold_store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        hydrate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hydrate.stderr)
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), locked);
+    assert!(
+        fs::read_to_string(dir.join("node_modules/local/index.js"))
+            .unwrap()
+            .contains("prerelease")
+    );
+    let outdated = run(
+        dir,
+        &[
+            "outdated",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        outdated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&outdated.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&outdated.stdout)
+            .contains("declared=npm:h3@next locked=2.0.1-rc.20 compatible=2.0.0")
+    );
+    let before = fs::read(dir.join("package.json")).unwrap();
+    let output = run(
+        dir,
+        &[
+            "update",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("latest"));
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), locked);
+    assert_eq!(fs::read(dir.join("package.json")).unwrap(), before);
+    for package in fixture["packages"].as_array_mut().unwrap() {
+        if package["name"] == "@actual/scoped" {
+            package["dist_tags"] = serde_json::json!(["latest"]);
+        }
+    }
+    fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+    let update = run(
+        dir,
+        &[
+            "update",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let updated_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("package.json")).unwrap()).unwrap();
+    let original_manifest: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(
+        updated_manifest["dependencies"],
+        original_manifest["dependencies"]
+    );
+    assert!(
+        fs::read_to_string(dir.join("node_modules/local/package.json"))
+            .unwrap()
+            .contains("2.0.0")
+    );
+}
+
+#[test]
+fn copied_file_tarballs_keep_source_identity_and_reject_changed_bytes_on_replay() {
+    use base64::Engine;
+    let project = tapid_test_support::TempProject::new("file-tarballs").unwrap();
+    let dir = project.path();
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    let package = fixture["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == "h3" && package["version"] == "1.0.0")
+        .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            package["artifact"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("base64:")
+                .unwrap(),
+        )
+        .unwrap();
+    project.write("vendor/pkg.tgz", &bytes).unwrap();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"copied":"file:./vendor/pkg.tgz","registry":"npm:h3@1"}}"#).unwrap();
+    let fixture_path = project
+        .write(
+            "registry.json",
+            serde_json::to_vec(&fixture).unwrap().as_slice(),
+        )
+        .unwrap();
+    let store = dir.join("store");
+    let output = run(
+        dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let locked = fs::read(dir.join("tapid.lock")).unwrap();
+    let lock = Lockfile::from_json(std::str::from_utf8(&locked).unwrap()).unwrap();
+    assert_eq!(lock.packages().len(), 2);
+    assert!(lock.root_bindings()["copied"].starts_with("file:vendor/pkg.tgz#sha256-"));
+    let why = run(dir, &["--json", "why", "h3"]);
+    assert!(
+        why.status.success(),
+        "{}",
+        String::from_utf8_lossy(&why.stderr)
+    );
+    let explanation: serde_json::Value = serde_json::from_slice(&why.stdout).unwrap();
+    let copied = explanation["data"]["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|path| path["steps"][0]["key"] == lock.root_bindings()["copied"])
+        .expect("why must retain the copied source path alongside the registry path");
+    assert_eq!(copied["steps"][0]["sourceKind"], "copied");
+    let why = run(dir, &["why", "h3"]);
+    assert!(
+        why.status.success(),
+        "{}",
+        String::from_utf8_lossy(&why.stderr)
+    );
+    assert!(String::from_utf8_lossy(&why.stdout).contains("file:vendor/pkg.tgz#sha256-"));
+    for flags in [
+        vec!["install", "--offline", "--frozen"],
+        vec!["ci", "--offline"],
+    ] {
+        fs::remove_dir_all(dir.join("node_modules")).unwrap();
+        let mut args = flags;
+        args.extend([
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ]);
+        let output = run(dir, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), locked);
+        assert_eq!(
+            fs::read(dir.join("node_modules/copied/index.js")).unwrap(),
+            fs::read(dir.join("node_modules/registry/index.js")).unwrap()
+        );
+    }
+    fs::write(dir.join("vendor/pkg.tgz"), b"changed").unwrap();
+    let output = run(
+        dir,
+        &[
+            "install",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("digest mismatch"));
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), locked);
+    assert!(dir.join("node_modules/copied/index.js").is_file());
+}
+
+#[test]
+fn pinned_git_dependencies_replay_exact_commits_after_refs_move() {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let project = tapid_test_support::TempProject::new("pinned-git").unwrap();
+    let dir = project.path();
+    let original: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    let mut packages = Vec::new();
+    for (version, commit, reference) in [
+        ("1.0.0", "a".repeat(40), Some("main")),
+        ("2.0.0", "b".repeat(40), None),
+    ] {
+        let mut package = original["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "h3" && package["version"] == version)
+            .unwrap()
+            .clone();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(
+                package["artifact"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("base64:")
+                    .unwrap(),
+            )
+            .unwrap();
+        let digest = format!("sha256-{:x}", Sha256::digest(&bytes));
+        package["registry"] = serde_json::json!(format!(
+            "git+https://example.test/repo.git#{commit}!{digest}"
+        ));
+        if let Some(reference) = reference {
+            package["git_ref"] = serde_json::json!(reference);
+        }
+        packages.push(package);
+    }
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"copied":"git+https://example.test/repo.git#main","untouched":"git+https://example.test/repo.git#main"}}"#).unwrap();
+    let fixture_path = project
+        .write(
+            "registry.json",
+            &serde_json::to_vec(&serde_json::json!({"packages":packages})).unwrap(),
+        )
+        .unwrap();
+    let store = dir.join("store");
+    let install = run(
+        dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let locked = fs::read(dir.join("tapid.lock")).unwrap();
+    let lock = Lockfile::from_json(std::str::from_utf8(&locked).unwrap()).unwrap();
+    assert!(lock.root_bindings()["copied"].contains(&"a".repeat(40)));
+    packages[0].as_object_mut().unwrap().remove("git_ref");
+    packages[1]["git_ref"] = serde_json::json!("main");
+    fs::write(
+        &fixture_path,
+        serde_json::to_vec(&serde_json::json!({"packages":packages})).unwrap(),
+    )
+    .unwrap();
+    for flags in [
+        vec!["install"],
+        vec!["install", "--offline", "--frozen"],
+        vec!["ci", "--offline"],
+    ] {
+        fs::remove_dir_all(dir.join("node_modules")).unwrap();
+        let mut args = flags;
+        args.extend([
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ]);
+        let output = run(dir, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), locked);
+        assert!(
+            fs::read_to_string(dir.join("node_modules/copied/package.json"))
+                .unwrap()
+                .contains("1.0.0")
+        );
+    }
+    for command in ["install", "ci"] {
+        let cold = dir.join(format!("cold-{command}"));
+        let mut args = vec![command];
+        if command == "install" {
+            args.push("--frozen");
+        }
+        args.extend([
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            cold.to_str().unwrap(),
+        ]);
+        let output = run(dir, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), locked);
+        assert!(
+            fs::read_to_string(dir.join("node_modules/copied/package.json"))
+                .unwrap()
+                .contains("1.0.0")
+        );
+    }
+    // A named Git refresh must preserve the other binding after the reference moves.
+    let update = run(
+        dir,
+        &[
+            "update",
+            "copied",
+            "--latest",
+            "--save-exact",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    assert!(
+        fs::read_to_string(dir.join("node_modules/copied/package.json"))
+            .unwrap()
+            .contains("2.0.0")
+    );
+    assert!(
+        fs::read_to_string(dir.join("tapid.lock"))
+            .unwrap()
+            .contains(&"b".repeat(40))
+    );
+    let named_lock =
+        Lockfile::from_json(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
+    assert!(named_lock.root_bindings()["untouched"].contains(&"a".repeat(40)));
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("package.json")).unwrap()).unwrap();
+    assert_eq!(
+        saved["dependencies"]["copied"],
+        "git+https://example.test/repo.git#main"
+    );
+    let updated_lock = fs::read(dir.join("tapid.lock")).unwrap();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"copied":"git+https://example.test/repo.git#missing-ref"}}"#).unwrap();
+    let changed_reference = run(
+        dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !changed_reference.status.success(),
+        "a changed declaration must resolve its new reference"
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), updated_lock);
+}
+
+#[test]
+fn copied_dependency_rejections_preserve_project_and_store_and_redact_credentials() {
+    for spec in [
+        "file:../outside.tgz",
+        "file:/outside.tgz",
+        "file:directory.tgz",
+        "file:missing.tgz",
+        "git+ssh://example.test/repo#main",
+        "git+https://user:never-log-this@example.test/repo#main",
+        "git+https://example.test/repo?token=never-log-this#main",
+        "git+https://example.test/repo#semver:^1",
+    ] {
+        let project = tapid_test_support::TempProject::new("copied-rejection").unwrap();
+        let dir = project.path();
+        let manifest =
+            serde_json::json!({"name":"demo","version":"1.0.0","dependencies":{"copied":spec}})
+                .to_string();
+        project.write("package.json", manifest.as_bytes()).unwrap();
+        project.write("tapid.lock", b"previous lock").unwrap();
+        project
+            .write("node_modules/keep", b"previous install")
+            .unwrap();
+        fs::create_dir(dir.join("directory.tgz")).unwrap();
+        let fixture = project
+            .write("registry.json", br#"{"packages":[]}"#)
+            .unwrap();
+        let store = dir.join("store");
+        let output = run(
+            dir,
+            &[
+                "install",
+                "--registry-fixture",
+                fixture.to_str().unwrap(),
+                "--store-dir",
+                store.to_str().unwrap(),
+            ],
+        );
+        assert!(!output.status.success(), "{spec}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("copied"), "{error}");
+        assert!(!error.contains("never-log-this"));
+        assert_eq!(
+            fs::read(dir.join("package.json")).unwrap(),
+            manifest.as_bytes()
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), b"previous lock");
+        assert_eq!(
+            fs::read(dir.join("node_modules/keep")).unwrap(),
+            b"previous install"
+        );
+        assert!(!store.exists());
+    }
+}
+
+#[test]
+fn copied_file_tarballs_materialize_bins_and_cold_replay() {
+    let project = tapid_test_support::TempProject::new("file-bins").unwrap();
+    let dir = project.path();
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    let package = fixture["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == "@actual/scoped")
+        .unwrap();
+    let bytes = STANDARD
+        .decode(
+            package["artifact"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("base64:")
+                .unwrap(),
+        )
+        .unwrap();
+    project.write("vendor/tool.tgz", &bytes).unwrap();
+    project
+        .write("package.json", br#"{"name":"demo","version":"1.0.0"}"#)
+        .unwrap();
+    let store = dir.join("store");
+    let output = run(
+        dir,
+        &[
+            "add",
+            "local@file:vendor/tool.tgz",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let locked = fs::read(dir.join("tapid.lock")).unwrap();
+    let manifest = fs::read(dir.join("package.json")).unwrap();
+    for (command, flags) in [
+        ("install", vec!["--offline", "--frozen"]),
+        ("install", vec!["--frozen"]),
+        ("ci", Vec::new()),
+    ] {
+        fs::remove_dir_all(dir.join("node_modules")).unwrap();
+        let destination = if flags.contains(&"--offline") {
+            store.clone()
+        } else {
+            dir.join(format!("cold-{command}"))
+        };
+        let mut args = vec![command];
+        args.extend(flags);
+        args.extend(["--store-dir", destination.to_str().unwrap()]);
+        let replay = run(dir, &args);
+        assert!(
+            replay.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), locked);
+        assert!(
+            dir.join("node_modules/.bin/scoped-tool").exists()
+                || dir.join("node_modules/.bin/scoped-tool.cmd").exists()
+        );
+        assert!(dir.join("node_modules/local/index.js").is_file());
+    }
+    let update = run(
+        dir,
+        &["update", "--latest", "--store-dir", store.to_str().unwrap()],
+    );
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest);
+    let outdated = run(dir, &["outdated"]);
+    assert!(
+        outdated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&outdated.stderr)
+    );
+    assert!(String::from_utf8_lossy(&outdated.stdout).contains("declared=file:vendor/tool.tgz"));
+}
+
+#[test]
+fn copied_git_archives_use_the_same_safe_extraction_and_bin_lane() {
+    use sha2::{Digest, Sha256};
+    let project = tapid_test_support::TempProject::new("git-archive").unwrap();
+    let repo = tapid_test_support::TempProject::new("git-archive-source").unwrap();
+    repo.write(
+        "package.json",
+        br#"{"name":"git-tool","version":"1.0.0","bin":{"git-tool":"bin.js"},"dependencies":{"nested":"npm:h3@next"}}"#,
+    )
+    .unwrap();
+    repo.write("bin.js", b"#!/usr/bin/env node\nconsole.log('fixture');\n")
+        .unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .env_clear()
+            .env("HOME", repo.path())
+            .env("USERPROFILE", repo.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", repo.path().join("empty-config"))
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "-c",
+                "core.hooksPath=disabled-hooks",
+                "-c",
+                "commit.gpgSign=false",
+            ])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    repo.write("empty-config", b"").unwrap();
+    git(&["init", "--template="]);
+    git(&["add", "package.json", "bin.js"]);
+    git(&["commit", "-m", "Fixture"]);
+    let commit = String::from_utf8(git(&["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let bytes = git(&["archive", "--format=tar", "--prefix=package/", "HEAD"]);
+    let source = format!(
+        "git+https://example.test/tool.git#{commit}!sha256-{:x}",
+        Sha256::digest(&bytes)
+    );
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"local":"git+https://example.test/tool.git#main"}}"#).unwrap();
+    let original: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    let mut child = original["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == "h3" && package["version"] == "2.0.1-rc.20")
+        .unwrap()
+        .clone();
+    child["dist_tags"] = serde_json::json!(["next"]);
+    let fixture = project.write("registry.json", &serde_json::to_vec(&serde_json::json!({"packages":[{"registry":source,"git_ref":"main","name":"git-tool","version":"1.0.0","artifact":format!("base64:{}", STANDARD.encode(&bytes)),"dependencies":{}}, child]})).unwrap()).unwrap();
+    let store = project.path().join("store");
+    let install = run(
+        project.path(),
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    assert!(
+        project.path().join("node_modules/.bin/git-tool").exists()
+            || project
+                .path()
+                .join("node_modules/.bin/git-tool.cmd")
+                .exists()
+    );
+    assert!(project.path().join("node_modules/local/bin.js").is_file());
+    assert!(
+        fs::read_to_string(project.path().join("node_modules/nested/index.js"))
+            .unwrap()
+            .contains("prerelease")
+    );
+    if let Some(node) = node_assertion_output(Command::new("node").args(["-e", "console.log(require(require.resolve('nested', {paths:[require('path').resolve('node_modules/local')]})))"]).current_dir(project.path()), std::env::var_os("TAPID_REQUIRE_NODE_ASSERTIONS").is_some(), "copied-git-transitive-alias") {
+        assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
+        assert_eq!(String::from_utf8_lossy(&node.stdout).trim(), "prerelease");
+    }
+    let locked = fs::read(project.path().join("tapid.lock")).unwrap();
+    let mut altered: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    altered["packages"][0]["artifact"] =
+        serde_json::json!(format!("base64:{}", STANDARD.encode(b"changed archive")));
+    fs::write(&fixture, serde_json::to_vec(&altered).unwrap()).unwrap();
+    let cold = project.path().join("cold-store");
+    let replay = run(
+        project.path(),
+        &[
+            "install",
+            "--frozen",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            cold.to_str().unwrap(),
+        ],
+    );
+    assert!(!replay.status.success());
+    assert!(String::from_utf8_lossy(&replay.stderr).contains("digest mismatch"));
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), locked);
+    assert!(project.path().join("node_modules/local/bin.js").is_file());
+}
+
+#[test]
+fn copied_file_tarballs_reject_hostile_entries_without_replacing_the_project() {
+    for (path, kind) in [("../escape", b'0'), ("package/link", b'2')] {
+        let project = tapid_test_support::TempProject::new("file-hostile").unwrap();
+        let mut header = [0u8; 512];
+        header[..path.len()].copy_from_slice(path.as_bytes());
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[124..136].copy_from_slice(b"00000000000\0");
+        header[148..156].fill(b' ');
+        header[156] = kind;
+        header[157..169].copy_from_slice(b"../../escape");
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let sum = header.iter().map(|byte| *byte as u32).sum::<u32>();
+        header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        let bytes = [header.as_slice(), &[0u8; 1024]].concat();
+        project.write("vendor/hostile.tar", &bytes).unwrap();
+        project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"local":"file:vendor/hostile.tar"}}"#).unwrap();
+        project
+            .write("node_modules/keep", b"previous install")
+            .unwrap();
+        let store = project.path().join("store");
+        let install = run(
+            project.path(),
+            &["install", "--store-dir", store.to_str().unwrap()],
+        );
+        assert!(!install.status.success());
+        assert!(String::from_utf8_lossy(&install.stderr).contains("ARCHIVE_INVALID"));
+        assert_eq!(
+            fs::read(project.path().join("node_modules/keep")).unwrap(),
+            b"previous install"
+        );
+        assert!(!project.path().join("tapid.lock").exists());
+        assert!(!project.path().join("escape").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn copied_file_paths_cannot_follow_symlink_components() {
+    let project = tapid_test_support::TempProject::new("file-symlink").unwrap();
+    let outside = tapid_test_support::TempProject::new("file-symlink-target").unwrap();
+    outside.write("tool.tgz", b"archive").unwrap();
+    std::os::unix::fs::symlink(outside.path(), project.path().join("vendor")).unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"local":"file:vendor/tool.tgz"}}"#,
+        )
+        .unwrap();
+    let store = project.path().join("store");
+    let install = run(
+        project.path(),
+        &["install", "--store-dir", store.to_str().unwrap()],
+    );
+    assert!(!install.status.success());
+    assert!(String::from_utf8_lossy(&install.stderr).contains("symlink"));
+    assert!(!store.exists());
+    assert_eq!(
+        fs::read(outside.path().join("tool.tgz")).unwrap(),
+        b"archive"
+    );
+}
+
+#[test]
+fn dist_tag_workspace_peers_validate_exact_targets_during_resolution_and_replay() {
+    let project = tapid_test_support::TempProject::new("workspace-tag-peer").unwrap();
+    let manifest = br#"{"name":"demo","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"h3":"1.0.0","member":"workspace:*"}}"#;
+    project.write("package.json", manifest).unwrap();
+    project
+        .write(
+            "packages/member/package.json",
+            br#"{"name":"member","version":"1.0.0","peerDependencies":{"h3":"next"}}"#,
+        )
+        .unwrap();
+    let mut fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    for package in fixture["packages"].as_array_mut().unwrap() {
+        if package["name"] == "h3" && package["version"] == "1.0.0" {
+            package["dist_tags"] = serde_json::json!(["next"]);
+        }
+    }
+    let fixture_path = project
+        .write("registry.json", &serde_json::to_vec(&fixture).unwrap())
+        .unwrap();
+    let store = project.path().join("store");
+    let args = [
+        "install",
+        "--registry-fixture",
+        fixture_path.to_str().unwrap(),
+        "--store-dir",
+        store.to_str().unwrap(),
+    ];
+    let installed = run(project.path(), &args);
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    project
+        .write("package.json", &[manifest.as_slice(), b"\n"].concat())
+        .unwrap();
+    let changed = run(project.path(), &args);
+    assert!(
+        changed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+    let locked = fs::read(project.path().join("tapid.lock")).unwrap();
+    for package in fixture["packages"].as_array_mut().unwrap() {
+        package.as_object_mut().unwrap().remove("dist_tags");
+        if package["name"] == "h3" && package["version"] == "2.0.0" {
+            package["dist_tags"] = serde_json::json!(["next"]);
+        }
+    }
+    fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+    let replay = run(
+        project.path(),
+        &[
+            "install",
+            "--offline",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), locked);
+    let refresh = run(
+        project.path(),
+        &[
+            "update",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!refresh.status.success());
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), locked);
 }
 
 #[test]
@@ -6846,3 +8135,5 @@ fn sandbox_json_rejects_install_before_privileged_management() {
         output
     );
 }
+#[path = "cli_cases/preview.rs"]
+mod preview_tests;

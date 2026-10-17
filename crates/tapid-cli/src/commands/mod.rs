@@ -131,18 +131,20 @@ pub(crate) enum Command {
     Remove(lifecycle::RemoveArgs),
     /// Resolve and reinstall dependencies using the declared version ranges.
     #[command(
-        long_about = "Resolve and install the dependency graph again and write tapid.lock. Declared version ranges stay unchanged unless --latest is used.\n\nWith --latest, selected requirements become * in package.json. Package selection controls which declarations change; the entire graph is re-resolved on every update.",
+        long_about = "Refresh selected direct dependencies and write tapid.lock. Named updates preserve unrelated valid locked versions. Selected requirements and peer constraints may require transitive changes, which are reported with their requiring edges. Without names, refresh the whole graph.\n\nDeclared ranges stay unchanged unless a save policy or --latest is used. --latest permits versions beyond the declared range and saves a caret requirement by default. Use --save-exact, --save-caret, or --save-tilde to choose how resolved versions are saved. Alias targets, sections, workspace references, and copied sources are preserved.",
         after_help = "Examples:
   tapid update
   tapid update react
-  tapid update --latest react"
+  tapid update --latest react
+  tapid update --latest --save-exact react"
     )]
     Update(lifecycle::UpdateArgs),
     /// Compare declared and locked dependencies with registry versions.
     #[command(
-        long_about = "Report each direct dependency's declared requirement, locked version, newest compatible version, and newest available version.\n\nRequires package.json and tapid.lock. Reads live registry metadata unless --registry-fixture is supplied. Does not update dependency declarations or install packages, but may recover an interrupted transaction.\n\n--store-dir and --allow-unverified-registry-artifacts have no effect on this command.",
+        long_about = "Report each direct dependency's declared requirement, locked version, newest compatible version, and newest available version. Show the SemVer change, direct lockfile pin impact if each version is selected, and whether the available version requires changing the declared range.\n\nLockfile impact compares direct versions only. Transitive changes and whether an update resolves successfully require full dependency resolution. SemVer change labels do not establish API compatibility.\n\nRequires package.json and tapid.lock. Reads live registry metadata unless --offline or --registry-fixture is supplied. --offline without a fixture reports registry versions and impact as unknown; local workspace versions remain available. Available means the highest published SemVer, including prereleases, rather than the latest dist-tag. Does not modify the manifest, lockfile, store, or node_modules. Pending interrupted transactions require recovery through tapid install before inspection.\n\n--store-dir and --allow-unverified-registry-artifacts have no effect on this command.",
         after_help = "Examples:
   tapid outdated
+  tapid outdated --offline
   tapid outdated --workspace web"
     )]
     Outdated(lifecycle::OutdatedArgs),

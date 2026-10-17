@@ -368,3 +368,260 @@ fn run_permissions_network_grant_serves_http_through_real_cli() {
         );
     }
 }
+
+#[test]
+fn run_result_file_reports_prelaunch_failure_without_mixing_streams() {
+    let project = project();
+    let results = tapid_test_support::TempProject::new("run-results").unwrap();
+    let path = results.path().join("result.json");
+    let output = invoke(
+        project.path(),
+        &["run", "missing", "--result-file", path.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let result: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("prelaunch result file")).unwrap();
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["operation"], "run");
+    assert_eq!(result["outcome"], "prelaunch_failure");
+    assert_eq!(result["error"]["code"], "SCRIPT_MISSING");
+    assert!(result["receipt"].is_null());
+    assert!(output.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("schema_version"));
+}
+
+#[test]
+fn run_result_file_rejects_existing_and_project_destinations_before_launch() {
+    let project = project();
+    let results = tapid_test_support::TempProject::new("run-result-destinations").unwrap();
+    let existing = results.write("existing.json", b"keep me").unwrap();
+    for path in [existing, project.path().join("result.json")] {
+        let output = invoke(
+            project.path(),
+            &["run", "probe", "--result-file", path.to_str().unwrap()],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("result file"));
+    }
+    assert_eq!(
+        fs::read(results.path().join("existing.json")).unwrap(),
+        b"keep me"
+    );
+    assert!(!project.path().join("result.json").exists());
+    #[cfg(unix)]
+    {
+        let link = results.path().join("link.json");
+        std::os::unix::fs::symlink(results.path().join("existing.json"), &link).unwrap();
+        let output = invoke(
+            project.path(),
+            &["run", "probe", "--result-file", link.to_str().unwrap()],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(fs::read(link).unwrap(), b"keep me");
+        let alias = results.path().join("project-alias");
+        std::os::unix::fs::symlink(project.path(), &alias).unwrap();
+        let output = invoke(
+            project.path(),
+            &[
+                "run",
+                "probe",
+                "--result-file",
+                alias.join("result.json").to_str().unwrap(),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert!(!project.path().join("result.json").exists());
+    }
+}
+
+#[test]
+fn run_result_file_cannot_be_forged_by_child_and_preserves_output_and_exit() {
+    let project = project();
+    let results = tapid_test_support::TempProject::new("run-result-child").unwrap();
+    let path = results.path().join("result.json");
+    let (_runtime, node) = private_node_runtime();
+    project
+        .write(
+            "probe.js",
+            format!(
+                r#"
+const fs=require('node:fs'),a=require('node:assert/strict');
+const destination={};
+a.throws(()=>fs.writeFileSync(destination, '{{"outcome":"forged"}}'));
+a.throws(()=>fs.appendFileSync(destination, 'forged'));
+a.throws(()=>fs.unlinkSync(destination));
+a.throws(()=>fs.renameSync(destination, 'stolen-result'));
+a.throws(()=>fs.linkSync(destination, 'linked-result'));
+process.stdout.write(Buffer.from([0,255,10]));
+process.stderr.write('{{"schema_version":1,"outcome":"forged"}}');
+process.exitCode=37;
+"#,
+                serde_json::to_string(&path).unwrap()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "run",
+            "probe",
+            "--result-file",
+            path.to_str().unwrap(),
+            "--node-runtime",
+            node.to_str().unwrap(),
+            "--allow-read",
+            ".",
+            "--allow-write",
+            ".",
+            "--allow-subprocess",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(37),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, [0, 255, 10]);
+    assert_eq!(output.stderr, br#"{"schema_version":1,"outcome":"forged"}"#);
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(bytes.last(), Some(&b'\n'));
+    let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["outcome"], "completed");
+    assert_eq!(result["receipt"]["termination"], "Exited(37)");
+    assert_eq!(result["receipt"]["assurance"], "Restricted");
+    assert!(result["receipt"]["completion"].is_object());
+    assert_eq!(result["policy_inputs"]["source"], "invocation-baseline");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn run_result_file_covers_configuration_preparation_and_containment_failures() {
+    for (config, args, code, outcome) in [
+        (None, vec![], "CONFIG_UNAVAILABLE", "prelaunch_failure"),
+        (
+            Some("malformed = ["),
+            vec![],
+            "CONFIG_INVALID",
+            "prelaunch_failure",
+        ),
+        (Some(""), vec![], "PROFILE_MISSING", "prelaunch_failure"),
+        (
+            Some("[run.scripts.probe]\nread=['.']\n"),
+            vec!["--node-runtime", "missing-node"],
+            "PREPARATION_FAILED",
+            "prelaunch_failure",
+        ),
+    ] {
+        let project = project();
+        let results = tapid_test_support::TempProject::new("run-result-failure").unwrap();
+        let path = results.path().join("result.json");
+        if let Some(config) = config {
+            project.write("tapid.toml", config.as_bytes()).unwrap();
+        }
+        let mut arguments = vec!["run", "probe", "--result-file", path.to_str().unwrap()];
+        arguments.extend(args);
+        let output = invoke(project.path(), &arguments);
+        assert_eq!(output.status.code(), Some(1));
+        let result: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(result["outcome"], outcome);
+        assert_eq!(result["error"]["code"], code);
+        assert!(result["receipt"].is_null());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn run_result_file_reports_unsupported_containment_without_fallback() {
+    let project = project();
+    project
+        .write(
+            "tapid.toml",
+            b"[run.scripts.probe]\nread=['.']\nsubprocess=true\n",
+        )
+        .unwrap();
+    project
+        .write(
+            "probe.js",
+            b"require('node:fs').writeFileSync('spawned','unsafe')",
+        )
+        .unwrap();
+    let results = tapid_test_support::TempProject::new("run-result-unsupported").unwrap();
+    let path = results.path().join("result.json");
+    let (_runtime, node) = private_node_runtime();
+    let output = invoke(
+        project.path(),
+        &[
+            "run",
+            "probe",
+            "--result-file",
+            path.to_str().unwrap(),
+            "--node-runtime",
+            node.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!project.path().join("spawned").exists());
+    let result: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(result["outcome"], "execution_failure");
+    assert_eq!(result["error"]["code"], "unsupported-containment");
+    assert_eq!(
+        result["policy_inputs"]["effective"]["assurance"],
+        "ManagedTree"
+    );
+    assert!(result["receipt"].is_null());
+}
+
+#[test]
+fn run_result_file_covers_project_manifest_and_workspace_failures() {
+    let project = project();
+    let results = tapid_test_support::TempProject::new("run-result-inputs").unwrap();
+    for (index, args, code) in [
+        (
+            0,
+            vec!["--project-dir", "does-not-exist"],
+            "PROJECT_UNAVAILABLE",
+        ),
+        (
+            1,
+            vec!["--workspace", "missing-member"],
+            "WORKSPACE_INVALID",
+        ),
+        (2, vec![], "MANIFEST_INVALID"),
+    ] {
+        if index == 2 {
+            project.write("package.json", b"invalid json").unwrap();
+        }
+        let path = results.path().join(format!("result-{index}.json"));
+        let mut arguments = vec!["run", "probe", "--result-file", path.to_str().unwrap()];
+        arguments.extend(args);
+        let output = invoke(project.path(), &arguments);
+        assert_eq!(output.status.code(), Some(1));
+        let result: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(result["outcome"], "prelaunch_failure");
+        assert_eq!(result["error"]["code"], code);
+        assert!(result["error"]["completion"].is_null());
+        assert!(result["receipt"].is_null());
+    }
+    let path = results.path().join("conflict.json");
+    let output = invoke(
+        project.path(),
+        &[
+            "run",
+            "probe",
+            "--result-file",
+            path.to_str().unwrap(),
+            "--receipt-json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!path.exists());
+}

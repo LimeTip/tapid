@@ -99,7 +99,7 @@ pub(crate) fn explain(
     })?;
     let lock = Lockfile::from_json(&lock_bytes).map_err(OperationalError::from)?;
     lock.validate_replay(&root_digest)
-        .map_err(OperationalError::from)?;
+        .map_err(|error| OperationalError::from(error).at_manifest(&root_manifest_path))?;
 
     let roots = if selection.manifest_path == root_manifest_path {
         direct_roots(&lock, &selection.manifest, &selection.root_dir)?
@@ -340,6 +340,23 @@ fn direct_dependency_kinds(manifest: &PackageManifest) -> BTreeMap<String, Strin
     .collect()
 }
 
+/// Explain immediate dependency and peer edges using the same graph as `why`.
+pub(super) fn requiring_edges(
+    lock: &Lockfile,
+) -> Result<BTreeMap<String, Vec<String>>, OperationalError> {
+    let mut reasons = BTreeMap::<String, Vec<String>>::new();
+    for (parent, edges) in graph(lock)? {
+        let parent = parent.replace('|', " ");
+        for edge in edges {
+            reasons
+                .entry(edge.target)
+                .or_default()
+                .push(format!("{parent} through {} '{}'", edge.kind, edge.name));
+        }
+    }
+    Ok(reasons)
+}
+
 fn graph(lock: &Lockfile) -> Result<BTreeMap<String, Vec<Edge>>, OperationalError> {
     let mut graph: BTreeMap<String, Vec<Edge>> = BTreeMap::new();
     for (key, package) in lock.packages_typed().map_err(OperationalError::from)? {
@@ -406,6 +423,10 @@ fn source_kind(key: &str) -> &'static str {
             source: LockfilePackageSource::Workspace(_),
             ..
         }) => "workspace",
+        Ok(LockfilePackageKey {
+            source: LockfilePackageSource::Copied(_),
+            ..
+        }) => "copied",
         _ => "registry",
     }
 }
