@@ -302,6 +302,67 @@ fn tool_preserves_replaced_launcher_and_unknown_environment() {
 }
 
 #[test]
+fn tool_cleanup_recovers_interrupted_retirement_marker_writes() {
+    for point in ["tool_writing_retirement", "tool_retirement_synced"] {
+        let project = TempProject::new(point).unwrap();
+        let home = TempHome::new(point).unwrap();
+        assert_success(&install(&project, &home));
+        let root = home.path().join("tools with spaces");
+        let directory = root.join("environments");
+        let unowned = directory.join(".tapid-tool-write-deadbeef");
+        fs::write(&unowned, b"unowned").unwrap();
+        let crashed = command(&project, &home, &["tool", "remove", "hello-tool"])
+            .env("TAPID_TEST_CRASH_POINT", point)
+            .output()
+            .unwrap();
+        assert!(!crashed.status.success(), "{point}");
+        let interrupted_recovery = command(&project, &home, &["tool", "list"])
+            .env("TAPID_TEST_CRASH_POINT", point)
+            .output()
+            .unwrap();
+        assert!(!interrupted_recovery.status.success(), "{point}");
+        assert_eq!(list(&project, &home)["data"]["tools"], json!([]));
+        let remaining: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![unowned.file_name().unwrap()],
+            "abandoned retirement write at {point}"
+        );
+        assert_eq!(fs::read(&unowned).unwrap(), b"unowned");
+        assert_eq!(list(&project, &home)["data"]["tools"], json!([]));
+        assert_eq!(fs::read_dir(directory).unwrap().count(), 1);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn tool_default_root_uses_home_when_xdg_data_home_is_empty_or_unset() {
+    for value in [None, Some("")] {
+        let project = TempProject::new("tool-empty-xdg").unwrap();
+        let home = TempHome::new("tool-empty-xdg").unwrap();
+        let mut install = isolated_process(&project, &home, env!("CARGO_BIN_EXE_tapid"));
+        install
+            .args(["tool", "install", "hello-tool@1.0.0"])
+            .arg("--registry-fixture")
+            .arg(fixture(&project))
+            .arg("--store-dir")
+            .arg(home.path().join("store"));
+        if let Some(value) = value {
+            install.env("XDG_DATA_HOME", value);
+        } else {
+            install.env_remove("XDG_DATA_HOME");
+        }
+        assert_success(&install.output().unwrap());
+        let root = home.path().join(".local/share/tapid/tools");
+        assert!(root.join("catalog.json").is_file());
+        assert!(root.join("bin/hello-tool").is_file());
+    }
+}
+
+#[test]
 fn tool_catalog_recovery_retires_interrupted_replacement_files() {
     for point in ["lockfile_writing", "lockfile_staged", "lockfile_published"] {
         let project = TempProject::new(point).unwrap();

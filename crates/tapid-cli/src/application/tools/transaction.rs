@@ -336,7 +336,9 @@ pub(super) fn cleanup(root: &Path, catalog: &Catalog) -> Result<Cleanup, Operati
         .collect::<BTreeSet<_>>();
     let mut result = Cleanup {
         pending: false,
-        changed: false,
+        // Retirement sidecars are written beside generations. This scope is
+        // cleaned only under the mutation lock, never by a concurrent invocation.
+        changed: state::cleanup_write_stages(&directory)?,
     };
     // Only the atomic sidecar, never a generation name or temporary filename,
     // authorizes completing ownership of an interrupted staging directory.

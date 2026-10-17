@@ -114,7 +114,7 @@ the existing versioned result protocol.
 The default tool root is:
 - Windows: %LOCALAPPDATA%/tapid/tools
 - macOS: ~/Library/Application Support/tapid/tools
-- Linux: $XDG_DATA_HOME/tapid/tools, or ~/.local/share/tapid/tools
+- Linux: $XDG_DATA_HOME/tapid/tools, or ~/.local/share/tapid/tools when XDG_DATA_HOME is unset or empty
 
 Add the reported root's bin directory to PATH once using your shell's normal
 configuration. Tapid does not edit shell profiles or the persistent environment.

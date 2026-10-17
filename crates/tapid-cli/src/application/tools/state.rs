@@ -97,11 +97,7 @@ pub(super) fn root_path(explicit: Option<&Path>) -> Result<PathBuf, OperationalE
             home()?.join("tapid/tools")
         } else if cfg!(target_os = "macos") {
             home()?.join("Library/Application Support/tapid/tools")
-        } else if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-            let data = PathBuf::from(data);
-            if !data.is_absolute() {
-                return Err(error("XDG_DATA_HOME must be absolute"));
-            }
+        } else if let Some(data) = xdg_data_home(std::env::var_os("XDG_DATA_HOME"))? {
             data.join("tapid/tools")
         } else {
             home()?.join(".local/share/tapid/tools")
@@ -127,6 +123,16 @@ pub(super) fn root_path(explicit: Option<&Path>) -> Result<PathBuf, OperationalE
     }
     check_path(&path)?;
     Ok(path)
+}
+fn xdg_data_home(value: Option<std::ffi::OsString>) -> Result<Option<PathBuf>, OperationalError> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(error("XDG_DATA_HOME must be absolute"));
+    }
+    Ok(Some(path))
 }
 pub(super) fn is_link(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
@@ -234,6 +240,7 @@ pub(super) fn write_new(
             Some(".tapid-tool") => "tool_writing_environment_owner",
             Some("pending.json") => "tool_writing_journal",
             Some("committed") => "tool_writing_decision",
+            Some(name) if name.starts_with(".tapid-tool-retired-") => "tool_writing_retirement",
             _ if parent.file_name().is_some_and(|name| name == "bin") => "tool_writing_launcher",
             _ => "",
         };
@@ -241,6 +248,9 @@ pub(super) fn write_new(
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(error)?;
+        if crash == "tool_writing_retirement" {
+            crate::filesystem::activation::test_crash_at("tool_retirement_synced");
+        }
         if path.file_name().is_some_and(|name| name == ".tapid-tools") {
             crate::filesystem::activation::test_crash_at("tool_owner_synced");
         }
@@ -471,6 +481,18 @@ mod tests {
     use crate::application::outcome::ErrorKind;
     use std::time::{Duration, Instant};
     use tapid_test_support::TempHome;
+
+    #[test]
+    fn xdg_data_home_uses_fallback_for_empty_values_but_rejects_relative_paths() {
+        assert_eq!(xdg_data_home(None).unwrap(), None);
+        assert_eq!(xdg_data_home(Some("".into())).unwrap(), None);
+        assert!(xdg_data_home(Some("relative/data".into())).is_err());
+        let home = TempHome::new("tool-xdg-home").unwrap();
+        assert_eq!(
+            xdg_data_home(Some(home.path().as_os_str().to_owned())).unwrap(),
+            Some(home.path().to_owned())
+        );
+    }
 
     #[test]
     fn write_stage_recovery_handles_empty_partial_and_completed_payloads() {

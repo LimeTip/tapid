@@ -76,7 +76,8 @@ Managed state writes atomically create and sync a
 regular `payload` file. Publication renames that payload into place and removes
 the empty directory. Under the catalog lock, recovery retires interrupted write
 directories in the root and launcher directory, including empty and partial
-stages. Unknown children, oversized payloads, and links fail closed. Write stages
+stages. Mutation cleanup also retires stages beside environments, where retirement
+markers are published. Unknown children, oversized payloads, and links fail closed. Write stages
 inside retired generations are handled by existing environment cleanup.
 
 Global commands run with normal user authority and an externally managed runtime.
