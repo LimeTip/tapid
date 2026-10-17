@@ -1,5 +1,6 @@
 //! Copied artifact declarations, immutable pins, and archive metadata preparation.
 use super::*;
+use crate::application::outcome::DiagnosticContext;
 use tapid_registry_client::GitDependency;
 
 #[derive(Clone, Debug)]
@@ -138,10 +139,15 @@ pub(super) fn archive_format(source: &PackageSource, bytes: &[u8]) -> ArchiveFor
 
 fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, OperationalError> {
     if source.artifact_digest() != Some(digest(&bytes).as_str()) {
-        return Err(OperationalError::new(
-            ErrorKind::Integrity,
-            "copied artifact digest mismatch",
-        ));
+        return Err(
+            OperationalError::new(ErrorKind::Integrity, "copied artifact digest mismatch")
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "artifact_digest",
+                    Some("sha256"),
+                    source.artifact_digest().unwrap_or("missing"),
+                    digest(&bytes),
+                )),
+        );
     }
     let staging = scratch()?;
     let tree = staging.0.join("tree");
@@ -361,7 +367,14 @@ pub(crate) fn validate_locked_files(
                 return Err(OperationalError::new(
                     ErrorKind::Integrity,
                     format!("file dependency '{}' digest mismatch", key.name),
-                ));
+                )
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "artifact_digest",
+                    Some("sha256"),
+                    expected,
+                    digest(&bytes),
+                ))
+                .for_package((&key).into()));
             }
         }
     }
@@ -394,7 +407,13 @@ pub(super) fn fetch_pinned(
                 return Err(OperationalError::new(
                     ErrorKind::Integrity,
                     "copied artifact digest mismatch",
-                ));
+                )
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "artifact_digest",
+                    Some("sha256"),
+                    source.artifact_digest().unwrap_or("missing"),
+                    digest(&bytes),
+                )));
             }
             return Ok(bytes);
         }
@@ -409,10 +428,15 @@ pub(super) fn fetch_pinned(
         return Err("expected copied artifact source".into());
     };
     if source.artifact_digest() != Some(digest(&bytes).as_str()) {
-        return Err(OperationalError::new(
-            ErrorKind::Integrity,
-            "copied artifact digest mismatch",
-        ));
+        return Err(
+            OperationalError::new(ErrorKind::Integrity, "copied artifact digest mismatch")
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "artifact_digest",
+                    Some("sha256"),
+                    source.artifact_digest().unwrap_or("missing"),
+                    digest(&bytes),
+                )),
+        );
     }
     Ok(bytes)
 }

@@ -7,6 +7,11 @@ use std::{
 
 const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 
+mod diagnostic;
+pub(crate) use diagnostic::{
+    Declaration, DiagnosticContext, DiagnosticPackage, RequirementDiagnostic,
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorKind {
     InvalidRequest,
@@ -141,6 +146,7 @@ pub(crate) struct OperationalError {
     pub(crate) kind: ErrorKind,
     message: String,
     source: Option<Box<dyn Error + Send + Sync>>,
+    pub(crate) diagnostic: Option<Box<DiagnosticContext>>,
 }
 
 impl OperationalError {
@@ -149,6 +155,7 @@ impl OperationalError {
             kind,
             message: bounded(message.to_string()),
             source: None,
+            diagnostic: None,
         }
     }
 
@@ -156,8 +163,46 @@ impl OperationalError {
         Self {
             kind,
             message: bounded(source.to_string()),
+            diagnostic: DiagnosticContext::from_error(&source).map(Box::new),
             source: Some(Box::new(source)),
         }
+    }
+
+    pub(crate) fn with_diagnostic(mut self, diagnostic: DiagnosticContext) -> Self {
+        self.diagnostic = Some(Box::new(diagnostic));
+        self
+    }
+
+    pub(crate) fn for_package(mut self, package: DiagnosticPackage) -> Self {
+        self.diagnostic.get_or_insert_with(Default::default).package = Some(package);
+        self
+    }
+
+    pub(crate) fn at_manifest(mut self, path: &Path) -> Self {
+        let diagnostic = self.diagnostic.get_or_insert_with(Default::default);
+        diagnostic
+            .declaration
+            .get_or_insert_with(|| Declaration::manifest(path, String::new()));
+        self
+    }
+
+    pub(crate) fn at_dependency(
+        mut self,
+        path: &Path,
+        section: &str,
+        name: &str,
+        requirement: &str,
+    ) -> Self {
+        let diagnostic = self.diagnostic.get_or_insert_with(Default::default);
+        let declaration = Declaration::manifest(path, Declaration::pointer(section, name));
+        diagnostic.declaration = Some(declaration.clone());
+        diagnostic.requirements.push(RequirementDiagnostic {
+            local_name: Some(name.to_owned()),
+            requirement: requirement.to_owned(),
+            package: None,
+            declaration: Some(declaration),
+        });
+        self
     }
 
     pub(crate) fn context(mut self, context: impl fmt::Display) -> Self {
@@ -185,6 +230,11 @@ impl From<tapid_resolver::ResolveError> for OperationalError {
             _ => ErrorKind::Resolution,
         };
         Self::from_source(kind, error)
+    }
+}
+impl From<tapid_manifest::WorkspaceError> for OperationalError {
+    fn from(error: tapid_manifest::WorkspaceError) -> Self {
+        Self::from_source(ErrorKind::Project, error)
     }
 }
 impl From<tapid_lockfile::LockfileError> for OperationalError {
