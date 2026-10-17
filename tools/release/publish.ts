@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
+import { compareStableVersions as compareCanonicalStableVersions } from "./version.ts";
 
 const execFileAsync = promisify(execFile);
 export type Dependency = string | {
@@ -70,17 +71,11 @@ function publishableToCratesIo(pkg: MetadataPackage): boolean {
 }
 
 function compareStableVersions(left: string, right: string): number | undefined {
-  const parse = (version: string): bigint[] | undefined => {
-    const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.exec(version);
-    return match ? match.slice(1).map(BigInt) : undefined;
-  };
-  const leftParts = parse(left);
-  const rightParts = parse(right);
-  if (!leftParts || !rightParts) return undefined;
-  for (let index = 0; index < 3; index++) {
-    if (leftParts[index] !== rightParts[index]) return leftParts[index] > rightParts[index] ? 1 : -1;
+  try {
+    return compareCanonicalStableVersions(left, right);
+  } catch {
+    return undefined;
   }
-  return 0;
 }
 
 /**

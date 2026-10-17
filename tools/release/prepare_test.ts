@@ -6,6 +6,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { nextProductVersion, preparationFiles, prepareRelease, refreshLockfiles } from "./prepare.ts";
+import { compareStableVersions } from "./version.ts";
+
+test("stable version comparison orders components and rejects noncanonical or prerelease versions", () => {
+  strictEqual(compareStableVersions("1.2.10", "1.2.9"), 1);
+  strictEqual(compareStableVersions("1.2.9", "1.2.10"), -1);
+  strictEqual(compareStableVersions("1.2.9", "1.2.9"), 0);
+  throws(() => compareStableVersions("01.2.3", "1.2.3"));
+  throws(() => compareStableVersions("1.2.3-rc.1", "1.2.3"));
+});
 
 test("product defaults to next patch and accepts only a newer stable explicit version", () => {
   strictEqual(nextProductVersion("0.0.11", ""), "0.0.12");

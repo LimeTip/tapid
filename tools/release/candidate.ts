@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checksumLines, releaseRecord, releaseVersion } from './release.ts';
 import { renderInstallers, templatesForCommit, type InstallerTemplates } from './bootstrap.ts';
+import { compareStableVersions } from './version.ts';
 
 export type Asset = { id: number; name: string; size: number };
 export type ReleaseState = { id: number; tag_name: string; name: string; body: string; draft: boolean; prerelease: boolean; immutable?: boolean; assets: Asset[] };
@@ -41,9 +42,7 @@ function version(value: unknown): asserts value is string {
 }
 function compare(left: string, right: string): number {
   version(left); version(right);
-  const a=left.split('.').map(BigInt),b=right.split('.').map(BigInt);
-  for(let i=0;i<3;i++) if(a[i]!==b[i]) return a[i]>b[i] ? 1 : -1;
-  return 0;
+  return compareStableVersions(left, right);
 }
 function source(tag: string, commit: string): void {
   releaseVersion(tag,tag.slice(1));
