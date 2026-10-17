@@ -1,0 +1,298 @@
+use super::*;
+
+fn invoke(project: &Path, arguments: &[&str]) -> std::process::Output {
+    let temporary = tapid_test_support::TempProject::new("run-permission-temp").unwrap();
+    let mut command = isolated_command(project, arguments, true);
+    let home = command
+        .get_envs()
+        .find(|(name, _)| *name == "HOME")
+        .and_then(|(_, value)| value)
+        .unwrap()
+        .to_owned();
+    command.env("USERPROFILE", home);
+    command
+        .env("TEMP", temporary.path())
+        .env("TMP", temporary.path());
+    #[cfg(windows)]
+    command.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
+    command
+        .env("TAPID_FLAG_VISIBLE", "visible-value")
+        .env("TAPID_FLAG_SECRET", "secret-value");
+    command.output().unwrap()
+}
+
+fn project() -> tapid_test_support::TempProject {
+    let project = tapid_test_support::TempProject::new("run-permissions").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"flags","version":"1.0.0","scripts":{"probe":"node probe.js"}}"#,
+        )
+        .unwrap();
+    project
+}
+
+#[test]
+fn run_permissions_validate_values_without_requiring_a_configuration_file() {
+    for (flag, value, category) in [
+        ("--allow-write", "../outside", "invalid-path"),
+        ("--allow-read", "C:/outside", "invalid-path"),
+        ("--allow-env", "CI=secret-value", "invalid-environment"),
+    ] {
+        let project = project();
+        let output = invoke(project.path(), &["run", "probe", flag, value]);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(error.contains(category), "{error}");
+        assert!(!error.contains("secret-value"));
+        assert!(!project.path().join("tapid.toml").exists());
+    }
+}
+
+#[test]
+fn run_permissions_preserve_malformed_configuration_and_reserved_environment_checks() {
+    let project = project();
+    project.write("tapid.toml", b"malformed = [").unwrap();
+    let output = invoke(project.path(), &["run", "probe", "--allow-read", "."]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid run configuration"));
+    fs::remove_file(project.path().join("tapid.toml")).unwrap();
+    let output = invoke(project.path(), &["run", "probe", "--allow-env", "PATH"]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("reserved environment variable PATH"));
+}
+
+fn node_source() -> PathBuf {
+    if let Some(path) = std::env::var_os("TAPID_TEST_NODE") {
+        return path.into();
+    }
+    let temporary = tapid_test_support::TempProject::new("run-node-discovery").unwrap();
+    let output = Command::new("node")
+        .args(["-p", "process.execPath"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", temporary.path())
+        .output()
+        .expect("native permission tests require standard Node");
+    assert!(output.status.success());
+    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+}
+
+fn private_node_runtime() -> (tapid_test_support::TempProject, PathBuf) {
+    let runtime = tapid_test_support::TempProject::new("run-permission-runtime").unwrap();
+    let node = runtime
+        .path()
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    fs::copy(node_source(), &node).unwrap();
+    (runtime, node)
+}
+
+#[test]
+fn run_permissions_enforce_scoped_writes_environment_and_descendants_without_persisting_config() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    fs::create_dir(project.path().join("writable")).unwrap();
+    project.write("probe.js", br#"
+const a=require('node:assert/strict'),fs=require('node:fs');
+a.equal(process.env.TAPID_FLAG_VISIBLE,'visible-value');
+a.equal(process.env.TAPID_FLAG_SECRET,undefined);
+fs.writeFileSync('writable/result.txt','permitted');
+a.throws(()=>fs.writeFileSync('outside.txt','escape'));
+const child=require('node:child_process').spawnSync(process.execPath,['-e',"const a=require('node:assert/strict'),fs=require('node:fs');fs.writeFileSync('writable/child.txt','child');a.throws(()=>fs.writeFileSync('child-outside.txt','escape'));a.equal(process.env.TAPID_FLAG_SECRET,undefined);"],{stdio:'inherit'});
+a.equal(child.status,0);console.log('FLAGS_OK');
+"#).unwrap();
+    let node = node.to_str().unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "run",
+            "probe",
+            "--node-runtime",
+            node,
+            "--allow-read",
+            ".",
+            "--allow-write",
+            "writable",
+            "--allow-env",
+            "TAPID_FLAG_VISIBLE",
+            "--allow-subprocess",
+            "--receipt-json",
+        ],
+    );
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{error}");
+    assert_eq!(output.stdout, b"FLAGS_OK\n");
+    assert_eq!(
+        fs::read(project.path().join("writable/result.txt")).unwrap(),
+        b"permitted"
+    );
+    assert_eq!(
+        fs::read(project.path().join("writable/child.txt")).unwrap(),
+        b"child"
+    );
+    assert!(!project.path().join("outside.txt").exists());
+    assert!(!project.path().join("child-outside.txt").exists());
+    assert!(!project.path().join("tapid.toml").exists());
+    assert!(!error.contains("visible-value") && !error.contains("secret-value"));
+    let receipt: serde_json::Value =
+        serde_json::from_str(error.lines().find(|line| line.starts_with('{')).unwrap()).unwrap();
+    assert_eq!(receipt["policy_inputs"]["source"], "invocation-baseline");
+    assert_eq!(
+        receipt["policy_inputs"]["effective"]["write"],
+        serde_json::json!(["writable"])
+    );
+    assert_eq!(receipt["assurance"], "Restricted");
+}
+
+#[test]
+fn run_permissions_do_not_implicitly_grant_writes() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    project.write("probe.js", br#"require('node:assert/strict').throws(()=>require('node:fs').writeFileSync('forbidden.txt','escape'));console.log('WRITE_DENIED');"#).unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "run",
+            "probe",
+            "--node-runtime",
+            node.to_str().unwrap(),
+            "--allow-read",
+            ".",
+            "--allow-subprocess",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"WRITE_DENIED\n");
+    assert!(!project.path().join("forbidden.txt").exists());
+}
+
+#[test]
+fn run_permissions_narrow_a_profile_and_reject_additional_authority_before_execution() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    fs::create_dir_all(project.path().join("writable/nested")).unwrap();
+    fs::create_dir(project.path().join("other")).unwrap();
+    let config = b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nwrite=['writable']\nsubprocess=true\nnetwork=false\n";
+    project.write("tapid.toml", config).unwrap();
+    project.write("probe.js", br#"console.log('PROFILE_STARTED');const a=require('node:assert/strict'),fs=require('node:fs');fs.writeFileSync('writable/nested/ok','ok');a.throws(()=>fs.writeFileSync('writable/parent-denied','escape'));"#).unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "run",
+            "probe",
+            "--node-runtime",
+            node.to_str().unwrap(),
+            "--allow-write",
+            "writable/nested",
+            "--receipt-json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"PROFILE_STARTED\n");
+    assert!(!project.path().join("writable/parent-denied").exists());
+    for (flag, value) in [
+        ("--allow-write", "other"),
+        ("--allow-env", "OTHER"),
+        ("--allow-network", ""),
+    ] {
+        let mut args = vec![
+            "run",
+            "probe",
+            "--node-runtime",
+            node.to_str().unwrap(),
+            flag,
+        ];
+        if !value.is_empty() {
+            args.push(value);
+        }
+        let output = invoke(project.path(), &args);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("exceeds the configured run policy"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(fs::read(project.path().join("tapid.toml")).unwrap(), config);
+}
+
+#[test]
+fn run_permissions_flag_only_baseline_has_no_implicit_project_or_subprocess_grants() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"flags","version":"1.0.0","scripts":{"probe":"echo BASELINE_OK"}}"#,
+        )
+        .unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "run",
+            "probe",
+            "--node-runtime",
+            node.to_str().unwrap(),
+            "--allow-env",
+            "TAPID_FLAG_VISIBLE",
+            "--receipt-json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "BASELINE_OK"
+    );
+    let error = String::from_utf8_lossy(&output.stderr);
+    let receipt: serde_json::Value =
+        serde_json::from_str(error.lines().find(|line| line.starts_with('{')).unwrap()).unwrap();
+    let policy = &receipt["policy_inputs"]["effective"];
+    assert_eq!(policy["read"], serde_json::json!([]));
+    assert_eq!(policy["write"], serde_json::json!([]));
+    assert_eq!(policy["network"], false);
+    assert_eq!(policy["subprocess"], false);
+    assert!(
+        receipt["effective_filesystem"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|grant| grant["source"] != "ProjectPolicy")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn run_permissions_network_flag_keeps_unsupported_windows_network_fail_closed() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"flags","version":"1.0.0","scripts":{"probe":"echo MUST_NOT_START"}}"#,
+        )
+        .unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "run",
+            "probe",
+            "--node-runtime",
+            node.to_str().unwrap(),
+            "--allow-network",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported-containment"));
+}

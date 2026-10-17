@@ -51,6 +51,7 @@ pub(crate) fn clean(args: CleanArgs, json: bool) -> ExitCode {
     execute(args.store_dir, true, args.options.yes, json, "clean")
 }
 
+/// Inspect or evict published cache entries and render human or versioned JSON results.
 fn execute(
     root: Option<PathBuf>,
     clean: bool,
@@ -81,13 +82,14 @@ fn execute(
         Ok(summary) => {
             println!("Package cache: {}", root.display());
             println!(
-                "Artifacts: {} entries, {} bytes",
+                "Artifacts: {} entries, {} logical bytes",
                 summary.artifacts.entries, summary.artifacts.bytes
             );
             println!(
-                "Trees: {} entries, {} bytes",
+                "Trees: {} entries, {} logical bytes",
                 summary.trees.entries, summary.trees.bytes
             );
+            println!("Sizes are logical file bytes, not a prediction of reclaimed disk space.");
             println!(
                 "Preserved unrecognized entries: {}",
                 summary.preserved_entries
@@ -112,7 +114,7 @@ fn execute(
             eprintln!("error: {error}");
             if matches!(error, tapid_store::IngestError::CacheCleanup(_)) {
                 eprintln!(
-                    "Some cache entries may already have been removed. Inspection and retry are safe."
+                    "Cache cleanup stopped. Some cache entries may already have been removed. Inspect the cache or retry after correcting the error. No background cleanup is scheduled."
                 );
             }
             ExitCode::from(1)

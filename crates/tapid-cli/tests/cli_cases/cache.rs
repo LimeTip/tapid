@@ -13,7 +13,13 @@ fn cache_inspection_and_clean_preview_preserve_bytes_until_yes() {
     fs::write(store.join(".store.lock"), b"").unwrap();
 
     fs::write(store.join("keep-me"), b"user file").unwrap();
-    for args in [vec!["cache"], vec!["clean"], vec!["clean", "--dry-run"]] {
+    for args in [
+        vec!["cache"],
+        vec!["cache", "info"],
+        vec!["cache", "clean"],
+        vec!["clean"],
+        vec!["clean", "--dry-run"],
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
             .args(args)
             .arg("--store-dir")
@@ -22,7 +28,12 @@ fn cache_inspection_and_clean_preview_preserve_bytes_until_yes() {
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         let text = String::from_utf8(output.stdout).unwrap();
-        assert!(text.contains("11 bytes"), "{text}");
+        assert!(text.contains("11 logical bytes"), "{text}");
+        assert!(text.contains("0 logical bytes"), "{text}");
+        assert!(
+            text.contains("not a prediction of reclaimed disk space"),
+            "{text}"
+        );
         assert!(artifact.exists());
     }
     let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
@@ -33,6 +44,80 @@ fn cache_inspection_and_clean_preview_preserve_bytes_until_yes() {
     assert!(output.status.success(), "{output:?}");
     assert!(!artifact.exists());
     assert_eq!(fs::read(store.join("keep-me")).unwrap(), b"user file");
+}
+
+#[test]
+fn cache_cleanup_failure_stops_with_inspection_and_retry_advice() {
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } == 0 {
+        // Root bypasses the directory permissions used to block removal.
+        return;
+    }
+    let home = TempHome::new("cache-cleanup-failure").unwrap();
+    let store = home.path().join("store");
+    let directory = store.join("artifacts");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(store.join(".store.lock"), b"").unwrap();
+    let artifact = directory.join(format!("sha256-{}", "a".repeat(64)));
+    fs::write(&artifact, b"preserve until retry").unwrap();
+    #[cfg(windows)]
+    let blocker = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&artifact)
+            .unwrap()
+    };
+    #[cfg(unix)]
+    let original = {
+        use std::os::unix::fs::PermissionsExt;
+        let original = fs::metadata(&directory).unwrap().permissions();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500)).unwrap();
+        original
+    };
+    let human = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(["cache", "clean", "--yes", "--store-dir"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    let json = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(["clean", "--yes", "--json", "--store-dir"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    #[cfg(windows)]
+    drop(blocker);
+    #[cfg(unix)]
+    fs::set_permissions(&directory, original).unwrap();
+
+    assert_eq!(human.status.code(), Some(1));
+    assert!(human.stdout.is_empty());
+    let text = String::from_utf8(human.stderr).unwrap();
+    assert!(text.contains("Cache cleanup stopped"), "{text}");
+    assert!(text.contains("may already have been removed"), "{text}");
+    assert!(text.contains("Inspect the cache or retry"), "{text}");
+    assert!(
+        text.contains("No background cleanup is scheduled"),
+        "{text}"
+    );
+    assert_eq!(json.status.code(), Some(1));
+    assert!(json.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["errors"][0]["code"], "CACHE_MAINTENANCE_FAILED");
+    assert_eq!(value["errors"][0]["phase"], "operation");
+    assert_eq!(value["changes"]["state"], "committed_cleanup_pending");
+    assert!(value["data"]["summary"].is_null());
+    assert_eq!(fs::read(&artifact).unwrap(), b"preserve until retry");
+
+    let retry = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(["clean", "--yes", "--store-dir"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(retry.status.success(), "{retry:?}");
+    assert!(!artifact.exists());
 }
 
 #[test]

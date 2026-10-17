@@ -15,6 +15,10 @@ pub(crate) fn fetch_imported(
     imported
         .validate_replay(&manifest, &root_digest(project)?)
         .map_err(|e| OperationalError::new(ErrorKind::LockManifestMismatch, e.to_string()))?;
+    let workspace = workspace_materialization(project, registry_config)?;
+    imported
+        .validate_workspace_manifests(&imported_workspace_manifests(project, &workspace)?)
+        .map_err(|e| OperationalError::new(ErrorKind::LockManifestMismatch, e.to_string()))?;
     let graph = imported
         .graph()
         .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?;
@@ -301,15 +305,184 @@ pub(crate) fn fetch_imported(
     imported
         .record_verified_artifacts(artifact_receipts)
         .map_err(|e| e.to_string())?;
+    let instances: Vec<_> = instances.into_values().collect();
+    let mut plan = WorkspaceInstallPlan::from(workspace.links);
+    plan.include_owned_members()?;
+    for (member, points) in &graph.member_roots {
+        let roots = &points.dependencies;
+        let local_roots: Vec<_> = roots
+            .iter()
+            .filter(|(name, path)| {
+                *path != &format!("node_modules/{name}") && selected.contains(*path)
+            })
+            .map(|(name, path)| {
+                Ok(NamedDependency {
+                    name: name
+                        .parse()
+                        .map_err(|e: tapid_core::DomainError| e.to_string())?,
+                    child: keys[path].clone(),
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        let links = WorkspaceLinkPlan {
+            links: graph
+                .workspace_links
+                .iter()
+                .filter(|(path, _)| path.starts_with(&format!("{member}/node_modules/")))
+                .map(|(path, target)| {
+                    let source = &graph.workspaces[target];
+                    Ok(tapid_linker::WorkspaceLink {
+                        name: source["name"]
+                            .as_str()
+                            .expect("name")
+                            .parse()
+                            .map_err(|e: tapid_core::DomainError| e.to_string())?,
+                        version: source["version"]
+                            .as_str()
+                            .expect("version")
+                            .parse()
+                            .map_err(|e: tapid_core::DomainError| e.to_string())?,
+                        source: project.join(target),
+                        target: project.join(path),
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        };
+        if !local_roots.is_empty()
+            || !links.links.is_empty()
+            || plan.members.contains_key(&project.join(member))
+        {
+            plan.members.insert(
+                project.join(member),
+                WorkspaceMemberInstall {
+                    input: pinned_layout(
+                        roots
+                            .iter()
+                            .filter(|(_, path)| selected.contains(*path))
+                            .map(|(name, path)| {
+                                Ok(NamedDependency {
+                                    name: name
+                                        .parse()
+                                        .map_err(|e: tapid_core::DomainError| e.to_string())?,
+                                    child: keys[path].clone(),
+                                })
+                            })
+                            .collect::<Result<_, String>>()?,
+                        &instances,
+                        &edges,
+                    ),
+                    links,
+                },
+            );
+        }
+    }
+    plan.links.links.retain(|link| {
+        graph
+            .workspace_links
+            .contains_key(&format!("node_modules/{}", link.name))
+    });
     Ok((
         lock,
-        NamedLayoutInput {
-            instances: instances.into_values().collect(),
-            root_dependencies: roots,
-            dependency_edges: edges,
-        },
+        pinned_layout(roots, &instances, &edges),
         trees,
         transaction,
-        WorkspaceLinkPlan { links: Vec::new() },
+        plan,
     ))
+}
+
+/// Read the same contained workspace sources used by native installs.
+/// Digests also detect edits between discovery and import publication.
+pub(crate) fn imported_workspace_manifests(
+    project: &Path,
+    workspace: &WorkspaceMaterialization,
+) -> Result<BTreeMap<String, (String, String)>, String> {
+    let canonical_project = fs::canonicalize(project)
+        .map_err(|error| format!("cannot resolve install project root: {error}"))?;
+    let project = canonical_project.as_path();
+    let mut manifests = BTreeMap::new();
+    for (source, _) in workspace.members.values() {
+        let member_root = project.join(source.path());
+        for ancestor in member_root
+            .ancestors()
+            .take_while(|ancestor| *ancestor != project)
+        {
+            match fs::symlink_metadata(ancestor.join("node_modules")) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_dir()
+                        && workspace
+                            .members
+                            .values()
+                            .any(|(source, _)| project.join(source.path()) == ancestor)
+                    {
+                        crate::filesystem::activation::validate_managed_node_modules(ancestor)?;
+                        continue;
+                    }
+                    return Err(format!(
+                        "/packages/{}: node_modules: remove the unmanaged member or ancestor node_modules tree before importing or replaying workspace selections",
+                        source.path().replace('/', "~1")
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        let path = project.join(source.path()).join("package.json");
+        if !fs::symlink_metadata(&path)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_file()
+        {
+            return Err("workspace package.json must be a regular, non-symlink file".into());
+        }
+        let canonical = fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        if !canonical.starts_with(project) {
+            return Err("workspace manifest escapes project root".into());
+        }
+        let text = fs::read_to_string(&canonical).map_err(|e| e.to_string())?;
+        let current_digest = digest(text.as_bytes()).to_string();
+        let key = LockfilePackageKey::workspace(source.clone()).to_string();
+        if !workspace
+            .locked
+            .iter()
+            .any(|member| member.key() == key && member.manifest_digest() == current_digest)
+        {
+            return Err("workspace member manifest changed during discovery; retry".into());
+        }
+        manifests.insert(source.path().to_owned(), (text, current_digest));
+    }
+    Ok(manifests)
+}
+
+/// Each managed directory contains only the registry graph reachable from its entry points.
+fn pinned_layout(
+    roots: Vec<NamedDependency>,
+    instances: &[PackageInstance],
+    edges: &[NamedDependencyEdge],
+) -> NamedLayoutInput {
+    let mut reachable = BTreeSet::new();
+    let mut pending: Vec<_> = roots.iter().map(|root| root.child.clone()).collect();
+    while let Some(key) = pending.pop() {
+        if !reachable.insert(key.clone()) {
+            continue;
+        }
+        pending.extend(
+            edges
+                .iter()
+                .filter(|edge| edge.parent == key)
+                .map(|edge| edge.dependency.child.clone()),
+        );
+    }
+    NamedLayoutInput {
+        instances: instances
+            .iter()
+            .filter(|instance| reachable.contains(&InstanceKey::from(*instance)))
+            .cloned()
+            .collect(),
+        root_dependencies: roots,
+        dependency_edges: edges
+            .iter()
+            .filter(|edge| reachable.contains(&edge.parent))
+            .cloned()
+            .collect(),
+    }
 }
