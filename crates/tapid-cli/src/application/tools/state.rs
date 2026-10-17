@@ -479,14 +479,15 @@ mod tests {
     fn write_stage_recovery_handles_empty_partial_and_completed_payloads() {
         for contents in [None, Some(&b"partial"[..]), Some(&b"complete data"[..])] {
             let home = TempHome::new("tool-write-stages").unwrap();
-            let stage = home.path().join(format!("{WRITE_STAGE}deadbeef"));
+            let root = root_path(Some(home.path())).unwrap();
+            let stage = root.join(format!("{WRITE_STAGE}deadbeef"));
             fs::create_dir(&stage).unwrap();
             if let Some(contents) = contents {
                 fs::write(stage.join("payload"), contents).unwrap();
             }
-            assert!(cleanup_write_stages(home.path()).unwrap());
+            assert!(cleanup_write_stages(&root).unwrap());
             assert!(!stage.exists());
-            assert!(!cleanup_write_stages(home.path()).unwrap());
+            assert!(!cleanup_write_stages(&root).unwrap());
         }
     }
 
