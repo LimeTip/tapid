@@ -209,6 +209,21 @@ impl RegistryConfig {
         })
     }
 
+    /// Credential-free configuration for local project inspection. Never reads the environment.
+    pub(crate) fn inspection(&self) -> serde_json::Value {
+        let routes = self.routes.iter().map(|(scope, entry)| serde_json::json!({
+            "scope": scope, "origin": entry.url, "credential_environment_name": entry.token_env
+        })).collect::<Vec<_>>();
+        serde_json::json!({
+            "origins": self.configured_origins(),
+            "routes": routes,
+            "default_origin": self.routes.get("default").map_or(NPM, |entry| entry.url.as_str()),
+            "jsr_origin": JSR,
+            "credential_environment_names": self.credential_environment_names(),
+            "credentials": "not_read"
+        })
+    }
+
     pub(crate) fn configured_origins(&self) -> Vec<String> {
         self.routes
             .values()

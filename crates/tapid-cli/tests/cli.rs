@@ -17,6 +17,8 @@ mod ci_tests;
 mod explain_tests;
 #[path = "cli_cases/run_permissions.rs"]
 mod run_permission_tests;
+#[path = "cli_cases/status.rs"]
+mod status_tests;
 
 mod workspace_acceptance;
 

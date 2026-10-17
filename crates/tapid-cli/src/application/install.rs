@@ -751,22 +751,7 @@ fn perform_install(
     let registry_config = crate::registry::RegistryConfig::load(&project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
-    let current_workspace = workspace
-        .locked
-        .iter()
-        .map(|package| (package.key(), package.manifest_digest().to_owned()))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let locked_workspace = lock
-        .workspace_packages()
-        .iter()
-        .map(|(key, package)| (key.clone(), package.manifest_digest().to_owned()))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    if current_workspace != locked_workspace {
-        return Err(
-            "workspace membership or member manifest changed; regenerate tapid.lock with an online install"
-                .into(),
-        );
-    }
+    super::replay::validate_workspace_membership(&workspace, &lock)?;
     let workspace_registry_dependencies = online::resolved_workspace_registry_dependencies(
         &root_manifest,
         &workspace,
@@ -973,7 +958,7 @@ fn read_lock(path: &Path) -> Result<Lockfile, OperationalError> {
     })
 }
 
-fn validate_workspace_dependency_edges(
+pub(crate) fn validate_workspace_dependency_edges(
     workspace: &online::WorkspaceMaterialization,
     registry_dependencies: &[online::WorkspaceRegistryDependency],
     lock: &Lockfile,

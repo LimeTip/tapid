@@ -48,6 +48,27 @@ fn complete_progress_step<T, E>(
     Ok(value)
 }
 
+/// Compare the full member set and manifest digests before validating replay edges.
+pub(crate) fn validate_workspace_membership(
+    workspace: &crate::online::WorkspaceMaterialization,
+    lock: &Lockfile,
+) -> Result<(), String> {
+    let current = workspace
+        .locked
+        .iter()
+        .map(|package| (package.key(), package.manifest_digest().to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    let locked = lock
+        .workspace_packages()
+        .iter()
+        .map(|(key, package)| (key.clone(), package.manifest_digest().to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    if current != locked {
+        return Err("workspace membership or member manifest changed; regenerate tapid.lock with an online install".to_owned());
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_root_bindings(
     lock: &Lockfile,
     manifest: &PackageManifest,

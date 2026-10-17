@@ -30,6 +30,7 @@ The next-release installers, expected for 0.0.11, select archives through `https
 ```text
 tapid init [PATH]
 tapid license
+tapid status [--project-dir <PATH>] [--workspace <NAME>] [--json]
 tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
 tapid lock verify
@@ -307,3 +308,34 @@ See [supported forms and limits](../../docs/compatibility.md#copied-file-tarball
 Npm aliases are supported in manifest dependencies and package arguments such as `tapid add 'h3-v2@npm:h3@2.0.1-rc.20'`. Scoped targets and supported semver ranges retain their actual registry identity and local import names during install and frozen/offline replay. See [alias behavior and limits](../../docs/compatibility.md#npm-aliases).
 
 Existing npm projects can use `tapid import-package-lock <path>` to preserve supported npm v3 selections without resolution. Import is offline; the first frozen install verifies pinned tarballs. See the [migration and rollback guide](../../docs/npm-lockfile-import.md). Tapid manages packages and lockfiles; Node.js, workerd, Wrangler, and deployment tools keep their existing roles.
+
+## Inspect a project before operating
+
+`tapid status [--project-dir PATH] [--workspace NAME] [--json]` inspects local
+project metadata offline. The project directory is the explicit workspace root,
+matching install selection rules. Workspace selection uses an exact member name;
+installation ownership is checked for the root and discovered members regardless
+of selection. Workspace linking is reported separately and is not verified.
+
+The report includes root and member manifest/lock agreement, node_modules
+ownership, pending project recovery, dependency-spec blockers with manifest
+locations, registry origins and credential variable names, supported forms, and
+checks not performed. Credentials are never read. Missing or invalid files and
+pending transactions remain report data. Status never installs, runs scripts,
+opens the shared store, acquires transaction locks, or attempts recovery.
+
+Exit 0 means no local blockers were found. It does not establish complete
+compatibility or successful installation, replay, or script execution. Exit 1
+means blockers, read failures, detected changes, or inspection truncation.
+Dependency resolution, registry access, engine/platform requirements, installed
+tree integrity, shared-store recovery, lifecycle approvals, and runner assurance
+remain unchecked. A managed marker establishes ownership only.
+
+Snapshot entries identify inspected metadata using SHA-256 or explicit missing
+and unreadable states. Directory and journal entries use metadata identities;
+journal contents and installed files are not read. Files are rechecked for
+persistent changes. The snapshot is always labeled `not_atomic`: writers are
+not excluded, workspace membership can change during discovery, and a change
+followed by restoration can escape detection. Do not treat the report as a
+verified consistent snapshot or authorization to bypass later command checks.
+The result and capability summary are experimental.

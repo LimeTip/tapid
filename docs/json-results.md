@@ -10,6 +10,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `add`, `remove`, `update`, `prune` | Dependency operation result |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
 | `explain` | Exact package evidence under `data`; registry metadata or a local snapshot, with optional artifact byte verification |
+| `status` | Read-only local project preflight; blockers and pending recovery retain `data` and exit 1 |
 | `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
 | `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
 | `ci`, `init`, `manifest`, `lock`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
@@ -78,3 +79,51 @@ Within schema version 1, existing field types, code meanings, transaction states
 `tapid run` preserves the child's stdout, stderr, and exit code. Its existing `--receipt-json` option appends a receipt to stderr after child output. That stream may contain arbitrary child bytes, so it is not a single-object JSON channel. Global `--json` rejects `run` before launch to preserve the package-result stdout guarantee. A future machine result channel for run must be a separately selected file or descriptor, isolated from both child streams, and retain the child exit code. This release does not add that channel.
 
 When invocation permission flags are used, the schema-version-1 receipt adds `policy_inputs`: `source` is `script-profile`, `configured-defaults` or `invocation-baseline`; `configuration` contains the configured ceiling or null; `invocation` contains the supplied permission lists/booleans; `effective` describes the selected project policy and preserved assurance/limits. Environment entries are names only. Omitted lists inherit configured grants, so an empty invocation list does not itself mean the effective grant list is empty. Backend runtime additions remain in `effective_filesystem`, and checked enforcement remains in the established evidence. Profile-only receipts retain their existing shape. Consumers must accept additive fields; this metadata does not make untrusted child streams a trusted machine-result channel.
+
+## Project status
+
+`tapid --json status` uses the version 1 envelope and always reports unchanged
+project files, including when recovery is pending. `data` remains present on
+inspection failures. `data.assessment` is `no_local_blockers` or `blocked`;
+`outcome` is respectively `success` or `failure`, and the exit code is 0 or 1.
+These describe local preflight only. They do not establish that installation,
+lock replay, or script execution will succeed.
+
+Status data contains `manifest_lock_agreement`, `workspace`, `installation`,
+`recovery`, `recovery_guidance`, `registries`, `blockers`, `truncated`, `snapshot`,
+`verification_depth`, `checks_not_performed`, and `capabilities`. Manifest/lock
+agreement is `match`, `mismatch`, or `unknown`. Installation states are `absent`,
+`managed`, or `unmanaged_or_invalid`. Recovery is `none_detected`, `pending`, or
+`unknown`. The shared store is not inspected. Blockers contain stable `code`
+and bounded `location` fields, using JSON pointers for dependency declarations.
+A selected member does not limit full-workspace checks. Registry data includes
+origins, credential variable names, and `credentials: "not_read"`.
+
+`snapshot.consistency` is always `not_atomic`. Its `files` identify metadata
+reads by digest, explicit absence/read failure, or directory/journal metadata.
+`changes_detected` and each `changed_on_recheck` flag describe the second pass;
+false does not prove that no concurrent change occurred. Workspace discovery
+and other readers may observe different moments. Node_modules contents and
+workspace links are not verified. Runner/platform assurance is not assessed.
+The report lists these limits in `checks_not_performed` and exposes current
+supported lock/spec forms in the experimental `capabilities` summary. Use
+`tapid --json status --help` for arguments and defaults from Clap definitions.
+
+The report includes at most 128 blockers, 128 workspace members, and 128
+declarations from each dependency section. File digests are bounded to 32 MiB, registry configuration to 64 KiB,
+and marker reads to 1 KiB. A truncated inspection exits 1. Display locations are
+sanitized and bounded to 4 KiB; they are descriptive and must not be used for
+automatic recovery. Use the envelope's lossless `project_path` to identify the
+project. Status never advises deleting recovery data or bypassing verification.
+
+Status blocker codes are `MANIFEST_INVALID_OR_MISSING`, `WORKSPACE_INVALID`,
+`WORKSPACE_SELECTION_INVALID`, `UNSUPPORTED_SPEC`, `UNSUPPORTED_OVERRIDE`,
+`MANIFEST_COMPATIBILITY_BLOCKER`, `WORKSPACE_COMPATIBILITY_BLOCKER`,
+`REGISTRY_CONFIGURATION_INVALID`, `LOCKFILE_MISSING`, `LOCKFILE_UNREADABLE`,
+`LOCKFILE_INVALID`, `LOCK_MANIFEST_MISMATCH`, `LOCK_WORKSPACE_MISMATCH`,
+`LOCK_ROOT_BINDINGS_INVALID`, `LOCK_REPLAY_UNSUPPORTED`, `INSTALLATION_NOT_MANAGED`,
+`RECOVERY_REQUIRED`, `RECOVERY_STATE_INVALID`, and `SNAPSHOT_CHANGED`.
+`INSPECTION_TRUNCATED` appears in the envelope's errors when entry or display
+limits prevent a complete report. A lock can agree with manifests and still
+have a replay blocker, such as a legacy schema requiring regeneration or
+locally computed registry integrity. Status reports those separately.
