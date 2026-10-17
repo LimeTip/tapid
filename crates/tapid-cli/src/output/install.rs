@@ -135,6 +135,7 @@ impl Reporter {
             ErrorKind::RegistryConfiguration
             | ErrorKind::RegistryCredentialMissing
             | ErrorKind::RegistryMetadata
+            | ErrorKind::RegistryMetadataUnavailable
             | ErrorKind::RegistryTransport => "registry access",
             ErrorKind::Resolution | ErrorKind::PeerDependency => "dependency resolution",
             ErrorKind::Integrity | ErrorKind::Archive => "artifact verification",

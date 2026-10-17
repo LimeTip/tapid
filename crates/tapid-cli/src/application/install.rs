@@ -18,7 +18,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tapid_linker::{ManagedRoot, NamedLayoutInput, plan_named_layout};
+use tapid_linker::{ManagedRoot, NamedLayoutInput, plan_workspace_layout};
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 use tapid_store::Store;
@@ -414,6 +414,24 @@ fn perform_install(
         online::validate_manifest_roots(&project_dir, updated)
             .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
     }
+    if let Some(spec) = package {
+        let (name, requirement) = package_spec::parse(spec);
+        if manifest_path != project_dir.join("package.json")
+            && online::copied_declaration(requirement)?.is_some()
+        {
+            return Err(OperationalError::new(
+                ErrorKind::InvalidRequest,
+                format!(
+                    "copied workspace member dependency '{name}' is unsupported; declare copied artifacts at the project root"
+                ),
+            ));
+        }
+        let candidate = read_manifest(&manifest_path)?
+            .with_dependency(name, requirement)
+            .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
+        online::validate_manifest_roots(&project_dir, &candidate)
+            .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+    }
     let lock_path = project_dir.join("tapid.lock");
     let mut imported = if lock_path.is_file() {
         let bytes = fs::read_to_string(&lock_path)
@@ -565,6 +583,9 @@ fn perform_install(
             let registry_config = crate::registry::RegistryConfig::load(&project_dir)
                 .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
             replayable &= online::validate_locked_routes(lock, &registry_config)?;
+            if lock.root_manifest_digest() == online::root_digest(&project_dir)? {
+                online::validate_locked_files(&project_dir, lock)?;
+            }
             let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
             let current = workspace
                 .locked
@@ -594,7 +615,7 @@ fn perform_install(
     if imported.is_some() || !offline && !frozen && !replay_existing {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-        let (mut lock, mut input, mut trees, mut store_transaction, workspace_links) =
+        let (mut lock, mut input, mut trees, mut store_transaction, mut workspace_plan) =
             if let Some(imported) = imported.as_mut() {
                 online::fetch_imported(
                     imported,
@@ -632,7 +653,13 @@ fn perform_install(
                 .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?,
             );
         }
+        workspace_plan
+            .include_owned_members()
+            .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
         let journal = session.journal.as_mut().expect("lifecycle journal created");
+        journal
+            .set_member_roots(workspace_plan.members.keys())
+            .map_err(|e| OperationalError::new(ErrorKind::Transaction, e))?;
         journal
             .set_store_root(store.root())
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
@@ -676,6 +703,11 @@ fn perform_install(
         for instance in &mut input.instances {
             instance.tree.root = publication.resolve_path(&instance.tree.root);
         }
+        for member in workspace_plan.members.values_mut() {
+            for instance in &mut member.input.instances {
+                instance.tree.root = publication.resolve_path(&instance.tree.root);
+            }
+        }
         if original_lock.as_deref() != Some(lock_json.as_bytes()) {
             session.outcome.changed_files.push(lock_path.clone());
         }
@@ -694,7 +726,7 @@ fn perform_install(
             &project_dir,
             input,
             trees,
-            workspace_links,
+            workspace_plan,
             activation_lock,
             true,
             &mut report_replay_progress,
@@ -807,10 +839,18 @@ fn perform_install(
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?,
         );
     }
+    let mut workspace_plan = online::WorkspaceInstallPlan::from(workspace.links);
+    workspace_plan
+        .include_owned_members()
+        .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
     let journal = session.journal.as_mut().expect("replay journal created");
+    journal
+        .set_member_roots(workspace_plan.members.keys())
+        .map_err(|e| OperationalError::new(ErrorKind::Transaction, e))?;
     journal
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+    online::validate_locked_files(&project_dir, &lock)?;
     if !online::validate_locked_routes(&lock, &registry_config)? {
         return Err(OperationalError::new(
             ErrorKind::Lockfile,
@@ -831,6 +871,7 @@ fn perform_install(
                 &store,
                 &registry_config,
                 registry_fixture,
+                &project_dir,
                 |completed, total| report_replay_progress(Progress::Replay(completed, total)),
             )?;
         let source_trees = trees.clone();
@@ -874,7 +915,7 @@ fn perform_install(
             &project_dir,
             input,
             trees,
-            workspace.links,
+            workspace_plan,
             activation_lock,
             true,
             &mut report_replay_progress,
@@ -894,8 +935,13 @@ fn perform_install(
     }
     let mut publication = None;
     if !offline
-        && let Some(transaction) =
-            online::hydrate_locked(&lock, &store, &registry_config, registry_fixture)?
+        && let Some(transaction) = online::hydrate_locked(
+            &lock,
+            &store,
+            &registry_config,
+            registry_fixture,
+            &project_dir,
+        )?
     {
         session.mutated = true;
         publication = Some(
@@ -946,7 +992,7 @@ fn perform_install(
         &project_dir,
         input,
         trees,
-        workspace.links,
+        workspace_plan,
         true,
         activation_lock,
         true,
@@ -1023,9 +1069,11 @@ fn validate_workspace_dependency_edges(
             let target_key = target
                 .parse::<tapid_lockfile::LockfilePackageKey>()
                 .map_err(|error| error.to_string())?;
-            if target_key.source.registry() != Some(&dependency.registry)
+            if target_key.source.package_source().as_ref() != Some(&dependency.registry)
                 || target_key.name != dependency.package
-                || !dependency.requirement.matches(&target_key.version)
+                || !dependency
+                    .requirement
+                    .matches_locked_version(&target_key.version)
                 || !lock.packages().contains_key(target)
             {
                 return Err(format!(
@@ -1060,9 +1108,9 @@ fn validate_workspace_dependency_edges(
                     key.parse::<tapid_lockfile::LockfilePackageKey>()
                         .ok()
                         .is_some_and(|target| {
-                            target.source.registry() == Some(registry)
+                            target.source.package_source().as_ref() == Some(registry)
                                 && target.name == *package
-                                && peer.requirement.matches(&target.version)
+                                && peer.requirement.matches_locked_version(&target.version)
                                 && lock.packages().contains_key(key)
                         })
                 })
@@ -1082,7 +1130,7 @@ fn materialize_install(
     project_dir: &Path,
     input: NamedLayoutInput,
     trees: BTreeMap<String, PathBuf>,
-    workspace_links: tapid_linker::WorkspaceLinkPlan,
+    workspace_plan: online::WorkspaceInstallPlan,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
     mut progress: impl FnMut(Progress),
@@ -1091,7 +1139,7 @@ fn materialize_install(
         project_dir,
         input,
         trees,
-        workspace_links,
+        workspace_plan,
         false,
         activation_lock,
         preserve_previous,
@@ -1104,78 +1152,108 @@ fn materialize_with_lock(
     project_dir: &Path,
     input: NamedLayoutInput,
     trees: BTreeMap<String, PathBuf>,
-    workspace_links: tapid_linker::WorkspaceLinkPlan,
+    workspace_plan: online::WorkspaceInstallPlan,
     replayed: bool,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
     mut progress: impl FnMut(Progress),
 ) -> Result<(), OperationalError> {
-    let root = match ManagedRoot::new(project_dir) {
-        Ok(value) => value,
-        Err(error) => {
-            if replayed {
-                crate::application::replay::cleanup_replay_snapshots(&trees);
-            }
-            return Err(OperationalError::from_source(
-                ErrorKind::Materialization,
-                error,
-            ));
+    let mut stages = Vec::new();
+    let result = (|| {
+        // Finish every stage before replacing any live tree.
+        for (member, member_plan) in &workspace_plan.members {
+            let stage = stage_layout(
+                project_dir,
+                member,
+                &member_plan.input,
+                &trees,
+                &member_plan.links,
+                replayed,
+                activation_lock,
+                &mut progress,
+            )?;
+            stages.push((member.clone(), stage, member_plan.links.clone()));
         }
-    };
-    let platform = crate::application::replay::current_platform();
-    let plan = match plan_named_layout(root, input.clone(), platform) {
-        Ok(value) => value,
-        Err(error) => {
-            if replayed {
-                crate::application::replay::cleanup_replay_snapshots(&trees);
-            }
-            return Err(OperationalError::from_source(
-                ErrorKind::Materialization,
-                error,
-            ));
-        }
-    };
-    let stage = match activation_lock.create_stage(project_dir) {
-        Ok(stage) => stage,
-        Err(error) => {
-            if replayed {
-                crate::application::replay::cleanup_replay_snapshots(&trees);
-            }
-            return Err(OperationalError::new(ErrorKind::Materialization, error));
-        }
-    };
-    let result = crate::filesystem::tree::materialize_stage_with_workspace_links(
-        &stage,
-        &plan,
-        &input.instances,
-        &trees,
-        replayed,
-        &workspace_links,
-        |completed, total| progress(Progress::Materialization(completed, total)),
-    )
-    .and_then(|_| {
-        crate::filesystem::activation::activate_node_modules_with_preflight(
+        let stage = stage_layout(
             project_dir,
-            &stage,
+            project_dir,
+            &input,
+            &trees,
+            &workspace_plan.links,
+            replayed,
             activation_lock,
-            preserve_previous,
-            || {
-                crate::filesystem::tree::validate_workspace_links(
-                    project_dir,
-                    &stage,
-                    &workspace_links,
-                )
-            },
-        )
-    });
+            &mut progress,
+        )?;
+        stages.push((project_dir.to_owned(), stage, workspace_plan.links));
+        for (root, stage, links) in &stages {
+            if root != project_dir {
+                crate::filesystem::lifecycle_journal::validate_member_root(project_dir, root)
+                    .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
+            }
+            crate::filesystem::activation::activate_node_modules_with_preflight(
+                root,
+                stage,
+                activation_lock,
+                preserve_previous,
+                || crate::filesystem::tree::validate_workspace_links(project_dir, stage, links),
+            )
+            .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
+            if root != project_dir {
+                crate::filesystem::activation::test_crash_at("workspace_member_activated");
+            }
+        }
+        Ok(())
+    })();
     if replayed {
         crate::application::replay::cleanup_replay_snapshots(&trees);
     }
-    if let Err(error) = result {
+    for (_, stage, _) in stages {
+        let _ = fs::remove_dir_all(stage);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_layout(
+    workspace_root: &Path,
+    project: &Path,
+    input: &NamedLayoutInput,
+    trees: &BTreeMap<String, PathBuf>,
+    links: &tapid_linker::WorkspaceLinkPlan,
+    replayed: bool,
+    activation_lock: &ActivationLock,
+    mut progress: impl FnMut(Progress),
+) -> Result<PathBuf, OperationalError> {
+    if project != workspace_root {
+        crate::filesystem::lifecycle_journal::validate_member_root(workspace_root, project)
+            .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
+    }
+    let root = ManagedRoot::new(project)
+        .map_err(|e| OperationalError::from_source(ErrorKind::Materialization, e))?;
+    let plan = plan_workspace_layout(
+        root,
+        input.clone(),
+        links,
+        crate::application::replay::current_platform(),
+    )
+    .map_err(|e| OperationalError::from_source(ErrorKind::Materialization, e))?;
+    let stage = activation_lock
+        .create_stage(project)
+        .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
+    if let Err(error) = crate::filesystem::tree::materialize_stage_with_workspace_links(
+        &stage,
+        &plan,
+        &input.instances,
+        trees,
+        replayed,
+        links,
+        workspace_root,
+        |completed, total| progress(Progress::Materialization(completed, total)),
+    ) {
         let _ = fs::remove_dir_all(&stage);
         return Err(OperationalError::new(ErrorKind::Materialization, error));
     }
-    Ok(())
+    Ok(stage)
 }
 
 #[cfg(test)]
