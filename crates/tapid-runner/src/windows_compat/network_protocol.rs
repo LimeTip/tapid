@@ -7,6 +7,7 @@ pub const SOCKET: u32 = 1;
 pub const REGISTER: u32 = 2;
 pub const ACK: u32 = 3;
 pub const LOOKUP: u32 = 4;
+#[allow(dead_code)] // Host-only client bound in this shared wire module.
 pub const MAX_CLIENTS: usize = 64;
 
 #[derive(Clone, Copy, Debug)]
@@ -36,6 +37,7 @@ impl Request {
         bytes[32..40].copy_from_slice(&self.child.to_le_bytes());
         bytes
     }
+    #[allow(dead_code)] // The host decodes requests; the contained DLL only sends them.
     pub fn decode(bytes: &[u8; REQUEST_SIZE]) -> Option<Self> {
         let word = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
         if word(0) != VERSION || word(8) == 0 || word(28) != 0 {
@@ -71,6 +73,7 @@ impl Request {
             && self.child == 0
     }
 }
+#[allow(dead_code)] // The host constructs responses; the contained DLL receives them.
 pub fn response(id: u32, error: u32, request: isize, reply: isize) -> [u8; RESPONSE_SIZE] {
     let mut bytes = [0; RESPONSE_SIZE];
     bytes[..4].copy_from_slice(&VERSION.to_le_bytes());

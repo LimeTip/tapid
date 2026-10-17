@@ -111,6 +111,7 @@ pub struct Answer {
     pub addresses: Vec<Address>,
 }
 impl Answer {
+    #[allow(dead_code)] // Host-only DNS response construction in this shared wire module.
     pub fn encode(&self, id: u32) -> Option<[u8; wire::RESPONSE_SIZE]> {
         if self.addresses.is_empty()
             || self.addresses.len() > MAX_ADDRESSES
