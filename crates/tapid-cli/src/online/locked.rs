@@ -25,7 +25,7 @@ pub(crate) fn validate_locked_routes(
 }
 
 pub(super) fn locked_platform_matches(key: &LockfilePackageKey) -> Result<bool, OperationalError> {
-    let context = crate::context::parse_platform(&key.platform_context)?;
+    let context = key.platform_context()?;
     Ok(current_platform_matches(&PackagePlatform {
         os: context.os.into_iter().collect(),
         cpu: context.cpu.into_iter().collect(),
@@ -97,18 +97,10 @@ pub(crate) fn hydrate_locked(
                 &key.name,
                 &allowed_origins,
             )?;
-            let response = if registry.as_str() == JSR {
-                JsrRegistry::new(transport, registry.clone()).download_artifact(url)
-            } else {
-                NpmRegistry::new(transport, registry.clone()).download_artifact(url)
-            }
-            .map_err(|error| OperationalError::from_source(ErrorKind::RegistryTransport, error))?;
-            if response.status != 200 {
-                return Err(OperationalError::new(
-                    ErrorKind::RegistryTransport,
-                    format!("cannot download locked artifact: HTTP {}", response.status),
-                ));
-            }
+            let response =
+                tapid_registry_client::download_artifact(transport, url).map_err(|error| {
+                    OperationalError::from_source(ErrorKind::RegistryTransport, error)
+                })?;
             Ok(response.body)
         }
     })
@@ -131,16 +123,7 @@ fn hydrate_with_fetch(
         }
         match store.verified_tree_path(&digest) {
             Ok(_) => continue,
-            Err(tapid_store::IngestError::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound
-                    && !store
-                        .root()
-                        .join("trees")
-                        .join(digest.as_str())
-                        .try_exists()
-                        .map_err(|error| {
-                            OperationalError::from_source(ErrorKind::Store, error)
-                        })? => {}
+            Err(tapid_store::IngestError::TreeMissing(_)) => {}
             Err(error) => {
                 return Err(OperationalError::from(error).context("locked store tree is invalid"));
             }
@@ -248,7 +231,7 @@ pub(super) fn locked_records(
                     "multiple locked contexts for {}@{} cannot be reused during changed-graph resolution; request an explicit update",
                     key.name, key.version)));
             }
-            let platform = crate::context::parse_platform(&key.platform_context)?;
+            let platform = key.platform_context()?;
             let dependencies = package
                 .dependencies()
                 .iter()
@@ -262,7 +245,7 @@ pub(super) fn locked_records(
                     Ok((name.clone(), requirement))
                 })
                 .collect::<Result<BTreeMap<_, _>, OperationalError>>()?;
-            let peers = crate::context::parse_peer(&key.peer_context)?
+            let peers = key.peer_context()?
                 .entries()
                 .iter()
                 .map(|(name, version)| (name.to_string(), version.to_string()))
@@ -453,26 +436,11 @@ pub(crate) fn validate_locked_artifact_sources(
     Ok(())
 }
 
-type LockedInstallOutput = Result<
-    (
-        NamedLayoutInput,
-        BTreeMap<String, PathBuf>,
-        StoreTransaction,
-        LockedSnapshots,
-    ),
-    OperationalError,
->;
-
-/// Retain private verified snapshots through activation without republishing cached trees.
-pub(crate) struct LockedSnapshots {
-    trees: Vec<TemporaryTree>,
-}
-
-impl LockedSnapshots {
-    /// Keep an owned private snapshot alive until activation finishes.
-    pub(crate) fn retain(&mut self, tree: PathBuf) {
-        self.trees.push(TemporaryTree(tree));
-    }
+type LockedInstallOutput = Result<PreparedLockedInstall, OperationalError>;
+pub(crate) struct PreparedLockedInstall {
+    pub layout: PreparedLayout,
+    pub transaction: StoreTransaction,
+    pub snapshots: Vec<tapid_store::VerifiedTreeSnapshot>,
 }
 
 pub(crate) fn prepare_locked_install(
@@ -488,7 +456,7 @@ pub(crate) fn prepare_locked_install(
         OperationalError::from(error).context("cannot recover stale replay snapshots")
     })?;
     let mut transaction = store.transaction();
-    let mut snapshots = LockedSnapshots { trees: Vec::new() };
+    let mut snapshots = Vec::new();
     let mut fixtures = None;
     let mut transports = BTreeMap::new();
     let allowed_origins = registry_config.configured_origins();
@@ -497,7 +465,6 @@ pub(crate) fn prepare_locked_install(
         manifest,
         registry_config,
         report_progress,
-        false,
         |key, package| {
             let tree_digest: ArtifactDigest =
                 package
@@ -508,11 +475,11 @@ pub(crate) fn prepare_locked_install(
                     })?;
             match store.verified_tree_snapshot(&tree_digest) {
                 Ok(snapshot) => {
-                    snapshots.retain(snapshot.clone());
-                    return Ok(snapshot);
+                    let path = snapshot.path().to_owned();
+                    snapshots.push(snapshot);
+                    return Ok(path);
                 }
-                Err(tapid_store::IngestError::Io(error))
-                    if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(tapid_store::IngestError::TreeMissing(_)) => {}
                 Err(error) => return Err(OperationalError::from(error)),
             }
             let registry = key.source.registry();
@@ -629,7 +596,15 @@ pub(crate) fn prepare_locked_install(
                 .map_err(OperationalError::from)
         },
     )?;
-    Ok((input, trees, transaction, snapshots))
+    Ok(PreparedLockedInstall {
+        layout: PreparedLayout {
+            input,
+            trees,
+            workspace: WorkspaceInstallPlan::default(),
+        },
+        transaction,
+        snapshots,
+    })
 }
 
 #[cfg(test)]
@@ -669,7 +644,11 @@ mod ci_tests {
             let package_key = package.key();
             lock.insert_package(package).unwrap();
             lock.set_roots([package_key]).unwrap();
-            let (input, trees, transaction, snapshots) = prepare_locked_install(
+            let PreparedLockedInstall {
+                layout: PreparedLayout { input, trees, .. },
+                transaction,
+                snapshots,
+            } = prepare_locked_install(
                 &lock,
                 &manifest,
                 &store,

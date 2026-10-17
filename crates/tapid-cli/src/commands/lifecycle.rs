@@ -223,18 +223,23 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
             )
             .map(LifecycleReport::Preview);
         }
-        crate::application::install::run_with_manifest_target(
-            &selection.root_dir,
-            &selection.manifest_path,
-            Some(crate::application::install::ManifestEdit {
-                expected: &selection.manifest,
-                updated: &plan.manifest,
-            }),
-            None,
-            args.common.store_dir.as_deref(),
-            mode,
-            args.common.registry_fixture.as_deref(),
-            args.common.allow_unverified_registry_artifacts,
+        crate::application::install::run(
+            crate::application::install::InstallRequest {
+                project_dir: &selection.root_dir,
+                target_manifest_path: &selection.manifest_path,
+                mutation: crate::application::install::ManifestMutation::ReplaceManifest(
+                    crate::application::install::ManifestEdit {
+                        expected: &selection.manifest,
+                        updated: &plan.manifest,
+                    },
+                ),
+                store_root: args.common.store_dir.as_deref(),
+                mode,
+                registry_fixture: args.common.registry_fixture.as_deref(),
+                allow_unverified_registry_artifacts: args
+                    .common
+                    .allow_unverified_registry_artifacts,
+            },
             |event| crate::output::report_progress(event, json),
         )
         .map(LifecycleReport::Installed)
@@ -296,15 +301,16 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
             );
         }
     };
-    match crate::application::install::run_with_manifest_target(
-        &selection.root_dir,
-        &selection.manifest_path,
-        None,
-        None,
-        args.common.store_dir.as_deref(),
-        crate::application::install::InstallMode::Offline,
-        None,
-        false,
+    match crate::application::install::run(
+        crate::application::install::InstallRequest {
+            project_dir: &selection.root_dir,
+            target_manifest_path: &selection.manifest_path,
+            mutation: crate::application::install::ManifestMutation::None,
+            store_root: args.common.store_dir.as_deref(),
+            mode: crate::application::install::InstallMode::Offline,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
         |event| crate::output::report_progress(event, json),
     ) {
         Ok(report) => {
@@ -335,38 +341,38 @@ fn mutate_and_install(
     .map_err(|error| OperationFailure::unchanged(&common.project_dir, error))?;
     let plan = planner(&selection.manifest)
         .map_err(|error| OperationFailure::unchanged(&selection.root_dir, error))?;
+    let mode = if refresh {
+        crate::application::install::InstallMode::Refresh
+    } else {
+        crate::application::install::InstallMode::Online
+    };
     if dry_run {
         return crate::application::preview::run(
             &selection.root_dir,
             &selection.manifest_path,
             &selection.manifest,
             &plan.manifest,
-            if refresh {
-                crate::application::install::InstallMode::Refresh
-            } else {
-                crate::application::install::InstallMode::Online
-            },
+            mode,
             common.registry_fixture.as_deref(),
             common.allow_unverified_registry_artifacts,
         )
         .map(LifecycleReport::Preview);
     }
-    crate::application::install::run_with_manifest_target(
-        &selection.root_dir,
-        &selection.manifest_path,
-        Some(crate::application::install::ManifestEdit {
-            expected: &selection.manifest,
-            updated: &plan.manifest,
-        }),
-        None,
-        common.store_dir.as_deref(),
-        if refresh {
-            crate::application::install::InstallMode::Refresh
-        } else {
-            crate::application::install::InstallMode::Online
+    crate::application::install::run(
+        crate::application::install::InstallRequest {
+            project_dir: &selection.root_dir,
+            target_manifest_path: &selection.manifest_path,
+            mutation: crate::application::install::ManifestMutation::ReplaceManifest(
+                crate::application::install::ManifestEdit {
+                    expected: &selection.manifest,
+                    updated: &plan.manifest,
+                },
+            ),
+            store_root: common.store_dir.as_deref(),
+            mode,
+            registry_fixture: common.registry_fixture.as_deref(),
+            allow_unverified_registry_artifacts: common.allow_unverified_registry_artifacts,
         },
-        common.registry_fixture.as_deref(),
-        common.allow_unverified_registry_artifacts,
         |event| crate::output::report_progress(event, json),
     )
     .map(LifecycleReport::Installed)
@@ -534,7 +540,7 @@ mod stale_tests {
 #[cfg(test)]
 mod stale_update_tests {
     use crate::application::{
-        install::{InstallMode, ManifestEdit, run_with_manifest_target},
+        install::{InstallMode, InstallRequest, ManifestEdit, ManifestMutation, run},
         lifecycle::{SavePolicy, UpdateRequest, plan_update},
     };
     use tapid_test_support::TempProject;
@@ -552,24 +558,25 @@ mod stale_update_tests {
         let plan = plan_update(&before, &["react".into()], true).unwrap();
         let newer = br#"{"name":"app","version":"1.0.0","dependencies":{"react":"^19"},"description":"another writer"}"#;
         project.write("package.json", newer).unwrap();
-        let failure = run_with_manifest_target(
-            project.path(),
-            &path,
-            Some(ManifestEdit {
-                expected: &before,
-                updated: &plan.manifest,
-            }),
-            None,
-            Some(&project.path().join("store")),
-            InstallMode::Update(UpdateRequest {
-                plan: &plan,
-                target: &path,
-                named: true,
-                original_root_digest: None,
-                save: Some(SavePolicy::Exact),
-            }),
-            None,
-            false,
+        let failure = run(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: &path,
+                mutation: ManifestMutation::ReplaceManifest(ManifestEdit {
+                    expected: &before,
+                    updated: &plan.manifest,
+                }),
+                store_root: Some(&project.path().join("store")),
+                mode: InstallMode::Update(UpdateRequest {
+                    plan: &plan,
+                    target: &path,
+                    named: true,
+                    original_root_digest: None,
+                    save: Some(SavePolicy::Exact),
+                }),
+                registry_fixture: None,
+                allow_unverified_registry_artifacts: false,
+            },
             |_| {},
         )
         .unwrap_err();

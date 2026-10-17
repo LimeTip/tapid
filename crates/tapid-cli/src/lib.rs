@@ -1,6 +1,5 @@
 mod application;
 mod commands;
-mod context;
 mod filesystem;
 mod online;
 mod output;

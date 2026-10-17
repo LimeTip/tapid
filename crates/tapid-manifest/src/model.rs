@@ -11,6 +11,17 @@ pub enum DependencyKind {
     PeerDependencies,
 }
 
+impl DependencyKind {
+    pub fn field_name(self) -> &'static str {
+        match self {
+            Self::Dependencies => "dependencies",
+            Self::DevDependencies => "devDependencies",
+            Self::OptionalDependencies => "optionalDependencies",
+            Self::PeerDependencies => "peerDependencies",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageManifest {
     pub(crate) name: PackageName,
@@ -130,14 +141,13 @@ impl PackageManifest {
         &mut self,
         kind: DependencyKind,
     ) -> (&'static str, &mut BTreeMap<String, String>) {
-        match kind {
-            DependencyKind::Dependencies => ("dependencies", &mut self.dependencies),
-            DependencyKind::DevDependencies => ("devDependencies", &mut self.dev_dependencies),
-            DependencyKind::OptionalDependencies => {
-                ("optionalDependencies", &mut self.optional_dependencies)
-            }
-            DependencyKind::PeerDependencies => ("peerDependencies", &mut self.peer_dependencies),
-        }
+        let section = match kind {
+            DependencyKind::Dependencies => &mut self.dependencies,
+            DependencyKind::DevDependencies => &mut self.dev_dependencies,
+            DependencyKind::OptionalDependencies => &mut self.optional_dependencies,
+            DependencyKind::PeerDependencies => &mut self.peer_dependencies,
+        };
+        (kind.field_name(), section)
     }
 
     fn set_dependency(
@@ -186,7 +196,10 @@ impl PackageManifest {
         Ok(self)
     }
 
-    pub fn dependency_kind(&self, name: &str) -> Option<DependencyKind> {
+    /// Iterate declarations by section; callers choose which kinds participate.
+    pub fn dependency_sections(
+        &self,
+    ) -> impl Iterator<Item = (DependencyKind, &BTreeMap<String, String>)> {
         [
             (DependencyKind::Dependencies, &self.dependencies),
             (DependencyKind::DevDependencies, &self.dev_dependencies),
@@ -197,7 +210,11 @@ impl PackageManifest {
             (DependencyKind::PeerDependencies, &self.peer_dependencies),
         ]
         .into_iter()
-        .find_map(|(kind, dependencies)| dependencies.contains_key(name).then_some(kind))
+    }
+
+    pub fn dependency_kind(&self, name: &str) -> Option<DependencyKind> {
+        self.dependency_sections()
+            .find_map(|(kind, dependencies)| dependencies.contains_key(name).then_some(kind))
     }
     pub fn dev_dependencies(&self) -> &BTreeMap<String, String> {
         &self.dev_dependencies

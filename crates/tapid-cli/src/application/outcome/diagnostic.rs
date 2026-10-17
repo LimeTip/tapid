@@ -148,20 +148,23 @@ impl DiagnosticContext {
         path: &Path,
         workspace: Option<&str>,
     ) -> Vec<RequirementDiagnostic> {
-        crate::application::lifecycle::direct_dependencies(manifest)
-            .into_iter()
+        manifest
+            .dependency_sections()
+            .flat_map(|(kind, declarations)| {
+                declarations
+                    .iter()
+                    .map(move |(name, requirement)| (name, requirement, kind))
+            })
             .map(|(name, requirement, kind)| {
-                let mut declaration = Declaration::manifest(
-                    path,
-                    Declaration::pointer(crate::application::lifecycle::kind_name(kind), &name),
-                );
+                let mut declaration =
+                    Declaration::manifest(path, Declaration::pointer(kind.field_name(), name));
                 declaration.workspace = workspace.map(str::to_owned);
-                let local_name = crate::online::dep_parts(&name)
+                let local_name = crate::online::dep_parts(name)
                     .map(|(_, name)| name.to_string())
-                    .unwrap_or(name);
+                    .unwrap_or_else(|_| name.clone());
                 RequirementDiagnostic {
                     local_name: Some(local_name),
-                    requirement,
+                    requirement: requirement.clone(),
                     package: None,
                     declaration: Some(declaration),
                 }

@@ -1,4 +1,4 @@
-use crate::MetadataError;
+use crate::{MetadataError, PackagePlatform};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use tapid_core::{PackageIntegrity, PackageName, PackageVersion, RegistryOrigin};
@@ -132,27 +132,6 @@ impl RegistrySnapshot {
     }
     pub fn candidates(&self, name: &PackageName) -> &[PackageMetadata] {
         self.packages.get(name).map(Vec::as_slice).unwrap_or(&[])
-    }
-}
-
-/// npm package compatibility constraints used for deterministic platform selection.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PackagePlatform {
-    /// Supported or negated npm operating-system identifiers.
-    pub os: Vec<String>,
-    /// Supported or negated npm CPU architecture identifiers.
-    pub cpu: Vec<String>,
-    /// Supported or negated npm libc identifiers.
-    pub libc: Vec<String>,
-}
-impl PackagePlatform {
-    /// Returns constraints that permit every supported platform.
-    pub fn unrestricted() -> Self {
-        Self {
-            os: Vec::new(),
-            cpu: Vec::new(),
-            libc: Vec::new(),
-        }
     }
 }
 
