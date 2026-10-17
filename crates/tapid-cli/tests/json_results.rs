@@ -1,8 +1,14 @@
 use std::{fs, process::Command};
-use tapid_test_support::TempProject;
+use tapid_test_support::{TempHome, TempProject};
 
 fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, serde_json::Value) {
+    let home = TempHome::new("json-result").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("XDG_CACHE_HOME", home.path())
+        .env("LOCALAPPDATA", home.path())
+        .env_remove("TAPID_NPM_TOKEN")
         .current_dir(project.path())
         .args(args)
         .output()
@@ -86,7 +92,7 @@ fn json_parse_errors_and_unsupported_commands_do_not_echo_input() {
     );
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(result["operation"], "import-package-lock");
-    assert_eq!(result["errors"][0]["code"], "JSON_UNSUPPORTED_COMMAND");
+    assert_eq!(result["errors"][0]["code"], "LOCKFILE_INVALID");
     assert!(!project.path().join("tapid.lock").exists());
 }
 
@@ -572,10 +578,7 @@ fn json_unsupported_results_preserve_canonical_command_names() {
     let project = TempProject::new("json-unsupported-operation").unwrap();
     for (args, operation) in [
         (vec!["--json", "init"], "init"),
-        (vec!["--json", "ci"], "ci"),
         (vec!["--json", "run", "test"], "run"),
-        (vec!["--json", "manifest", "validate"], "manifest"),
-        (vec!["--json", "lock", "verify"], "lock"),
         (vec!["--json", "license"], "license"),
         (vec!["--json", "upgrade"], "upgrade"),
         (vec!["--json"], "none"),
@@ -586,4 +589,185 @@ fn json_unsupported_results_preserve_canonical_command_names() {
         assert_eq!(result["errors"][0]["code"], "JSON_UNSUPPORTED_COMMAND");
     }
     assert_eq!(std::fs::read_dir(project.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn json_automation_commands_validate_import_and_ci() {
+    let project = TempProject::new("json-automation").unwrap();
+    project
+        .write(
+            "package.json",
+            include_bytes!("fixtures/npm-import/package.json"),
+        )
+        .unwrap();
+    project
+        .write(
+            "package-lock.json",
+            include_bytes!("fixtures/npm-import/package-lock.json"),
+        )
+        .unwrap();
+    project
+        .write(
+            "registry.json",
+            include_bytes!("fixtures/npm-import/registry.json"),
+        )
+        .unwrap();
+    let (output, result) = invoke(&project, &["manifest", "validate", "--json"]);
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["operation"], "manifest");
+    assert_eq!(result["changes"]["state"], "unchanged");
+    let (output, result) = invoke(
+        &project,
+        &["--json", "import-package-lock", "package-lock.json"],
+    );
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["changes"]["state"], "committed");
+    assert_eq!(result["changes"]["files"].as_array().unwrap().len(), 1);
+    let (output, result) = invoke(
+        &project,
+        &["--json", "ci", "--offline", "--store-dir", "store"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(result["errors"][0]["code"], "LOCKFILE_INVALID");
+    let store = project.path().join("store");
+    let (output, result) = invoke(
+        &project,
+        &[
+            "--json",
+            "update",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{result}");
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let (output, result) = invoke(&project, &["lock", "verify", "--json"]);
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["changes"]["state"], "unchanged");
+    for offline in [false, true] {
+        let mut args = vec![
+            "--json",
+            "ci",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            "registry.json",
+        ];
+        if offline {
+            args.push("--offline");
+        }
+        let (output, result) = invoke(&project, &args);
+        assert!(output.status.success(), "{result}");
+        assert_eq!(result["operation"], "ci");
+        assert_eq!(result["data"]["package_count"], 5);
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    }
+}
+
+#[test]
+fn json_automation_failures_are_typed_and_preserve_outputs() {
+    let project = TempProject::new("json-automation-failure").unwrap();
+    project
+        .write("package.json", b"secret invalid manifest")
+        .unwrap();
+    project.write("tapid.lock", b"secret invalid lock").unwrap();
+    project
+        .write("package-lock.json", b"secret invalid npm lock")
+        .unwrap();
+    for (args, code) in [
+        (vec!["--json", "manifest", "validate"], "MANIFEST_INVALID"),
+        (vec!["--json", "lock", "verify"], "LOCKFILE_INVALID"),
+        (
+            vec!["--json", "import-package-lock", "package-lock.json"],
+            "MANIFEST_INVALID",
+        ),
+        (
+            vec!["--json", "ci", "--offline", "--store-dir", "store"],
+            "MANIFEST_INVALID",
+        ),
+    ] {
+        let (output, result) = invoke(&project, &args);
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(result["errors"][0]["code"], code, "{result}");
+        assert_eq!(result["changes"]["state"], "unchanged");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("secret"));
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            b"secret invalid lock"
+        );
+        assert!(!project.path().join("node_modules").exists());
+    }
+}
+
+#[test]
+fn json_import_refuses_pending_recovery_and_nonregular_destination() {
+    for pending in [false, true] {
+        let project = TempProject::new("json-import-refusal").unwrap();
+        project
+            .write(
+                "package.json",
+                include_bytes!("fixtures/npm-import/package.json"),
+            )
+            .unwrap();
+        project
+            .write(
+                "package-lock.json",
+                include_bytes!("fixtures/npm-import/package-lock.json"),
+            )
+            .unwrap();
+        if pending {
+            project
+                .write(".tapid-install-stage-test/KEEP", b"pending")
+                .unwrap();
+        } else {
+            project
+                .write("tapid.lock/KEEP", b"existing directory")
+                .unwrap();
+        }
+        let (output, result) = invoke(
+            &project,
+            &["--json", "import-package-lock", "package-lock.json"],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(
+            result["errors"][0]["code"],
+            if pending {
+                "RECOVERY_FAILED"
+            } else {
+                "LOCKFILE_INVALID"
+            }
+        );
+        assert_eq!(
+            result["retry"],
+            if pending {
+                "recover_first"
+            } else {
+                "after_correction"
+            }
+        );
+        assert_eq!(
+            result["changes"]["state"],
+            if pending {
+                "recovery_required"
+            } else {
+                "unchanged"
+            }
+        );
+        assert!(!project.path().join("node_modules").exists());
+        assert_eq!(
+            fs::read(project.path().join(if pending {
+                ".tapid-install-stage-test/KEEP"
+            } else {
+                "tapid.lock/KEEP"
+            }))
+            .unwrap(),
+            if pending {
+                b"pending".as_slice()
+            } else {
+                b"existing directory".as_slice()
+            }
+        );
+    }
 }

@@ -17,7 +17,7 @@ pub(crate) struct Args {
     registry_fixture: Option<PathBuf>,
 }
 
-pub(crate) fn run(args: Args) -> ExitCode {
+pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     let result = crate::application::install::run(
         &args.project_dir,
         None,
@@ -30,14 +30,17 @@ pub(crate) fn run(args: Args) -> ExitCode {
         args.registry_fixture.as_deref(),
         false,
         |event| match event {
-            crate::application::install::Progress::Replay(completed, total) => {
+            crate::application::install::Progress::Replay(completed, total) if !json => {
                 eprintln!("Locked install progress: {completed}/{total}")
             }
-            event => crate::output::report_progress(event, false),
+            event => crate::output::report_progress(event, json),
         },
     );
     match result {
         Ok(report) => {
+            if json {
+                return crate::output::json::installed(&report, "ci");
+            }
             crate::output::report_warnings(&report.outcome.warnings);
             println!(
                 "Installed from lockfile: {} package(s)",
@@ -45,9 +48,6 @@ pub(crate) fn run(args: Args) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            crate::output::report_failure(&error);
-            ExitCode::from(1)
-        }
+        Err(error) => crate::output::json::failure_or_human(&error, "ci", json),
     }
 }

@@ -285,10 +285,18 @@ pub(crate) fn why_failure(project: &std::path::Path, code: &str) -> ExitCode {
     emit(result, 1)
 }
 
-pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
-    let mut result = envelope(operation, "success", Some(&report.outcome));
-    result["data"] = json!({"package_count": report.package_count, "replayed": report.replayed});
+pub(crate) fn completed(outcome: &OperationOutcome, operation: &str, data: Value) -> ExitCode {
+    let mut result = envelope(operation, "success", Some(outcome));
+    result["data"] = data;
     emit(result, 0)
+}
+
+pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
+    completed(
+        &report.outcome,
+        operation,
+        json!({"package_count": report.package_count, "replayed": report.replayed}),
+    )
 }
 
 pub(crate) fn outdated(report: &OutdatedReport, operation: &str, limit: usize) -> ExitCode {

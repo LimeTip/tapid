@@ -1,4 +1,6 @@
-use crate::application::outcome::{ErrorKind, OperationalError};
+use crate::application::outcome::{
+    ErrorKind, OperationFailure, OperationOutcome, OperationalError,
+};
 use clap::{Args as ClapArgs, Subcommand};
 use std::{fs::File, io::Read, path::PathBuf, process::ExitCode};
 use tapid_manifest::PackageManifest;
@@ -23,16 +25,34 @@ pub(crate) enum Command {
     },
 }
 
-pub(crate) fn run(args: Args) -> ExitCode {
+pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     match args.command {
         Command::Validate { path } => {
             let path = path.unwrap_or_else(|| PathBuf::from("package.json"));
-            match read_manifest(&path) {
+            let project = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            match read_manifest_typed(&path) {
                 Ok(manifest) => {
+                    if json {
+                        return crate::output::json::completed(
+                            &OperationOutcome::unchanged(project),
+                            "manifest",
+                            serde_json::json!({"action":"validate", "valid":true}),
+                        );
+                    }
                     println!("Valid manifest: {}@{}", manifest.name(), manifest.version());
                     ExitCode::SUCCESS
                 }
                 Err(error) => {
+                    if json {
+                        return crate::output::json::failure_or_human(
+                            &OperationFailure::unchanged(project, error),
+                            "manifest",
+                            true,
+                        );
+                    }
                     eprintln!("error: {error}");
                     ExitCode::from(1)
                 }
