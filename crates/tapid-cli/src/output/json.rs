@@ -88,6 +88,7 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
             .warnings
             .iter()
             .map(|warning| match warning {
+                Warning::UpdateGraphChange { .. } => "UPDATE_GRAPH_CHANGE",
                 Warning::UnverifiedRegistryArtifactsAllowed => {
                     "UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED"
                 }
@@ -288,6 +289,38 @@ pub(crate) fn why_failure(project: &std::path::Path, code: &str) -> ExitCode {
 pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
     let mut result = envelope(operation, "success", Some(&report.outcome));
     result["data"] = json!({"package_count": report.package_count, "replayed": report.replayed});
+    if operation == "update" {
+        let mut truncated = Vec::new();
+        let changes = report
+            .outcome
+            .warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                Warning::UpdateGraphChange { package, reason } => Some((package, reason)),
+                _ => None,
+            })
+            .enumerate()
+            .map(|(index, (package, reason))| {
+                let package = recorded_text(
+                    package,
+                    &format!("/data/graph_changes/{index}/package"),
+                    &mut truncated,
+                );
+                let reason = recorded_text(
+                    reason,
+                    &format!("/data/graph_changes/{index}/reason"),
+                    &mut truncated,
+                );
+                json!({"package": package, "reason": reason})
+            })
+            .collect::<Vec<_>>();
+        result["data"]["graph_changes"] = json!(changes);
+        let fields = result["truncated_fields"]
+            .as_array_mut()
+            .expect("envelope truncation list");
+        fields.extend(truncated.into_iter().map(Value::String));
+        fields.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
     emit(result, 0)
 }
 
@@ -388,6 +421,44 @@ pub(crate) fn cache_result(
             }
             emit(result, 1)
         }
+    }
+}
+
+pub(crate) fn preview(
+    report: &crate::application::preview::PreviewReport,
+    operation: &str,
+) -> ExitCode {
+    let mut result = envelope(operation, "success", Some(&report.outcome));
+    let mut data = serde_json::to_value(report).expect("preview serialization");
+    let mut truncated = result["truncated_fields"]
+        .as_array()
+        .expect("truncation list")
+        .iter()
+        .map(|value| value.as_str().expect("truncation pointer").to_owned())
+        .collect::<Vec<_>>();
+    sanitize_preview(&mut data, "/data", &mut truncated);
+    result["data"] = data;
+    truncated.sort_unstable();
+    truncated.dedup();
+    result["truncated_fields"] = json!(truncated);
+    emit(result, 0)
+}
+
+fn sanitize_preview(value: &mut Value, pointer: &str, truncated: &mut Vec<String>) {
+    match value {
+        Value::String(value) => *value = recorded_text(&*value, pointer, truncated),
+        Value::Array(values) => {
+            for (index, value) in values.iter_mut().enumerate() {
+                sanitize_preview(value, &format!("{pointer}/{index}"), truncated);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                let key = key.replace('~', "~0").replace('/', "~1");
+                sanitize_preview(value, &format!("{pointer}/{key}"), truncated);
+            }
+        }
+        _ => {}
     }
 }
 

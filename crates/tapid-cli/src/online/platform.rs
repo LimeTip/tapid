@@ -1,7 +1,7 @@
 //! Host platform detection for package compatibility.
 use tapid_core::PackagePlatform;
 
-pub(super) fn current_libc() -> Option<&'static str> {
+pub(crate) fn current_libc() -> Option<&'static str> {
     #[cfg(all(target_os = "linux", target_env = "musl"))]
     {
         Some("musl")

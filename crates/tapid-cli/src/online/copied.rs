@@ -219,9 +219,15 @@ pub(super) fn prepare_roots(
     previous: Option<&Lockfile>,
     fixture_records: &BTreeMap<PackageRecordKey, PackageRecord>,
     using_fixture: bool,
+    update: Option<crate::application::lifecycle::UpdateRequest<'_>>,
 ) -> Result<Vec<(Dependency, PackageRecord)>, OperationalError> {
     let current_digest = root_digest(project)?;
-    let previous = previous.filter(|lock| lock.root_manifest_digest() == current_digest);
+    let previous = previous.filter(|lock| {
+        lock.root_manifest_digest() == current_digest
+            || update.is_some_and(|request| {
+                request.named && request.original_root_digest == Some(lock.root_manifest_digest())
+            })
+    });
     let mut prepared = BTreeMap::<PackageName, (Dependency, PackageRecord)>::new();
     for (local, raw) in declarations(manifest) {
         let Some(spec) =
@@ -236,6 +242,15 @@ pub(super) fn prepare_roots(
             continue;
         }
         let pinned = previous
+            .filter(|_| {
+                !update.is_some_and(|request| {
+                    request
+                        .plan
+                        .mutations
+                        .iter()
+                        .any(|mutation| mutation.name == *local)
+                })
+            })
             .and_then(|lock| lock.root_bindings().get(local))
             .and_then(|key| key.parse::<LockfilePackageKey>().ok())
             .and_then(|key| key.source.package_source());

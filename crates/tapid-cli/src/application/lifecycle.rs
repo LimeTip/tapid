@@ -36,6 +36,32 @@ pub(crate) struct LifecyclePlan {
     pub(crate) diagnostics: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SavePolicy {
+    Exact,
+    Caret,
+    Tilde,
+}
+
+impl SavePolicy {
+    pub(crate) fn requirement(self, version: &PackageVersion) -> String {
+        match self {
+            Self::Exact => version.to_string(),
+            Self::Caret => format!("^{version}"),
+            Self::Tilde => format!("~{version}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct UpdateRequest<'a> {
+    pub(crate) plan: &'a LifecyclePlan,
+    pub(crate) target: &'a Path,
+    pub(crate) named: bool,
+    pub(crate) original_root_digest: Option<&'a str>,
+    pub(crate) save: Option<SavePolicy>,
+}
+
 pub(crate) fn plan_add(
     manifest: &PackageManifest,
     mutations: &[DependencyMutation],
@@ -126,7 +152,9 @@ pub(crate) fn plan_update(
                 continue;
             };
             declared = true;
-            let requirement = if latest && crate::online::copied_declaration(requirement)?.is_none()
+            let requirement = if latest
+                && !requirement.starts_with("workspace:")
+                && crate::online::copied_declaration(requirement)?.is_none()
             {
                 let parsed = requirement.parse::<Requirement>().map_err(|error| {
                     OperationalError::from_source(ErrorKind::InvalidRequest, error)
@@ -168,6 +196,89 @@ pub(crate) fn plan_update(
         mutations,
         diagnostics: Vec::new(),
     })
+}
+
+pub(super) fn update_change_warnings(
+    project: &Path,
+    request: UpdateRequest<'_>,
+    before: &Lockfile,
+    after: &Lockfile,
+) -> Result<Vec<crate::application::outcome::Warning>, OperationalError> {
+    use crate::application::outcome::Warning;
+    let selected = request
+        .plan
+        .mutations
+        .iter()
+        .map(|m| m.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let selected_bindings = |lock: &Lockfile| {
+        if request.target == project.join("package.json") {
+            lock.root_bindings()
+                .iter()
+                .filter(|(name, _)| selected.contains(name.as_str()))
+                .map(|(_, key)| key.clone())
+                .collect::<BTreeSet<_>>()
+        } else {
+            let relative = request
+                .target
+                .parent()
+                .and_then(|path| path.strip_prefix(project).ok());
+            lock.workspace_packages()
+                .values()
+                .filter(|member| {
+                    relative.is_some_and(|path| {
+                        member
+                            .key()
+                            .parse::<LockfilePackageKey>()
+                            .ok()
+                            .and_then(|key| {
+                                key.source
+                                    .workspace()
+                                    .map(|source| Path::new(source.path()) == path)
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .flat_map(|member| member.dependencies().iter())
+                .filter(|(name, _)| selected.contains(name.as_str()))
+                .map(|(_, key)| key.clone())
+                .collect()
+        }
+    };
+    let mut direct = selected_bindings(before);
+    direct.extend(selected_bindings(after));
+    let reasons = super::why::requiring_edges(after)?;
+    let mut warnings = Vec::new();
+    for key in after
+        .packages()
+        .keys()
+        .filter(|key| !before.packages().contains_key(*key) && !direct.contains(*key))
+    {
+        let parents = reasons.get(key).map(Vec::as_slice).unwrap_or_default();
+        let reason = if parents.is_empty() {
+            "the previous direct pin cannot satisfy the current manifest or peer constraints"
+                .to_owned()
+        } else {
+            format!(
+                "required by {} after the selected update",
+                parents.join(", ")
+            )
+        };
+        warnings.push(Warning::UpdateGraphChange {
+            package: key.replace('|', " "),
+            reason,
+        });
+    }
+    for key in before
+        .packages()
+        .keys()
+        .filter(|key| !after.packages().contains_key(*key) && !direct.contains(*key))
+    {
+        warnings.push(Warning::UpdateGraphChange {
+            package: key.replace('|', " "), reason: "removed because this exact package instance is no longer reachable after the selected update".into(),
+        });
+    }
+    Ok(warnings)
 }
 
 pub(crate) struct WorkspaceSelection {

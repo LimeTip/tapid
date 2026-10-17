@@ -310,6 +310,23 @@ fn direct_dependency_kinds(manifest: &PackageManifest) -> BTreeMap<String, Strin
         .collect()
 }
 
+/// Explain immediate dependency and peer edges using the same graph as `why`.
+pub(super) fn requiring_edges(
+    lock: &Lockfile,
+) -> Result<BTreeMap<String, Vec<String>>, OperationalError> {
+    let mut reasons = BTreeMap::<String, Vec<String>>::new();
+    for (parent, edges) in graph(lock)?.edges {
+        let parent = parent.replace('|', " ");
+        for edge in edges {
+            reasons
+                .entry(edge.target)
+                .or_default()
+                .push(format!("{parent} through {} '{}'", edge.kind, edge.name));
+        }
+    }
+    Ok(reasons)
+}
+
 struct WhyGraph {
     edges: BTreeMap<String, Vec<Edge>>,
     nodes: BTreeMap<String, LockfilePackageKey>,

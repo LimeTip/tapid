@@ -4,6 +4,9 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
+    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
     /// Package to add to dependencies, such as react@^19.0.0. Defaults to * without a requirement. Online only.
     #[arg(value_parser = parse_package_argument)]
     pub(crate) package: Option<String>,
@@ -47,6 +50,9 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
 
 /// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
 pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
+    if args.dry_run {
+        return preview(&args, json);
+    }
     let mut reporter = crate::output::install::Reporter::new(json);
     let target_manifest_path = if let Some(name) = args.workspace.as_deref() {
         match crate::application::lifecycle::resolve_workspace(&args.project_dir, Some(name)) {
@@ -106,5 +112,58 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
             reporter.failure(&error);
             ExitCode::from(1)
         }
+    }
+}
+
+fn preview(args: &Args, json: bool) -> ExitCode {
+    let result = (|| {
+        let selection = crate::application::lifecycle::resolve_workspace(
+            &args.project_dir,
+            args.workspace.as_deref(),
+        )
+        .map_err(|e| OperationFailure::unchanged(&args.project_dir, e))?;
+        if args.package.is_some() && (args.offline || args.frozen) {
+            return Err(OperationFailure::unchanged(
+                &selection.root_dir,
+                crate::application::outcome::OperationalError::new(
+                    crate::application::outcome::ErrorKind::InvalidRequest,
+                    "a package argument cannot be used with --offline or --frozen",
+                ),
+            ));
+        }
+        let next = if let Some(spec) = &args.package {
+            let (name, requirement) = crate::package_spec::parse(spec);
+            crate::application::lifecycle::plan_add(
+                &selection.manifest,
+                &[crate::application::lifecycle::DependencyMutation {
+                    name: name.to_owned(),
+                    requirement: Some(requirement.to_owned()),
+                    kind: tapid_manifest::DependencyKind::Dependencies,
+                }],
+            )
+            .map_err(|e| OperationFailure::unchanged(&selection.root_dir, e))?
+            .manifest
+        } else {
+            selection.manifest.clone()
+        };
+        crate::application::preview::run(
+            &selection.root_dir,
+            &selection.manifest_path,
+            &selection.manifest,
+            &next,
+            if args.offline {
+                crate::application::install::InstallMode::Offline
+            } else if args.frozen {
+                crate::application::install::InstallMode::Frozen
+            } else {
+                crate::application::install::InstallMode::Online
+            },
+            args.registry_fixture.as_deref(),
+            args.allow_unverified_registry_artifacts,
+        )
+    })();
+    match result {
+        Ok(report) => crate::output::preview::report(&report, "install", json),
+        Err(error) => crate::output::json::failure_or_human(&error, "install", json),
     }
 }
