@@ -397,22 +397,9 @@ impl Store {
         }
         let _guard = lock_file(&self.root, true)?;
         let destination = self.artifact_path(expected);
-        if let Ok(metadata) = fs::symlink_metadata(&destination) {
-            if !metadata.file_type().is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "artifact path is not a regular file",
-                )
-                .into());
-            }
-            let actual = digest_file(&destination)?;
-            if actual == expected.as_str() {
-                return Ok(IngestResult::AlreadyPresent(destination));
-            }
-            return Err(IngestError::DigestMismatch {
-                expected: expected.clone(),
-                actual,
-            });
+        if fs::symlink_metadata(&destination).is_ok() {
+            verify_existing_artifact(&destination, expected)?;
+            return Ok(IngestResult::AlreadyPresent(destination));
         }
         if destination.exists() {
             return Err(io::Error::new(
@@ -455,6 +442,7 @@ impl Store {
                     Ok(IngestResult::Activated(destination.clone()))
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    verify_existing_artifact(&destination, expected)?;
                     Ok(IngestResult::AlreadyPresent(destination.clone()))
                 }
                 Err(error) => Err(error.into()),
@@ -773,8 +761,43 @@ fn create_staging_file(dir: &Path) -> io::Result<(PathBuf, File)> {
     ))
 }
 
-fn digest_file(path: &Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
+fn verify_existing_artifact(path: &Path, expected: &ArtifactDigest) -> Result<(), IngestError> {
+    let mut file = open_artifact_without_following_links(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "artifact path is not a regular file",
+        )
+        .into());
+    }
+    let actual = digest_reader(&mut file)?;
+    if actual != expected.as_str() {
+        return Err(IngestError::DigestMismatch {
+            expected: expected.clone(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn open_artifact_without_following_links(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+fn digest_reader(file: &mut impl Read) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
