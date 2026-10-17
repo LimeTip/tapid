@@ -1051,6 +1051,7 @@ fn locked_preferences_preserve_transitives_but_never_override_ranges_or_origins(
     )
     .unwrap();
     let preferred = ResolutionPreferences {
+        refresh_roots: BTreeSet::new(),
         versions: BTreeSet::from([
             (
                 registry.clone(),
@@ -1097,6 +1098,7 @@ fn root_preferences_do_not_cross_alias_target_changes() {
         vec![package("bar", "1.0.0", &[]), package("bar", "2.0.0", &[])],
     );
     let preferred = ResolutionPreferences {
+        refresh_roots: BTreeSet::new(),
         versions: BTreeSet::new(),
         roots: BTreeMap::from([(
             (
@@ -1173,4 +1175,78 @@ fn dist_tags_reject_ambiguous_targets_in_normalized_metadata() {
         ),
         Err(ResolveError::DuplicateMetadata { .. })
     ));
+}
+
+#[test]
+fn refreshed_alias_roots_keep_same_package_transitive_preferences() {
+    let origin: PackageSource = "https://registry.npmjs.org".parse().unwrap();
+    let metadata = registry(
+        origin.as_str(),
+        vec![
+            package("foo", "1.0.0", &[]),
+            package("foo", "2.0.0", &[]),
+            package("parent", "1.0.0", &[("child", "npm:foo@*")]),
+        ],
+    );
+    let preferred = ResolutionPreferences {
+        versions: BTreeSet::from([(
+            origin.clone(),
+            "foo".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+        )]),
+        roots: BTreeMap::from([(
+            (
+                origin.clone(),
+                "untouched".parse().unwrap(),
+                "foo".parse().unwrap(),
+            ),
+            "1.0.0".parse().unwrap(),
+        )]),
+        refresh_roots: BTreeSet::from([(
+            origin.clone(),
+            "selected".parse().unwrap(),
+            "foo".parse().unwrap(),
+        )]),
+    };
+    for (range, expected) in [("npm:foo@*", "2.0.0"), ("npm:foo@1", "1.0.0")] {
+        let resolution = resolve_graph_with_preferences(
+            &[
+                Dependency::new(origin.clone(), "selected".parse().unwrap(), req(range)),
+                Dependency::new(
+                    origin.clone(),
+                    "untouched".parse().unwrap(),
+                    req("npm:foo@*"),
+                ),
+                Dependency::new(origin.clone(), "parent".parse().unwrap(), req("1")),
+            ],
+            std::slice::from_ref(&metadata),
+            ResolutionOptions::default(),
+            |parent, _| Ok(parent.clone()),
+            &preferred,
+        )
+        .unwrap();
+        assert_eq!(
+            resolution.root_bindings[&(origin.clone(), "selected".parse().unwrap())]
+                .version
+                .to_string(),
+            expected
+        );
+        assert_eq!(
+            resolution.root_bindings[&(origin.clone(), "untouched".parse().unwrap())]
+                .version
+                .to_string(),
+            "1.0.0"
+        );
+        assert_eq!(
+            resolution
+                .dependencies
+                .iter()
+                .find(|edge| edge.dependency.as_str() == "child")
+                .unwrap()
+                .child
+                .version
+                .to_string(),
+            "1.0.0"
+        );
+    }
 }
