@@ -140,9 +140,10 @@ impl InstallSession {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum InstallMode {
+pub(crate) enum InstallMode<'a> {
     Online,
     Refresh,
+    Update(super::lifecycle::UpdateRequest<'a>),
     Offline,
     Frozen,
     Ci,
@@ -266,7 +267,10 @@ pub(crate) fn run_with_manifest_target(
 ) -> Result<InstallReport, OperationFailure> {
     let mut session = InstallSession::new(project_dir);
     if allow_unverified_registry_artifacts
-        && matches!(mode, InstallMode::Online | InstallMode::Refresh)
+        && matches!(
+            mode,
+            InstallMode::Online | InstallMode::Refresh | InstallMode::Update(_)
+        )
     {
         session
             .outcome
@@ -472,6 +476,9 @@ fn perform_install(
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?,
         );
     }
+    let original_root_digest = online::root_digest(&project_dir)?;
+    let preserve_manifest_bytes = matches!(mode, InstallMode::Update(request) if request.save.is_none())
+        && manifest_override == Some(&current_manifest);
     let manifest = if let Some(updated) = manifest_override {
         updated.clone()
     } else if let Some(spec) = package {
@@ -485,7 +492,7 @@ fn perform_install(
     } else {
         current_manifest
     };
-    if manifest_override.is_some() || package.is_some() {
+    if (manifest_override.is_some() || package.is_some()) && !preserve_manifest_bytes {
         let bytes = manifest.to_json();
         if bytes.as_bytes() != original_manifest {
             session.outcome.changed_files.push(manifest_path.clone());
@@ -525,7 +532,10 @@ fn perform_install(
             Ok(()) => {}
             Err(tapid_lockfile::LockfileError::UnverifiedRegistryArtifact(_))
                 if allow_unverified_registry_artifacts
-                    && matches!(mode, InstallMode::Online | InstallMode::Refresh) =>
+                    && matches!(
+                        mode,
+                        InstallMode::Online | InstallMode::Refresh | InstallMode::Update(_)
+                    ) =>
             {
                 // Compatibility installs must resolve these entries again, never replay them.
                 replayable = false;
@@ -533,8 +543,16 @@ fn perform_install(
             Err(error) => return Err(OperationalError::from(error)),
         }
     }
-    let preserve = matches!(mode, InstallMode::Online);
-    let replay_existing = if preserve {
+    let update = match mode {
+        InstallMode::Update(mut request) => {
+            request.original_root_digest = Some(&original_root_digest);
+            Some(request)
+        }
+        _ => None,
+    };
+    let preserve =
+        matches!(mode, InstallMode::Online) || update.is_some_and(|request| request.named);
+    let replay_existing = if preserve && update.is_none() {
         if let Some(lock) = &previous_lock {
             let registry_config = crate::registry::RegistryConfig::load(&project_dir)
                 .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
@@ -593,9 +611,21 @@ fn perform_install(
                     } else {
                         None
                     },
+                    update,
                     &mut report_replay_progress,
                 )?
             };
+        if let (Some(request), Some(previous)) = (update, previous_lock.as_ref()) {
+            session
+                .outcome
+                .warnings
+                .extend(super::lifecycle::update_change_warnings(
+                    &project_dir,
+                    request,
+                    previous,
+                    &lock,
+                )?);
+        }
         if session.journal.is_none() {
             session.journal = Some(
                 crate::filesystem::lifecycle_journal::LifecycleJournal::begin(

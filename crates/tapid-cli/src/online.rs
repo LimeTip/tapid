@@ -13,6 +13,7 @@ pub(crate) use locked::{
 mod npm_import;
 pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
 mod resolution;
+mod update;
 #[cfg(test)]
 use resolution::{
     RESOLVER_METADATA_BUILD_COUNT, RESOLVER_METADATA_PARENT_VISITS,
@@ -23,10 +24,10 @@ use resolution::{
 pub(crate) use resolution::{manifest_overrides, manifest_roots};
 
 mod routing;
-use routing::artifact_transport_for_package;
 pub(crate) use routing::metadata_transport_for_package;
 #[cfg(test)]
 use routing::transport_for_route;
+use routing::{artifact_transport_for_package, registry_for_requirement};
 
 mod platform;
 #[cfg(test)]
@@ -224,6 +225,23 @@ pub(crate) struct WorkspaceRegistryDependency {
     pub registry: PackageSource,
     pub package: PackageName,
     pub requirement: Requirement,
+}
+
+impl WorkspaceRegistryDependency {
+    fn selected<'a>(
+        &self,
+        resolution: &'a Resolution,
+        records: &BTreeMap<PackageRecordKey, PackageRecord>,
+    ) -> Result<&'a tapid_registry_client::RegistryPackageId, OperationalError> {
+        let (_, local) = dep_parts(&self.manifest_name)?;
+        resolution.root_bindings.get(&(self.registry.clone(), local))
+            .filter(|id| id.name == self.package && records.get(&(id.registry.to_string(), id.name.to_string(), id.version.to_string()))
+                .is_some_and(|record| self.requirement.matches_tagged_version(&id.version, &record.dist_tags)))
+            .ok_or_else(|| OperationalError::new(ErrorKind::Resolution, format!(
+                "no selected registry package satisfies workspace member dependency '{}' ({:?})",
+                self.manifest_name, self.requirement
+            )))
+    }
 }
 
 #[derive(Clone)]
@@ -428,11 +446,7 @@ pub(crate) fn workspace_materialization(
                         ));
                     }
                     let package = requirement.package_name(&local_package).clone();
-                    let registry: PackageSource = if requirement.is_alias() {
-                        registry_config.origin_for_name(&package)?.into()
-                    } else {
-                        dependency_identity(registry_config, name)?.0.into()
-                    };
+                    let registry = registry_for_requirement(registry_config, name, &requirement)?;
                     registry_dependencies.push(WorkspaceRegistryDependency {
                         member_key: locked[package_index].key(),
                         manifest_name: local_package.to_string(),
@@ -769,11 +783,7 @@ fn workspace_root_resolution(
                 ));
             }
             let package = requirement.package_name(&local_package).clone();
-            let registry: PackageSource = if requirement.is_alias() {
-                registry_config.origin_for_name(&package)?.into()
-            } else {
-                dependency_identity(registry_config, name)?.0.into()
-            };
+            let registry = registry_for_requirement(registry_config, name, &requirement)?;
             register_local_root_identity(
                 &mut local_root_identities,
                 local_package.clone(),
@@ -834,6 +844,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
     allow_missing_integrity: bool,
     registry_config: &crate::registry::RegistryConfig,
     previous_lock: Option<&Lockfile>,
+    update: Option<crate::application::lifecycle::UpdateRequest<'_>>,
     mut progress: impl FnMut(crate::application::install::Progress),
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
@@ -894,8 +905,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
                 return Err(OperationalError::new(
                     ErrorKind::RegistryMetadata,
                     format!(
-                        "fixture npm metadata for {}@{} is missing dist.integrity; pass --allow-unverified-registry-artifacts for an explicit compatibility exception",
-                        name, version
+                        "fixture npm metadata for {name}@{version} is missing dist.integrity; pass --allow-unverified-registry-artifacts for an explicit compatibility exception"
                     ),
                 ));
             }
@@ -926,6 +936,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         previous_lock,
         &fixture_records,
         fixture.is_some(),
+        update,
     )?;
     let mut copied_records = BTreeMap::new();
     for (dependency, record) in copied_roots {
@@ -970,6 +981,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         .transpose()?
         .unwrap_or_default();
     let mut preferred = tapid_resolver::ResolutionPreferences {
+        refresh_roots: BTreeSet::new(),
         versions: preferred,
         roots: BTreeMap::new(),
     };
@@ -988,6 +1000,12 @@ pub(crate) fn resolve_and_fetch_with_lock(
                 .map(|(name, key)| Ok((name.clone(), key.parse()?)))
                 .collect::<Result<Vec<_>, OperationalError>>()?
         };
+        let mut bindings = bindings;
+        for member in lock.workspace_packages().values() {
+            for (local, key) in member.dependencies() {
+                bindings.push((local.clone(), key.parse()?));
+            }
+        }
         for (local, key) in bindings {
             if let Some(registry) = key.source.package_source()
                 && preferred.versions.contains(&(
@@ -1056,7 +1074,17 @@ pub(crate) fn resolve_and_fetch_with_lock(
             )
         }
     };
+    if let Some(request) = update.filter(|request| request.named) {
+        update::refresh_selected(
+            request,
+            &roots,
+            &mut preferred,
+            &mut seed,
+            &mut fetch_records,
+        )?;
+    }
     let mut tagged_providers = BTreeSet::new();
+
     for peer in &workspace_peer_dependencies {
         if peer.requirement.dist_tag().is_some()
             && let WorkspacePeerProvider::Registry { registry, package } = &peer.provider
@@ -1072,7 +1100,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         &roots,
         |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
         &overrides,
-        fetch_records,
+        &mut fetch_records,
         &preferred,
         seed,
         |fetched| progress(crate::application::install::Progress::Metadata(fetched)),
@@ -1083,6 +1111,18 @@ pub(crate) fn resolve_and_fetch_with_lock(
         &resolution,
         &records,
     )?;
+    if let Some(request) = update {
+        update::save_requirements(
+            project,
+            request,
+            registry_config,
+            &resolution,
+            &mut fetch_records,
+        )?;
+        if request.save.is_some() {
+            workspace_locked = workspace_materialization(project, registry_config)?.locked;
+        }
+    }
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")
     })?;
@@ -1264,20 +1304,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         })
         .collect();
     for dependency in &workspace_registry_dependencies {
-        let id = resolution
-            .roots
-            .iter()
-            .find(|id| {
-                id.registry == dependency.registry
-                    && id.name == dependency.package
-                    && records.get(&(id.registry.to_string(), id.name.to_string(), id.version.to_string())).is_some_and(|record| dependency.requirement.matches_tagged_version(&id.version, &record.dist_tags))
-            })
-            .ok_or_else(|| {
-                format!(
-                    "no selected registry package satisfies workspace member dependency '{}' ({:?})",
-                    dependency.manifest_name, dependency.requirement
-                )
-            })?;
+        let id = dependency.selected(&resolution, &records)?;
         let target_platform = platform_contexts
             .get(id)
             .ok_or_else(|| format!("missing platform context for {id}"))?;
@@ -1319,10 +1346,17 @@ pub(crate) fn resolve_and_fetch_with_lock(
     }
     lock.insert_graph(locked_packages?, workspace_locked)
         .map_err(OperationalError::from)?;
-    let mut root_keys = resolution
-        .roots
+    let direct_bindings = resolution
+        .root_bindings
         .iter()
-        .filter(|id| root_registry_identities.contains(&(id.registry.clone(), id.name.clone())))
+        .filter(|((registry, name), id)| {
+            direct_local_names.contains(name)
+                && root_registry_identities.contains(&(registry.clone(), id.name.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut root_keys = direct_bindings
+        .iter()
+        .map(|(_, id)| *id)
         .map(|id| {
             let platform = platform_contexts
                 .get(id)
@@ -1342,13 +1376,8 @@ pub(crate) fn resolve_and_fetch_with_lock(
     root_keys.dedup();
     lock.set_roots(root_keys).map_err(OperationalError::from)?;
     lock.set_root_bindings(
-        resolution
-            .root_bindings
+        direct_bindings
             .iter()
-            .filter(|((registry, name), id)| {
-                direct_local_names.contains(name)
-                    && root_registry_identities.contains(&(registry.clone(), id.name.clone()))
-            })
             .map(|((_, name), id)| {
                 let platform = platform_contexts
                     .get(id)
@@ -1427,12 +1456,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
             },
         });
     }
-    for ((registry, name), id) in &resolution.root_bindings {
-        if !direct_local_names.contains(name)
-            || !root_registry_identities.contains(&(registry.clone(), id.name.clone()))
-        {
-            continue;
-        }
+    for ((_, name), id) in direct_bindings {
         let instance = instance_keys
             .get(&(
                 id.registry.clone(),
@@ -1451,20 +1475,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         });
     }
     for dependency in &workspace_registry_dependencies {
-        let id = resolution
-            .roots
-            .iter()
-            .find(|id| {
-                id.registry == dependency.registry
-                    && id.name == dependency.package
-                    && records.get(&(id.registry.to_string(), id.name.to_string(), id.version.to_string())).is_some_and(|record| dependency.requirement.matches_tagged_version(&id.version, &record.dist_tags))
-            })
-            .ok_or_else(|| {
-                format!(
-                    "no selected registry package satisfies workspace member dependency '{}' ({:?})",
-                    dependency.manifest_name, dependency.requirement
-                )
-            })?;
+        let id = dependency.selected(&resolution, &records)?;
         let instance = instance_keys
             .get(&(
                 id.registry.clone(),

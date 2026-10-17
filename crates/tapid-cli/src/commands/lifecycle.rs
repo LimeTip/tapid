@@ -46,9 +46,15 @@ pub(crate) struct UpdateArgs {
     pub(crate) packages: Vec<String>,
     #[arg(
         long,
-        help = "Replace selected version requirements with * in package.json and resolve again"
+        help = "Update selected packages beyond their ranges and save resolved versions with a caret by default"
     )]
     pub(crate) latest: bool,
+    #[arg(long, conflicts_with_all = ["save_caret", "save_tilde"], help = "Save selected resolved versions as exact requirements")]
+    pub(crate) save_exact: bool,
+    #[arg(long, conflicts_with_all = ["save_exact", "save_tilde"], help = "Save selected resolved versions with a caret range")]
+    pub(crate) save_caret: bool,
+    #[arg(long, conflicts_with_all = ["save_exact", "save_caret"], help = "Save selected resolved versions with a tilde range")]
+    pub(crate) save_tilde: bool,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
 }
@@ -167,9 +173,46 @@ pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
 }
 
 pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
-    let result = mutate_and_install(&args.common, json, true, |manifest| {
-        crate::application::lifecycle::plan_update(manifest, &args.packages, args.latest)
-    });
+    use crate::application::lifecycle::{SavePolicy, UpdateRequest};
+    let result = (|| {
+        let selection = crate::application::lifecycle::resolve_workspace(
+            &args.common.project_dir,
+            args.common.workspace.as_deref(),
+        )
+        .map_err(|error| OperationFailure::unchanged(&args.common.project_dir, error))?;
+        let plan = crate::application::lifecycle::plan_update(
+            &selection.manifest,
+            &args.packages,
+            args.latest,
+        )
+        .map_err(|error| OperationFailure::unchanged(&selection.root_dir, error))?;
+        let save = if args.save_exact {
+            Some(SavePolicy::Exact)
+        } else if args.save_tilde {
+            Some(SavePolicy::Tilde)
+        } else if args.save_caret || args.latest {
+            Some(SavePolicy::Caret)
+        } else {
+            None
+        };
+        crate::application::install::run_with_manifest_target(
+            &selection.root_dir,
+            &selection.manifest_path,
+            Some(&plan.manifest),
+            None,
+            args.common.store_dir.as_deref(),
+            crate::application::install::InstallMode::Update(UpdateRequest {
+                plan: &plan,
+                target: &selection.manifest_path,
+                named: !args.packages.is_empty(),
+                original_root_digest: None,
+                save,
+            }),
+            args.common.registry_fixture.as_deref(),
+            args.common.allow_unverified_registry_artifacts,
+            |event| crate::output::report_progress(event, json),
+        )
+    })();
     report(result, json, "update", "Updated dependencies")
 }
 
