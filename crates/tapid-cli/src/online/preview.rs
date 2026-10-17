@@ -108,13 +108,10 @@ pub(crate) fn resolve(
             id.name.to_string(),
             id.version.to_string(),
         )];
-        let platform = selected_platform_context_for(
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            current_libc(),
-            &record.platform,
-        )
-        .map_err(|e| OperationalError::new(ErrorKind::Resolution, e))?;
+        let platform = record
+            .platform
+            .selected_context(std::env::consts::OS, std::env::consts::ARCH, current_libc())
+            .map_err(|e| OperationalError::new(ErrorKind::Resolution, e))?;
         let peer = resolved
             .resolution
             .peer_contexts
