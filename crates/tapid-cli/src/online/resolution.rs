@@ -503,6 +503,22 @@ where
     )
 }
 
+pub(super) fn preserve_pinned_record(
+    package: PackageRecord,
+    pinned: &PackageRecord,
+) -> PackageRecord {
+    // Preserve exact edges, platform constraints, and artifact pins. Fresh metadata
+    // may fill an absent registry URL and recover tags and original peer ranges.
+    let mut preserved = pinned.clone();
+    if preserved.artifact.is_empty() && !package.fixture {
+        preserved.artifact = package.artifact;
+    }
+    preserved.dist_tags = package.dist_tags;
+    preserved.peer_dependencies = package.peer_dependencies;
+    preserved.optional_peer_dependencies = package.optional_peer_dependencies;
+    preserved
+}
+
 pub(super) fn resolve_with_preferences<R, F>(
     roots: &[Dependency],
     mut registry_for_dependency: R,
@@ -516,6 +532,7 @@ where
     R: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
     F: FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
 {
+    let mut roots = roots.to_vec();
     let mut fetched = BTreeSet::<(String, String)>::new();
     let mut records = BTreeMap::<PackageRecordKey, PackageRecord>::new();
     let mut normalized = NormalizedRecords::new();
@@ -545,16 +562,7 @@ where
                         package.version.to_string(),
                     );
                     if let Some(pinned) = pinned_records.get(&key) {
-                        // Preserve exact edges, platform constraints, and artifact pins.
-                        // Metadata may fill an absent registry URL and recover peer ranges.
-                        let mut preserved = pinned.clone();
-                        if preserved.artifact.is_empty() && !package.fixture {
-                            preserved.artifact = package.artifact;
-                        }
-                        preserved.dist_tags = package.dist_tags;
-                        preserved.peer_dependencies = package.peer_dependencies;
-                        preserved.optional_peer_dependencies = package.optional_peer_dependencies;
-                        preserved
+                        preserve_pinned_record(package, pinned)
                     } else {
                         package
                     }
@@ -576,7 +584,7 @@ where
         RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
 
         match tapid_resolver::resolve_graph_with_preferences(
-            roots,
+            &roots,
             &metadata,
             ResolutionOptions::default(),
             |parent, dependency| registry_for_dependency(parent, dependency),
@@ -677,9 +685,9 @@ where
                 if !fetched.insert(key) {
                     let discarded = discarded_version_diagnostics(&normalized, &registry, &name);
                     return if discarded.is_empty() {
-                        Err(resolution_error(error, roots, &records).context("resolution failed"))
+                        Err(resolution_error(error, &roots, &records).context("resolution failed"))
                     } else {
-                        Err(resolution_error(error, roots, &records)
+                        Err(resolution_error(error, &roots, &records)
                             .context(format!("resolution failed; {discarded}")))
                     };
                 }
@@ -706,7 +714,7 @@ where
                     package,
                     peer,
                     requirement,
-                    ..
+                    provider,
                 } = &error
                 else {
                     unreachable!()
@@ -750,7 +758,7 @@ where
                     });
                 let Some((registry, name, version)) = candidate else {
                     return Err(
-                        resolution_error(error, roots, &records).context("resolution failed")
+                        resolution_error(error, &roots, &records).context("resolution failed")
                     );
                 };
                 if fetched.insert((registry.to_string(), name.to_string())) {
@@ -782,14 +790,53 @@ where
                             }))
                     });
                     if !removed {
-                        return Err(
-                            resolution_error(error, roots, &records).context("resolution failed")
-                        );
+                        let Some(root) = roots
+                            .iter()
+                            .find(|root| root.name.as_str() == peer)
+                            .cloned()
+                        else {
+                            return Err(resolution_error(error, &roots, &records)
+                                .context("resolution failed"));
+                        };
+                        let actual = root.requirement.package_name(&root.name).clone();
+                        let provider_version = provider.as_deref().map(|id| id.version.clone());
+                        let released_version = provider_version.is_some_and(|version| {
+                            preferred.versions.contains(&(
+                                root.registry.clone(),
+                                actual.clone(),
+                                version,
+                            ))
+                        });
+                        let released_root = preferred
+                            .roots
+                            .remove(&(root.registry.clone(), root.name.clone(), actual.clone()))
+                            .is_some();
+                        let refreshed = preferred.refresh_roots.insert((
+                            root.registry.clone(),
+                            root.name.clone(),
+                            actual.clone(),
+                        ));
+                        if !(released_root || released_version && refreshed) {
+                            return Err(resolution_error(error, &roots, &records)
+                                .context("resolution failed"));
+                        }
+                        // Keep the provider's declared range and intersect the new peer
+                        // constraint. Releasing a preference never overrides a manifest pin.
+                        let peer_requirement: Requirement =
+                            requirement.parse().map_err(OperationalError::from)?;
+                        let constraint = if peer_requirement.is_alias() || actual == root.name {
+                            peer_requirement
+                        } else {
+                            format!("npm:{actual}@{requirement}")
+                                .parse()
+                                .map_err(OperationalError::from)?
+                        };
+                        roots.push(Dependency::new(root.registry, root.name, constraint));
                     }
                 }
             }
             Err(error) => {
-                return Err(resolution_error(error, roots, &records).context("resolution failed"));
+                return Err(resolution_error(error, &roots, &records).context("resolution failed"));
             }
         }
     }
