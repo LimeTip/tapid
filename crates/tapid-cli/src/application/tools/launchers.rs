@@ -113,14 +113,17 @@ pub(super) fn plan(
 ) -> Result<BTreeMap<String, String>, OperationalError> {
     let mut packages = Vec::new();
     for (name, tool) in &catalog.tools {
-        let package_root = root
-            .join("environments")
-            .join(&tool.generation)
-            .join("node_modules")
-            .join(name);
+        let environment = root.join("environments").join(&tool.generation);
+        let package_root = environment.join("node_modules").join(name);
         state::check_path(&package_root)?;
         let package_json =
             String::from_utf8(state::read(&package_root.join("package.json"))?).map_err(error)?;
+        let manifest = PackageManifest::parse(&package_json).map_err(error)?;
+        if package_commands(root, &environment, &package_root, &manifest)? != tool.commands {
+            return Err(error(format!(
+                "installed tool {name} bin mappings changed; update or remove the tool before publishing launchers"
+            )));
+        }
         packages.push(ShimPackage {
             tree_root: package_root,
             package_json,

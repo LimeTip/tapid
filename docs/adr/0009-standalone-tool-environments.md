@@ -23,7 +23,10 @@ A separate catalog lock covers recovery, publication, and invocation lease
 acquisition. Release it during staging and before runtime discovery or execution;
 invocations wait up to 30 seconds for it, then report contention. The mutation
 lock remains held during staging, so another writer cannot retire that generation.
-Verify a new generation before publication. Record both catalogs in a bounded journal;
+Verify a new generation before publication. Retained tools' declared bins, targets,
+and interpreter choices must still match their catalog records before replanning
+launchers; local drift requires updating or removing the affected tool.
+Record both catalogs in a bounded journal;
 a digest-bound, separately synced commit decision selects the new state.
 Recovery is idempotent and treats recorded launcher bytes as the only files it
 may replace. Catalog replacement reuses the existing atomic lockfile writer,

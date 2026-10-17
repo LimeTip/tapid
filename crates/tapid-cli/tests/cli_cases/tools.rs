@@ -381,6 +381,77 @@ fn tool_scoped_package_exports_its_declared_command() {
 }
 
 #[test]
+fn tool_mutation_rejects_drifted_bins_without_changing_published_state() {
+    for drift in ["added", "removed", "retargeted", "missing", "interpreter"] {
+        let project = TempProject::new("tool-bin-drift").unwrap();
+        let home = TempHome::new("tool-bin-drift").unwrap();
+        assert_success(&install(&project, &home));
+        let root = home.path().join("tools with spaces");
+        let before = list(&project, &home);
+        let environment = Path::new(before["data"]["tools"][0]["environment"].as_str().unwrap());
+        let package = environment.join("node_modules/hello-tool");
+        let manifest_path = package.join("package.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        match drift {
+            "added" => {
+                manifest["bin"] =
+                    json!({"hello-tool":"bin/hello.js", "shadow-command":"bin/hello.js"})
+            }
+            "removed" => {
+                manifest.as_object_mut().unwrap().remove("bin");
+            }
+            "retargeted" => {
+                fs::copy(package.join("bin/hello.js"), package.join("bin/other.js")).unwrap();
+                manifest["bin"] = json!({"hello-tool":"bin/other.js"});
+            }
+            "missing" => fs::remove_file(package.join("bin/hello.js")).unwrap(),
+            "interpreter" => {
+                fs::write(package.join("bin/hello.js"), b"MZchanged interpreter").unwrap()
+            }
+            _ => unreachable!(),
+        }
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let catalog = fs::read(root.join("catalog.json")).unwrap();
+        let shims: std::collections::BTreeMap<_, _> = fs::read_dir(root.join("bin"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect();
+        let output = install_multi(&project, &home, "other-tool@1.0.0");
+        assert!(
+            !output.status.success(),
+            "accepted {drift} bin drift: {output:?}"
+        );
+        assert_eq!(
+            fs::read(root.join("catalog.json")).unwrap(),
+            catalog,
+            "{drift}"
+        );
+        let after_shims: std::collections::BTreeMap<_, _> = fs::read_dir(root.join("bin"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect();
+        assert_eq!(after_shims, shims, "{drift}");
+        assert_eq!(
+            list(&project, &home)["data"]["tools"],
+            before["data"]["tools"]
+        );
+        // Removing the affected tool remains a way to recover from local drift.
+        assert_success(
+            &command(&project, &home, &["tool", "remove", "hello-tool"])
+                .output()
+                .unwrap(),
+        );
+    }
+}
+
+#[test]
 fn tool_corrupt_catalog_and_unowned_command_are_preserved() {
     let project = TempProject::new("tool-invalid-state").unwrap();
     let home = TempHome::new("tool-invalid-state").unwrap();
