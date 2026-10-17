@@ -19,9 +19,13 @@ requiring package to recover its original peer range. A preferred version that
 cannot satisfy the resulting peer requirements is released. Reused artifacts
 retain their pinned integrity, URL, and tree digest.
 
-`tapid update` deliberately refreshes the graph under the supported declared
-ranges. `--latest` retains its existing manifest-changing behavior. Add, remove,
-and ordinary install preserve compatible selections.
+`tapid update` without names deliberately refreshes the graph under the supported
+declared ranges. Named updates release only selected root preferences, retaining
+unrelated compatible root bindings and transitive selections. Required transitive
+changes report their requiring parent edges. `--latest` allows versions beyond
+the declared range and defaults to saving the resolved version with a caret.
+Explicit exact, caret, and tilde save policies also work within existing ranges.
+Add, remove, and ordinary install preserve compatible selections.
 
 Frozen installation requires an unchanged lock graph, matching manifests and
 workspace edges. It can download missing exact archives, but does not resolve

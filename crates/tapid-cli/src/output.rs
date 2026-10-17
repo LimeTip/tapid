@@ -1,5 +1,6 @@
 pub(crate) mod install;
 pub(crate) mod json;
+pub(crate) mod preview;
 
 use std::process::ExitCode;
 

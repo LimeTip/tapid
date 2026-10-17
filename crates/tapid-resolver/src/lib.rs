@@ -499,6 +499,8 @@ pub struct ResolutionOptions {
 pub struct ResolutionPreferences {
     /// Previously selected versions, including transitive versions.
     pub versions: BTreeSet<(PackageSource, PackageName, PackageVersion)>,
+    /// Roots that use highest-version selection while retaining transitive preferences.
+    pub refresh_roots: BTreeSet<(PackageSource, PackageName, PackageName)>,
     /// Previously selected direct bindings, ahead of other locked versions.
     pub roots: BTreeMap<(PackageSource, PackageName, PackageName), PackageVersion>,
 }
@@ -529,6 +531,15 @@ pub struct ResolvedDependency {
     pub child: RegistryPackageId,
 }
 
+/// The declaration whose requirements failed candidate selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequirementOrigin {
+    /// Local dependency name, distinct from an alias's actual package name.
+    pub name: PackageName,
+    /// None means a caller-supplied root requirement.
+    pub package: Option<Box<RegistryPackageId>>,
+}
+
 /// Structured deterministic failures from requirement parsing and graph selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveError {
@@ -543,22 +554,24 @@ pub enum ResolveError {
         packages: Vec<(String, String)>,
     },
     MissingCandidate {
+        origin: Box<RequirementOrigin>,
         registry: String,
         name: String,
         requirement: String,
         available: Vec<String>,
     },
     Conflict {
+        origin: Box<RequirementOrigin>,
         registry: String,
         name: String,
         requirements: Vec<String>,
         available: Vec<String>,
     },
     PeerDependency {
-        package: String,
+        package: Box<RegistryPackageId>,
         peer: String,
         requirement: String,
-        provider: Option<String>,
+        provider: Option<Box<RegistryPackageId>>,
     },
 }
 impl fmt::Display for ResolveError {
@@ -580,7 +593,8 @@ impl fmt::Display for ResolveError {
                 provider: Some(provider),
             } => write!(
                 f,
-                "peer dependency incompatible: {package} requires {peer}@{requirement}, but the direct root provider is {provider}"
+                "peer dependency incompatible: {package} requires {peer}@{requirement}, but the direct root provider is {}",
+                provider.version
             ),
             _ => write!(f, "{self:?}"),
         }
@@ -665,7 +679,17 @@ where
     let mut root_bindings = BTreeMap::new();
     let mut queue = Vec::new();
     let mut missing_metadata = BTreeSet::new();
+    let fresh = ResolutionPreferences::default();
     for ((registry, local_name, name), requirements) in root_constraints {
+        let preferred = if preferred.refresh_roots.contains(&(
+            registry.clone(),
+            local_name.clone(),
+            name.clone(),
+        )) {
+            &fresh
+        } else {
+            preferred
+        };
         let package = match select_package(
             &registry,
             &name,
@@ -675,6 +699,10 @@ where
             preferred
                 .roots
                 .get(&(registry.clone(), local_name.clone(), name.clone())),
+            || RequirementOrigin {
+                name: local_name.clone(),
+                package: None,
+            },
         ) {
             Ok(package) => package,
             Err(ResolveError::MissingCandidate { .. })
@@ -722,6 +750,10 @@ where
                 &candidate_index,
                 preferred,
                 None,
+                || RequirementOrigin {
+                    name: dependency.clone(),
+                    package: Some(Box::new(parent.clone())),
+                },
             ) {
                 Ok(package) => package,
                 Err(ResolveError::MissingCandidate { .. })
@@ -802,10 +834,10 @@ where
                 }) && (!requirement.is_alias() || requirement.package_name(peer) == &provider.name)
             }) {
                 return Err(ResolveError::PeerDependency {
-                    package: id.to_string(),
+                    package: Box::new(id.clone()),
                     peer: peer.to_string(),
                     requirement: requirement.raw.clone(),
-                    provider: provider.map(|provider| provider.version.to_string()),
+                    provider: provider.cloned().map(Box::new),
                 });
             }
             context = context.with(
@@ -850,6 +882,7 @@ fn select_package(
     candidates: &CandidateIndex<'_>,
     preferred: &ResolutionPreferences,
     preferred_root: Option<&PackageVersion>,
+    origin: impl FnOnce() -> RequirementOrigin,
 ) -> Result<PackageVersionMetadata, ResolveError> {
     let matching = candidates
         .get(&(registry.clone(), name.clone()))
@@ -883,6 +916,7 @@ fn select_package(
         let available = available(matching);
         if requirements.len() > 1 {
             ResolveError::Conflict {
+                origin: Box::new(origin()),
                 registry: registry.to_string(),
                 name: name.to_string(),
                 requirements,
@@ -890,6 +924,7 @@ fn select_package(
             }
         } else {
             ResolveError::MissingCandidate {
+                origin: Box::new(origin()),
                 registry: registry.to_string(),
                 name: name.to_string(),
                 requirement: requirements.into_iter().next().unwrap_or_default(),

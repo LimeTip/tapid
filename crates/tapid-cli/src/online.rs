@@ -1,9 +1,12 @@
 mod artifact;
 mod copied;
+mod graph;
+mod preview;
 pub(crate) use copied::{
     copied_root_names, declaration as copied_declaration, validate_copied_root_binding,
     validate_locked_files,
 };
+pub(crate) use preview::{GraphPackage, GraphSnapshot, resolve as resolve_preview_graph};
 mod locked;
 use crate::application::outcome::{ErrorKind, OperationalError};
 pub(crate) use locked::{
@@ -13,6 +16,7 @@ pub(crate) use locked::{
 mod npm_import;
 pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
 mod resolution;
+mod update;
 #[cfg(test)]
 use resolution::{
     RESOLVER_METADATA_BUILD_COUNT, RESOLVER_METADATA_PARENT_VISITS,
@@ -23,15 +27,16 @@ use resolution::{
 pub(crate) use resolution::{manifest_overrides, manifest_roots};
 
 mod routing;
-use routing::artifact_transport_for_package;
 pub(crate) use routing::metadata_transport_for_package;
 #[cfg(test)]
 use routing::transport_for_route;
+use routing::{artifact_transport_for_package, registry_for_requirement};
 
 mod platform;
+pub(crate) use platform::current_libc;
 #[cfg(test)]
 use platform::platform_matches_for;
-use platform::{current_libc, current_platform_matches, selected_platform_context_for};
+use platform::{current_platform_matches, selected_platform_context_for};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
@@ -252,13 +257,23 @@ pub(crate) struct WorkspaceMaterialization {
     pub members: BTreeMap<String, (LocalWorkspaceSource, PackageVersion)>,
     pub registry_dependencies: Vec<WorkspaceRegistryDependency>,
     pub peer_dependencies: Vec<WorkspacePeerDependency>,
+    pub declarations: Vec<crate::application::outcome::RequirementDiagnostic>,
 }
 
 pub(crate) fn workspace_materialization(
     project: &Path,
     registry_config: &crate::registry::RegistryConfig,
-) -> Result<WorkspaceMaterialization, String> {
-    let workspace = Workspace::discover(project)?;
+) -> Result<WorkspaceMaterialization, OperationalError> {
+    workspace_materialization_with_manifest(project, registry_config, None)
+}
+
+pub(super) fn workspace_materialization_with_manifest(
+    project: &Path,
+    registry_config: &crate::registry::RegistryConfig,
+    replacement: Option<(&Path, &PackageManifest)>,
+) -> Result<WorkspaceMaterialization, OperationalError> {
+    let workspace = Workspace::discover_typed(project)
+        .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))?;
     let root = workspace
         .root_path()
         .parent()
@@ -266,7 +281,7 @@ pub(crate) fn workspace_materialization(
     let canonical_project = fs::canonicalize(project)
         .map_err(|error| format!("cannot resolve install project root: {error}"))?;
     if root != canonical_project {
-        return Err("resolved workspace root does not match install project root".to_owned());
+        return Err("resolved workspace root does not match install project root".into());
     }
     let mut packages = Vec::new();
     let mut locked = Vec::new();
@@ -274,7 +289,18 @@ pub(crate) fn workspace_materialization(
     let mut locked_by_name = BTreeMap::new();
     let mut registry_dependencies = Vec::new();
     let mut peer_dependencies = Vec::new();
+    let mut declarations = Vec::new();
     for member in workspace.members() {
+        let manifest = replacement
+            .filter(|(path, _)| *path == member.path())
+            .map_or(member.manifest(), |(_, manifest)| manifest);
+        declarations.extend(
+            crate::application::outcome::DiagnosticContext::manifest_requirements(
+                manifest,
+                member.path(),
+                Some(member.name()),
+            ),
+        );
         let member_root = member
             .path()
             .parent()
@@ -289,7 +315,8 @@ pub(crate) fn workspace_materialization(
             return Err(format!(
                 "workspace member escapes workspace root: {}",
                 member_root.display()
-            ));
+            )
+            .into());
         }
         let relative = canonical
             .strip_prefix(root)
@@ -304,16 +331,20 @@ pub(crate) fn workspace_materialization(
             })
             .collect::<Result<Vec<_>, _>>()?
             .join("/");
-        let version = member.manifest().version().clone();
+        let version = manifest.version().clone();
         let source =
             LocalWorkspaceSource::new(&relative_posix, member.name(), &version.to_string())
                 .map_err(|error| error.to_string())?;
-        let manifest_bytes = fs::read(member.path()).map_err(|error| {
-            format!(
-                "cannot read workspace member manifest {}: {error}",
-                member.path().display()
-            )
-        })?;
+        let manifest_bytes = if replacement.is_some_and(|(path, _)| path == member.path()) {
+            manifest.to_json().into_bytes()
+        } else {
+            fs::read(member.path()).map_err(|error| {
+                format!(
+                    "cannot read workspace member manifest {}: {error}",
+                    member.path().display()
+                )
+            })?
+        };
         locked_by_name.insert(member.name().to_owned(), locked.len());
         locked.push(
             LockedWorkspacePackage::new(source.clone(), &digest(&manifest_bytes).to_string())
@@ -330,10 +361,13 @@ pub(crate) fn workspace_materialization(
         members.insert(member.name().to_owned(), (source, version));
     }
     for member in workspace.members() {
+        let manifest = replacement
+            .filter(|(path, _)| *path == member.path())
+            .map_or(member.manifest(), |(_, manifest)| manifest);
         let package_index = *locked_by_name
             .get(member.name())
             .ok_or("workspace member has no lockfile identity")?;
-        for (name, range) in member.manifest().peer_dependencies() {
+        for (name, range) in manifest.peer_dependencies() {
             let (requirement, provider) = if let Some((source, version)) = members.get(name) {
                 let requirement = workspace_requirement(range, version)?;
                 if !requirement.matches(version) {
@@ -343,7 +377,7 @@ pub(crate) fn workspace_materialization(
                         range,
                         member.name(),
                         version
-                    ));
+                    ).into());
                 }
                 (
                     requirement,
@@ -358,7 +392,7 @@ pub(crate) fn workspace_materialization(
                         "workspace peer dependency '{}' in member '{}' has no local workspace provider; refusing registry fallback",
                         name,
                         member.name()
-                    ));
+                    ).into());
                 }
                 let (registry, package) = dependency_identity(registry_config, name)?;
                 if copied::declaration(range)
@@ -367,7 +401,7 @@ pub(crate) fn workspace_materialization(
                 {
                     return Err(format!(
                         "copied dependency '{name}' in a workspace member is unsupported; declare copied artifacts at the project root"
-                    ));
+                    ).into());
                 }
                 let requirement = range.parse::<Requirement>().map_err(|error| {
                     format!(
@@ -390,9 +424,9 @@ pub(crate) fn workspace_materialization(
             });
         }
         for dependency_map in [
-            member.manifest().dependencies(),
-            member.manifest().dev_dependencies(),
-            member.manifest().optional_dependencies(),
+            manifest.dependencies(),
+            manifest.dev_dependencies(),
+            manifest.optional_dependencies(),
         ] {
             for (name, range) in dependency_map {
                 let Some((source, version)) = members.get(name) else {
@@ -401,7 +435,7 @@ pub(crate) fn workspace_materialization(
                             "workspace dependency '{}' in member '{}' has no local workspace target; refusing registry fallback",
                             name,
                             member.name()
-                        ));
+                        ).into());
                     }
                     if copied::declaration(range)
                         .map_err(|reason| format!("dependency '{name}': {reason}"))?
@@ -409,7 +443,7 @@ pub(crate) fn workspace_materialization(
                     {
                         return Err(format!(
                             "copied workspace member dependency '{name}' is unsupported; declare copied artifacts at the project root"
-                        ));
+                        ).into());
                     }
                     let requirement = range.parse::<Requirement>().map_err(|error| {
                         format!(
@@ -420,19 +454,16 @@ pub(crate) fn workspace_materialization(
                     if manifest_registry.to_string() == JSR && requirement.is_alias() {
                         return Err(format!(
                             "npm alias '{name}@{range}' cannot use a JSR dependency name"
-                        ));
+                        )
+                        .into());
                     }
                     if manifest_registry.as_str() == JSR && requirement.dist_tag().is_some() {
                         return Err(format!(
                             "unsupported JSR dist-tag dependency '{name}@{range}': npm dist-tags only are supported"
-                        ));
+                        ).into());
                     }
                     let package = requirement.package_name(&local_package).clone();
-                    let registry: PackageSource = if requirement.is_alias() {
-                        registry_config.origin_for_name(&package)?.into()
-                    } else {
-                        dependency_identity(registry_config, name)?.0.into()
-                    };
+                    let registry = registry_for_requirement(registry_config, name, &requirement)?;
                     registry_dependencies.push(WorkspaceRegistryDependency {
                         member_key: locked[package_index].key(),
                         manifest_name: local_package.to_string(),
@@ -450,7 +481,7 @@ pub(crate) fn workspace_materialization(
                         range,
                         member.name(),
                         version
-                    ));
+                    ).into());
                 }
                 let target = LockfilePackageKey::workspace(source.clone()).to_string();
                 locked[package_index]
@@ -466,6 +497,7 @@ pub(crate) fn workspace_materialization(
         members,
         registry_dependencies,
         peer_dependencies,
+        declarations,
     })
 }
 
@@ -650,11 +682,18 @@ fn artifact_progress_checkpoint(completed: usize, total: usize) -> bool {
 pub(crate) fn validate_manifest_roots(
     project: &Path,
     manifest: &PackageManifest,
-) -> Result<(), String> {
-    let registry_config = crate::registry::RegistryConfig::load(project)?;
-    copied::validate_declarations(project, manifest)?;
-    let workspace = workspace_materialization(project, &registry_config)?;
-    workspace_root_resolution(manifest, &workspace, &registry_config).map(|_| ())
+) -> Result<(), OperationalError> {
+    let invalid = |error| OperationalError::new(ErrorKind::InvalidRequest, error);
+    let registry_config = crate::registry::RegistryConfig::load(project).map_err(invalid)?;
+    copied::validate_declarations(project, manifest).map_err(invalid)?;
+    let workspace = workspace_materialization(project, &registry_config).map_err(|mut error| {
+        // Preserve the request-validation category while retaining typed evidence.
+        error.kind = ErrorKind::InvalidRequest;
+        error
+    })?;
+    workspace_root_resolution(manifest, &workspace, &registry_config)
+        .map(|_| ())
+        .map_err(invalid)
 }
 
 pub(crate) fn resolved_workspace_registry_dependencies(
@@ -769,11 +808,7 @@ fn workspace_root_resolution(
                 ));
             }
             let package = requirement.package_name(&local_package).clone();
-            let registry: PackageSource = if requirement.is_alias() {
-                registry_config.origin_for_name(&package)?.into()
-            } else {
-                dependency_identity(registry_config, name)?.0.into()
-            };
+            let registry = registry_for_requirement(registry_config, name, &requirement)?;
             register_local_root_identity(
                 &mut local_root_identities,
                 local_package.clone(),
@@ -834,255 +869,41 @@ pub(crate) fn resolve_and_fetch_with_lock(
     allow_missing_integrity: bool,
     registry_config: &crate::registry::RegistryConfig,
     previous_lock: Option<&Lockfile>,
+    update: Option<crate::application::lifecycle::UpdateRequest<'_>>,
     mut progress: impl FnMut(crate::application::install::Progress),
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
-    let WorkspaceRootResolution {
-        mut roots,
-        direct_root_identities: mut root_registry_identities,
+    let graph::ResolvedGraph {
+        metadata_lookups: _,
+        resolution,
+        records,
+        workspace_links,
+        mut workspace_locked,
+        workspace_registry_dependencies,
+        root_registry_identities,
         workspace_root_keys,
-        registry_dependencies: workspace_registry_dependencies,
-        overrides,
-    } = workspace_root_resolution(manifest, &workspace, registry_config)?;
-    let direct_local_names = manifest
-        .dependencies()
-        .keys()
-        .chain(manifest.dev_dependencies().keys())
-        .chain(manifest.optional_dependencies().keys())
-        .map(|name| dep_parts(name).map(|(_, name)| name))
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    let WorkspaceMaterialization {
-        links: workspace_links,
-        locked: mut workspace_locked,
-        members: _,
-        registry_dependencies: _,
-        peer_dependencies: workspace_peer_dependencies,
-    } = workspace;
-    let fixture = fixture_path.map(fixture).transpose()?;
-    let mut fixture_records = BTreeMap::<(String, String, String), PackageRecord>::new();
-    if let Some(f) = &fixture {
-        for p in &f.packages {
-            let registry: PackageSource =
-                p.registry
-                    .parse()
-                    .map_err(|error: tapid_core::DomainError| {
-                        OperationalError::from_source(ErrorKind::RegistryMetadata, error)
-                            .context(format!("invalid fixture registry {}", p.registry))
-                    })?;
-            let name: PackageName = p.name.parse().map_err(|error: tapid_core::DomainError| {
-                OperationalError::from_source(ErrorKind::RegistryMetadata, error)
-                    .context(format!("invalid fixture package {}", p.name))
-            })?;
-            let version: PackageVersion =
-                p.version
-                    .parse()
-                    .map_err(|error: tapid_core::DomainError| {
-                        OperationalError::from_source(ErrorKind::RegistryMetadata, error)
-                            .context(format!("invalid fixture version {}", p.version))
-                    })?;
-            let integrity = p
-                .integrity
-                .clone()
-                .map(|v| {
-                    v.parse().map_err(|error: tapid_core::DomainError| {
-                        OperationalError::from_source(ErrorKind::RegistryMetadata, error)
-                            .context(format!("invalid fixture integrity {v}"))
-                    })
-                })
-                .transpose()?;
-            if registry.to_string() == NPM && integrity.is_none() && !allow_missing_integrity {
-                return Err(OperationalError::new(
-                    ErrorKind::RegistryMetadata,
-                    format!(
-                        "fixture npm metadata for {}@{} is missing dist.integrity; pass --allow-unverified-registry-artifacts for an explicit compatibility exception",
-                        name, version
-                    ),
-                ));
-            }
-            fixture_records.insert(
-                (p.registry.clone(), p.name.clone(), p.version.clone()),
-                PackageRecord {
-                    git_reference: p.git_ref.clone(),
-                    copied_archive: None,
-                    dist_tags: p.dist_tags.clone(),
-                    registry,
-                    name,
-                    version,
-                    integrity,
-                    artifact: p.artifact.clone(),
-                    dependencies: p.dependencies.clone(),
-                    peer_dependencies: p.peer_dependencies.clone(),
-                    optional_peer_dependencies: p.optional_peer_dependencies.clone(),
-                    optional_dependencies: BTreeMap::new(),
-                    platform: PackagePlatform::unrestricted(),
-                    fixture: true,
-                },
-            );
-        }
-    }
-    let copied_roots = copied::prepare_roots(
+        direct_local_names,
+        updated_manifest,
+    } = graph::resolve_package_graph(
         project,
         manifest,
+        workspace,
+        fixture_path,
+        allow_missing_integrity,
+        registry_config,
         previous_lock,
-        &fixture_records,
-        fixture.is_some(),
+        update,
+        &mut progress,
     )?;
-    let mut copied_records = BTreeMap::new();
-    for (dependency, record) in copied_roots {
-        root_registry_identities.insert((dependency.registry.clone(), record.name.clone()));
-        roots.push(dependency);
-        copied_records.insert(
-            (
-                record.registry.to_string(),
-                record.name.to_string(),
-                record.version.to_string(),
-            ),
-            record,
-        );
-    }
-    let mut local_identities = BTreeMap::new();
-    for root in &roots {
-        register_local_root_identity(
-            &mut local_identities,
-            root.name.clone(),
-            format!(
-                "{}|{}",
-                root.registry,
-                root.requirement.package_name(&root.name)
-            ),
-        )?;
-    }
     let configured_origins = registry_config.configured_origins();
-    let mut metadata_transports = BTreeMap::<(String, String), HttpsTransport>::new();
-    let preferred = previous_lock
-        .map(|lock| {
-            locked::reusable_locked_packages(lock).map(|packages| {
-                packages
-                    .into_iter()
-                    .filter_map(|(key, _)| {
-                        key.source
-                            .package_source()
-                            .map(|registry| (registry, key.name, key.version))
-                    })
-                    .collect::<BTreeSet<_>>()
-            })
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let mut preferred = tapid_resolver::ResolutionPreferences {
-        versions: preferred,
-        roots: BTreeMap::new(),
-    };
-    if let Some(lock) = previous_lock {
-        let bindings = if lock.root_bindings().is_empty() {
-            lock.roots()
-                .iter()
-                .map(|key| {
-                    let key: LockfilePackageKey = key.parse()?;
-                    Ok((key.name.to_string(), key))
-                })
-                .collect::<Result<Vec<_>, OperationalError>>()?
-        } else {
-            lock.root_bindings()
-                .iter()
-                .map(|(name, key)| Ok((name.clone(), key.parse()?)))
-                .collect::<Result<Vec<_>, OperationalError>>()?
-        };
-        for (local, key) in bindings {
-            if let Some(registry) = key.source.package_source()
-                && preferred.versions.contains(&(
-                    registry.clone(),
-                    key.name.clone(),
-                    key.version.clone(),
-                ))
-                && locked::locked_platform_matches(&key)?
-            {
-                preferred.roots.insert(
-                    (
-                        registry.clone(),
-                        local
-                            .parse()
-                            .map_err(|error: tapid_core::DomainError| error.to_string())?,
-                        key.name,
-                    ),
-                    key.version,
-                );
-            }
-        }
+    if let Some(request) = update.filter(|request| request.save.is_some()) {
+        let saved = updated_manifest.as_ref().expect("resolved update manifest");
+        fs::write(request.target, saved.to_json()).map_err(|error| {
+            OperationalError::from_source(ErrorKind::Transaction, error)
+                .context("cannot save updated requirements")
+        })?;
+        workspace_locked = workspace_materialization(project, registry_config)?.locked;
     }
-    let mut seed = previous_lock
-        .map(|lock| locked::locked_records(lock, &fixture_records, fixture.is_some()))
-        .transpose()?
-        .unwrap_or_default();
-    seed.retain(|record| {
-        !copied_records.contains_key(&(
-            record.registry.to_string(),
-            record.name.to_string(),
-            record.version.to_string(),
-        ))
-    });
-    seed.extend(copied_records.values().cloned());
-    let mut fetch_records = |registry: &PackageSource, name: &PackageName| {
-        if registry.registry().is_none() {
-            return Ok(copied_records
-                .values()
-                .filter(|record| &record.registry == registry && &record.name == name)
-                .cloned()
-                .collect());
-        }
-        if fixture.is_some() {
-            Ok(fixture_records
-                .values()
-                .filter(|package| &package.registry == registry && &package.name == name)
-                .cloned()
-                .collect())
-        } else {
-            let registry = registry
-                .registry()
-                .ok_or("copied artifact metadata is unavailable")?;
-            let transport = metadata_transport_for_package(
-                &mut metadata_transports,
-                registry_config,
-                registry,
-                name,
-                &configured_origins,
-            )?;
-            remote_records(
-                transport,
-                registry_config,
-                registry,
-                name,
-                allow_missing_integrity,
-            )
-        }
-    };
-    let mut tagged_providers = BTreeSet::new();
-    for peer in &workspace_peer_dependencies {
-        if peer.requirement.dist_tag().is_some()
-            && let WorkspacePeerProvider::Registry { registry, package } = &peer.provider
-            && root_registry_identities.contains(&(registry.clone(), package.clone()))
-            && tagged_providers.insert((registry.clone(), package.clone()))
-        {
-            let provider_records = fetch_records(registry, package)?;
-            seed.retain(|record| record.registry != *registry || record.name != *package);
-            seed.extend(provider_records);
-        }
-    }
-    let (resolution, records) = resolution::resolve_with_preferences(
-        &roots,
-        |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
-        &overrides,
-        fetch_records,
-        &preferred,
-        seed,
-        |fetched| progress(crate::application::install::Progress::Metadata(fetched)),
-    )?;
-    validate_workspace_peer_providers(
-        &workspace_peer_dependencies,
-        &root_registry_identities,
-        &resolution,
-        &records,
-    )?;
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")
     })?;
@@ -1174,8 +995,9 @@ pub(crate) fn resolve_and_fetch_with_lock(
         )
         .map_err(|error| OperationalError::new(ErrorKind::Resolution, error))?;
         platform_contexts.insert(id.clone(), platform_context.clone());
-        let (actual, tree_digest, tree) =
-            artifact_fetcher.prepare(id, &record, pinned, &mut store_transaction)?;
+        let (actual, tree_digest, tree) = artifact_fetcher
+            .prepare(id, &record, pinned, &mut store_transaction)
+            .map_err(|error| error.for_package(id.into()))?;
         let key = LockfilePackageKey::from_source(
             id.registry.clone(),
             id.name.clone(),
@@ -1264,20 +1086,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         })
         .collect();
     for dependency in &workspace_registry_dependencies {
-        let id = resolution
-            .roots
-            .iter()
-            .find(|id| {
-                id.registry == dependency.registry
-                    && id.name == dependency.package
-                    && records.get(&(id.registry.to_string(), id.name.to_string(), id.version.to_string())).is_some_and(|record| dependency.requirement.matches_tagged_version(&id.version, &record.dist_tags))
-            })
-            .ok_or_else(|| {
-                format!(
-                    "no selected registry package satisfies workspace member dependency '{}' ({:?})",
-                    dependency.manifest_name, dependency.requirement
-                )
-            })?;
+        let id = graph::workspace_registry_target(dependency, &resolution, &records)?;
         let target_platform = platform_contexts
             .get(id)
             .ok_or_else(|| format!("missing platform context for {id}"))?;
@@ -1319,10 +1128,17 @@ pub(crate) fn resolve_and_fetch_with_lock(
     }
     lock.insert_graph(locked_packages?, workspace_locked)
         .map_err(OperationalError::from)?;
-    let mut root_keys = resolution
-        .roots
+    let direct_bindings = resolution
+        .root_bindings
         .iter()
-        .filter(|id| root_registry_identities.contains(&(id.registry.clone(), id.name.clone())))
+        .filter(|((registry, name), id)| {
+            direct_local_names.contains(name)
+                && root_registry_identities.contains(&(registry.clone(), id.name.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut root_keys = direct_bindings
+        .iter()
+        .map(|(_, id)| *id)
         .map(|id| {
             let platform = platform_contexts
                 .get(id)
@@ -1342,13 +1158,8 @@ pub(crate) fn resolve_and_fetch_with_lock(
     root_keys.dedup();
     lock.set_roots(root_keys).map_err(OperationalError::from)?;
     lock.set_root_bindings(
-        resolution
-            .root_bindings
+        direct_bindings
             .iter()
-            .filter(|((registry, name), id)| {
-                direct_local_names.contains(name)
-                    && root_registry_identities.contains(&(registry.clone(), id.name.clone()))
-            })
             .map(|((_, name), id)| {
                 let platform = platform_contexts
                     .get(id)
@@ -1427,12 +1238,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
             },
         });
     }
-    for ((registry, name), id) in &resolution.root_bindings {
-        if !direct_local_names.contains(name)
-            || !root_registry_identities.contains(&(registry.clone(), id.name.clone()))
-        {
-            continue;
-        }
+    for ((_, name), id) in direct_bindings {
         let instance = instance_keys
             .get(&(
                 id.registry.clone(),
@@ -1451,20 +1257,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         });
     }
     for dependency in &workspace_registry_dependencies {
-        let id = resolution
-            .roots
-            .iter()
-            .find(|id| {
-                id.registry == dependency.registry
-                    && id.name == dependency.package
-                    && records.get(&(id.registry.to_string(), id.name.to_string(), id.version.to_string())).is_some_and(|record| dependency.requirement.matches_tagged_version(&id.version, &record.dist_tags))
-            })
-            .ok_or_else(|| {
-                format!(
-                    "no selected registry package satisfies workspace member dependency '{}' ({:?})",
-                    dependency.manifest_name, dependency.requirement
-                )
-            })?;
+        let id = graph::workspace_registry_target(dependency, &resolution, &records)?;
         let instance = instance_keys
             .get(&(
                 id.registry.clone(),
@@ -1496,6 +1289,24 @@ pub(crate) fn resolve_and_fetch_with_lock(
         store_transaction,
         workspace_links.into(),
     ))
+}
+
+/// Membership and member manifest bytes both participate in replay identity.
+pub(crate) fn workspace_matches_lock(
+    workspace: &WorkspaceMaterialization,
+    lock: &Lockfile,
+) -> bool {
+    let current = workspace
+        .locked
+        .iter()
+        .map(|p| (p.key(), p.manifest_digest()))
+        .collect::<BTreeMap<_, _>>();
+    let locked = lock
+        .workspace_packages()
+        .iter()
+        .map(|(k, p)| (k.clone(), p.manifest_digest()))
+        .collect::<BTreeMap<_, _>>();
+    current == locked
 }
 
 #[cfg(test)]

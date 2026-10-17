@@ -103,6 +103,21 @@ jobs:
           done
           grep -Fx 'TAPID_NEWS_SITE_ACCEPTANCE_V1' "$RUNNER_TEMP/news-site-acceptance.txt"
 
+  rust-minimum:
+    name: Rust 1.88 minimum
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.88 toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.88.0
+      - name: Check locked production workspace
+        run: cargo check --workspace --all-targets --all-features --locked
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
