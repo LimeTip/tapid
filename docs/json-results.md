@@ -73,7 +73,9 @@ restoration of a moved old lock cannot be guaranteed. Inspect the project and
 any .tapid-lock backup before recovery. A backup cleanup failure after replacement
 reports `committed_cleanup_pending` and `do_not_repeat`; it does not schedule
 background cleanup. Import errors classify manifest, lock, registry configuration,
-contention, and transaction failures at their operation boundaries.
+contention, and transaction failures at their operation boundaries. Workspace-member
+edits detected between discovery and import publication return
+`LOCK_MANIFEST_MISMATCH`; other workspace validation failures retain `INVALID_DATA`.
 
 CI uses the install data and failure contract below, including progress suppression.
 It requires a native verified-tree lock, preserves package.json and tapid.lock,

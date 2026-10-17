@@ -1193,3 +1193,63 @@ fn dist_tag_peers_fetch_metadata_for_locked_root_providers() {
     assert!(fetched_host);
     assert_eq!(resolution.selected.len(), 2);
 }
+
+/// Concurrent member edits must keep their mismatch code; layout refusals keep INVALID_DATA.
+#[test]
+fn imported_workspace_manifest_failure_kinds() {
+    for changed in [true, false] {
+        let project = tapid_test_support::TempProject::new("import-workspace-error-kind").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        project
+            .write(
+                "packages/member/package.json",
+                br#"{"name":"member","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        project
+            .write("tapid.lock", b"preserve existing lock")
+            .unwrap();
+        let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+        let workspace = workspace_materialization(project.path(), &config).unwrap();
+        let manifest = if changed {
+            let updated = br#"{"name":"member","version":"2.0.0"}"#;
+            project
+                .write("packages/member/package.json", updated)
+                .unwrap();
+            updated.as_slice()
+        } else {
+            project
+                .write("packages/member/node_modules/KEEP", b"unmanaged")
+                .unwrap();
+            br#"{"name":"member","version":"1.0.0"}"#.as_slice()
+        };
+        let error = imported_workspace_manifests(project.path(), &workspace).unwrap_err();
+        assert_eq!(
+            error.kind,
+            if changed {
+                ErrorKind::LockManifestMismatch
+            } else {
+                ErrorKind::InvalidData
+            }
+        );
+        assert_eq!(
+            fs::read(project.path().join("packages/member/package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            b"preserve existing lock"
+        );
+        if !changed {
+            assert_eq!(
+                fs::read(project.path().join("packages/member/node_modules/KEEP")).unwrap(),
+                b"unmanaged"
+            );
+        }
+    }
+}

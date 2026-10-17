@@ -17,6 +17,7 @@ pub(crate) struct Args {
     registry_fixture: Option<PathBuf>,
 }
 
+/// Replay native locked selections and suppress all progress when returning JSON.
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     let result = crate::application::install::run(
         &args.project_dir,

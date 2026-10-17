@@ -285,12 +285,14 @@ pub(crate) fn why_failure(project: &std::path::Path, code: &str) -> ExitCode {
     emit(result, 1)
 }
 
+/// Emit a successful version 1 result with typed changes and command-specific data.
 pub(crate) fn completed(outcome: &OperationOutcome, operation: &str, data: Value) -> ExitCode {
     let mut result = envelope(operation, "success", Some(outcome));
     result["data"] = data;
     emit(result, 0)
 }
 
+/// Render install counts through the shared success envelope without exposing the graph.
 pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
     completed(
         &report.outcome,

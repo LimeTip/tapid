@@ -1,6 +1,7 @@
 use std::{fs, process::Command};
 use tapid_test_support::{TempHome, TempProject};
 
+/// Run an isolated CLI command and require a single JSON result with empty stderr.
 fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, serde_json::Value) {
     let home = TempHome::new("json-result").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
@@ -75,6 +76,7 @@ fn json_install_success_and_handled_failure() {
     assert_eq!(result["retry"], "after_correction");
 }
 
+/// Reject malformed or unsupported requests without echoing values or writing project outputs.
 #[test]
 fn json_parse_errors_and_unsupported_commands_do_not_echo_input() {
     let project = TempProject::new("json-parse").unwrap();
@@ -573,6 +575,7 @@ fn json_outdated_limit_can_retrieve_entries_beyond_the_default() {
     assert_eq!(output.status.code(), Some(2));
 }
 
+/// Keep canonical operation names even when JSON execution is unsupported.
 #[test]
 fn json_unsupported_results_preserve_canonical_command_names() {
     let project = TempProject::new("json-unsupported-operation").unwrap();
@@ -591,6 +594,7 @@ fn json_unsupported_results_preserve_canonical_command_names() {
     assert_eq!(std::fs::read_dir(project.path()).unwrap().count(), 0);
 }
 
+/// Exercise validation, import, and native CI without changing pinned selections on replay.
 #[test]
 fn json_automation_commands_validate_import_and_ci() {
     let project = TempProject::new("json-automation").unwrap();
@@ -666,6 +670,7 @@ fn json_automation_commands_validate_import_and_ci() {
     }
 }
 
+/// Keep untrusted diagnostics out of handled failures and preserve existing outputs.
 #[test]
 fn json_automation_failures_are_typed_and_preserve_outputs() {
     let project = TempProject::new("json-automation-failure").unwrap();
@@ -701,6 +706,7 @@ fn json_automation_failures_are_typed_and_preserve_outputs() {
     }
 }
 
+/// Refuse pending recovery and unsafe lock destinations without altering their contents.
 #[test]
 fn json_import_refuses_pending_recovery_and_nonregular_destination() {
     for pending in [false, true] {

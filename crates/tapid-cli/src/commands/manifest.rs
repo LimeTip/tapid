@@ -25,6 +25,7 @@ pub(crate) enum Command {
     },
 }
 
+/// Validate the selected manifest with the same regular-file and size checks used by CLI callers.
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     match args.command {
         Command::Validate { path } => {

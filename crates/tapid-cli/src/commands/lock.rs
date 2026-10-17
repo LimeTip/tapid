@@ -22,6 +22,7 @@ pub(crate) enum Command {
     Verify,
 }
 
+/// Validate lockfile schema and consistency without recovering or changing project outputs.
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     match args.command {
         Command::Verify => {

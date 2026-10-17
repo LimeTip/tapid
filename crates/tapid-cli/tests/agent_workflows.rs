@@ -15,6 +15,7 @@ struct Measurements {
 }
 
 impl Measurements {
+    /// Run one isolated CLI call and record its protocol, byte, and retry measurements.
     fn call(&mut self, project: &TempProject, home: &TempHome, args: &[&str]) -> Value {
         if self
             .previous_failure
@@ -52,6 +53,7 @@ impl Measurements {
         result
     }
 
+    /// Check the scenario budget and print measurements only after its assertions pass.
     fn finish(&self, calls: usize) {
         assert_eq!(self.calls, calls, "tool-call budget");
         assert_eq!(self.retries, 0, "unnecessary retries");
@@ -63,6 +65,7 @@ impl Measurements {
     }
 }
 
+/// Keep child stdin closed and isolate cache, credential, and crash-test settings.
 fn command(project: &TempProject, home: &TempHome, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
     command
@@ -80,6 +83,7 @@ fn command(project: &TempProject, home: &TempHome, args: &[&str]) -> Command {
     command
 }
 
+/// Copy the npm placement fixture without resolving or contacting a registry.
 fn npm_project() -> TempProject {
     let project = TempProject::new("agent-npm").unwrap();
     for (name, bytes) in [
@@ -101,11 +105,13 @@ fn npm_project() -> TempProject {
     project
 }
 
+/// Require a completed operation with no retry advice.
 fn success(result: &Value) {
     assert_eq!(result["outcome"], "success", "{result}");
     assert_eq!(result["retry"], Value::Null);
 }
 
+/// Execute the guide as one sequence while preserving npm selections and the original npm lock.
 #[test]
 fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
     let guide = include_str!("../../../docs/agent-guide.md");
@@ -187,6 +193,7 @@ fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
     metrics.finish(10);
 }
 
+/// Compare complete package records so unrelated version, source, and edge changes fail the test.
 #[test]
 fn agent_dependency_edits_and_repeated_install_preserve_unselected_graph() {
     let project = TempProject::new("agent-edits").unwrap();
@@ -238,6 +245,7 @@ fn agent_dependency_edits_and_repeated_install_preserve_unselected_graph() {
     metrics.finish(4);
 }
 
+/// Treat precise refusal with preserved project outputs as successful completion of unsupported tasks.
 #[test]
 fn agent_stops_on_precise_failures_without_retry_or_file_mutation() {
     let home = TempHome::new("agent-stop").unwrap();
@@ -320,6 +328,7 @@ fn agent_stops_on_precise_failures_without_retry_or_file_mutation() {
     }
 }
 
+/// Populate a cold shared cache once, then replay another checkout without changing pins.
 #[test]
 fn agent_separate_checkouts_share_verified_cache_without_graph_changes() {
     let first = npm_project();
@@ -367,6 +376,7 @@ fn agent_separate_checkouts_share_verified_cache_without_graph_changes() {
     metrics.finish(3);
 }
 
+/// Hold the project lock to prove contention cannot begin a dependency edit.
 #[test]
 fn agent_same_project_contention_stops_before_dependency_edit() {
     use fs4::FileExt;
@@ -391,6 +401,7 @@ fn agent_same_project_contention_stops_before_dependency_edit() {
     metrics.finish(1);
 }
 
+/// Recover a lost commit response through the documented install caller before another mutation.
 #[test]
 fn agent_lost_commit_response_recovers_before_repeating_mutation() {
     let project = TempProject::new("agent-lost-response").unwrap();
@@ -425,20 +436,26 @@ fn agent_lost_commit_response_recovers_before_repeating_mutation() {
     let result = metrics.call(&project, &home, &["--json", "outdated", "--offline"]);
     assert_eq!(result["retry"], "recover_first");
     assert_eq!(result["changes"]["state"], "recovery_required");
-    // A locked replay recovers the committed decision, without re-resolving.
-    success(&metrics.call(
+    // Exercise the documented install recovery without re-resolving the committed graph.
+    let recovered = metrics.call(
         &project,
         &home,
         &[
             "--json",
-            "ci",
+            "install",
             "--offline",
+            "--frozen",
             "--store-dir",
             "store",
-            "--registry-fixture",
-            "registry.json",
         ],
-    ));
+    );
+    success(&recovered);
+    assert!(
+        recovered["warnings"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("PREVIOUS_TRANSACTION_RECOVERED"))
+    );
     assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), pinned);
     metrics.finish(3);
 }

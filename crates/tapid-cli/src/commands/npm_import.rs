@@ -15,6 +15,7 @@ pub(crate) struct Args {
     path: PathBuf,
 }
 
+/// Render npm import outcomes while keeping diagnostic prose out of JSON results.
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     match import(args) {
         Ok(outcome) => {
@@ -34,6 +35,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     }
 }
 
+/// Validate npm selections before locking, then track replacement and cleanup outcomes separately.
 fn import(args: Args) -> Result<OperationOutcome, OperationFailure> {
     let project = std::env::current_dir().map_err(|e| {
         OperationFailure::unchanged(
@@ -140,6 +142,7 @@ fn import(args: Args) -> Result<OperationOutcome, OperationFailure> {
     }
 }
 
+/// Read exact manifest bytes for digest and concurrent-edit checks, rejecting nonregular files.
 fn read_manifest(path: &Path) -> Result<String, String> {
     let metadata =
         fs::symlink_metadata(path).map_err(|e| format!("cannot inspect package.json: {e}"))?;

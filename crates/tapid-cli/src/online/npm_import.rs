@@ -392,10 +392,12 @@ pub(crate) fn fetch_imported(
 
 /// Read the same contained workspace sources used by native installs.
 /// Digests also detect edits between discovery and import publication.
+/// Concurrent member edits retain their lock/manifest mismatch code; other validation
+/// failures remain INVALID_DATA.
 pub(crate) fn imported_workspace_manifests(
     project: &Path,
     workspace: &WorkspaceMaterialization,
-) -> Result<BTreeMap<String, (String, String)>, String> {
+) -> Result<BTreeMap<String, (String, String)>, OperationalError> {
     let canonical_project = fs::canonicalize(project)
         .map_err(|error| format!("cannot resolve install project root: {error}"))?;
     let project = canonical_project.as_path();
@@ -420,10 +422,10 @@ pub(crate) fn imported_workspace_manifests(
                     return Err(format!(
                         "/packages/{}: node_modules: remove the unmanaged member or ancestor node_modules tree before importing or replaying workspace selections",
                         source.path().replace('/', "~1")
-                    ));
+                    ).into());
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.to_string()),
+                Err(error) => return Err(error.to_string().into()),
             }
         }
         let path = project.join(source.path()).join("package.json");
@@ -446,7 +448,10 @@ pub(crate) fn imported_workspace_manifests(
             .iter()
             .any(|member| member.key() == key && member.manifest_digest() == current_digest)
         {
-            return Err("workspace member manifest changed during discovery; retry".into());
+            return Err(OperationalError::new(
+                ErrorKind::LockManifestMismatch,
+                "workspace member manifest changed during discovery; retry",
+            ));
         }
         manifests.insert(source.path().to_owned(), (text, current_digest));
     }
