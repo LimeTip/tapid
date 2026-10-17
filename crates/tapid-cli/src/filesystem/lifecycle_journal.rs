@@ -23,6 +23,60 @@ struct Record {
     marker_existed: bool,
     node_modules_existed: bool,
     store_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    members: Vec<MemberActivation>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemberActivation {
+    path: String,
+    marker_existed: bool,
+    node_modules_existed: bool,
+}
+
+fn member_paths(
+    project: &Path,
+    members: &[MemberActivation],
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut paths = Vec::new();
+    let mut previous: Option<&str> = None;
+    for member in members {
+        let relative = Path::new(&member.path);
+        if relative.is_absolute() || previous.is_some_and(|p| p >= member.path.as_str()) {
+            return Err("refusing unsafe or duplicate lifecycle member path".into());
+        }
+        let path = project.join(relative);
+        validate_member_root(project, &path)?;
+        previous = Some(&member.path);
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// Revalidate the recorded directory identity before writing or recovering a member layout.
+pub(crate) fn validate_member_root(project: &Path, member: &Path) -> Result<(), String> {
+    let relative = member
+        .strip_prefix(project)
+        .map_err(|_| "member activation escapes project")?;
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|c| {
+            !matches!(c, std::path::Component::Normal(_)) || c.as_os_str() == "node_modules"
+        })
+    {
+        return Err("refusing unsafe lifecycle member path".into());
+    }
+    if member.canonicalize().as_deref().ok() != Some(member) {
+        return Err("refusing noncanonical lifecycle member path".into());
+    }
+    if !fs::symlink_metadata(member)
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_dir()
+    {
+        return Err("lifecycle member must be a directory".into());
+    }
+    Ok(())
 }
 
 fn default_manifest_path() -> String {
@@ -109,6 +163,7 @@ impl LifecycleJournal {
             marker_existed,
             node_modules_existed,
             store_root: None,
+            members: Vec::new(),
         };
         write_record(project, &record)?;
         Ok(Self {
@@ -117,6 +172,38 @@ impl LifecycleJournal {
             finished: false,
             settlement_attempted: false,
         })
+    }
+
+    pub(crate) fn set_member_roots<'a>(
+        &mut self,
+        roots: impl Iterator<Item = &'a std::path::PathBuf>,
+    ) -> Result<(), String> {
+        if !self.record.members.is_empty() {
+            return Err("member activation roots already recorded".into());
+        }
+        let mut members = Vec::new();
+        for root in roots {
+            crate::filesystem::activation::validate_managed_node_modules(root)?;
+            let path = root
+                .strip_prefix(&self.project)
+                .map_err(|_| "member activation escapes project")?
+                .to_str()
+                .ok_or("member path is not UTF-8")?
+                .to_owned();
+            members.push(MemberActivation {
+                path,
+                marker_existed: exists(root.join(".tapid-managed"))?,
+                node_modules_existed: exists(root.join("node_modules"))?,
+            });
+        }
+        members.sort_by(|a, b| a.path.cmp(&b.path));
+        member_paths(&self.project, &members)?;
+        if !members.is_empty() {
+            self.record.version = 3;
+            self.record.members = members;
+            write_record(&self.project, &self.record)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn set_store_root(&mut self, store_root: &Path) -> Result<(), String> {
@@ -141,6 +228,9 @@ impl LifecycleJournal {
     }
 
     pub(crate) fn finish(&mut self) -> Result<(), String> {
+        for member in member_paths(&self.project, &self.record.members)? {
+            crate::filesystem::activation::commit_owned_activation(&member, &self.record.owner)?;
+        }
         crate::filesystem::activation::commit_owned_activation(&self.project, &self.record.owner)?;
         remove_journal(&self.project)?;
         self.finished = true;
@@ -259,13 +349,17 @@ pub(crate) fn recover(
         fs::read(&path).map_err(|error| format!("cannot read lifecycle journal: {error}"))?;
     let record: Record = serde_json::from_slice(&bytes)
         .map_err(|error| format!("refusing to recover a malformed lifecycle journal: {error}"))?;
-    if !matches!(record.version, 1 | 2)
+    if !matches!(record.version, 1..=3)
         || (record.version == 1 && record.manifest_path != "package.json")
         || !valid_owner(&record.owner)
         || stale_owner.is_some_and(|owner| record.owner != owner)
     {
         return Err("refusing to recover a lifecycle journal with invalid ownership".into());
     }
+    if record.version < 3 && !record.members.is_empty() {
+        return Err("member activation requires lifecycle version 3".into());
+    }
+    let member_paths = member_paths(project, &record.members)?;
     recovery_manifest_path(project, &record.manifest_path)?;
     if record.manifest.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES
         || record.lock.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES
@@ -285,6 +379,19 @@ pub(crate) fn recover(
     }
     if record.state == State::Prepared {
         recover_record(project, &record)?;
+    }
+    for (member, path) in record.members.iter().zip(member_paths) {
+        crate::filesystem::activation::recover_owned_activation(
+            &path,
+            &record.owner,
+            Some(RecoveryDecision {
+                owner: record.owner.clone(),
+                committed: record.state == State::Committed,
+                marker_existed: member.marker_existed,
+                node_modules_existed: member.node_modules_existed,
+            }),
+        )?;
+        crate::filesystem::activation::recover_owned_stages(&path, &record.owner)?;
     }
     Ok(Some(RecoveryDecision {
         owner: record.owner,
@@ -526,6 +633,82 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invalid_member_recovery_paths_fail_before_mutation() {
+        let project = tapid_test_support::TempProject::new("journal-member-paths").unwrap();
+        project.write("package.json", b"current manifest").unwrap();
+        project.write("tapid.lock", b"current lock").unwrap();
+        project.write("member/package.json", b"{}").unwrap();
+        let owner = "123-deadbeef\n";
+        let journal = LifecycleJournal::begin(
+            project.path(),
+            &project.path().join("package.json"),
+            owner,
+            b"old manifest",
+            Some(b"old lock"),
+        )
+        .unwrap();
+        std::mem::forget(journal);
+        let path = project.path().join(JOURNAL);
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for paths in [
+            vec!["../outside"],
+            vec!["/absolute"],
+            vec!["member/../member"],
+            vec!["member/node_modules"],
+            vec!["member", "member"],
+        ] {
+            let mut record = original.clone();
+            record["version"] = serde_json::json!(3);
+            record["members"] = serde_json::Value::Array(paths.iter().map(|path| serde_json::json!({"path":path,"marker_existed":false,"node_modules_existed":false})).collect());
+            fs::write(&path, record.to_string()).unwrap();
+            assert!(recover(project.path(), Some(owner)).is_err(), "{paths:?}");
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                b"current manifest"
+            );
+            assert_eq!(
+                fs::read(project.path().join("tapid.lock")).unwrap(),
+                b"current lock"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn member_recovery_rejects_redirected_directory_before_mutation() {
+        let project = tapid_test_support::TempProject::new("journal-member-symlink").unwrap();
+        let outside = tapid_test_support::TempProject::new("journal-member-outside").unwrap();
+        project.write("package.json", b"current manifest").unwrap();
+        outside.write("node_modules/sentinel", b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("member")).unwrap();
+        let owner = "123-deadbeef\n";
+        let journal = LifecycleJournal::begin(
+            project.path(),
+            &project.path().join("package.json"),
+            owner,
+            b"old manifest",
+            None,
+        )
+        .unwrap();
+        std::mem::forget(journal);
+        let path = project.path().join(JOURNAL);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["version"] = serde_json::json!(3);
+        record["members"] = serde_json::json!([{"path":"member","marker_existed":false,"node_modules_existed":false}]);
+        fs::write(&path, record.to_string()).unwrap();
+        assert!(recover(project.path(), Some(owner)).is_err());
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            b"current manifest"
+        );
+        assert_eq!(
+            fs::read(outside.path().join("node_modules/sentinel")).unwrap(),
+            b"outside"
+        );
+    }
+    #[test]
     fn large_snapshot_journal_is_recoverable_after_begin() {
         let project = std::env::temp_dir().join(format!(
             "tapid-journal-large-snapshot-{}-{}",
@@ -618,6 +801,7 @@ mod tests {
             marker_existed: false,
             node_modules_existed: false,
             store_root: None,
+            members: Vec::new(),
         };
         fs::write(&backup, serde_json::to_vec(&record).unwrap()).unwrap();
 
@@ -657,6 +841,7 @@ mod tests {
             marker_existed: false,
             node_modules_existed: false,
             store_root: None,
+            members: Vec::new(),
         };
         let committed = Record {
             version: prepared.version,
@@ -670,6 +855,7 @@ mod tests {
             marker_existed: prepared.marker_existed,
             node_modules_existed: prepared.node_modules_existed,
             store_root: None,
+            members: Vec::new(),
         };
         let path = project.join(JOURNAL);
         let backup = journal_backup_path(&path);
@@ -712,6 +898,7 @@ mod tests {
             marker_existed: false,
             node_modules_existed: false,
             store_root: None,
+            members: Vec::new(),
         };
         let mut committed = Record {
             version: prepared.version,
@@ -725,6 +912,7 @@ mod tests {
             marker_existed: prepared.marker_existed,
             node_modules_existed: prepared.node_modules_existed,
             store_root: None,
+            members: Vec::new(),
         };
         committed.manifest = STANDARD.encode(committed_manifest);
         fs::write(

@@ -64,15 +64,20 @@ fn spec(value: &str) -> Result<(String, String), OperationalError> {
     let (name, requirement) = crate::package_spec::parse(value);
     let name = name.strip_prefix("npm:").unwrap_or(name);
     name.parse::<tapid_core::PackageName>().map_err(error)?;
+    validate_requirement(requirement)?;
+    Ok((name.to_owned(), requirement.to_owned()))
+}
+
+fn validate_requirement(requirement: &str) -> Result<(), OperationalError> {
     let range = requirement
         .parse::<tapid_resolver::Requirement>()
         .map_err(error)?;
-    if range.is_alias() {
+    if range.is_alias() || range.dist_tag().is_some() {
         return Err(error(
             "tool installation supports npm package names and semver requirements",
         ));
     }
-    Ok((name.to_owned(), requirement.to_owned()))
+    Ok(())
 }
 fn view(root: &Path, catalog: &Catalog, outcome: OperationOutcome) -> Report {
     Report {
@@ -190,6 +195,8 @@ pub(crate) fn run(
         .map_err(|e| OperationFailure::unchanged(&root, e))?;
     let _lock = crate::filesystem::activation::ActivationLock::acquire_without_recovery(&root)
         .map_err(|e| OperationFailure::unchanged(&root, e))?;
+    let mut catalog_lock =
+        Some(state::lock_catalog(&root).map_err(|e| OperationFailure::unchanged(&root, e))?);
     if let Err(e) = transaction::recover(&root).map(|recovered| {
         if recovered {
             outcome.warnings.push(Warning::PreviousTransactionRecovered);
@@ -213,18 +220,21 @@ pub(crate) fn run(
     let before = state::load(&root).map_err(|e| OperationFailure::unchanged(&root, e))?;
     let result = (|| {
         let cleanup = transaction::cleanup(&root, &before)?;
-        if cleanup.pending {
-            outcome.state = ChangeState::CommittedCleanupPending;
-        }
         if cleanup.changed {
-            if !cleanup.pending {
-                outcome.state = ChangeState::Committed;
-            }
             outcome.changed_files.push(root.join("environments"));
         }
         let mut after = before.clone();
         match action {
-            Action::List => return Ok(before.clone()),
+            Action::List => {
+                outcome.state = if cleanup.pending {
+                    ChangeState::CommittedCleanupPending
+                } else if cleanup.changed {
+                    ChangeState::Committed
+                } else {
+                    ChangeState::Unchanged
+                };
+                return Ok(before.clone());
+            }
             Action::Install(_) | Action::Update(_) => {
                 let (name, requirement) = request.as_ref().expect("validated request");
                 let requirement = if matches!(action, Action::Update(_)) {
@@ -236,14 +246,19 @@ pub(crate) fn run(
                 } else {
                     requirement
                 };
-                let tool = stage(
+                // The mutation lock excludes other writers and cleanup. Invocations
+                // can lease the current generation while its replacement is staged.
+                drop(catalog_lock.take());
+                let staged = stage(
                     &root,
                     name,
                     requirement,
                     &options,
                     &mut outcome,
                     &mut progress,
-                )?;
+                );
+                catalog_lock = Some(state::lock_catalog(&root)?);
+                let tool = staged?;
                 after.tools.insert(name.to_owned(), tool);
             }
             Action::Remove(_) => {
@@ -270,6 +285,11 @@ pub(crate) fn run(
     match result {
         Ok(catalog) => Ok(view(&root, &catalog, outcome)),
         Err(e) => {
+            // Failure to reacquire after staging cannot have published a journal.
+            // Leave the owned stage for the next serialized mutation to clean.
+            if catalog_lock.is_none() {
+                return Err(OperationFailure::unchanged(&root, e));
+            }
             let committed = root.join("committed").exists();
             let pending = root.join("pending.json").exists();
             let recovery = (|| {
@@ -312,7 +332,7 @@ pub(crate) fn execute(
 ) -> Result<i32, OperationalError> {
     let root = state::root_path(Some(root))?;
     state::verify(&root)?;
-    let lock = crate::filesystem::activation::ActivationLock::acquire_without_recovery(&root)?;
+    let lock = state::lock_catalog(&root)?;
     transaction::recover(&root)?;
     let catalog = state::load(&root)?;
     let (tool, bin) = catalog
@@ -332,6 +352,7 @@ pub(crate) fn execute(
     let lease = crate::filesystem::activation::open_lock_file(&environment.join(".in-use"))
         .map_err(error)?;
     FileExt::try_lock_shared(&lease).map_err(error)?;
+    drop(lock);
     let mut process = if bin.node {
         let node = crate::run::discover_node_runtime(std::env::var_os("PATH").as_deref())
             .map_err(error)?;
@@ -341,7 +362,6 @@ pub(crate) fn execute(
     } else {
         Command::new(&target)
     };
-    drop(lock);
     let status = process.args(arguments).status().map_err(error)?;
     drop(lease);
     #[cfg(unix)]

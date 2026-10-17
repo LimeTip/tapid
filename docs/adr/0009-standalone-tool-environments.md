@@ -18,8 +18,12 @@ direct-package bins. Persist requirements, versions, generations, command
 mappings, and launcher ownership bytes in a versioned catalog.
 
 Use stable command launchers that dispatch through Tapid and the selected
-catalog. Serialize catalog mutations with the existing activation lock. Verify a
-new generation before publication. Record both catalogs in a bounded journal;
+catalog. Serialize tool mutations and cleanup with the existing activation lock.
+A separate catalog lock covers recovery, publication, and invocation lease
+acquisition. Release it during staging and before runtime discovery or execution;
+invocations wait up to 30 seconds for it, then report contention. The mutation
+lock remains held during staging, so another writer cannot retire that generation.
+Verify a new generation before publication. Record both catalogs in a bounded journal;
 a digest-bound, separately synced commit decision selects the new state.
 Recovery is idempotent and treats recorded launcher bytes as the only files it
 may replace. Catalog replacement reuses the existing atomic lockfile writer,

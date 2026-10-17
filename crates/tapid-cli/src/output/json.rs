@@ -154,10 +154,9 @@ pub(crate) fn tools(report: &crate::application::tools::Report) -> ExitCode {
         })
     }).collect::<Vec<_>>();
     result["data"] = json!({"tools":tools, "bin_dir":recorded_text(report.bin_dir.display(), "/data/bin_dir", &mut truncated)});
-    result["truncated_fields"]
-        .as_array_mut()
-        .unwrap()
-        .extend(truncated.into_iter().map(Value::String));
+    let fields = result["truncated_fields"].as_array_mut().unwrap();
+    fields.extend(truncated.into_iter().map(Value::String));
+    fields.sort_unstable_by(|a, b| a.as_str().cmp(&b.as_str()));
     emit(result, 0)
 }
 
@@ -354,6 +353,8 @@ fn outdated_result(report: &OutdatedReport, operation: &str, limit: usize) -> Va
                 "locked": entry.locked.as_ref().map(|value| field(value, "locked")),
                 "newest_compatible": entry.newest_compatible.as_ref().map(|value| field(value, "newest_compatible")),
                 "newest_available": entry.newest_available.as_ref().map(|value| field(value, "newest_available")),
+                "compatible_impact": entry.impact(entry.newest_compatible.as_deref()),
+                "available_impact": entry.impact(entry.newest_available.as_deref()),
                 "error": entry.diagnostic.as_ref().map(|error| json!({"code": error.kind.code()})),
             })
         })

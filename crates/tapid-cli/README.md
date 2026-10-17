@@ -50,7 +50,7 @@ tapid tool remove <PACKAGE> [--tools-dir <PATH>]
 tapid cache info [--store-dir <PATH>]
 tapid cache clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid clean [--dry-run | --yes] [--store-dir <PATH>]
-tapid run <SCRIPT> [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
+tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json] [-- <ARGS>...]
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
@@ -148,6 +148,10 @@ journal selects the old catalog before commit and the new catalog after commit.
 The next tool operation or invocation settles interrupted publication. List can
 recover pending work and retire inactive owned environments.
 
+Installed commands can start while an install or update stages its environment.
+Catalog recovery, publication, and invocation lease acquisition share a short-held
+lock. Invocations wait up to 30 seconds for that lock before reporting contention.
+
 A running invocation leases its environment. Cleanup deferred by that lease or
 an open Windows file is reported as committed_cleanup_pending in JSON and retried
 by later tool operations. The lease covers the process waited for by the
@@ -159,13 +163,13 @@ Unknown or inconsistent recovery state fails closed and preserves files.
 
 ## Inspect and clear the package cache
 
-`tapid cache` and `tapid cache info` report the package-store path, counts, and logical file bytes for published artifacts and marked package trees. They work offline without a project and do not create files or recover transactions. The default path is the same platform cache location used by installation. Use `--store-dir <PATH>` to inspect an explicit store. Sizes exclude directory overhead, symlink targets, staging, and unrecognized entries. They are not a measurement of allocated disk space.
+`tapid cache` and `tapid cache info` report the package-store path, counts, and logical file bytes for published artifacts and marked package trees. They work offline without a project and do not create files or recover transactions. The default path is the same platform cache location used by installation. Use `--store-dir <PATH>` to inspect an explicit store. Human inspection and preview output labels sizes as logical bytes. Sizes exclude directory overhead, symlink targets, staging, and unrecognized entries. They measure file content lengths, not allocated disk space or predicted disk space reclaimed by cleaning. Hard links, compression, sparse files, and filesystem metadata can make those quantities differ.
 
 `tapid clean` and `tapid cache clean` preview that scope by default. Pass `--yes` to delete the currently recognized published entries without prompting. `--dry-run` explicitly requests the preview and conflicts with `--yes`. All forms support global `--json` with schema version 1 results.
 
 Cleaning preserves project `node_modules`, manifests, lockfiles, lifecycle authentication keys, staging, recovery journals, and unrecognized entries. Installed projects keep their materialized files. Future offline or frozen replay may fail until the required cache trees are populated again. Release-upgrade recovery data is outside this command's scope. This is explicit eviction of reusable package data, not automatic garbage collection based on which projects use it.
 
-Maintenance uses the existing cross-process store lock and fails immediately when a competing publication or replay prevents safe access. Symlinked roots, cache directories, and lock files are rejected. Opened directories remain pinned during maintenance, and no-follow traversal prevents concurrent parent replacements from redirecting deletion. Symlink entries are preserved; links inside a recognized tree are never followed. A pending transaction must be recovered by installation before maintenance. A populated legacy store without a lock also requires an install before maintenance. Filesystem errors fail the command; deletion errors can leave a partially cleared cache and are reported as cleanup pending in JSON. Inspection and retry are safe.
+Maintenance uses the existing cross-process store lock and fails immediately when a competing publication or replay prevents safe access. Symlinked roots, cache directories, and lock files are rejected. Opened directories remain pinned during maintenance, and no-follow traversal prevents concurrent parent replacements from redirecting deletion. Symlink entries are preserved; links inside a recognized tree are never followed. A pending transaction must be recovered by installation before maintenance. A populated legacy store without a lock also requires an install before maintenance. A deletion or directory-sync failure stops cleanup and exits nonzero; some entries may already have been removed. Inspect the cache or retry after correcting the filesystem error. No background cleanup is scheduled. JSON reports these failures as `committed_cleanup_pending`; failures before eviction remain `unchanged`. This state describes a stopped, possibly partial cache eviction, not a queued cleanup task.
 
 ## Upgrade Tapid
 
@@ -185,7 +189,7 @@ tapid install --offline --frozen --project-dir ./example
 tapid install --registry-fixture ./fixture.json --project-dir ./example
 ```
 
-The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 7 locks without derived outputs or schema 9 locks with approved lifecycle outputs, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
+The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 7 locks without derived outputs, schema 9 locks with approved lifecycle outputs, or schema 10 locks with copied file/Git sources, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
 
 When that option is enabled, existing lock entries with locally computed integrity
 are resolved and fetched again. Ordinary online installs still preserve compatible
@@ -198,11 +202,15 @@ integrity even when the artifact is cached.
 
 ## Install and lifecycle outcomes
 
+`outdated` compares each direct dependency's declared range and locked version with registry metadata. It reports the newest compatible version and newest available version, with SemVer change labels and direct lockfile pin impact for each. `available-manifest=changed` means the available version requires a different declared range. Peer declarations do not select direct lockfile pins, so their lockfile impact is unchanged even when metadata is unavailable. Missing metadata leaves other impact fields unknown. The command never recovers interrupted transactions or changes the manifest, lockfile, store, or node_modules. A pending transaction stops inspection with recovery guidance. Live registry access is the default. Use `--offline` to forbid registry access; without a fixture, registry versions and impact are unknown, while local workspace versions remain available.
+
+Lockfile impact describes selecting the shown direct version. An unchanged direct pin does not establish that the whole lockfile would stay unchanged after `update`, which re-resolves the entire graph. Transitive changes and resolution failures require full resolution. Major, minor, patch, and prerelease labels compare version numbers; they do not establish API compatibility. Registry "available" means the highest published SemVer version, including prereleases, rather than npm's `latest` tag.
+
 `update` preserves declared ranges. `update --latest` replaces each selected declaration's range with `*`, retaining its section and npm alias target. A name declared in multiple sections is updated in every section where it appears. Naming packages leaves other declarations unchanged; omitting names selects all declarations.
 
 `install`, `ci`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
 
-Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result remains unchanged for its own operation and warns if it first recovered an interrupted transaction.
+Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result is unchanged unless a pending transaction requires recovery. In that case it reports `recovery_required` and the paths to inspect without attempting recovery.
 
 Human `install` output reports resolving, verification, store replay, and linking progress on terminal stderr, at most once per second within a phase plus phase transitions and completion. Redirected stderr and `--json` suppress progress. Successful installs report elapsed time, changed project paths, and added, changed, reused, and removed registry lock selections when a valid comparison is available. Counts compare exact lock records, including version and peer/platform context. A version replacement counts as an addition and removal; reused selections do not imply cache hits or skipped filesystem work. Missing prior locks count as empty. Invalid native locks fail installation. Imported locks omit the comparison because their records are not directly comparable to verified-tree lock records. Failures identify the operation phase, retain the diagnostic and safe error context, describe unchanged or rolled-back project files, and give known next steps without suggesting a repeat after commit.
 
@@ -292,6 +300,23 @@ Ordinary installation also replays a matching lock. Changed manifests retain com
 
 ## Experimental Node.js root-script runner and `.bin` handling
 
+The invocation permission names are the same on Windows, macOS and Linux:
+
+```text
+tapid run test --allow-read . --allow-subprocess
+tapid run build --allow-read . --allow-write .next --allow-write .tmp --allow-env CI --allow-subprocess
+```
+
+`--allow-read <PATH>`, `--allow-write <PATH>` and `--allow-env <NAME>` may be repeated. Filesystem paths use portable project-relative syntax with forward slashes; they are relative to the policy project root, including when `--workspace` selects a member. Environment arguments are names, not `NAME=VALUE` assignments. `PATH` stays controlled by runtime/tool resolution, and registry credential names remain forbidden. `--allow-subprocess` allows descendants under the same containment policy. `--allow-network` (alias `--allow-net`) requests the existing unrestricted network permission; it does not restrict networking by host, port or loopback address. Arguments after `--` remain script arguments and never grant permissions.
+
+Supplying any of these permission flags enables invocation-only policy selection without requiring a script profile or creating/editing `tapid.toml`. With no configured policy, the baseline is Required/Restricted assurance with no project read, write, environment, network or subprocess grants. Backend runtime grants remain necessary and are disclosed separately. Node scripts normally need `--allow-read . --allow-subprocess` because the launcher uses a platform shell. Restricted does not promise complete descendant cleanup or ManagedTree resource guarantees.
+
+An exact script profile, or explicitly configured `[run.defaults]` when there is no exact profile, remains a ceiling. A supplied read/write/environment list replaces that dimension with the selected narrower grants; omitted dimensions keep the configured grants. Flags cannot exceed configured filesystem scope, enable denied network/subprocess authority, weaken assurance or remove resource ceilings. To authorize broader access, deliberately change the configuration. Empty explicit defaults still preserve the legacy ManagedTree default. With no invocation permission flags, exact-profile requirements and existing configuration behavior are unchanged.
+
+Names and policy selection are portable; enforcement availability still depends on the backend. For example, Windows currently rejects requested networking and missing/unsafe write targets before execution. Prepare writable directories such as `.next` and `.tmp` before a Windows run. No unsupported request falls back to unrestricted execution.
+
+Invocation-mode receipts add `policy_inputs` with the configuration source, invocation grants and effective project policy. These contain environment names, never values. `effective_filesystem` and established backend evidence describe resolved/runtime authority; input provenance alone is not enforcement evidence. The existing receipt channel and child exit/output behavior remain unchanged.
+
 `tapid run` is a separate root-script launcher, not Tapid's package-management core and not a general JavaScript runtime selector. It currently launches Node.js scripts only. It cannot select Bun, Deno, or another runtime; use the runtime's own tooling for those projects. Its execution-containment feature is experimental and supported only on the documented platform/configuration combinations.
 
 ```text
@@ -319,7 +344,7 @@ Paths are project-relative. Grant only the access the script needs: `network = f
 
 Restricted is an authority boundary, **not** full process-tree management or a promise that arbitrary script code is safe. Tapid does not guarantee cleanup or termination of detached descendants. Configured tree-wide timeout, output, process-count, and memory limits require Linux ManagedTree. A requested restriction the backend cannot enforce causes the run to fail before the target starts; Tapid does not silently run it without containment. Linux Restricted uses Landlock and seccomp and requires kernel support; it has targeted Ubuntu 24.04.5 x86_64 validation. macOS Restricted is experimental and uses deprecated/private Seatbelt APIs.
 
-The command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution. Omitting `assurance` retains the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before the shell starts.
+Without invocation permission flags, the command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution. Omitting `assurance` in configuration retains the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before the shell starts.
 
 The command constructs a minimal environment rather than preserving inherited variables: `PATH` is reserved and cannot be allowlisted, while other declared names are retrieved individually from the caller only when present. Windows environment-name matching is case-insensitive and case-equivalent allowlist duplicates are rejected. The current `network` field is boolean: `true` grants unrestricted networking. `--hostname`, `--port`, and other forwarded application arguments do not constrain authority; declared listen/connect scopes remain future work.
 
@@ -340,7 +365,7 @@ Install derives executable shims from verified package `bin` metadata. Unix uses
 - Dependency lifecycle scripts are denied by default. Exact checked-in approvals can build private derived trees using Linux ManagedTree; see [dependency lifecycle scripts](../../docs/dependency-lifecycle.md).
 - Root scripts run only after the explicit `tapid run` command.
 - Root-script execution is wired to fail-closed preflight. macOS 26 has an experimental Restricted backend using deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock/seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. Linux ManagedTree requires explicit cgroup delegation and private namespaces. macOS ManagedTree, Windows native containment, and the broader platform probe matrix remain unsupported or pending.
-- Full npm CLI/package-specifier compatibility is not implemented: tags and git/file dependencies remain unsupported, while nested/ancestor peer lookup, automatic peer placement, and complete optional-dependency and lockfile semantics remain incomplete. Tapid supports the documented bounded npm-style workspace subset; see the [compatibility matrix](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#compatibility-matrix). Range satisfaction is differential-tested against pinned node-semver 7.8.5 for the documented grammar in `crates/tapid-resolver/README.md`.
+- Full npm CLI/package-specifier compatibility is not implemented. Copied project-root file tarballs and HTTPS Git pins are supported; directory links, SSH Git, preparation hooks, nested/ancestor peer lookup, automatic peer placement, and complete optional-dependency semantics remain unsupported. Tapid supports the documented bounded npm-style workspace subset; see the [compatibility matrix](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#compatibility-matrix). Range satisfaction is differential-tested against pinned node-semver 7.8.5 for the documented grammar in `crates/tapid-resolver/README.md`.
 - `add`, `remove`, `update`, `outdated`, and `prune` are implemented (see [Commands](#commands)); dependency script approval is available through exact checked-in lifecycle policies, while package publishing is outside this slice. Private-registry authentication is available as a development feature, not a production-support claim.
 - JSR installation remains fail-closed unless metadata provides both an HTTPS npm tarball URL and a valid SHA-512 SRI value. Live JSR integrity behavior is unsupported and unverified.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform does not prove behavior on another.
@@ -348,6 +373,15 @@ Install derives executable shims from verified package `bin` metadata. Unix uses
 The macOS runner requires the binary's early private-launcher initializer. `sandbox-exec` launches that same executable under a parameter-bound profile. A fixed-size nonce/version READY/GO protocol, kqueue NOTE_EXEC, and CLOEXEC status EOF establish launch; target exit codes and stderr never do. Receipt `executable_resolution` reports exact Unix byte arrays for PATH and its ordered entries, `caller_path_inherited = false`, the distinct byte-verified private Node snapshot identity and validation timing, and cleanup observation. This reserves bare `node` and env-shebang resolution, not explicit paths to project executables.
 
 For retained bindings, `executable_resolution.reserved_node.cleanup_observed` is `false`, and `limitations` explicitly describes retention. This field reports removal of the private snapshot, independently of best-effort process-group cleanup in `completion`. Retained directories and snapshots consume temporary storage until OS cleanup or host removal after every descendant exits. Tapid does not schedule deletion or reuse them. OS or host removal while descendants survive ends reserved-node protection. Host writes or races after final validation remain outside Restricted containment; retention provides no ManagedTree ownership or cleanup guarantee.
+
+Npm dist-tags such as `latest` and `next` resolve to exact versions online, including tagged prereleases. Matching installs and frozen/offline replay retain the locked version after a tag moves; `update` refreshes the tag target. See [dist-tag behavior](../../docs/compatibility.md#registry-dist-tags).
+
+Project-root `file:vendor/tool.tgz` dependencies copy contained regular tarballs;
+`git+https://example.test/tool.git#main` dependencies pin a peeled commit and
+archive digest. Copied sources use schema 10 and the existing verified-tree and
+bin materialization paths. Matching and frozen installs retain the accepted pin,
+`update` refreshes Git references, and replay rejects changed file bytes.
+See [supported forms and limits](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
 
 Npm aliases are supported in manifest dependencies and package arguments such as `tapid add 'h3-v2@npm:h3@2.0.1-rc.20'`. Scoped targets and supported semver ranges retain their actual registry identity and local import names during install and frozen/offline replay. See [alias behavior and limits](../../docs/compatibility.md#npm-aliases).
 

@@ -169,7 +169,7 @@ pub(super) fn execute_with_backend(
         .finish()
 }
 
-fn validate_supported_evidence(
+pub(super) fn validate_supported_evidence(
     request: &ExecutionRequest,
     support: &ContainmentSupport,
 ) -> Result<(), ExecutionError> {

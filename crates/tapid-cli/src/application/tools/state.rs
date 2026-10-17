@@ -8,6 +8,42 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 pub(super) const LIMIT: usize = 4 * 1024 * 1024;
+
+/// Protect catalog recovery/publication and lease acquisition, never downloads
+/// or command execution. The caller keeps the returned file open while locked.
+pub(super) fn lock_catalog(root: &Path) -> Result<fs::File, OperationalError> {
+    lock_catalog_for(root, std::time::Duration::from_secs(30))
+}
+
+fn lock_catalog_for(
+    root: &Path,
+    timeout: std::time::Duration,
+) -> Result<fs::File, OperationalError> {
+    use crate::application::outcome::ErrorKind;
+    use fs4::{FileExt, TryLockError};
+    use std::time::{Duration, Instant};
+    let path = root.join(".tapid-tool-catalog.lock");
+    check_path(&path)?;
+    let file = crate::filesystem::activation::open_lock_file(&path).map_err(error)?;
+    let started = Instant::now();
+    loop {
+        match FileExt::try_lock(&file) {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if started.elapsed() < timeout => {
+                std::thread::sleep(
+                    Duration::from_millis(10).min(timeout.saturating_sub(started.elapsed())),
+                );
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(OperationalError::new(
+                    ErrorKind::ProjectBusy,
+                    "tool catalog is busy; timed out waiting for publication",
+                ));
+            }
+            Err(TryLockError::Error(e)) => return Err(error(e)),
+        }
+    }
+}
 const MARKER: &[u8] = b"tapid-tools-v1\n";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -236,14 +272,7 @@ pub(super) fn validate(catalog: &Catalog) -> Result<(), OperationalError> {
         tool.version
             .parse::<tapid_core::PackageVersion>()
             .map_err(error)?;
-        if tool
-            .requirement
-            .parse::<tapid_resolver::Requirement>()
-            .map_err(error)?
-            .is_alias()
-        {
-            return Err(error("tool catalog requirements must be npm semver ranges"));
-        }
+        super::validate_requirement(&tool.requirement)?;
         if tool.generation.is_empty() || !tool.generation.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(error("invalid tool generation"));
         }
@@ -277,4 +306,32 @@ pub(super) fn load(root: &Path) -> Result<Catalog, OperationalError> {
     let catalog: Catalog = serde_json::from_slice(&read(&path)?).map_err(error)?;
     validate(&catalog)?;
     Ok(catalog)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::outcome::ErrorKind;
+    use std::time::{Duration, Instant};
+    use tapid_test_support::TempHome;
+
+    #[test]
+    fn catalog_lock_contention_is_bounded_and_retryable() {
+        let home = TempHome::new("tool-catalog-timeout").unwrap();
+        let lock = lock_catalog(home.path()).unwrap();
+        let started = Instant::now();
+        let failure = lock_catalog_for(home.path(), Duration::from_millis(30)).unwrap_err();
+        assert_eq!(failure.kind, ErrorKind::ProjectBusy);
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(lock);
+        lock_catalog_for(home.path(), Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn catalog_lock_rejects_non_regular_files() {
+        let home = TempHome::new("tool-catalog-directory").unwrap();
+        fs::create_dir(home.path().join(".tapid-tool-catalog.lock")).unwrap();
+        assert!(lock_catalog_for(home.path(), Duration::ZERO).is_err());
+    }
 }

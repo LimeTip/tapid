@@ -261,6 +261,7 @@ impl std::error::Error for ConfigError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunConfig {
     defaults: SandboxPolicy,
+    explicit_defaults: bool,
     scripts: BTreeMap<String, SandboxPolicy>,
 }
 
@@ -293,7 +294,11 @@ impl RunConfig {
         for name in root.run.scripts.keys() {
             validate_string_length("script profile name", name)?;
         }
-        let defaults = apply_profile(SandboxPolicy::default(), root.run.defaults)?;
+        let explicit_defaults = root.run.defaults.is_some();
+        let defaults = apply_profile(
+            SandboxPolicy::default(),
+            root.run.defaults.unwrap_or_default(),
+        )?;
         let scripts = root
             .run
             .scripts
@@ -302,11 +307,20 @@ impl RunConfig {
                 apply_profile(defaults.clone(), profile).map(|policy| (name, policy))
             })
             .collect::<Result<_, _>>()?;
-        Ok(Self { defaults, scripts })
+        Ok(Self {
+            defaults,
+            explicit_defaults,
+            scripts,
+        })
     }
 
     pub fn defaults(&self) -> &SandboxPolicy {
         &self.defaults
+    }
+
+    /// Explicit configured defaults, distinct from implicit legacy profile defaults.
+    pub fn configured_defaults(&self) -> Option<&SandboxPolicy> {
+        self.explicit_defaults.then_some(&self.defaults)
     }
 
     /// Returns the exact per-script profile without falling back to defaults.
@@ -334,7 +348,7 @@ struct ConfigDocument {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RunSection {
-    defaults: RawProfile,
+    defaults: Option<RawProfile>,
     scripts: BTreeMap<String, RawProfile>,
 }
 
@@ -940,4 +954,15 @@ mod tests {
         assert!(config.exact_profile("missing").is_none());
         assert!(config.exact_profile("Dev").is_none());
     }
+}
+#[test]
+fn configured_defaults_distinguish_an_explicit_ceiling_from_implicit_defaults() {
+    assert!(
+        RunConfig::parse_toml("")
+            .unwrap()
+            .configured_defaults()
+            .is_none()
+    );
+    let config = RunConfig::parse_toml("[run.defaults]\n").unwrap();
+    assert_eq!(config.configured_defaults(), Some(config.defaults()));
 }

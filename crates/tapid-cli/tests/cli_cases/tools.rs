@@ -429,7 +429,119 @@ fn tool_powershell_shim_preserves_empty_arguments() {
 }
 
 #[test]
-fn tool_operations_fail_when_another_process_holds_the_catalog_lock() {
+fn tool_failed_install_remains_retryable_with_earlier_cleanup_pending() {
+    use fs4::FileExt;
+    let project = TempProject::new("tool-failed-with-cleanup").unwrap();
+    let home = TempHome::new("tool-failed-with-cleanup").unwrap();
+    assert_success(&install(&project, &home));
+    let listed = list(&project, &home);
+    let environment = Path::new(listed["data"]["tools"][0]["environment"].as_str().unwrap());
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(environment.join(".in-use"))
+        .unwrap();
+    FileExt::try_lock_shared(&lease).unwrap();
+    assert_success(
+        &command(&project, &home, &["tool", "remove", "hello-tool"])
+            .output()
+            .unwrap(),
+    );
+    let output = command(
+        &project,
+        &home,
+        &["--json", "tool", "install", "hello-tool@9.0.0"],
+    )
+    .arg("--registry-fixture")
+    .arg(fixture(&project))
+    .arg("--store-dir")
+    .arg(home.path().join("store"))
+    .output()
+    .unwrap();
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(result["retry"], "after_correction");
+    assert!(environment.exists());
+}
+
+#[test]
+fn tool_json_truncation_pointers_are_sorted() {
+    let project = TempProject::new("tool-json-truncation").unwrap();
+    let home = TempHome::new("tool-json-truncation").unwrap();
+    assert_success(&install(&project, &home));
+    let path = home.path().join("tools with spaces/catalog.json");
+    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let long_version = format!("1.0.0-{}", "x".repeat(5000));
+    catalog["tools"]["hello-tool"]["version"] = json!(long_version);
+    catalog["tools"]["hello-tool"]["requirement"] = json!(format!(">={long_version}"));
+    fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    let result = list(&project, &home);
+    assert_eq!(
+        result["truncated_fields"],
+        json!(["/data/tools/0/requirement", "/data/tools/0/version"])
+    );
+}
+
+#[test]
+fn tool_invocation_runs_while_a_mutation_holds_the_staging_lock() {
+    use fs4::FileExt;
+    let project = TempProject::new("tool-exec-during-stage").unwrap();
+    let home = TempHome::new("tool-exec-during-stage").unwrap();
+    assert_success(&install(&project, &home));
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(home.path().join("tools with spaces/.tapid-activation.lock"))
+        .unwrap();
+    FileExt::try_lock(&lock).unwrap();
+    let output = command(&project, &home, &["__tool-exec", "--command", "hello-tool"])
+        .args(["--", "during-stage"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!(["during-stage"])
+    );
+}
+
+#[test]
+fn tool_invocation_waits_for_catalog_publication() {
+    use fs4::FileExt;
+    use std::{process::Stdio, time::Duration};
+    let project = TempProject::new("tool-exec-waits").unwrap();
+    let home = TempHome::new("tool-exec-waits").unwrap();
+    assert_success(&install(&project, &home));
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(
+            home.path()
+                .join("tools with spaces/.tapid-tool-catalog.lock"),
+        )
+        .unwrap();
+    FileExt::try_lock(&lock).unwrap();
+    let mut child = command(&project, &home, &["__tool-exec", "--command", "hello-tool"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let early_exit = child.try_wait().unwrap();
+    drop(lock);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        early_exit.is_none(),
+        "invocation must wait for publication: {output:?}"
+    );
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+}
+
+#[test]
+fn tool_mutations_fail_when_another_process_holds_the_staging_lock() {
     use fs4::FileExt;
     let project = TempProject::new("tool-lock").unwrap();
     let home = TempHome::new("tool-lock").unwrap();
@@ -576,7 +688,11 @@ fn tool_catalog_rejects_invalid_versions_and_requirements() {
     assert_success(&install(&project, &home));
     let path = home.path().join("tools with spaces/catalog.json");
     let before = fs::read(&path).unwrap();
-    for (field, value) in [("version", "not-semver"), ("requirement", "npm:other@1")] {
+    for (field, value) in [
+        ("version", "not-semver"),
+        ("requirement", "npm:other@1"),
+        ("requirement", "latest"),
+    ] {
         let mut catalog: Value = serde_json::from_slice(&before).unwrap();
         catalog["tools"]["hello-tool"][field] = json!(value);
         fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();

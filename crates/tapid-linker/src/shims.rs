@@ -31,12 +31,58 @@ pub enum ShimStrategy {
     WindowsCmdAndPowerShell,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShimInterpreter {
+    Direct,
+    Node,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShimEntry {
     pub command: String,
     pub source: PathBuf,
     pub target: PathBuf,
     pub strategy: ShimStrategy,
+    pub interpreter: ShimInterpreter,
+}
+
+fn shim_interpreter(
+    source: &std::path::Path,
+    platform: Platform,
+) -> Result<ShimInterpreter, PlanError> {
+    use std::io::Read;
+    if platform != Platform::Windows {
+        return Ok(ShimInterpreter::Direct);
+    }
+    let mut prefix = Vec::new();
+    std::fs::File::open(source)
+        .and_then(|file| file.take(512).read_to_end(&mut prefix))
+        .map_err(|_| PlanError::BinTargetMissing(source.to_owned()))?;
+    if !prefix.starts_with(b"#!") {
+        return Ok(ShimInterpreter::Direct);
+    }
+    if prefix.len() == 512 && !prefix.contains(&b'\n') {
+        return Err(PlanError::InvalidPackageMetadata(format!(
+            "Windows bin shebang exceeds the inspection limit: {}",
+            source.display()
+        )));
+    }
+    let line = prefix
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    let words = std::str::from_utf8(&line[2..])
+        .unwrap_or_default()
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>();
+    match words.as_slice() {
+        ["node" | "node.exe" | "/usr/bin/node" | "/usr/bin/node.exe"]
+        | ["/usr/bin/env", "node" | "node.exe"] => Ok(ShimInterpreter::Node),
+        _ => Err(PlanError::InvalidPackageMetadata(format!(
+            "unsupported Windows bin interpreter: {}",
+            source.display()
+        ))),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,6 +153,7 @@ pub fn plan_shims(
                 return Err(PlanError::ShimCollision(target_path));
             }
             entries.push(ShimEntry {
+                interpreter: shim_interpreter(&source, platform)?,
                 command: target.command.clone(),
                 source,
                 target: target_path,
@@ -218,6 +265,7 @@ pub fn plan_shims_with_workspace_packages(
                 return Err(PlanError::ShimCollision(target_path));
             }
             plan.entries.push(ShimEntry {
+                interpreter: shim_interpreter(&validated_source, platform)?,
                 command: target.command.clone(),
                 source,
                 target: target_path,
@@ -332,6 +380,83 @@ mod tests {
             package_json: format!(r#"{{"name":"{name}","version":"1.0.0","bin":{bin}}}"#),
             bin_dir: root.join("node_modules"),
         }
+    }
+
+    #[test]
+    fn windows_bin_interpreters_are_bounded_and_do_not_execute_shebang_arguments() {
+        let root = test_root("interpreters");
+        std::fs::create_dir_all(&root).unwrap();
+        let package = shim_package(&root, "tool", r#""cli.js""#, "package");
+        for (prefix, expected) in [
+            (
+                b"#!/usr/bin/env node\n".as_slice(),
+                Some(ShimInterpreter::Node),
+            ),
+            (
+                b"#! /usr/bin/node\r\n".as_slice(),
+                Some(ShimInterpreter::Node),
+            ),
+            (
+                b"MZ native executable".as_slice(),
+                Some(ShimInterpreter::Direct),
+            ),
+            (b"#!/usr/bin/env node --inspect\n".as_slice(), None),
+            (b"#!/usr/bin/env node&evil\n".as_slice(), None),
+            (b"#!/bin/sh\n".as_slice(), None),
+        ] {
+            std::fs::write(package.tree_root.join("cli.js"), prefix).unwrap();
+            let result = plan_shims(
+                ManagedRoot::new(&root).unwrap(),
+                vec![package.clone()],
+                Platform::Windows,
+            );
+            match expected {
+                Some(interpreter) => {
+                    assert_eq!(result.unwrap().entries[0].interpreter, interpreter)
+                }
+                None => assert!(matches!(result, Err(PlanError::InvalidPackageMetadata(_)))),
+            }
+            assert!(!package.bin_dir.join(".bin").exists());
+        }
+        std::fs::write(
+            package.tree_root.join("cli.js"),
+            [b"#!".as_slice(), &vec![b' '; 1024], b"node\n"].concat(),
+        )
+        .unwrap();
+        assert!(
+            plan_shims(
+                ManagedRoot::new(&root).unwrap(),
+                vec![package.clone()],
+                Platform::Windows
+            )
+            .is_err()
+        );
+        std::fs::write(
+            package.tree_root.join("cli.js"),
+            [b"#!node".as_slice(), &vec![b' '; 1024], b"--inspect\n"].concat(),
+        )
+        .unwrap();
+        assert!(
+            plan_shims(
+                ManagedRoot::new(&root).unwrap(),
+                vec![package.clone()],
+                Platform::Windows
+            )
+            .is_err(),
+            "arguments beyond the bounded prefix must not be accepted"
+        );
+        assert_eq!(
+            plan_shims(
+                ManagedRoot::new(&root).unwrap(),
+                vec![package],
+                Platform::Unix
+            )
+            .unwrap()
+            .entries[0]
+                .interpreter,
+            ShimInterpreter::Direct
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
