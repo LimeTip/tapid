@@ -129,7 +129,8 @@ mod tests {
     #[test]
     fn large_native_tool_bin_is_planned_without_a_state_file_size_limit() {
         let project = tapid_test_support::TempProject::new("tool-native-prefix").unwrap();
-        let package = project.path().join("node_modules/native");
+        let root = super::state::root_path(Some(project.path())).unwrap();
+        let package = root.join("node_modules/native");
         std::fs::create_dir_all(&package).unwrap();
         let manifest = tapid_manifest::PackageManifest::parse(
             r#"{"name":"native","version":"1.0.0","bin":{"native":"native.exe"}}"#,
@@ -138,8 +139,7 @@ mod tests {
         let mut binary = vec![0; super::state::LIMIT + 1];
         binary[..2].copy_from_slice(b"MZ");
         std::fs::write(package.join("native.exe"), binary).unwrap();
-        let commands =
-            super::package_commands(project.path(), project.path(), &package, &manifest).unwrap();
+        let commands = super::package_commands(&root, &root, &package, &manifest).unwrap();
         assert!(!commands["native"].node);
     }
 }

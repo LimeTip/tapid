@@ -318,20 +318,22 @@ mod tests {
     #[test]
     fn catalog_lock_contention_is_bounded_and_retryable() {
         let home = TempHome::new("tool-catalog-timeout").unwrap();
-        let lock = lock_catalog(home.path()).unwrap();
+        let root = root_path(Some(home.path())).unwrap();
+        let lock = lock_catalog(&root).unwrap();
         let started = Instant::now();
-        let failure = lock_catalog_for(home.path(), Duration::from_millis(30)).unwrap_err();
+        let failure = lock_catalog_for(&root, Duration::from_millis(30)).unwrap_err();
         assert_eq!(failure.kind, ErrorKind::ProjectBusy);
         assert!(started.elapsed() >= Duration::from_millis(30));
         assert!(started.elapsed() < Duration::from_secs(5));
         drop(lock);
-        lock_catalog_for(home.path(), Duration::ZERO).unwrap();
+        lock_catalog_for(&root, Duration::ZERO).unwrap();
     }
 
     #[test]
     fn catalog_lock_rejects_non_regular_files() {
         let home = TempHome::new("tool-catalog-directory").unwrap();
-        fs::create_dir(home.path().join(".tapid-tool-catalog.lock")).unwrap();
-        assert!(lock_catalog_for(home.path(), Duration::ZERO).is_err());
+        let root = root_path(Some(home.path())).unwrap();
+        fs::create_dir(root.join(".tapid-tool-catalog.lock")).unwrap();
+        assert!(lock_catalog_for(&root, Duration::ZERO).is_err());
     }
 }
