@@ -6,8 +6,8 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 
 | Command | Global `--json` |
 | --- | --- |
-| `install`, alias `i` | Install or replay result |
-| `add`, `remove`, `update`, `prune` | Dependency operation result |
+| `install`, alias `i` | Install or replay result; resolved dependency preview with `--dry-run` |
+| `add`, `remove`, `update`, `prune` | Dependency operation result; `add`, `remove`, and `update` support resolved previews with `--dry-run` |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
 | `explain` | Exact package evidence under `data`; registry metadata or a local snapshot, with optional artifact byte verification |
 | `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
@@ -35,7 +35,7 @@ Every object contains these fields:
 | `changes.state` | `unchanged`, `rolled_back`, `committed`, `committed_cleanup_pending`, or `recovery_required` |
 | `changes.files` | Sorted, deduplicated display paths for affected project outputs |
 | `changes.paths` | Sorted, deduplicated lossless native path records for affected project outputs |
-| `truncated_fields` | Sorted JSON pointers to display or metadata scalars shortened by the byte limit |
+| `truncated_fields` | Sorted, deduplicated JSON pointers to display or metadata scalars shortened by the byte limit |
 | `warnings` | Sorted, deduplicated warning codes |
 | `errors` | Error objects with a stable `code`; operational errors also have `phase` of `operation` or `recovery` |
 | `retry` | null or typed retry advice |
@@ -53,7 +53,38 @@ Help results contain `data.text`, the selected command's help text with no ANSI 
 
 Inspection and previews report `changes.state: "unchanged"`. Successful eviction exits 0 and reports `committed` when entries were removed, or `unchanged` for an empty deletion set. `CACHE_BUSY` exits 1 with `unchanged` state and `retry: "after_contention"`. Other failures before eviction exit 1 with `unchanged` state and `CACHE_MAINTENANCE_FAILED`. A deletion or directory-sync failure exits 1 and reports `committed_cleanup_pending` because some cached data may have been removed; this state concerns cache eviction, not a project transaction. Cleanup has stopped, and no background cleanup is scheduled. Inspect the cache or retry after correcting the filesystem error. The state does not promise that removal or synchronization will finish automatically. Failed results have `data.summary: null`. Cache-location failures, including explicit roots that are files or symlinks, use `CACHE_PATH_INVALID`. All cache operational errors include `phase: "operation"`. An empty explicit `--store-dir` is rejected during argument parsing as `ARGUMENT_INVALID`, exit 2.
 
-Install and mutating lifecycle data contains `package_count` and `replayed`. Graphs, artifact URLs, raw metadata, credentials, source error chains, and uncontrolled diagnostic messages are excluded. There is no graph selection in version 1.
+## Install and dependency preview results
+
+Ordinary install and mutating lifecycle results contain `data.package_count` and `data.replayed`. They exclude graphs, artifact URLs, raw metadata, credentials, source error chains, and uncontrolled diagnostic messages.
+
+`tapid --json install --dry-run`, `add --dry-run`, `remove --dry-run`, and `update --dry-run` instead return a resolved graph preview under the version 1 envelope. The operation retains its canonical command name. Successful previews use `outcome: "success"`, `changes.state: "unchanged"`, empty affected-file lists, null retry advice, and exit 0. This payload is an observation, not an executable plan or a prepared installation.
+
+| Preview data field | Meaning |
+| --- | --- |
+| `preview_kind` | `"resolved_graph"` |
+| `artifacts_prepared` | Always `false` |
+| `target` | Current OS/architecture/libc inspection target, with `unspecified` when libc is unavailable |
+| `declarations` | Declaration edits with `section`, `name`, `before`, and `after`; absent requirements are null |
+| `packages` | Package records and graph changes described below |
+| `root_changes` | Changed graph root bindings with `name`, `before`, and `after`; absent bindings are null, present bindings are package keys |
+| `effects` | Network permission, metadata lookups, and side effects described below |
+| `limitations` | Presentation strings describing unavailable evidence and preview limits |
+
+Declarations follow dependency-section order: `dependencies`, `devDependencies`, `optionalDependencies`, then `peerDependencies`, with names sorted within each section. Packages sort by canonical package key; root changes sort by binding name. Empty change lists are arrays, not null.
+
+Each package entry contains `key`, `source`, `name`, `version`, `integrity`, `dependencies`, `change`, `before`, `after`, and `reasons`. A package record contains the first six fields. `dependencies` maps local dependency names to selected package keys. `integrity` contains available integrity metadata or null; it does not attest artifact bytes. `before` and `after` contain the corresponding record or null when absent. The top-level record describes the after state when present, otherwise the before state. Canonical keys distinguish source, name, version, peer context, and platform context.
+
+`change` is `added`, `removed`, `changed`, or `unchanged`. A version, peer-context, or platform-context change produces removal of the old identity and addition of the new one. `changed` means a retained identity has different integrity metadata or dependency targets. Unchanged packages remain in the array. Inspect `root_changes` too: promoting an existing transitive package to a direct root can change a binding without changing a package record.
+
+Each reason contains `graph` of `before` or `after`, `relation` of `direct` for a graph root or `dependency` for a parent edge, `parent` as the parent package key or null for roots, `dependency` as the incoming name, and `requirement` as an available requirement or null. These are selection edges in the indicated graph, not API compatibility claims. Existing lockfile transitive edges do not preserve their original dependency kind or declared range; unavailable ranges remain null rather than presenting reconstructed exact pins as declared requirements.
+
+`effects` contains `network_allowed`, `metadata_source`, `metadata_lookups`, `artifact_requests`, `cache_reads`, `cache_writes`, `project_writes`, `recovery`, and `scripts`. `network_allowed` describes permission to fetch registry metadata, not proof that a request occurred. `metadata_source` is `registry`, `fixture`, or `lockfile`; `metadata_lookups` counts package metadata lookups, not individual HTTP requests. A matching online lock can produce zero lookups even when network access is allowed. Fixtures and offline/frozen inspection forbid registry access. `artifact_requests` is always 0, and the remaining effect flags are always false. Cache fields refer to the package store, not reading the project's lockfile.
+
+Previews do not create an activation lock, recover transactions, access the package store, fetch artifacts, or run scripts. Pending recovery fails without attempting recovery. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without establishing that its artifacts are cached. Previews requiring copied file/Git resolution or imported npm locks fail explicitly. Artifact availability, archive validity, lifecycle outputs, and later installation success remain unverified. A later command reads current inputs and may resolve different metadata.
+
+Preview metadata uses the same scalar sanitization and byte limits as other version 1 data. The combined envelope and preview truncation pointers are sorted and deduplicated in `truncated_fields`. Handled failures use the standard failure envelope with `data: null`, unchanged project state, a typed error, and exit 1.
+
+## Outdated results
 
 Outdated data contains `entries`, `total_entries`, and `truncated`. Each entry contains `identity`, `kind`, `declared`, `locked`, `newest_compatible`, `newest_available`, and `error`. Unknown versions are null. The error is null or an object with a typed code. Entries sort by identity and dependency kind. Metadata failure in any entry makes the overall outcome `partial`, even if that entry falls beyond the output limit. Partial outdated reports retain exit 0; callers must inspect `outcome` and entry errors.
 
@@ -69,7 +100,9 @@ Package text is untrusted data. Never execute it or treat it as recovery advice.
 
 ## Codes and compatibility
 
-Operational codes are `INVALID_REQUEST`, `PROJECT_UNAVAILABLE`, `MANIFEST_INVALID`, `LOCKFILE_INVALID`, `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_CONFIGURATION_INVALID`, `REGISTRY_AUTH_MISSING`, `REGISTRY_METADATA_INVALID`, `REGISTRY_METADATA_UNAVAILABLE`, `REGISTRY_TRANSPORT_FAILED`, `RESOLUTION_FAILED`, `PEER_DEPENDENCY_UNSATISFIED`, `INTEGRITY_MISMATCH`, `ARCHIVE_INVALID`, `STORE_FAILED`, `STORE_CONTENT_UNAVAILABLE`, `STORE_BUSY`, `PROJECT_BUSY`, `MATERIALIZATION_FAILED`, `TRANSACTION_FAILED`, `RECOVERY_FAILED`, and `INVALID_DATA`. Protocol codes are `ARGUMENT_INVALID` and `JSON_UNSUPPORTED_COMMAND`. Warning codes are `UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED` and `PREVIOUS_TRANSACTION_RECOVERED`.
+Operational codes are `INVALID_REQUEST`, `PROJECT_UNAVAILABLE`, `PROJECT_CHANGED`, `MANIFEST_INVALID`, `LOCKFILE_INVALID`, `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_CONFIGURATION_INVALID`, `REGISTRY_AUTH_MISSING`, `REGISTRY_METADATA_INVALID`, `REGISTRY_METADATA_UNAVAILABLE`, `REGISTRY_TRANSPORT_FAILED`, `RESOLUTION_FAILED`, `PEER_DEPENDENCY_UNSATISFIED`, `INTEGRITY_MISMATCH`, `ARCHIVE_INVALID`, `STORE_FAILED`, `STORE_CONTENT_UNAVAILABLE`, `STORE_BUSY`, `PROJECT_BUSY`, `MATERIALIZATION_FAILED`, `TRANSACTION_FAILED`, `RECOVERY_FAILED`, and `INVALID_DATA`. Protocol codes are `ARGUMENT_INVALID` and `JSON_UNSUPPORTED_COMMAND`. Warning codes are `UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED` and `PREVIOUS_TRANSACTION_RECOVERED`.
+
+`PROJECT_CHANGED` means the starting manifest changed after dependency planning or while preparing a preview. Lifecycle commands compare the expected semantic manifest with the current manifest under the project lock before writing an override. This failure uses unchanged state and `retry: "after_correction"`; rerun against current inputs. It does not claim protection against uncooperative writers changing files throughout a transaction.
 
 Within schema version 1, existing field types, code meanings, transaction states, and exit semantics remain stable. Additive fields, new error or warning codes, and new command coverage are compatible. Consumers must ignore unknown fields and handle unknown codes conservatively. Removing or renaming fields or changing their meaning requires a new schema version. Schema versioning is independent of Tapid's package version.
 

@@ -5,6 +5,9 @@ use tapid_manifest::DependencyKind;
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct AddArgs {
+    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
     /// Packages to add, such as react@^19.0.0. Defaults to * without a requirement.
     #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
@@ -32,6 +35,9 @@ pub(crate) struct AddArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct RemoveArgs {
+    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
     /// Declared package names to remove, without version requirements.
     #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
@@ -41,6 +47,9 @@ pub(crate) struct RemoveArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct UpdateArgs {
+    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
     /// Declared package names to select. Omit to select all direct dependencies.
     #[arg(value_name = "PACKAGE")]
     pub(crate) packages: Vec<String>,
@@ -140,7 +149,7 @@ pub(crate) fn add(args: AddArgs, json: bool) -> ExitCode {
             }
         })
         .collect::<Vec<_>>();
-    let result = mutate_and_install(&args.common, json, false, |manifest| {
+    let result = mutate_and_install(&args.common, json, false, args.dry_run, |manifest| {
         crate::application::lifecycle::plan_add(manifest, &mutations)
     });
     report(result, json, "add", "Added dependencies")
@@ -160,14 +169,14 @@ pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
             json,
         );
     }
-    let result = mutate_and_install(&args.common, json, false, |manifest| {
+    let result = mutate_and_install(&args.common, json, false, args.dry_run, |manifest| {
         crate::application::lifecycle::plan_remove(manifest, &args.packages)
     });
     report(result, json, "remove", "Removed dependencies")
 }
 
 pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
-    let result = mutate_and_install(&args.common, json, true, |manifest| {
+    let result = mutate_and_install(&args.common, json, true, args.dry_run, |manifest| {
         crate::application::lifecycle::plan_update(manifest, &args.packages, args.latest)
     });
     report(result, json, "update", "Updated dependencies")
@@ -254,10 +263,11 @@ fn mutate_and_install(
     common: &CommonArgs,
     json: bool,
     refresh: bool,
+    dry_run: bool,
     planner: impl FnOnce(
         &tapid_manifest::PackageManifest,
     ) -> Result<crate::application::lifecycle::LifecyclePlan, OperationalError>,
-) -> Result<crate::application::install::InstallReport, OperationFailure> {
+) -> Result<LifecycleReport, OperationFailure> {
     let selection = crate::application::lifecycle::resolve_workspace(
         &common.project_dir,
         common.workspace.as_deref(),
@@ -265,10 +275,29 @@ fn mutate_and_install(
     .map_err(|error| OperationFailure::unchanged(&common.project_dir, error))?;
     let plan = planner(&selection.manifest)
         .map_err(|error| OperationFailure::unchanged(&selection.root_dir, error))?;
+    if dry_run {
+        return crate::application::preview::run(
+            &selection.root_dir,
+            &selection.manifest_path,
+            &selection.manifest,
+            &plan.manifest,
+            if refresh {
+                crate::application::install::InstallMode::Refresh
+            } else {
+                crate::application::install::InstallMode::Online
+            },
+            common.registry_fixture.as_deref(),
+            common.allow_unverified_registry_artifacts,
+        )
+        .map(LifecycleReport::Preview);
+    }
     crate::application::install::run_with_manifest_target(
         &selection.root_dir,
         &selection.manifest_path,
-        Some(&plan.manifest),
+        Some(crate::application::install::ManifestEdit {
+            expected: &selection.manifest,
+            updated: &plan.manifest,
+        }),
         None,
         common.store_dir.as_deref(),
         if refresh {
@@ -280,16 +309,26 @@ fn mutate_and_install(
         common.allow_unverified_registry_artifacts,
         |event| crate::output::report_progress(event, json),
     )
+    .map(LifecycleReport::Installed)
+}
+
+#[derive(Debug)]
+enum LifecycleReport {
+    Installed(crate::application::install::InstallReport),
+    Preview(crate::application::preview::PreviewReport),
 }
 
 fn report(
-    result: Result<crate::application::install::InstallReport, OperationFailure>,
+    result: Result<LifecycleReport, OperationFailure>,
     json: bool,
     operation: &str,
     action: &str,
 ) -> ExitCode {
     match result {
-        Ok(report) => {
+        Ok(LifecycleReport::Preview(report)) => {
+            crate::output::preview::report(&report, operation, json)
+        }
+        Ok(LifecycleReport::Installed(report)) => {
             if json {
                 return crate::output::json::installed(&report, operation);
             }
@@ -331,6 +370,7 @@ mod tests {
 
         let result = add(
             AddArgs {
+                dry_run: false,
                 packages: vec!["react@^18.0.0".into()],
                 dev: false,
                 optional: false,
@@ -375,5 +415,58 @@ mod tests {
             crate::application::lifecycle::format_outdated_entry(&entry),
             "npm:foo [dependencies] declared=^1.0.0 locked=1.0.0 compatible=1.4.0 available=unavailable diagnostic=registry metadata unavailable\n  compatible-change=minor compatible-lockfile=changed\n  available-change=unknown available-lockfile=unknown available-manifest=unknown"
         );
+    }
+}
+
+#[cfg(test)]
+mod stale_tests {
+    use super::*;
+    use tapid_test_support::TempProject;
+
+    #[test]
+    fn stale_lifecycle_request_preserves_intervening_manifest_edit() {
+        let project = TempProject::new("stale-lifecycle").unwrap();
+        project
+            .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+            .unwrap();
+        let newer = br#"{"name":"app","version":"1.0.0","description":"another writer"}"#;
+        let fixture = project.write("registry.json", br#"{"packages":[{"registry":"https://jsr.io","name":"@scope/placeholder","version":"1.0.0","artifact":"unused"}]}"#).unwrap();
+        let common = CommonArgs {
+            project_dir: project.path().to_owned(),
+            workspace: None,
+            store_dir: Some(project.path().join("store")),
+            registry_fixture: Some(fixture),
+            allow_unverified_registry_artifacts: false,
+        };
+        let result = mutate_and_install(&common, false, false, false, |manifest| {
+            let plan = crate::application::lifecycle::plan_add(
+                manifest,
+                &[crate::application::lifecycle::DependencyMutation {
+                    name: "react".into(),
+                    requirement: Some("^18.0.0".into()),
+                    kind: DependencyKind::PeerDependencies,
+                }],
+            )?;
+            project.write("package.json", newer).unwrap();
+            Ok(plan)
+        });
+        assert_eq!(
+            std::fs::read(project.path().join("package.json")).unwrap(),
+            newer,
+            "intervening edit was overwritten"
+        );
+        let failure = result.unwrap_err();
+        assert_eq!(failure.error.kind.code(), "PROJECT_CHANGED");
+        assert_eq!(
+            failure.outcome.state,
+            crate::application::outcome::ChangeState::Unchanged
+        );
+        assert_eq!(
+            std::fs::read(project.path().join("package.json")).unwrap(),
+            newer
+        );
+        for path in ["tapid.lock", "node_modules", "store"] {
+            assert!(!project.path().join(path).exists(), "{path}");
+        }
     }
 }
