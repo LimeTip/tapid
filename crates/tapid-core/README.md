@@ -11,6 +11,14 @@ Core domain types and deterministic validation for Tapid.
 
 This crate contains package names, canonical SemVer identities including prereleases, SHA-256 artifact digests, canonical padded SHA-512 package integrity values, peer/platform contexts, and shared domain errors. It is intentionally independent of the CLI, network, and filesystem.
 
+`ArtifactUrl` validates canonical HTTPS artifact references without credentials,
+queries, fragments, or ambiguous percent encoding. Transport and lockfile readers
+share this rule without normalizing persisted references.
+
+`PackagePlatform` owns npm OS/CPU aliases, positive and negated constraints, and
+Linux libc matching. `matches` selects applicable packages; `selected_context`
+records only the constrained dimensions in package-instance identity.
+
 `RegistryOrigin` canonicalizes HTTPS origins (host casing/IDNA, IP spelling,
 default port removal and slash-only roots), and rejects credentials, query,
 fragment and non-root paths. Non-default ports remain distinct. Persisted identity

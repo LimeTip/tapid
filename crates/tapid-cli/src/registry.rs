@@ -39,25 +39,24 @@ pub(crate) struct RegistryConfig {
 impl RegistryConfig {
     pub(crate) fn load(project: &std::path::Path) -> Result<Self, String> {
         let path = project.join("tapid.toml");
-        let input = match crate::commands::run::read_bounded_config_file(
-            &path,
-            MAX_CONFIG_BYTES as usize,
-        ) {
-            Ok(bytes) => bytes,
-            Err(crate::commands::run::ConfigReadError::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(Self::default());
-            }
-            Err(crate::commands::run::ConfigReadError::CapacityExceeded) => {
-                return Err(
-                    "registry configuration must be a regular file no larger than 64 KiB".into(),
-                );
-            }
-            Err(crate::commands::run::ConfigReadError::Io(error)) => {
-                return Err(format!("cannot read registry configuration: {error}"));
-            }
-        };
+        let input =
+            match crate::filesystem::read::read_bounded_file(&path, MAX_CONFIG_BYTES as usize) {
+                Ok(bytes) => bytes,
+                Err(crate::filesystem::read::ReadError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Ok(Self::default());
+                }
+                Err(crate::filesystem::read::ReadError::CapacityExceeded) => {
+                    return Err(
+                        "registry configuration must be a regular file no larger than 64 KiB"
+                            .into(),
+                    );
+                }
+                Err(crate::filesystem::read::ReadError::Io(error)) => {
+                    return Err(format!("cannot read registry configuration: {error}"));
+                }
+            };
         Self::parse_toml_bytes(&input)
     }
 
@@ -95,34 +94,15 @@ impl RegistryConfig {
         Ok(Self { routes })
     }
 
-    fn selected_entry(&self, package: &str) -> Result<Option<&RegistryEntry>, String> {
-        let name: PackageName = package
-            .parse()
-            .map_err(|_| "invalid package name".to_owned())?;
-        let key = name
-            .as_str()
-            .split_once('/')
-            .and_then(|(scope, _)| scope.starts_with('@').then_some(scope));
-        Ok(key
-            .and_then(|scope| self.routes.get(scope))
-            .or_else(|| self.routes.get("default")))
-    }
-
-    fn policy_for(&self, package: &str) -> Result<String, String> {
-        let name: PackageName = package
-            .parse()
-            .map_err(|_| "invalid package name".to_owned())?;
-        let scope = name
-            .as_str()
-            .split_once('/')
-            .and_then(|(scope, _)| scope.starts_with('@').then_some(scope));
-        if let Some(scope) = scope.filter(|scope| self.routes.contains_key(*scope)) {
-            return Ok(scope.to_owned());
+    fn selected_entry<'a>(&'a self, name: &PackageName) -> (Option<&'a RegistryEntry>, &'a str) {
+        if let Some((scope, _)) = name.as_str().split_once('/')
+            && let Some((policy, entry)) = self.routes.get_key_value(scope)
+        {
+            return (Some(entry), policy);
         }
-        if self.routes.contains_key("default") {
-            Ok("default".to_owned())
-        } else {
-            Ok("public-fallback".to_owned())
+        match self.routes.get("default") {
+            Some(entry) => (Some(entry), "default"),
+            None => (None, "public-fallback"),
         }
     }
 
@@ -134,7 +114,8 @@ impl RegistryConfig {
     }
 
     pub(crate) fn origin_for_name(&self, name: &PackageName) -> Result<RegistryOrigin, String> {
-        self.selected_entry(name.as_str())?
+        self.selected_entry(name)
+            .0
             .map(|entry| entry.url.as_str())
             .unwrap_or(NPM)
             .parse()
@@ -183,15 +164,17 @@ impl RegistryConfig {
         package: &str,
         mut read_env: impl FnMut(&str) -> Option<String>,
     ) -> Result<RegistryRoute, OperationalError> {
-        let entry = self
-            .selected_entry(package)
-            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-        let origin = self
-            .origin_for(package)
-            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-        let policy = self
-            .policy_for(package)
-            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+        let name: PackageName = package.parse().map_err(|_| {
+            OperationalError::new(ErrorKind::RegistryConfiguration, "invalid package name")
+        })?;
+        let (entry, policy) = self.selected_entry(&name);
+        let origin = entry
+            .map(|entry| entry.url.as_str())
+            .unwrap_or(NPM)
+            .parse()
+            .map_err(|_| {
+                OperationalError::new(ErrorKind::RegistryConfiguration, "invalid registry origin")
+            })?;
         let token = if let Some(variable) = entry.and_then(|entry| entry.token_env.as_deref()) {
             let value = read_env(variable)
                 .filter(|value| !value.is_empty())
@@ -205,7 +188,7 @@ impl RegistryConfig {
         Ok(RegistryRoute {
             origin,
             token,
-            policy,
+            policy: policy.to_owned(),
         })
     }
 

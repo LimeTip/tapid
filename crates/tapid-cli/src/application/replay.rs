@@ -1,35 +1,13 @@
 use super::outcome::{ErrorKind, OperationalError};
-use crate::context;
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf};
 use tapid_core::PackageInstanceId;
 use tapid_linker::{
     InstanceKey, NamedDependency, NamedDependencyEdge, NamedLayoutInput, PackageInstance, Platform,
     VerifiedTreeReference,
 };
 use tapid_lockfile::Lockfile;
-use tapid_manifest::PackageManifest;
+use tapid_manifest::{DependencyKind, PackageManifest};
 use tapid_store::Store;
-
-struct ReplaySnapshotGuard {
-    paths: Vec<PathBuf>,
-    keep: bool,
-}
-
-pub(crate) fn cleanup_replay_snapshots(trees: &BTreeMap<String, PathBuf>) {
-    for tree in trees.values() {
-        let _ = fs::remove_dir_all(tree);
-    }
-}
-
-impl Drop for ReplaySnapshotGuard {
-    fn drop(&mut self) {
-        if !self.keep {
-            for path in &self.paths {
-                let _ = fs::remove_dir_all(path);
-            }
-        }
-    }
-}
 
 fn replay_progress_checkpoint(completed: usize, total: usize) -> bool {
     total > 0 && (completed == 1 || completed == total || completed.is_multiple_of(50))
@@ -46,27 +24,6 @@ fn complete_progress_step<T, E>(
         report(completed, total);
     }
     Ok(value)
-}
-
-/// Compare the full member set and manifest digests before validating replay edges.
-pub(crate) fn validate_workspace_membership(
-    workspace: &crate::online::WorkspaceMaterialization,
-    lock: &Lockfile,
-) -> Result<(), String> {
-    let current = workspace
-        .locked
-        .iter()
-        .map(|package| (package.key(), package.manifest_digest().to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    let locked = lock
-        .workspace_packages()
-        .iter()
-        .map(|(key, package)| (key.clone(), package.manifest_digest().to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    if current != locked {
-        return Err("workspace membership or member manifest changed; regenerate tapid.lock with an online install".to_owned());
-    }
-    Ok(())
 }
 
 pub(crate) fn validate_root_bindings(
@@ -89,6 +46,12 @@ pub(crate) fn validate_root_bindings(
         .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))
 }
 
+pub(crate) struct ReplayInput {
+    pub input: NamedLayoutInput,
+    pub trees: BTreeMap<String, PathBuf>,
+    pub snapshots: Vec<tapid_store::VerifiedTreeSnapshot>,
+}
+
 pub(crate) fn replay_input_with_publication(
     lock: &Lockfile,
     manifest: &PackageManifest,
@@ -96,28 +59,36 @@ pub(crate) fn replay_input_with_publication(
     registry_config: &crate::registry::RegistryConfig,
     report_progress: impl FnMut(usize, usize),
     publication: Option<&tapid_store::StorePublication>,
-) -> Result<(NamedLayoutInput, BTreeMap<String, PathBuf>), OperationalError> {
+) -> Result<ReplayInput, OperationalError> {
     store.cleanup_stale_replay_snapshots().map_err(|error| {
         OperationalError::from(error).context("cannot recover stale replay snapshots")
     })?;
-    replay_input_with_tree_source(
+    let mut snapshots = Vec::new();
+    let (input, trees) = replay_input_with_tree_source(
         lock,
         manifest,
         registry_config,
         report_progress,
-        true,
         |_, package| {
             let digest = package
                 .tree_digest()
                 .parse()
                 .map_err(|error: tapid_core::DomainError| error.to_string())?;
-            match publication {
+            let snapshot = match publication {
                 Some(publication) => publication.verified_tree_snapshot(&digest),
                 None => store.verified_tree_snapshot(&digest),
             }
-            .map_err(OperationalError::from)
+            .map_err(OperationalError::from)?;
+            let path = snapshot.path().to_owned();
+            snapshots.push(snapshot);
+            Ok(path)
         },
-    )
+    )?;
+    Ok(ReplayInput {
+        input,
+        trees,
+        snapshots,
+    })
 }
 
 /// Build the locked layout using either owned replay snapshots or transaction-owned trees.
@@ -126,7 +97,6 @@ pub(crate) fn replay_input_with_tree_source(
     manifest: &PackageManifest,
     registry_config: &crate::registry::RegistryConfig,
     mut report_progress: impl FnMut(usize, usize),
-    owns_snapshots: bool,
     mut tree_source: impl FnMut(
         &tapid_lockfile::LockfilePackageKey,
         &tapid_lockfile::LockedPackage,
@@ -135,10 +105,6 @@ pub(crate) fn replay_input_with_tree_source(
     let mut instances = Vec::new();
     let mut keys = BTreeMap::new();
     let mut trees = BTreeMap::new();
-    let mut snapshots = ReplaySnapshotGuard {
-        paths: Vec::new(),
-        keep: false,
-    };
     let typed_packages = lock.packages_typed().map_err(OperationalError::from)?;
     let mut typed_keys = typed_packages
         .iter()
@@ -163,13 +129,8 @@ pub(crate) fn replay_input_with_tree_source(
             &mut report_progress,
         )
         .map_err(|e| e.context(format!("package {encoded} tree unavailable")))?;
-        if owns_snapshots {
-            snapshots.paths.push(tree.clone());
-        }
-        let peer = context::parse_peer(&key.peer_context)
-            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
-        let platform = context::parse_platform(&key.platform_context)
-            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+        let peer = key.peer_context()?;
+        let platform = key.platform_context()?;
         let registry = key.source.package_source().ok_or_else(|| {
             OperationalError::new(
                 ErrorKind::Lockfile,
@@ -261,7 +222,6 @@ pub(crate) fn replay_input_with_tree_source(
             });
         }
     }
-    snapshots.keep = true;
     Ok((
         NamedLayoutInput {
             instances,
@@ -548,11 +508,10 @@ fn replay_root_identities_with_config(
     String,
 > {
     let mut identities = std::collections::BTreeMap::new();
-    for map in [
-        manifest.dependencies(),
-        manifest.dev_dependencies(),
-        manifest.optional_dependencies(),
-    ] {
+    for (kind, map) in manifest.dependency_sections() {
+        if kind == DependencyKind::PeerDependencies {
+            continue;
+        }
         for (name, requirement) in map {
             let (registry, package) = registry_config.identity_for_spec(name)?;
             if requirement.starts_with("workspace:") {

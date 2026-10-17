@@ -63,7 +63,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
         }
         Err(error) => {
             if json {
-                return crate::output::json::why_failure(&args.project_dir, error.kind.code());
+                return crate::output::json::why_failure(&args.project_dir, &error);
             }
             eprintln!("error: {error}");
             eprintln!("diagnostic: {}", error.kind.code());

@@ -135,11 +135,12 @@ pub(crate) enum Command {
     Remove(lifecycle::RemoveArgs),
     /// Resolve and reinstall dependencies using the declared version ranges.
     #[command(
-        long_about = "Resolve and install the dependency graph again and write tapid.lock. Declared version ranges stay unchanged unless --latest is used.\n\nWith --latest, selected requirements become * in package.json. Package selection controls which declarations change; the entire graph is re-resolved on every update.",
+        long_about = "Refresh selected direct dependencies and write tapid.lock. Named updates preserve unrelated valid locked versions. Selected requirements and peer constraints may require transitive changes, which are reported with their requiring edges. Without names, refresh the whole graph.\n\nDeclared ranges stay unchanged unless a save policy or --latest is used. --latest permits versions beyond the declared range and saves a caret requirement by default. Use --save-exact, --save-caret, or --save-tilde to choose how resolved versions are saved. Alias targets, sections, workspace references, and copied sources are preserved.",
         after_help = "Examples:
   tapid update
   tapid update react
-  tapid update --latest react"
+  tapid update --latest react
+  tapid update --latest --save-exact react"
     )]
     Update(lifecycle::UpdateArgs),
     /// Compare declared and locked dependencies with registry versions.
@@ -210,6 +211,10 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
             command,
             Some(
                 Command::Status(_)
+                    | Command::Ci(_)
+                    | Command::Manifest(_)
+                    | Command::Lock(_)
+                    | Command::ImportPackageLock(_)
                     | Command::Cache(_)
                     | Command::Clean(_)
                     | Command::Install(_)
@@ -242,13 +247,13 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(Command::Init(args)) => init::run(args),
-        Some(Command::ImportPackageLock(args)) => npm_import::run(args),
-        Some(Command::Manifest(args)) => manifest::run(args),
-        Some(Command::Lock(args)) => lock::run(args),
+        Some(Command::ImportPackageLock(args)) => npm_import::run(args, json),
+        Some(Command::Manifest(args)) => manifest::run(args, json),
+        Some(Command::Lock(args)) => lock::run(args, json),
         Some(Command::Run(args)) => run::run(args),
 
         Some(Command::Install(args)) => install::run(args, json),
-        Some(Command::Ci(args)) => ci::run(args),
+        Some(Command::Ci(args)) => ci::run(args, json),
         Some(Command::Add(args)) => lifecycle::add(args, json),
         Some(Command::Remove(args)) => lifecycle::remove(args, json),
         Some(Command::Update(args)) => lifecycle::update(args, json),

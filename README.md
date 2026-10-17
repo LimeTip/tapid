@@ -196,6 +196,8 @@ Released 0.0.10 clients still use signed discovery followed by GitHub checksum f
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
 
+Automation clients can use the compact [agent guide v1](docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
+
 ## Install from the lockfile
 
 ```text
@@ -216,7 +218,7 @@ tapid install --offline --project-dir ./example
 tapid install --frozen --project-dir ./example
 ```
 
-Ordinary install reuses a matching lock. Changed manifests preserve compatible locked selections; `tapid update` requests a fresh graph. Frozen installation with a native lock keeps the exact graph and lock bytes, and can download missing pinned archives without resolving metadata. Imported npm locks preserve selections but may record verified tree receipts. Offline installation forbids downloads, including with `--frozen`. Native lock hydration requires a pinned HTTPS URL and registry-declared SHA-512 provenance, then verifies the archive and locked tree digest. Replay validates manifest digests, registry routes, platform contexts, tree markers, and managed output before atomic activation. `--store-dir PATH` selects another verified store root. See [locked installation decisions](docs/adr/0008-locked-install-selection-and-hydration.md).
+Ordinary install reuses a matching lock. Changed manifests preserve compatible locked selections; `tapid update` without names requests a fresh graph; named updates preserve unrelated compatible pins. Frozen installation with a native lock keeps the exact graph and lock bytes, and can download missing pinned archives without resolving metadata. Imported npm locks preserve selections but may record verified tree receipts. Offline installation forbids downloads, including with `--frozen`. Native lock hydration requires a pinned HTTPS URL and registry-declared SHA-512 provenance, then verifies the archive and locked tree digest. Replay validates manifest digests, registry routes, platform contexts, tree markers, and managed output before atomic activation. `--store-dir PATH` selects another verified store root. See [locked installation decisions](docs/adr/0008-locked-install-selection-and-hydration.md).
 
 ## Inspect and clear the package cache
 

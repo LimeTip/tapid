@@ -484,6 +484,41 @@ fn manifest_roots_rejects_conflicting_direct_dependency_override() {
 }
 
 #[test]
+fn override_diagnostics_preserve_non_npm_metadata_origins() {
+    use crate::application::outcome::{
+        Declaration, DiagnosticContext, DiagnosticPackage, RequirementDiagnostic,
+    };
+    let manifest =
+        PackageManifest::parse(r#"{"name":"app","version":"1.0.0","overrides":{"h3":"^3"}}"#)
+            .unwrap();
+    let overrides = manifest_overrides(&manifest).unwrap();
+    for source in ["https://registry.example.test", "https://jsr.io"] {
+        let original = RequirementDiagnostic {
+            local_name: Some("h3".into()),
+            requirement: "^3".into(),
+            package: Some(DiagnosticPackage {
+                source: source.into(),
+                name: "parent".into(),
+                version: Some("1.0.0".into()),
+            }),
+            declaration: Some(Declaration::metadata("dependencies", "h3")),
+        };
+        let mut context = DiagnosticContext {
+            requirements: vec![original.clone()],
+            ..DiagnosticContext::default()
+        };
+        resolution::locate_override_requirements(
+            &mut context,
+            &[],
+            &manifest,
+            Path::new("package.json"),
+            &overrides,
+        );
+        assert_eq!(context.requirements, vec![original]);
+    }
+}
+
+#[test]
 fn root_override_replaces_a_transitive_dependency_requirement() {
     let root = Dependency::new(
         NPM.parse().unwrap(),
@@ -747,50 +782,6 @@ fn malformed_peer_name_fails_closed() {
         Err(error) => error,
     };
     assert!(error.contains("peer dependency ../host has an unsupported name"));
-}
-
-#[test]
-fn selected_platform_constraints_produce_an_exact_lockfile_context() {
-    let platform = PackagePlatform {
-        os: vec!["darwin".into()],
-        cpu: vec!["arm64".into()],
-        libc: Vec::new(),
-    };
-
-    let context = selected_platform_context_for("macos", "aarch64", None, &platform).unwrap();
-
-    assert_eq!(context.os.as_deref(), Some("darwin"));
-    assert_eq!(context.cpu.as_deref(), Some("arm64"));
-    assert_eq!(context.libc, None);
-}
-
-#[test]
-fn libc_constraints_follow_linux_only_npm_semantics() {
-    let positive = PackagePlatform {
-        os: Vec::new(),
-        cpu: Vec::new(),
-        libc: vec!["glibc".into()],
-    };
-    let exclusion_only = PackagePlatform {
-        os: Vec::new(),
-        cpu: Vec::new(),
-        libc: vec!["!musl".into()],
-    };
-
-    assert!(platform_matches_for("macos", "aarch64", None, &positive));
-    assert!(!platform_matches_for("linux", "x86_64", None, &positive));
-    assert!(platform_matches_for(
-        "linux",
-        "x86_64",
-        None,
-        &exclusion_only
-    ));
-    assert_eq!(
-        selected_platform_context_for("macos", "aarch64", None, &positive)
-            .unwrap()
-            .libc,
-        None
-    );
 }
 
 #[test]
@@ -1192,4 +1183,64 @@ fn dist_tag_peers_fetch_metadata_for_locked_root_providers() {
     .unwrap();
     assert!(fetched_host);
     assert_eq!(resolution.selected.len(), 2);
+}
+
+/// Concurrent member edits must keep their mismatch code; layout refusals keep INVALID_DATA.
+#[test]
+fn imported_workspace_manifest_failure_kinds() {
+    for changed in [true, false] {
+        let project = tapid_test_support::TempProject::new("import-workspace-error-kind").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        project
+            .write(
+                "packages/member/package.json",
+                br#"{"name":"member","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        project
+            .write("tapid.lock", b"preserve existing lock")
+            .unwrap();
+        let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+        let workspace = workspace_materialization(project.path(), &config).unwrap();
+        let manifest = if changed {
+            let updated = br#"{"name":"member","version":"2.0.0"}"#;
+            project
+                .write("packages/member/package.json", updated)
+                .unwrap();
+            updated.as_slice()
+        } else {
+            project
+                .write("packages/member/node_modules/KEEP", b"unmanaged")
+                .unwrap();
+            br#"{"name":"member","version":"1.0.0"}"#.as_slice()
+        };
+        let error = imported_workspace_manifests(project.path(), &workspace).unwrap_err();
+        assert_eq!(
+            error.kind,
+            if changed {
+                ErrorKind::LockManifestMismatch
+            } else {
+                ErrorKind::InvalidData
+            }
+        );
+        assert_eq!(
+            fs::read(project.path().join("packages/member/package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            b"preserve existing lock"
+        );
+        if !changed {
+            assert_eq!(
+                fs::read(project.path().join("packages/member/node_modules/KEEP")).unwrap(),
+                b"unmanaged"
+            );
+        }
+    }
 }

@@ -1,8 +1,10 @@
 //! Offline project preflight. No store handles, transaction locks, or recovery calls.
 use crate::{
-    commands::run::{ConfigReadError, read_bounded_config_file},
     filesystem::{
-        activation::validate_managed_node_modules, atomic::digest_bytes, lifecycle_journal,
+        activation::validate_managed_node_modules,
+        atomic::digest_bytes,
+        lifecycle_journal,
+        read::{ReadError, read_bounded_file},
     },
     registry::RegistryConfig,
 };
@@ -60,9 +62,9 @@ impl StatusReport {
 // Absence, rejected file types and read failures retain distinct snapshot identities.
 // Never read journal contents or enumerate installed trees.
 fn read(path: &Path, limit: usize) -> Result<Vec<u8>, &'static str> {
-    read_bounded_config_file(path, limit).map_err(|error| match error {
-        ConfigReadError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
-        ConfigReadError::CapacityExceeded => "oversized",
+    read_bounded_file(path, limit).map_err(|error| match error {
+        ReadError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
+        ReadError::CapacityExceeded => "oversized",
         _ => "unreadable_or_non_regular",
     })
 }
@@ -326,8 +328,9 @@ fn workspace_matches(
 ) -> Result<(), &'static str> {
     let workspace = crate::online::workspace_materialization(project, config)
         .map_err(|_| "WORKSPACE_COMPATIBILITY_BLOCKER")?;
-    super::replay::validate_workspace_membership(&workspace, lock)
-        .map_err(|_| "LOCK_WORKSPACE_MISMATCH")?;
+    if !crate::online::workspace_matches_lock(&workspace, lock) {
+        return Err("LOCK_WORKSPACE_MISMATCH");
+    }
     let dependencies =
         crate::online::resolved_workspace_registry_dependencies(manifest, &workspace, config)
             .map_err(|_| "WORKSPACE_COMPATIBILITY_BLOCKER")?;
@@ -345,12 +348,8 @@ fn inspect_manifest(
     workspace: &Workspace,
     report: &mut StatusReport,
 ) {
-    for (section, dependencies) in [
-        ("dependencies", manifest.dependencies()),
-        ("devDependencies", manifest.dev_dependencies()),
-        ("optionalDependencies", manifest.optional_dependencies()),
-        ("peerDependencies", manifest.peer_dependencies()),
-    ] {
+    for (kind, dependencies) in manifest.dependency_sections() {
+        let section = kind.field_name();
         for (name, raw) in dependencies.iter().take(MAX_ENTRIES) {
             let location = format!(
                 "{}#/{section}/{}",

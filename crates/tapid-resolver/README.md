@@ -15,6 +15,12 @@ The supported npm range contract is differentially tested against pinned `node-s
 
 `resolve_graph` walks transitive dependency maps deterministically, handles cycles through registry-qualified exact identities, and can select different versions of one transitive package for different parent edges. `resolve_graph_with_routing` accepts a caller-owned route selector for each transitive dependency and peer provider; root identities remain caller-selected, and routing failures are returned as `RegistryRouting` errors. It reports sorted requirements and candidates for conflicts. Offline resolution succeeds only with supplied cached metadata. Frozen resolution requires a lockfile replay input from the consumer layer and never falls back to the network.
 
+Candidate failures retain `RequirementOrigin`, including the local dependency
+name and the exact declaring package for transitive edges. Root origins leave
+the declaring package absent so callers can attach their manifest locations.
+Peer failures retain typed requiring/provider identities, including source and
+version, instead of flattening those identities to strings.
+
 Npm alias requirements retain the actual target name alongside the parsed version range. Resolution selects the actual registry identity while retaining local root bindings and parent edge names. Routing callbacks receive the actual target name. Peer providers are selected by local root name and validated against the actual target registry; explicit alias peers must also match the target name. Distinct local aliases can select different versions of one actual package.
 
-`resolve_graph_with_preferences` accepts exact locked version preferences. Compatible preferences precede the highest-version rule while retaining registry identity and range checks. The CLI supplies locked graph metadata and requests fresh metadata only when the prior candidates cannot satisfy changed inputs. Frozen installs replay the exact graph outside fresh resolution.
+`resolve_graph_with_preferences` accepts exact locked version preferences. Compatible preferences precede the highest-version rule while retaining registry identity and range checks. The CLI supplies locked graph metadata and requests fresh metadata only when the prior candidates cannot satisfy changed inputs. `refresh_roots` selects the highest compatible versions for named local root bindings while retaining locked preferences for transitive edges and other aliases of the same actual package. Frozen installs replay the exact graph outside fresh resolution.

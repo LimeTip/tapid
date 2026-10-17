@@ -1,3 +1,4 @@
+import { compareStableVersions, stableVersionParts } from "./versions.ts";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,13 +15,12 @@ type History = { sha: string; title: string; pr?: number };
 
 function stable(version: string): bigint[] {
   releaseVersion(`v${version}`, version);
-  return version.split(".").map(BigInt);
+  return stableVersionParts(version)!;
 }
 
 function newer(version: string, baseline: string): boolean {
-  const left = stable(version), right = stable(baseline);
-  const index = left.findIndex((part, i) => part !== right[i]);
-  return index >= 0 && left[index] > right[index];
+  stable(version); stable(baseline);
+  return compareStableVersions(version, baseline)! > 0;
 }
 
 export function nextProductVersion(current: string, requested: string, baseline: string = current): string {
