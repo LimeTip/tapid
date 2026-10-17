@@ -124,3 +124,23 @@ The main `release-contract` job owns Unix installer syntax (`sh -n`) and offline
 The Windows installer contract consumes the Windows CLI from the same workflow run and attempt. The producer exports its validated image revision through a job output; verification binds the artifact's recorded image revision to that upstream value, rather than to the separate verifier runner's image revision. Hosted image rollouts can give these jobs different revisions of the same Windows image. Both revisions are logged, while the image OS, architecture, source SHA, run/attempt, build settings, compiler receipts, binary digest, and size checks remain enforced. A missing or mismatched producer image output fails before materializing the executable.
 
 The security and package jobs use runner-provided workspaces and do not rely on local absolute paths. A local command may be unavailable on a developer machine, but CI treats the corresponding gate as required.
+
+## Deterministic agent workflows
+
+`agent_workflows` executes the compact [agent guide v1](agent-guide.md) against
+local npm-import fixtures and isolated projects/homes. Run it with:
+
+```sh
+node --experimental-strip-types scripts/dev.ts test -p tapid --test agent_workflows --locked -- --show-output
+```
+
+Each scenario asserts its task result and emits measured command calls, output
+bytes, and unnecessary repeated failures. Calls have an 8 KiB result budget.
+The scenarios check unchanged locked bytes on replay, unselected package records
+across add/remove, preserved npm locks, failure mutations, missing credentials,
+peer conflicts, unsupported declarations, cold and shared caches, project-lock
+contention, and recovery after a lost commit response. Separate temporary
+checkouts model worktree consumers of the same cache; they do not invoke Git.
+These are deterministic contract tests, not measurements of an external agent's
+reasoning or model tool selection. Existing transaction and containment tests
+remain responsible for their broader platform and attack-path coverage.

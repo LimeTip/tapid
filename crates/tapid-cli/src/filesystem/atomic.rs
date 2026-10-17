@@ -179,6 +179,38 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Inject rename failures only in debug builds so CLI tests can exercise failed rollback.
+fn rename_lockfile(from: &Path, to: &Path) -> io::Result<()> {
+    if cfg!(debug_assertions) {
+        let failure = std::env::var("TAPID_TEST_LOCKFILE_RENAME_FAILURE").unwrap_or_default();
+        let replacement = from.extension().is_some_and(|extension| extension == "tmp")
+            && matches!(failure.as_str(), "replace" | "replace-and-rollback");
+        let rollback = from.extension().is_some_and(|extension| extension == "bak")
+            && failure == "replace-and-rollback";
+        if replacement || rollback {
+            return Err(io::Error::other("injected lockfile rename failure"));
+        }
+    }
+    fs::rename(from, to)
+}
+
+/// Commit one lockfile without moving the old destination away or requiring later rollback.
+/// The synced staging file is in the destination directory so publication uses one rename.
+pub(crate) fn publish_lockfile(path: &Path, contents: &str) -> Result<(), String> {
+    let temp = path.with_file_name(format!(
+        ".tapid-lock-{}-{}.tmp",
+        std::process::id(),
+        unique_nonce()
+    ));
+    write_synced_file(&temp, contents.as_bytes())?;
+    if let Err(error) = rename_lockfile(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+/// Retain a backup for multi-output installation rollback under the caller's recovery journal.
 pub(crate) fn replace_lockfile(path: &Path, contents: &str) -> Result<Option<PathBuf>, String> {
     let nonce = format!("{}-{}", std::process::id(), unique_nonce());
     let temp = path.with_file_name(format!(".tapid-lock-{nonce}.tmp"));
@@ -194,9 +226,9 @@ pub(crate) fn replace_lockfile(path: &Path, contents: &str) -> Result<Option<Pat
     if had_old {
         fs::rename(path, &backup).map_err(|e| e.to_string())?;
     }
-    if let Err(error) = fs::rename(&temp, path) {
+    if let Err(error) = rename_lockfile(&temp, path) {
         if had_old {
-            let _ = fs::rename(&backup, path);
+            let _ = rename_lockfile(&backup, path);
         }
         let _ = fs::remove_file(&temp);
         return Err(error.to_string());
