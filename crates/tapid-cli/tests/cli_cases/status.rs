@@ -82,6 +82,13 @@ fn status_checks_all_workspace_manifests_and_never_reads_credentials() {
     let (_, value) = status(project.path(), &["--workspace", "b"]);
     assert_eq!(value["data"]["workspace"]["selected"], "b");
     assert_eq!(value["data"]["workspace"]["linking"], "not_verified");
+    let expected_location = format!(
+        "{}#/dependencies/bad",
+        Path::new("packages")
+            .join("a")
+            .join("package.json")
+            .display()
+    );
     assert!(
         value["data"]["blockers"]
             .as_array()
@@ -91,7 +98,7 @@ fn status_checks_all_workspace_manifests_and_never_reads_credentials() {
                 && b["location"]
                     .as_str()
                     .unwrap()
-                    .contains("packages/a/package.json#/dependencies/bad"))
+                    .ends_with(&expected_location))
     );
     assert_eq!(
         value["data"]["registries"]["credential_environment_names"][0],
@@ -383,4 +390,125 @@ fn status_rejects_symlinked_marker_without_following_or_replacing_it() {
             .is_symlink()
     );
     assert_eq!(fs::read(target).unwrap(), b"tapid-managed-v1\n");
+}
+
+#[test]
+fn status_reports_root_mismatch_despite_invalid_registry_or_workspace() {
+    for invalid in ["registry", "workspace"] {
+        let project =
+            tapid_test_support::TempProject::new("status-independent-root-mismatch").unwrap();
+        let manifest = if invalid == "workspace" {
+            br#"{"name":"app","version":"1.0.1","workspaces":["packages/**"]}"#.as_slice()
+        } else {
+            br#"{"name":"app","version":"1.0.1"}"#.as_slice()
+        };
+        project.write("package.json", manifest).unwrap();
+        if invalid == "registry" {
+            project.write("tapid.toml", b"[registries\n").unwrap();
+        }
+        let previous = br#"{"name":"app","version":"1.0.0"}"#;
+        let lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(previous))).unwrap();
+        let lock_bytes = lock.to_json().unwrap();
+        project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+        let (output, value) = status(project.path(), &[]);
+        assert!(!output.status.success());
+        assert_eq!(
+            value["data"]["manifest_lock_agreement"], "mismatch",
+            "{invalid}: {value}"
+        );
+        for code in [
+            "LOCK_MANIFEST_MISMATCH",
+            if invalid == "registry" {
+                "REGISTRY_CONFIGURATION_INVALID"
+            } else {
+                "WORKSPACE_INVALID"
+            },
+        ] {
+            assert!(
+                value["data"]["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| b["code"] == code),
+                "missing {code}: {value}"
+            );
+        }
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes.as_bytes()
+        );
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+    }
+}
+
+#[test]
+fn status_reports_replay_blocker_despite_invalid_registry_or_workspace() {
+    for invalid in ["registry", "workspace"] {
+        let project = tapid_test_support::TempProject::new("status-independent-replay").unwrap();
+        let manifest = if invalid == "workspace" {
+            br#"{"name":"app","version":"1.0.0","workspaces":["packages/**"]}"#.as_slice()
+        } else {
+            br#"{"name":"app","version":"1.0.0"}"#.as_slice()
+        };
+        project.write("package.json", manifest).unwrap();
+        if invalid == "registry" {
+            project.write("tapid.toml", b"[registries\n").unwrap();
+        }
+        let lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+        legacy["lockfileVersion"] = serde_json::json!(5);
+        let lock_bytes = legacy.to_string();
+        project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+        let (output, value) = status(project.path(), &[]);
+        assert!(!output.status.success());
+        assert_eq!(value["data"]["manifest_lock_agreement"], "unknown");
+        for code in [
+            "LOCK_REPLAY_UNSUPPORTED",
+            if invalid == "registry" {
+                "REGISTRY_CONFIGURATION_INVALID"
+            } else {
+                "WORKSPACE_INVALID"
+            },
+        ] {
+            assert!(
+                value["data"]["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| b["code"] == code),
+                "{invalid}, missing {code}: {value}"
+            );
+        }
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn status_reports_root_bindings_without_requiring_workspace_discovery() {
+    let project = tapid_test_support::TempProject::new("status-independent-root-bindings").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0","workspaces":["packages/**"],"dependencies":{"missing":"1"}}"#;
+    project.write("package.json", manifest).unwrap();
+    let lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+    let (output, value) = status(project.path(), &[]);
+    assert!(!output.status.success());
+    assert_eq!(value["data"]["manifest_lock_agreement"], "mismatch");
+    for code in ["LOCK_ROOT_BINDINGS_INVALID", "WORKSPACE_INVALID"] {
+        assert!(
+            value["data"]["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["code"] == code),
+            "missing {code}: {value}"
+        );
+    }
 }

@@ -13,7 +13,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tapid_lockfile::Lockfile;
+use tapid_lockfile::{Lockfile, LockfileError};
 use tapid_manifest::{PackageManifest, Workspace};
 
 const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
@@ -233,34 +233,42 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
             .and_then(|text| Lockfile::from_json(text).ok())
         {
             Some(lock) => {
-                if let (Some(manifest), Ok(bytes), Some(_workspace), Some(config)) =
-                    (&manifest, &manifest_bytes, &workspace, &config)
-                {
-                    let digest = digest_bytes(bytes);
-                    if lock.root_manifest_digest() == digest
-                        && lock.validate_replay(&digest).is_err()
-                    {
-                        report.block("LOCK_REPLAY_UNSUPPORTED", &lock_path);
-                    }
-                    if lock.root_manifest_digest() != digest {
-                        report.manifest_lock_agreement = "mismatch";
-                        report.block("LOCK_MANIFEST_MISMATCH", &lock_path);
-                    } else if let Err(code) = workspace_matches(&project, manifest, config, &lock) {
-                        report.manifest_lock_agreement = if code == "LOCK_WORKSPACE_MISMATCH" {
-                            "mismatch"
-                        } else {
-                            "unknown"
-                        };
-                        report.block(code, &lock_path);
-                    } else if crate::application::replay::validate_root_bindings(
-                        &lock, manifest, config,
-                    )
-                    .is_err()
-                    {
-                        report.manifest_lock_agreement = "mismatch";
-                        report.block("LOCK_ROOT_BINDINGS_INVALID", &lock_path);
-                    } else {
-                        report.manifest_lock_agreement = "match";
+                if let (Some(manifest), Ok(bytes)) = (&manifest, &manifest_bytes) {
+                    let root_matches = match lock.validate_replay(&digest_bytes(bytes)) {
+                        Ok(()) => true,
+                        Err(LockfileError::RootManifestDigestMismatch { .. }) => {
+                            report.manifest_lock_agreement = "mismatch";
+                            report.block("LOCK_MANIFEST_MISMATCH", &lock_path);
+                            false
+                        }
+                        Err(_) => {
+                            report.block("LOCK_REPLAY_UNSUPPORTED", &lock_path);
+                            true
+                        }
+                    };
+                    if root_matches && let Some(config) = &config {
+                        let bindings_match = crate::application::replay::validate_root_bindings(
+                            &lock, manifest, config,
+                        )
+                        .is_ok();
+                        if !bindings_match {
+                            report.manifest_lock_agreement = "mismatch";
+                            report.block("LOCK_ROOT_BINDINGS_INVALID", &lock_path);
+                        }
+                        if workspace.is_some() {
+                            match workspace_matches(&project, manifest, config, &lock) {
+                                Ok(()) if bindings_match => {
+                                    report.manifest_lock_agreement = "match"
+                                }
+                                Ok(()) => {}
+                                Err(code) => {
+                                    if code == "LOCK_WORKSPACE_MISMATCH" {
+                                        report.manifest_lock_agreement = "mismatch";
+                                    }
+                                    report.block(code, &lock_path);
+                                }
+                            }
+                        }
                     }
                 }
             }

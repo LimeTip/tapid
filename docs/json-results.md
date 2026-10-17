@@ -94,7 +94,11 @@ Status data contains `manifest_lock_agreement`, `workspace`, `installation`,
 `verification_depth`, `checks_not_performed`, and `capabilities`. Manifest/lock
 agreement is `match`, `mismatch`, or `unknown`. Installation states are `absent`,
 `managed`, or `unmanaged_or_invalid`. Recovery is `none_detected`, `pending`, or
-`unknown`. The shared store is not inspected. Blockers contain stable `code`
+`unknown`. Root digest and replay checks run whenever the manifest and lock parse, even
+when registry configuration or workspace discovery fails. Root binding checks
+require valid registry configuration; workspace checks also require discovery.
+A confirmed mismatch remains conclusive when other checks cannot run.
+The shared store is not inspected. Blockers contain stable `code`
 and bounded `location` fields, using JSON pointers for dependency declarations.
 A selected member does not limit full-workspace checks. Registry data includes
 origins, credential variable names, and `credentials: "not_read"`.
