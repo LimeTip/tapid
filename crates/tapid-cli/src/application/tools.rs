@@ -103,14 +103,7 @@ fn stage(
     progress: &mut impl FnMut(Progress),
 ) -> Result<Tool, OperationalError> {
     let generation = format!("{:x}", crate::filesystem::atomic::unique_nonce());
-    let environment = root.join("environments").join(&generation);
-    fs::create_dir(&environment).map_err(error)?;
-    state::write_new(
-        &environment.join(".tapid-tool"),
-        generation.as_bytes(),
-        false,
-    )?;
-    state::write_new(&environment.join(".in-use"), b"", false)?;
+    let environment = transaction::create_environment(root, &generation)?;
     let manifest = PackageManifest::parse(
         &serde_json::json!({
             "name":"tapid-tool-environment", "version":"0.0.0", "private":true,

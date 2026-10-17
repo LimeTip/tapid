@@ -938,6 +938,117 @@ fn writing_crash_case(point: &str) {
 }
 
 #[test]
+fn tool_reclaims_interrupted_stages_without_claiming_unknown_generations() {
+    for point in [
+        "tool_stage_intent",
+        "tool_environment_created",
+        "tool_writing_environment_owner",
+        "tool_environment_owner_renamed",
+        "tool_environment_owned",
+    ] {
+        let project = TempProject::new(point).unwrap();
+        let home = TempHome::new(point).unwrap();
+        assert_success(&install(&project, &home));
+        let root = home.path().join("tools with spaces");
+        let unknown = root.join("environments/deadbeef");
+        fs::create_dir(&unknown).unwrap();
+        fs::write(unknown.join("user-file"), b"user file").unwrap();
+        let before = list(&project, &home)["data"]["tools"].clone();
+        let crashed = command(&project, &home, &["tool", "update", "hello-tool"])
+            .arg("--registry-fixture")
+            .arg(fixture(&project))
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .env("TAPID_TEST_CRASH_POINT", point)
+            .output()
+            .unwrap();
+        assert!(!crashed.status.success());
+        assert_eq!(list(&project, &home)["data"]["tools"], before);
+        assert_eq!(
+            fs::read_dir(root.join("environments")).unwrap().count(),
+            2,
+            "{point}"
+        );
+        assert_eq!(fs::read(unknown.join("user-file")).unwrap(), b"user file");
+    }
+}
+
+#[test]
+fn tool_stage_recovery_never_follows_an_ownership_sidecar_link() {
+    let project = TempProject::new("tool-stage-link").unwrap();
+    let home = TempHome::new("tool-stage-link").unwrap();
+    let outside = TempProject::new("tool-stage-link-outside").unwrap();
+    assert_success(&install(&project, &home));
+    let sentinel = outside.write("user-file", b"user file").unwrap();
+    let root = home.path().join("tools with spaces");
+    let marker = root.join("environments/.tapid-tool-staging-v1-deadbeef");
+    #[cfg(windows)]
+    assert_success(
+        &isolated_process(&project, &home, "cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&marker)
+            .arg(outside.path())
+            .output()
+            .unwrap(),
+    );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), &marker).unwrap();
+    let output = command(&project, &home, &["tool", "list"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(fs::read(sentinel).unwrap(), b"user file");
+    assert!(!root.join("environments/deadbeef").exists());
+    #[cfg(windows)]
+    fs::remove_dir(marker).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn tool_direct_unix_bin_from_a_non_executable_archive_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    // hello-tool's shell bin has mode 0644 in this verified tar archive.
+    const ARCHIVE: &str = "H4sIAAAAAAAACu2TTUvDQBCGc86viOMhLaTJRGMKuUlpQSge9CQUZJtM7da4G3e3flDy3yWpH0UEL6EV2ecyy7svzDDDW7H8nt1RVG1ruNJSOB2DiJgmSVsR8XvFkyT9fLd6HKen6HjY9SA/sdaGKQf30usPsgHBHggyWFJZyoGRsoQAnkhpLgVkEIcYIgQw5wKyza4ra7SoFcKVhjoAnSteGd34KqkNF9qwsjEKWZA3IG8Gih7XXFHPX2i/Hz4rbmjCS7p+FXnPn15MxqOb0XR8e3V+6Qf+nBV+fwZQ14fe0v/lPffR7i277vFb/vHr7yP/Z8nQ5n8fHB+1p9dLt1JcmIVXcEW5aSPu0gs33tA99IwWi8Vi6Z43SATa4QAMAAA=";
+    let project = TempProject::new("tool-direct-shell").unwrap();
+    let home = TempHome::new("tool-direct-shell").unwrap();
+    let archive = STANDARD.decode(ARCHIVE).unwrap();
+    let registry = json!({"packages":[{
+        "registry":"https://registry.npmjs.org", "name":"hello-tool", "version":"1.0.0",
+        "integrity":format!("sha512-{}", STANDARD.encode(Sha512::digest(&archive))),
+        "artifact":format!("base64:{ARCHIVE}")
+    }]});
+    let registry = project
+        .write(
+            "shell-registry.json",
+            &serde_json::to_vec(&registry).unwrap(),
+        )
+        .unwrap();
+    let installed = command(&project, &home, &["tool", "install", "hello-tool@1.0.0"])
+        .arg("--registry-fixture")
+        .arg(registry)
+        .arg("--store-dir")
+        .arg(home.path().join("store"))
+        .output()
+        .unwrap();
+    assert_success(&installed);
+    let listed = list(&project, &home);
+    let environment = Path::new(listed["data"]["tools"][0]["environment"].as_str().unwrap());
+    assert_ne!(
+        fs::metadata(environment.join("node_modules/hello-tool/bin/hello.js"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111,
+        0
+    );
+    let output = command(&project, &home, &["__tool-exec", "--command", "hello-tool"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(output.stdout, b"direct-tool");
+}
+
+#[test]
 fn tool_retries_interrupted_ownership_publication_without_claiming_unowned_files() {
     for (point, published) in [
         ("tool_initializing_owner", false),

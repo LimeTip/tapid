@@ -7,7 +7,11 @@ use super::{
 use crate::application::outcome::OperationalError;
 use fs4::FileExt;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -180,6 +184,42 @@ pub(super) struct Cleanup {
     pub changed: bool,
 }
 const RETIRED: &str = ".tapid-tool-retired-";
+const STAGING: &str = ".tapid-tool-staging-v1-";
+
+pub(super) fn create_environment(
+    root: &Path,
+    generation: &str,
+) -> Result<PathBuf, OperationalError> {
+    let directory = root.join("environments");
+    let environment = directory.join(generation);
+    state::check_path(&environment)?;
+    match fs::symlink_metadata(&environment) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(error(
+                "tool generation path already exists; preserving files",
+            ));
+        }
+        Err(e) => return Err(error(e)),
+    }
+    let intent = directory.join(format!("{STAGING}{generation}"));
+    state::check_path(&intent)?;
+    fs::create_dir(&intent).map_err(error)?;
+    crate::filesystem::activation::sync_directory(&directory).map_err(error)?;
+    crate::filesystem::activation::test_crash_at("tool_stage_intent");
+    fs::create_dir(&environment).map_err(error)?;
+    crate::filesystem::activation::test_crash_at("tool_environment_created");
+    state::write_new(
+        &environment.join(".tapid-tool"),
+        generation.as_bytes(),
+        false,
+    )?;
+    crate::filesystem::activation::test_crash_at("tool_environment_owned");
+    state::write_new(&environment.join(".in-use"), b"", false)?;
+    fs::remove_dir(intent).map_err(error)?;
+    crate::filesystem::activation::sync_directory(&directory).map_err(error)?;
+    Ok(environment)
+}
 
 fn remove_payload(environment: &Path) -> Result<(), OperationalError> {
     for entry in fs::read_dir(environment).map_err(error)? {
@@ -257,6 +297,58 @@ pub(super) fn cleanup(root: &Path, catalog: &Catalog) -> Result<Cleanup, Operati
         pending: false,
         changed: false,
     };
+    // Only the atomic sidecar, never a generation name or temporary filename,
+    // authorizes completing ownership of an interrupted staging directory.
+    for entry in fs::read_dir(&directory).map_err(error)? {
+        let entry = entry.map_err(error)?;
+        let name = entry.file_name();
+        let Some(generation) = name.to_str().and_then(|s| s.strip_prefix(STAGING)) else {
+            continue;
+        };
+        if generation.is_empty()
+            || !generation.bytes().all(|b| b.is_ascii_hexdigit())
+            || active.contains(generation)
+        {
+            continue;
+        }
+        let intent = entry.path();
+        let metadata = fs::symlink_metadata(&intent).map_err(error)?;
+        if state::is_link(&metadata)
+            || !metadata.is_dir()
+            || fs::read_dir(&intent).map_err(error)?.next().is_some()
+        {
+            return Err(error(
+                "invalid tool staging ownership marker; preserving files",
+            ));
+        }
+        let environment = directory.join(generation);
+        state::check_path(&environment)?;
+        match fs::symlink_metadata(&environment) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(metadata) if metadata.is_dir() && !state::is_link(&metadata) => {
+                let marker = environment.join(".tapid-tool");
+                match fs::symlink_metadata(&marker) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        state::write_new(&marker, generation.as_bytes(), false)?;
+                    }
+                    Ok(_) => {
+                        if state::read(&marker)? != generation.as_bytes() {
+                            return Err(error("tool staging ownership mismatch; preserving files"));
+                        }
+                    }
+                    Err(e) => return Err(error(e)),
+                }
+                // An existing marker may come from a crash after rename but
+                // before its directory sync. Persist it before retiring intent.
+                crate::filesystem::activation::sync_directory(&environment).map_err(error)?;
+            }
+            Ok(_) => return Err(error("invalid tool staging directory; preserving files")),
+            Err(e) => return Err(error(e)),
+        }
+        fs::remove_dir(intent).map_err(error)?;
+        crate::filesystem::activation::sync_directory(&directory).map_err(error)?;
+        result.changed = true;
+    }
     for entry in fs::read_dir(&directory).map_err(error)? {
         let entry = entry.map_err(error)?;
         let name = entry.file_name();
@@ -313,4 +405,60 @@ pub(super) fn cleanup(root: &Path, catalog: &Catalog) -> Result<Cleanup, Operati
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tapid_test_support::TempHome;
+
+    #[test]
+    fn generation_creation_preserves_an_existing_unowned_directory() {
+        let home = TempHome::new("tool-stage-collision").unwrap();
+        let root = state::root_path(Some(home.path())).unwrap();
+        state::initialize(&root).unwrap();
+        let environment = root.join("environments/deadbeef");
+        fs::create_dir(&environment).unwrap();
+        fs::write(environment.join("user-file"), b"user file").unwrap();
+        assert!(create_environment(&root, "deadbeef").is_err());
+        assert!(
+            !root
+                .join(format!("environments/{STAGING}deadbeef"))
+                .exists()
+        );
+        assert_eq!(
+            fs::read(environment.join("user-file")).unwrap(),
+            b"user file"
+        );
+    }
+
+    #[test]
+    fn stage_recovery_preserves_invalid_ownership_records() {
+        for case in ["file", "nonempty", "wrong-owner", "directory-owner"] {
+            let home = TempHome::new(case).unwrap();
+            let root = state::root_path(Some(home.path())).unwrap();
+            state::initialize(&root).unwrap();
+            let environment = root.join("environments/deadbeef");
+            fs::create_dir(&environment).unwrap();
+            fs::write(environment.join("user-file"), b"user file").unwrap();
+            let intent = root.join(format!("environments/{STAGING}deadbeef"));
+            if case == "file" {
+                fs::write(&intent, b"user file").unwrap();
+            } else {
+                fs::create_dir(&intent).unwrap();
+            }
+            match case {
+                "nonempty" => fs::write(intent.join("user-file"), b"user file").unwrap(),
+                "wrong-owner" => fs::write(environment.join(".tapid-tool"), b"other").unwrap(),
+                "directory-owner" => fs::create_dir(environment.join(".tapid-tool")).unwrap(),
+                _ => {}
+            }
+            assert!(cleanup(&root, &Catalog::default()).is_err(), "{case}");
+            assert_eq!(
+                fs::read(environment.join("user-file")).unwrap(),
+                b"user file"
+            );
+            assert!(intent.exists());
+        }
+    }
 }

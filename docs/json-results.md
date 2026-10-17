@@ -7,13 +7,16 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | Command | Global `--json` |
 | --- | --- |
 | `install`, alias `i` | Install or replay result; resolved dependency preview with `--dry-run` |
+| `ci` | Locked install result with the existing install transaction states |
+| `manifest validate`, `lock verify` | Read-only validation result |
+| `import-package-lock` | Offline npm v3 import result; verification remains pending |
 | `add`, `remove`, `update`, `prune` | Dependency operation result; `add`, `remove`, and `update` support resolved previews with `--dry-run` |
 | `tool install`, `tool list`, `tool update`, `tool remove` | Tool inventory and command mappings with operation change/recovery state |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
 | `explain` | Exact package evidence under `data`; registry metadata or a local snapshot, with optional artifact byte verification |
 | `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
 | `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
-| `ci`, `init`, `manifest`, `lock`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
+| `init`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
 | `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
 | Private release helpers, no command | `JSON_UNSUPPORTED_COMMAND`, exit 1 |
 | Invalid arguments | `ARGUMENT_INVALID`, exit 2 |
@@ -55,6 +58,34 @@ Successful `update` results include `data.graph_changes`, an array of changed pa
 `cache`, `cache info`, `cache clean`, and `clean` use the version 1 envelope. The operation is `cache` for its subcommands and `clean` for the shortcut. `project` is null and `changes.files` and `changes.paths` are empty because maintenance does not change project outputs. `data.scope` is `published_package_data`; `data.store` is bounded display text and `data.store_path` uses the existing lossless native-path encoding. `data.action` is `info`, `preview`, or `clean`. The `data.summary` object contains `artifacts` and `trees`, each with `entries` and logical file `bytes`, plus `preserved_entries` for unrecognized entries inside those namespaces. Staging and upgrade-recovery caches are excluded. The version 1 `bytes` field names are unchanged: they count file content lengths, not allocated disk space or predicted reclaimed disk space. Human output labels the same values as logical bytes.
 
 Inspection and previews report `changes.state: "unchanged"`. Successful eviction exits 0 and reports `committed` when entries were removed, or `unchanged` for an empty deletion set. `CACHE_BUSY` exits 1 with `unchanged` state and `retry: "after_contention"`. Other failures before eviction exit 1 with `unchanged` state and `CACHE_MAINTENANCE_FAILED`. A deletion or directory-sync failure exits 1 and reports `committed_cleanup_pending` because some cached data may have been removed; this state concerns cache eviction, not a project transaction. Cleanup has stopped, and no background cleanup is scheduled. Inspect the cache or retry after correcting the filesystem error. The state does not promise that removal or synchronization will finish automatically. Failed results have `data.summary: null`. Cache-location failures, including explicit roots that are files or symlinks, use `CACHE_PATH_INVALID`. All cache operational errors include `phase: "operation"`. An empty explicit `--store-dir` is rejected during argument parsing as `ARGUMENT_INVALID`, exit 2.
+
+Validation success data contains `action` of `validate` or `verify` and
+`valid: true`, with unchanged state and no changed files. Manifest validation
+uses the selected manifest's parent directory as the project; lock verification
+uses the current directory. Failures use typed `MANIFEST_INVALID`,
+`LOCKFILE_INVALID`, or `LOCKFILE_MISSING` errors and `after_correction`.
+These commands do not compare manifest and lock, access the store, or recover.
+
+Npm import success data contains `format: "npm_v3"` and
+`verification: "pending"`. It reports `committed` with tapid.lock as the
+changed output, preserving the original npm lock and installed files. Validation
+and contention failures preserve project outputs. Pending install state returns
+`RECOVERY_FAILED`, `recovery_required`, and `recover_first` without recovery.
+Import stages and syncs the new lock in the project directory, then replaces
+tapid.lock with one rename. It never moves the old lock to a backup first.
+A staging or replacement I/O failure reports `TRANSACTION_FAILED`, `unchanged`,
+empty changed paths, and `after_correction`; the previous lock remains in place.
+No rollback or install recovery is needed for these publication failures.
+Successful replacement reports `committed`. Multi-output installation retains
+its separate journal-backed rollback and recovery contract.
+Import errors classify manifest, lock, registry configuration,
+contention, and transaction failures at their operation boundaries. Workspace-member
+edits detected between discovery and import publication return
+`LOCK_MANIFEST_MISMATCH`; other workspace validation failures retain `INVALID_DATA`.
+
+CI uses the install data and failure contract below, including progress suppression.
+It requires a native verified-tree lock, preserves package.json and tapid.lock,
+and replaces managed node_modules. Imported locks use install with --frozen.
 
 ## Install and dependency preview results
 

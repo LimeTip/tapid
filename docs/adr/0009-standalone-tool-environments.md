@@ -45,6 +45,11 @@ nonrecursively. Unix command names reserve `node`, including case variants, so
 adding the tool bin directory to PATH cannot replace implicit runtime discovery.
 Listing resumes this owned initialization, including missing `bin` and
 `environments` directories, but does not claim an empty unowned root.
+Generation staging similarly syncs an empty
+`.tapid-tool-staging-v1-<generation>` ownership directory before creating the
+generation. Recovery can then complete its ownership file and reuse normal
+retirement, while preserving unrelated markerless generations and rejecting
+invalid ownership records or links.
 
 Global commands run with normal user authority and an externally managed runtime.
 They are not root-script sandbox requests. Lifecycle hooks remain disabled;

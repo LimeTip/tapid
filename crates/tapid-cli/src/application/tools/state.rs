@@ -226,6 +226,7 @@ pub(super) fn write_new(
     let result = (|| {
         let crash = match path.file_name().and_then(|name| name.to_str()) {
             Some(".tapid-tools") => "tool_writing_owner",
+            Some(".tapid-tool") => "tool_writing_environment_owner",
             Some("pending.json") => "tool_writing_journal",
             Some("committed") => "tool_writing_decision",
             _ if parent.file_name().is_some_and(|name| name == "bin") => "tool_writing_launcher",
@@ -246,6 +247,9 @@ pub(super) fn write_new(
             return Err(error("managed file appeared before publication"));
         }
         fs::rename(&temporary, path).map_err(error)?;
+        if path.file_name().is_some_and(|name| name == ".tapid-tool") {
+            crate::filesystem::activation::test_crash_at("tool_environment_owner_renamed");
+        }
         crate::filesystem::activation::sync_directory(parent).map_err(error)
     })();
     if result.is_err() {

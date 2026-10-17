@@ -213,7 +213,11 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         && !matches!(
             command,
             Some(
-                Command::Cache(_)
+                Command::Ci(_)
+                    | Command::Manifest(_)
+                    | Command::Lock(_)
+                    | Command::ImportPackageLock(_)
+                    | Command::Cache(_)
                     | Command::Tool(_)
                     | Command::Clean(_)
                     | Command::Install(_)
@@ -247,13 +251,13 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(Command::Init(args)) => init::run(args),
-        Some(Command::ImportPackageLock(args)) => npm_import::run(args),
-        Some(Command::Manifest(args)) => manifest::run(args),
-        Some(Command::Lock(args)) => lock::run(args),
+        Some(Command::ImportPackageLock(args)) => npm_import::run(args, json),
+        Some(Command::Manifest(args)) => manifest::run(args, json),
+        Some(Command::Lock(args)) => lock::run(args, json),
         Some(Command::Run(args)) => run::run(args),
 
         Some(Command::Install(args)) => install::run(args, json),
-        Some(Command::Ci(args)) => ci::run(args),
+        Some(Command::Ci(args)) => ci::run(args, json),
         Some(Command::Add(args)) => lifecycle::add(args, json),
         Some(Command::Remove(args)) => lifecycle::remove(args, json),
         Some(Command::Update(args)) => lifecycle::update(args, json),
