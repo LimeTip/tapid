@@ -434,10 +434,7 @@ pub(super) fn validate(catalog: &Catalog) -> Result<(), OperationalError> {
             return Err(error("invalid tool generation"));
         }
         for (command, bin) in &tool.commands {
-            super::launchers::validate_command(
-                command,
-                crate::application::replay::current_platform(),
-            )?;
+            super::launchers::validate_command(command)?;
             if bin.target.is_absolute()
                 || bin
                     .target

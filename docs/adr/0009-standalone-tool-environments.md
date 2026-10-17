@@ -27,9 +27,16 @@ A separate catalog lock covers recovery, publication, and invocation lease
 acquisition. Release it during staging and before runtime discovery or execution;
 invocations wait up to 30 seconds for it, then report contention. The mutation
 lock remains held during staging, so another writer cannot retire that generation.
-Verify a new generation before publication. Retained tools' declared bins, targets,
-and interpreter choices must still match their catalog records before replanning
-launchers; local drift requires updating or removing the affected tool.
+Verify a new generation before publication. Retained tools on the current host
+must still have declared bins, targets, and interpreter choices matching their
+catalog records before replanning launchers; local drift requires updating or
+removing the affected tool. Foreign and legacy tools retain their recorded command
+mappings without inspecting foreign interpreters. Host dispatch launchers still
+reject their execution until replacement; per-tool migration can proceed while
+other foreign tools remain installed. Global output collision checks reuse the
+linker's name validation independently of target inspection. Host-reserved foreign
+names are not exported, and catalog decoding keeps host-specific reservations out
+of structural validation so these records remain listable and removable.
 Before exporting a new generation, the installed manifest's name and version must
 match the direct lockfile root binding; the catalog version comes from that
 selected key. Archive integrity alone does not establish package identity.

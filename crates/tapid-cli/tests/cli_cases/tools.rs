@@ -1027,6 +1027,119 @@ fn tool_install_creates_locked_environment_without_touching_the_caller() {
 }
 
 #[test]
+#[cfg(windows)]
+fn tool_foreign_names_reserved_on_windows_remain_listable_and_removable() {
+    let project = TempProject::new("tool-foreign-reserved-name").unwrap();
+    let home = TempHome::new("tool-foreign-reserved-name").unwrap();
+    assert_success(&install(&project, &home));
+    let root = home.path().join("tools with spaces");
+    let path = root.join("catalog.json");
+    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for name in catalog["shims"].as_object().unwrap().keys() {
+        fs::remove_file(root.join("bin").join(name)).unwrap();
+    }
+    let tool = &mut catalog["tools"]["hello-tool"];
+    tool["installation_platform"] = json!("linux-aarch64-glibc");
+    let bin = tool["commands"]["hello-tool"].take();
+    tool["commands"] = json!({"tapid.foo":bin});
+    fs::write(root.join("bin/tapid.foo"), b"#!/bin/sh\nexit 99\n").unwrap();
+    catalog["shims"] = json!({"tapid.foo":"#!/bin/sh\nexit 99\n"});
+    fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    assert_eq!(
+        list(&project, &home)["data"]["tools"][0]["commands"][0]["name"],
+        "tapid.foo"
+    );
+    assert_success(&install_multi(&project, &home, "other-tool@1.0.0"));
+    assert!(!root.join("bin/tapid.cmd").exists());
+    assert!(!root.join("bin/tapid.ps1").exists());
+    assert_success(
+        &command(&project, &home, &["tool", "remove", "hello-tool"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        list(&project, &home)["data"]["tools"][0]["name"],
+        "other-tool"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn tool_foreign_unix_bins_allow_individual_migration_and_reserve_commands() {
+    for action in ["remove", "update", "install"] {
+        let project = TempProject::new("tool-foreign-migration").unwrap();
+        let home = TempHome::new("tool-foreign-migration").unwrap();
+        assert_success(&install(&project, &home));
+        assert_success(&install_multi(&project, &home, "other-tool@1.0.0"));
+        let root = home.path().join("tools with spaces");
+        let path = root.join("catalog.json");
+        let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for name in catalog["shims"].as_object().unwrap().keys() {
+            fs::remove_file(root.join("bin").join(name)).unwrap();
+        }
+        let mut shims = serde_json::Map::new();
+        for tool in catalog["tools"].as_object_mut().unwrap().values_mut() {
+            tool["installation_platform"] = json!("linux-aarch64-glibc");
+            let environment = root
+                .join("environments")
+                .join(tool["generation"].as_str().unwrap());
+            for (command_name, bin) in tool["commands"].as_object_mut().unwrap() {
+                fs::write(
+                    environment.join(bin["target"].as_str().unwrap()),
+                    b"#!/bin/sh\nexit 99\n",
+                )
+                .unwrap();
+                bin["node"] = json!(false);
+                let shim = "#!/bin/sh\nexit 99\n";
+                fs::write(root.join("bin").join(command_name), shim).unwrap();
+                shims.insert(command_name.to_owned(), json!(shim));
+            }
+        }
+        catalog["shims"] = Value::Object(shims);
+        fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+        let before = fs::read(&path).unwrap();
+        for collision in ["collision-tool", "case-tool", "extension-tool"] {
+            assert!(
+                !install_multi(&project, &home, collision).status.success(),
+                "{collision}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        let retained = catalog["tools"]["other-tool"].clone();
+        let spec = if action == "install" {
+            "hello-tool@1.0.0"
+        } else {
+            "hello-tool"
+        };
+        let mut operation = command(&project, &home, &["tool", action, spec]);
+        if action != "remove" {
+            operation
+                .arg("--registry-fixture")
+                .arg(fixture(&project))
+                .arg("--store-dir")
+                .arg(home.path().join("store"));
+        }
+        assert_success(&operation.output().unwrap());
+        let after: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(after["tools"]["other-tool"], retained);
+        let rejected = command(
+            &project,
+            &home,
+            &["__tool-exec", "--command", "other-command"],
+        )
+        .output()
+        .unwrap();
+        assert_eq!(rejected.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("update or reinstall"));
+        assert_success(
+            &command(&project, &home, &["tool", "remove", "other-tool"])
+                .output()
+                .unwrap(),
+        );
+    }
+}
+
+#[test]
 fn tool_platform_migration_can_replace_multiple_legacy_tools_one_at_a_time() {
     let project = TempProject::new("tool-platform-migration").unwrap();
     let home = TempHome::new("tool-platform-migration").unwrap();

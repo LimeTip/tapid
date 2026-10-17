@@ -151,13 +151,16 @@ journal selects the old catalog before commit and the new catalog after commit.
 The next tool operation or invocation settles interrupted publication. List can
 recover pending work and retire inactive owned environments.
 Older Unix tools exporting `node` remain listable and removable, but execution
-of that reserved command is rejected; remove the conflicting tool before publishing
-other tool changes.
+of that reserved command is rejected.
 
 Environments record the OS, CPU, and libc used during installation. Moving a
 tools directory to a different host platform requires update or reinstall before
 execution. Older environments without this identity also require update or
 reinstall; they remain listable and removable.
+Tools can be migrated individually while other foreign environments remain
+installed. Their recorded commands stay reserved against collisions, and execution
+remains blocked until replacement. Foreign command names reserved on the new host
+remain listable but do not receive launchers there.
 
 Installed commands can start while an install or update stages its environment.
 Catalog recovery, publication, and invocation lease acquisition share a short-held

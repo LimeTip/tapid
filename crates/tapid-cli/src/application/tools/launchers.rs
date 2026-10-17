@@ -4,10 +4,10 @@ use super::{
 };
 use crate::application::outcome::OperationalError;
 use std::{collections::BTreeMap, path::Path};
-use tapid_linker::{ManagedRoot, Platform, ShimInterpreter, ShimPackage, plan_shims};
+use tapid_linker::{ManagedRoot, Platform, ShimInterpreter, ShimPackage, ShimStrategy, plan_shims};
 use tapid_manifest::PackageManifest;
 
-pub(super) fn validate_command(command: &str, platform: Platform) -> Result<(), OperationalError> {
+pub(super) fn validate_command(command: &str) -> Result<(), OperationalError> {
     if command.is_empty()
         || matches!(command, "." | "..")
         || !command
@@ -18,13 +18,7 @@ pub(super) fn validate_command(command: &str, platform: Platform) -> Result<(), 
             "tool command names must contain only letters, numbers, dot, underscore, or hyphen",
         ));
     }
-    if command.eq_ignore_ascii_case("tapid")
-        || platform == Platform::Windows
-            && Path::new(command)
-                .with_extension("cmd")
-                .file_stem()
-                .is_some_and(|s| s.eq_ignore_ascii_case("tapid"))
-    {
+    if command.eq_ignore_ascii_case("tapid") {
         return Err(error("tool command collides with Tapid"));
     }
     Ok(())
@@ -34,7 +28,15 @@ pub(super) fn validate_exported_command(
     command: &str,
     platform: Platform,
 ) -> Result<(), OperationalError> {
-    validate_command(command, platform)?;
+    validate_command(command)?;
+    if platform == Platform::Windows
+        && Path::new(command)
+            .with_extension("cmd")
+            .file_stem()
+            .is_some_and(|s| s.eq_ignore_ascii_case("tapid"))
+    {
+        return Err(error("tool command collides with Tapid"));
+    }
     if platform == Platform::Unix && command.eq_ignore_ascii_case("node") {
         return Err(error("tool command collides with the Node runtime"));
     }
@@ -111,47 +113,81 @@ pub(super) fn plan(
     root: &Path,
     catalog: &Catalog,
 ) -> Result<BTreeMap<String, String>, OperationalError> {
-    let mut packages = Vec::new();
+    let platform = crate::application::replay::current_platform();
+    let strategy = match platform {
+        Platform::Unix => ShimStrategy::UnixSymlink,
+        Platform::Windows => ShimStrategy::WindowsCmdAndPowerShell,
+        Platform::Other => return Err(error("unsupported tool launcher platform")),
+    };
+    let mut commands = Vec::new();
     for (name, tool) in &catalog.tools {
-        let environment = root.join("environments").join(&tool.generation);
-        let package_root = environment.join("node_modules").join(name);
-        state::check_path(&package_root)?;
-        let package_json =
-            String::from_utf8(state::read(&package_root.join("package.json"))?).map_err(error)?;
-        let manifest = PackageManifest::parse(&package_json).map_err(error)?;
-        if package_commands(root, &environment, &package_root, &manifest)? != tool.commands {
-            return Err(error(format!(
-                "installed tool {name} bin mappings changed; update or remove the tool before publishing launchers"
-            )));
+        let current_host = super::validate_environment_platform(tool).is_ok();
+        if current_host {
+            let environment = root.join("environments").join(&tool.generation);
+            let package_root = environment.join("node_modules").join(name);
+            state::check_path(&package_root)?;
+            let package_json = String::from_utf8(state::read(&package_root.join("package.json"))?)
+                .map_err(error)?;
+            let manifest = PackageManifest::parse(&package_json).map_err(error)?;
+            if package_commands(root, &environment, &package_root, &manifest)? != tool.commands {
+                return Err(error(format!(
+                    "installed tool {name} bin mappings changed; update or remove the tool before publishing launchers"
+                )));
+            }
         }
-        packages.push(ShimPackage {
-            tree_root: package_root,
-            package_json,
-            bin_dir: root.to_owned(),
-        });
+        // Foreign/legacy tools cannot execute until replaced. Keep their
+        // recorded command mappings without interpreting foreign payloads.
+        for command in tool.commands.keys() {
+            match validate_exported_command(command, platform) {
+                Ok(()) => commands.push(command),
+                // Never activate a foreign name reserved on this host (node).
+                Err(_) if !current_host => {}
+                Err(e) => return Err(e),
+            }
+        }
     }
-    let plan = plan_shims(
-        ManagedRoot::new(root).map_err(error)?,
-        packages,
-        crate::application::replay::current_platform(),
-    )
-    .map_err(error)?;
+    let targets = commands
+        .iter()
+        .map(|name| root.join("bin").join(name))
+        .collect::<Vec<_>>();
+    strategy
+        .validate_targets(targets.iter().map(|path| path.as_path()))
+        .map_err(error)?;
     let mut result = BTreeMap::new();
-    for entry in plan.entries {
-        validate_exported_command(
-            &entry.command,
-            crate::application::replay::current_platform(),
-        )?;
-        result.extend(
-            crate::filesystem::tool_shims::render(root, &entry.command, entry.strategy)
-                .map_err(error)?,
-        );
+    for command in commands {
+        result
+            .extend(crate::filesystem::tool_shims::render(root, command, strategy).map_err(error)?);
     }
     Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn foreign_node_commands_do_not_shadow_the_unix_runtime() {
+        let project = tapid_test_support::TempProject::new("tool-foreign-node").unwrap();
+        let root = super::state::root_path(Some(project.path())).unwrap();
+        let mut catalog = super::Catalog::default();
+        catalog.tools.insert(
+            "foreign".to_owned(),
+            crate::application::tools::Tool {
+                requirement: "1.0.0".to_owned(),
+                version: "1.0.0".to_owned(),
+                generation: "deadbeef".to_owned(),
+                commands: std::collections::BTreeMap::from([(
+                    "node".to_owned(),
+                    super::ToolBin {
+                        target: "node_modules/foreign/node.exe".into(),
+                        node: false,
+                    },
+                )]),
+                installation_platform: Some("windows-x86_64-".to_owned()),
+            },
+        );
+        assert!(super::plan(&root, &catalog).unwrap().is_empty());
+    }
+
     #[test]
     fn unix_tool_commands_cannot_shadow_the_node_runtime() {
         for name in ["node", "Node", "NODE"] {
@@ -164,9 +200,9 @@ mod tests {
                 "{name}"
             );
         }
-        assert!(super::validate_command("node-tool", tapid_linker::Platform::Unix).is_ok());
+        assert!(super::validate_command("node-tool").is_ok());
         for name in ["node", "Node", "NODE"] {
-            assert!(super::validate_command(name, tapid_linker::Platform::Unix).is_ok());
+            assert!(super::validate_command(name).is_ok());
         }
     }
 
