@@ -557,7 +557,8 @@ fn failed_previous_recovery_reports_project_outputs_for_install_and_outdated() {
             )
             .unwrap_err()
         } else {
-            crate::application::lifecycle::outdated_report(project.path(), None, None).unwrap_err()
+            crate::application::lifecycle::outdated_report(project.path(), None, None, false)
+                .unwrap_err()
         };
         assert_eq!(failure.error.kind, ErrorKind::Recovery);
         assert_eq!(failure.outcome.state, ChangeState::RecoveryRequired);
