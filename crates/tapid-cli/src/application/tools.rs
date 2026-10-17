@@ -154,10 +154,28 @@ fn stage(
     state::check_path(&package_root)?;
     let installed =
         crate::commands::manifest::read_manifest_typed(&package_root.join("package.json"))?;
+    let lock_json = std::io::read_to_string(state::open_regular(&environment.join("tapid.lock"))?)
+        .map_err(error)?;
+    let lock = tapid_lockfile::Lockfile::from_json(&lock_json).map_err(error)?;
+    let selected: tapid_lockfile::LockfilePackageKey = lock
+        .root_bindings()
+        .get(name)
+        .ok_or_else(|| error("tool has no direct locked package identity"))?
+        .parse()
+        .map_err(error)?;
+    if selected.name.as_str() != name
+        || installed.name() != &selected.name
+        || installed.version() != selected.version
+    {
+        return Err(OperationalError::new(
+            ErrorKind::Integrity,
+            "installed tool manifest identity differs from its direct locked package",
+        ));
+    }
     let commands = launchers::package_commands(root, &environment, &package_root, &installed)?;
     Ok(Tool {
         requirement: requirement.to_owned(),
-        version: installed.version().to_string(),
+        version: selected.version.to_string(),
         generation,
         commands,
         installation_platform: Some(installation_platform()),

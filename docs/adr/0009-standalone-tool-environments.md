@@ -30,6 +30,9 @@ lock remains held during staging, so another writer cannot retire that generatio
 Verify a new generation before publication. Retained tools' declared bins, targets,
 and interpreter choices must still match their catalog records before replanning
 launchers; local drift requires updating or removing the affected tool.
+Before exporting a new generation, the installed manifest's name and version must
+match the direct lockfile root binding; the catalog version comes from that
+selected key. Archive integrity alone does not establish package identity.
 Record both catalogs in a bounded journal;
 a digest-bound, separately synced commit decision selects the new state.
 Recovery is idempotent and treats recorded launcher bytes as the only files it

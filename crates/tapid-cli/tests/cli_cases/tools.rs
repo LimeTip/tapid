@@ -858,6 +858,58 @@ fn tool_catalog_rejects_invalid_versions_and_requirements() {
 }
 
 #[test]
+fn tool_rejects_integrity_valid_archives_with_a_different_locked_identity() {
+    for case in ["version", "name"] {
+        let project = TempProject::new("tool-archive-identity").unwrap();
+        let home = TempHome::new("tool-archive-identity").unwrap();
+        assert_success(&install(&project, &home));
+        let root = home.path().join("tools with spaces");
+        let before = list(&project, &home);
+        let catalog = fs::read(root.join("catalog.json")).unwrap();
+        let mut registry: Value =
+            serde_json::from_slice(&fs::read(fixture(&project)).unwrap()).unwrap();
+        // The archive and its SHA-512 remain valid hello-tool@1.0.0 bytes.
+        let spec = if case == "version" {
+            registry["packages"][0]["version"] = json!("1.1.0");
+            "hello-tool@1.1.0"
+        } else {
+            registry["packages"][0]["name"] = json!("wrong-name");
+            "wrong-name@1.0.0"
+        };
+        let registry = project
+            .write(
+                "mismatched-identity.json",
+                &serde_json::to_vec(&registry).unwrap(),
+            )
+            .unwrap();
+        let output = command(&project, &home, &["tool", "install", spec])
+            .arg("--registry-fixture")
+            .arg(registry)
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "accepted {case} mismatch: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("identity"),
+            "{case}: {output:?}"
+        );
+        assert_eq!(fs::read(root.join("catalog.json")).unwrap(), catalog);
+        assert_eq!(
+            list(&project, &home)["data"]["tools"],
+            before["data"]["tools"]
+        );
+        let invoked = command(&project, &home, &["__tool-exec", "--command", "hello-tool"])
+            .output()
+            .unwrap();
+        assert_eq!(invoked.status.code(), Some(7), "{case}: {invoked:?}");
+    }
+}
+
+#[test]
 fn tool_failed_integrity_verification_preserves_the_previous_installation() {
     let project = TempProject::new("tool-integrity").unwrap();
     let home = TempHome::new("tool-integrity").unwrap();
