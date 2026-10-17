@@ -1,7 +1,26 @@
 //! Route selection and origin-scoped metadata/artifact transport caches.
 use crate::application::outcome::{ErrorKind, OperationalError};
 
-use super::{BTreeMap, HttpsTransport, JSR, PackageName, RegistryOrigin};
+use super::{
+    BTreeMap, HttpsTransport, JSR, PackageName, PackageSource, RegistryOrigin, Requirement,
+};
+
+/// Alias requirements follow their actual target's route; ordinary declarations
+/// retain their explicitly selected registry identity, including JSR.
+pub(super) fn registry_for_requirement(
+    config: &crate::registry::RegistryConfig,
+    name: &str,
+    requirement: &Requirement,
+) -> Result<PackageSource, String> {
+    if requirement.is_alias() {
+        let (_, local) = super::dep_parts(name)?;
+        config
+            .origin_for_name(requirement.package_name(&local))
+            .map(Into::into)
+    } else {
+        super::dependency_identity(config, name).map(|(registry, _)| registry.into())
+    }
+}
 
 fn package_registry_route(
     registry_config: &crate::registry::RegistryConfig,

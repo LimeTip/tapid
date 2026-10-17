@@ -164,7 +164,9 @@ reject schema 7. Schema 4 compatibility and schema 5 regeneration rules are unch
 
 `tapid add 'local@npm:actual@^1'` and `tapid i 'local@npm:actual@^1'` preserve the
 alias declaration. `update` preserves its range, `update --latest` changes only
-the target range to `*`, and `outdated` looks up the actual registry package.
+the target range to a caret requirement for the resolved version by default. Explicit
+`--save-exact`, `--save-caret`, and `--save-tilde` select the save policy.
+`outdated` looks up the actual registry package.
 Simple overrides of an aliased transitive edge's local name replace its range
 while preserving the target package. Alias-valued overrides remain unsupported.
 
