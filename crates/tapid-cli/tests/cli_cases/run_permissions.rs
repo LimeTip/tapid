@@ -324,7 +324,10 @@ fn run_permissions_network_grant_serves_http_through_real_cli() {
         command.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
         drop(reservation);
         let worker = std::thread::spawn(move || command.output().unwrap());
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // This clock starts before CLI setup. Keep polling past the contained
+        // server's separate five-second execution limit so a slow setup cannot
+        // leave a successfully started server waiting for a client we abandoned.
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut response = String::new();
         while Instant::now() < deadline && !worker.is_finished() {
             if let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(100))

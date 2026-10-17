@@ -47,6 +47,10 @@ pub(crate) fn run(args: Args) -> ExitCode {
 
 #[cfg(windows)]
 fn render_status(status: &tapid_runner::WindowsNetworkGuardStatus) -> String {
+    let retained_filters = status.retained_filters.map_or_else(
+        || "unknown (administrator required)".to_owned(),
+        |count| count.to_string(),
+    );
     let state = if status.running {
         "running"
     } else if status.installed {
@@ -61,13 +65,10 @@ fn render_status(status: &tapid_runner::WindowsNetworkGuardStatus) -> String {
     if status.running {
         output.push_str(&format!(
             "Active executions: {}; retained denial filters: {}\n",
-            status.active_executions, status.retained_filters
+            status.active_executions, retained_filters
         ));
     } else if status.installed {
-        output.push_str(&format!(
-            "Retained denial filters: {}\n",
-            status.retained_filters
-        ));
+        output.push_str(&format!("Retained denial filters: {}\n", retained_filters));
     }
     output
 }
@@ -82,12 +83,33 @@ mod tests {
             installed: true,
             running: false,
             active_executions: 0,
-            retained_filters: 4,
+            retained_filters: Some(4),
             executable: "guard.exe".into(),
         };
         let output = render_status(&status);
         assert!(output.contains("Windows network guard: stopped"));
         assert!(output.contains("Retained denial filters: 4"), "{output}");
         assert!(!output.contains("Active executions"), "{output}");
+    }
+
+    #[test]
+    fn stopped_guard_status_distinguishes_unknown_filters_from_zero() {
+        let status = tapid_runner::WindowsNetworkGuardStatus {
+            installed: true,
+            running: false,
+            active_executions: 0,
+            retained_filters: None,
+            executable: "guard.exe".into(),
+        };
+        let output = render_status(&status);
+        assert!(
+            output.contains("Windows network guard: stopped"),
+            "{output}"
+        );
+        assert!(
+            output.contains("Retained denial filters: unknown (administrator required)"),
+            "{output}"
+        );
+        assert!(!output.contains("Retained denial filters: 0"), "{output}");
     }
 }

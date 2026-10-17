@@ -369,6 +369,13 @@ fn uninstall(path: &Path) -> Result<(), u32> {
     fs::remove_dir(path.parent().unwrap()).map_err(|_| ERROR_ACCESS_DENIED)?;
     Ok(())
 }
+fn retained_count(result: Result<u32, u32>) -> Result<Option<u32>, u32> {
+    match result {
+        Ok(count) => Ok(Some(count)),
+        Err(ERROR_ACCESS_DENIED) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
 fn observe(path: PathBuf) -> Result<Status, u32> {
     let manager = manager(SC_MANAGER_CONNECT)?;
     let service = match service(&manager, SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS) {
@@ -378,7 +385,7 @@ fn observe(path: PathBuf) -> Result<Status, u32> {
                 installed: false,
                 running: false,
                 active_executions: 0,
-                retained_filters: 0,
+                retained_filters: Some(0),
                 executable: path,
             });
         }
@@ -387,9 +394,13 @@ fn observe(path: PathBuf) -> Result<Status, u32> {
     verified(&service, &path)?;
     let running = query(&service)?.dwCurrentState == SERVICE_RUNNING;
     let (active_executions, retained_filters) = if running {
-        super::client::Guard::status()?
+        let (active, retained) = super::client::Guard::status()?;
+        (active, Some(retained))
     } else {
-        (0, super::filtering::Engine::connect()?.count()?)
+        (
+            0,
+            retained_count(super::filtering::Engine::connect().and_then(|engine| engine.count()))?,
+        )
     };
     Ok(Status {
         installed: true,
@@ -458,6 +469,16 @@ fn source_image(path: &Path) -> Result<File, u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn guard_status_preserves_unknown_count_on_access_denied() {
+        assert_eq!(retained_count(Err(ERROR_ACCESS_DENIED)), Ok(None));
+        assert_eq!(retained_count(Ok(0)), Ok(Some(0)));
+        assert_eq!(retained_count(Ok(4)), Ok(Some(4)));
+        assert_eq!(
+            retained_count(Err(ERROR_INVALID_DATA)),
+            Err(ERROR_INVALID_DATA)
+        );
+    }
     #[test]
     fn guard_installer_binds_source_to_running_image_and_rejects_copy() {
         let source = source_image(&std::env::current_exe().unwrap()).unwrap();

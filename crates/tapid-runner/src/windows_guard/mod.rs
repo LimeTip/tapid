@@ -53,7 +53,8 @@ pub struct WindowsNetworkGuardStatus {
     pub installed: bool,
     pub running: bool,
     pub active_executions: u32,
-    pub retained_filters: u32,
+    /// None when the invoking user cannot enumerate filters for a stopped service.
+    pub retained_filters: Option<u32>,
     pub executable: PathBuf,
 }
 /// Manage the protected Windows deny service. Install/uninstall require administrator rights.
