@@ -101,6 +101,9 @@ declarations include the member name and that member's manifest path. Metadata
 declarations have null manifest paths and must not be treated as editable local
 fields. For an absent peer provider, add a provider through a supported local
 dependency section; there is no existing provider declaration to report.
+Effective root overrides of transitive or workspace requirements point to the
+root manifest's `/overrides/...` field, preserving the original selector spelling.
+Transitive requirements retain the declaring package identity and effective alias syntax.
 Resolver root origins exclude `peerDependencies` entries, even when they have
 the same name and range as an installed dependency. Peer requirements remain
 visible in the peer-specific declaration and requirement fields.

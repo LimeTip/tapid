@@ -1109,6 +1109,13 @@ pub(crate) fn resolve_and_fetch_with_lock(
     .map_err(|mut error| {
         if let Some(context) = &mut error.diagnostic {
             context.locate_requirements(&declarations);
+            resolution::locate_override_requirements(
+                context,
+                &declarations,
+                manifest,
+                &project.join("package.json"),
+                &overrides,
+            );
         }
         error
     })?;

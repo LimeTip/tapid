@@ -394,12 +394,88 @@ fn json_workspace_conflict_locates_each_declaring_member() {
 }
 
 #[test]
+fn json_effective_overrides_locate_root_manifest_fields() {
+    for (workspace, local, previous, selector, expected) in [
+        (false, "h3", "^1", "npm:h3", "^3"),
+        (false, "h3-v2", "npm:h3@^1", "h3-v2", "npm:h3@^3"),
+        (
+            false,
+            "@local/direct",
+            "npm:@actual/scoped@^1",
+            "npm:@local/direct",
+            "npm:@actual/scoped@^3",
+        ),
+        (true, "h3", "^1", "npm:h3", "^3"),
+    ] {
+        let project = TempProject::new("json-override-context").unwrap();
+        let mut manifest =
+            serde_json::json!({"name":"app","version":"1.0.0","overrides":{selector:"^3"}});
+        let mut fixture: serde_json::Value =
+            serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+        if workspace {
+            manifest["workspaces"] = serde_json::json!(["packages/*"]);
+            project.write("packages/member/package.json", serde_json::json!({"name":"member","version":"1.0.0","dependencies":{local:previous},"peerDependencies":{local:"^3"},"overrides":{local:"^4"}}).to_string().as_bytes()).unwrap();
+        } else {
+            manifest["dependencies"] = serde_json::json!({"alias-parent":"1.0.0"});
+            fixture["packages"][4]["dependencies"] = serde_json::json!({local:previous});
+        }
+        project
+            .write("package.json", manifest.to_string().as_bytes())
+            .unwrap();
+        project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let (output, result) = invoke(
+            &project,
+            &[
+                "install",
+                "--json",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                "store",
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        let requirements = result["errors"][0]["context"]["requirements"]
+            .as_array()
+            .unwrap();
+        assert_eq!(requirements.len(), 1, "{result}");
+        let requirement = &requirements[0];
+        assert_eq!(requirement["local_name"], local);
+        assert_eq!(requirement["requirement"], expected);
+        assert_eq!(requirement["declaration"]["origin"], "manifest");
+        assert_eq!(
+            requirement["declaration"]["pointer"],
+            format!(
+                "/overrides/{}",
+                selector.replace('~', "~0").replace('/', "~1")
+            )
+        );
+        assert_eq!(
+            requirement["declaration"]["manifest"],
+            project
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("package.json")
+                .to_str()
+                .unwrap()
+        );
+        assert!(requirement["declaration"]["workspace"].is_null());
+        if !workspace {
+            assert_eq!(requirement["package"]["name"], "alias-parent");
+        }
+    }
+}
+
+#[test]
 fn json_transitive_failure_keeps_metadata_provenance() {
     let project = TempProject::new("json-transitive-context").unwrap();
     project
         .write(
             "package.json",
-            br#"{"name":"app","version":"1.0.0","dependencies":{"alias-parent":"1.0.0"}}"#,
+            br#"{"name":"app","version":"1.0.0","dependencies":{"alias-parent":"1.0.0"},"overrides":{"h3":"^3"}}"#,
         )
         .unwrap();
     let mut fixture: serde_json::Value =

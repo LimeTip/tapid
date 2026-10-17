@@ -73,7 +73,7 @@ impl Declaration {
         format!("/{}/{}", escape(section), escape(name))
     }
 
-    fn selects_resolver_root(&self) -> bool {
+    pub(crate) fn selects_resolver_root(&self) -> bool {
         self.origin == "manifest" && !self.pointer.starts_with("/peerDependencies/")
     }
 }
