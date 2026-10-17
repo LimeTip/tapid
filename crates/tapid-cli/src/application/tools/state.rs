@@ -9,16 +9,29 @@ use std::{
 };
 pub(super) const LIMIT: usize = 4 * 1024 * 1024;
 
+#[derive(Debug)]
+pub(super) struct CatalogLock {
+    file: fs::File,
+}
+
+impl Drop for CatalogLock {
+    fn drop(&mut self) {
+        // Like ActivationLock, release explicitly: a duplicated or briefly
+        // inherited file handle must not extend the critical section.
+        let _ = fs4::FileExt::unlock(&self.file);
+    }
+}
+
 /// Protect catalog recovery/publication and lease acquisition, never downloads
-/// or command execution. The caller keeps the returned file open while locked.
-pub(super) fn lock_catalog(root: &Path) -> Result<fs::File, OperationalError> {
+/// or command execution. Dropping the guard explicitly releases the lock.
+pub(super) fn lock_catalog(root: &Path) -> Result<CatalogLock, OperationalError> {
     lock_catalog_for(root, std::time::Duration::from_secs(30))
 }
 
 fn lock_catalog_for(
     root: &Path,
     timeout: std::time::Duration,
-) -> Result<fs::File, OperationalError> {
+) -> Result<CatalogLock, OperationalError> {
     use crate::application::outcome::ErrorKind;
     use fs4::{FileExt, TryLockError};
     use std::time::{Duration, Instant};
@@ -28,7 +41,7 @@ fn lock_catalog_for(
     let started = Instant::now();
     loop {
         match FileExt::try_lock(&file) {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(CatalogLock { file }),
             Err(TryLockError::WouldBlock) if started.elapsed() < timeout => {
                 std::thread::sleep(
                     Duration::from_millis(10).min(timeout.saturating_sub(started.elapsed())),
@@ -327,6 +340,18 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         drop(lock);
         lock_catalog_for(&root, Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn catalog_lock_releases_even_with_a_duplicated_handle() {
+        let home = TempHome::new("tool-catalog-release").unwrap();
+        let root = root_path(Some(home.path())).unwrap();
+        let lock = lock_catalog(&root).unwrap();
+        let retained = lock.file.try_clone().unwrap();
+        drop(lock);
+        let next = lock_catalog_for(&root, Duration::ZERO).unwrap();
+        drop(next);
+        drop(retained);
     }
 
     #[test]
