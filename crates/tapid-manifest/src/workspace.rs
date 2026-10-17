@@ -34,6 +34,11 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn discover(project_dir: &Path) -> Result<Self, String> {
+        Self::discover_typed(project_dir).map_err(|error| error.to_string())
+    }
+
+    /// Discover members without discarding the location of a manifest parse failure.
+    pub fn discover_typed(project_dir: &Path) -> Result<Self, crate::WorkspaceError> {
         let project_dir = fs::canonicalize(project_dir).map_err(|error| {
             format!(
                 "cannot resolve workspace root {}: {error}",
@@ -44,17 +49,26 @@ impl Workspace {
             return Err(format!(
                 "workspace root is not a directory: {}",
                 project_dir.display()
-            ));
+            )
+            .into());
         }
         let root_manifest_path = project_dir.join("package.json");
         let root_metadata = fs::symlink_metadata(&root_manifest_path)
             .map_err(|error| format!("cannot inspect workspace root manifest: {error}"))?;
         if !root_metadata.file_type().is_file() {
-            return Err("workspace root package.json must be a regular file".to_owned());
+            return Err("workspace root package.json must be a regular file"
+                .to_owned()
+                .into());
         }
         let root_path = contained_path(&project_dir, &root_manifest_path)?;
         let root_text = read_file(&root_path)?;
-        let root = PackageManifest::parse(&root_text).map_err(|error| error.to_string())?;
+        let root = PackageManifest::parse(&root_text).map_err(|error| {
+            crate::WorkspaceError::Manifest {
+                path: root_path.clone(),
+                diagnostic: Box::new(error.diagnostic(&root_text)),
+                error: Box::new(error),
+            }
+        })?;
         let patterns = workspace_patterns(root.extra.get("workspaces"))?;
         let mut paths = Vec::new();
         for pattern in patterns {
@@ -94,7 +108,8 @@ impl Workspace {
                 return Err(format!(
                     "workspace member escapes workspace root: {}",
                     path.display()
-                ));
+                )
+                .into());
             }
             let member_root = canonical
                 .parent()
@@ -112,17 +127,20 @@ impl Workspace {
                 return Err(format!(
                     "workspace member may not be inside root node_modules: {}",
                     member_root.display()
-                ));
+                )
+                .into());
             }
             let text = read_file(&canonical)?;
-            let manifest = PackageManifest::parse(&text).map_err(|error| {
-                format!("invalid workspace member {}: {error}", canonical.display())
-            })?;
+            let manifest =
+                PackageManifest::parse(&text).map_err(|error| crate::WorkspaceError::Manifest {
+                    path: canonical.clone(),
+                    diagnostic: Box::new(error.diagnostic(&text)),
+                    error: Box::new(error),
+                })?;
             if !names.insert(manifest.name().to_string()) {
-                return Err(format!(
-                    "duplicate workspace package name '{}'",
-                    manifest.name()
-                ));
+                return Err(
+                    format!("duplicate workspace package name '{}'", manifest.name()).into(),
+                );
             }
             members.push(WorkspaceMember {
                 name: manifest.name().to_string(),

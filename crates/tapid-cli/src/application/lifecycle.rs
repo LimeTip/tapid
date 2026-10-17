@@ -301,8 +301,7 @@ pub(crate) fn resolve_workspace(
         OperationalError::from_source(ErrorKind::Project, error)
             .context("cannot open project directory")
     })?;
-    let workspace = Workspace::discover(&project_dir)
-        .map_err(|error| OperationalError::new(ErrorKind::Project, error))?;
+    let workspace = Workspace::discover_typed(&project_dir).map_err(OperationalError::from)?;
     let manifest = workspace
         .select(selector)
         .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?
@@ -591,6 +590,14 @@ fn outdated_entries(
                 })
                 .map(|key| key.version)
                 .max();
+            let diagnostic = (!compatible).then(|| {
+                    OperationalError::new(
+                        ErrorKind::InvalidRequest,
+                        format!(
+                            "local workspace version {local_version} does not satisfy declared range {declared}"
+                        ),
+                    ).at_dependency(&selection.manifest_path, kind.field_name(), &identity, &declared)
+                });
             entries.push(OutdatedEntry {
                 identity,
                 kind: kind.field_name().to_owned(),
@@ -598,14 +605,7 @@ fn outdated_entries(
                 locked: locked_version.map(|version| version.to_string()),
                 newest_compatible: compatible.then(|| local_version.to_string()),
                 newest_available: Some(local_version.to_string()),
-                diagnostic: (!compatible).then(|| {
-                    OperationalError::new(
-                        ErrorKind::InvalidRequest,
-                        format!(
-                            "local workspace version {local_version} does not satisfy declared range {declared}"
-                        ),
-                    )
-                }),
+                diagnostic,
             });
             continue;
         }
@@ -743,6 +743,20 @@ fn outdated_entries(
                 ),
             ),
         };
+        let diagnostic = diagnostic.map(|error| {
+            error
+                .for_package(super::outcome::DiagnosticPackage {
+                    source: origin.to_string(),
+                    name: package_name.to_string(),
+                    version: None,
+                })
+                .at_dependency(
+                    &selection.manifest_path,
+                    kind.field_name(),
+                    &identity,
+                    &declared,
+                )
+        });
         entries.push(OutdatedEntry {
             identity,
             kind: kind.field_name().to_owned(),

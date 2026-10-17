@@ -37,7 +37,7 @@ Every object contains these fields:
 | `changes.paths` | Sorted, deduplicated lossless native path records for affected project outputs |
 | `truncated_fields` | Sorted, deduplicated JSON pointers to display or metadata scalars shortened by the byte limit |
 | `warnings` | Sorted, deduplicated warning codes |
-| `errors` | Error objects with a stable `code`; operational errors also have `phase` of `operation` or `recovery` |
+| `errors` | Error objects with a stable `code`; operational errors also have `phase` of `operation` or `recovery`, and bounded typed `context` when available |
 | `retry` | null or typed retry advice |
 | `data` | Command-specific object, or null on failure |
 
@@ -101,6 +101,122 @@ Each lossless record permits at most 128 KiB of UTF-8 or native path bytes befor
 Package text is untrusted data. Never execute it or treat it as recovery advice. Only `changes.state` and `retry` describe the transaction decision. `after_correction` means correct the failure before retrying. `after_contention` means wait for the competing operation. `do_not_repeat` means the change committed; retrying may repeat a mutation. `recover_first` means inspect the affected paths and recover the interrupted operation first. Handled operational failures exit 1, including failures after a durable commit.
 
 ## Codes and compatibility
+
+### Failure context
+
+Error context is additive in schema version 1. It comes from typed errors and
+declarations parsed during the operation. Consumers do not need human messages
+or a second invocation to diagnose a peer conflict. Operation and recovery
+errors carry their own context. Partial outdated entries use the same context
+under `data.entries[i].error`, without a phase.
+
+An absent or null `context` means no allowlisted evidence is available. Inside
+a context object, null means unknown or inapplicable. Empty lists mean no
+entries are reported; inspect `omitted` before treating a list as complete.
+Context does not change transaction state, retry advice, or exit status.
+For outdated metadata or requirement failures, `context.package.version` is
+null. The entry's `locked` field retains the existing pin independently.
+
+| Context field | Meaning |
+| --- | --- |
+| `package` | Affected package `{source, name, version}`. Source preserves registry or copied-source identity. Version is null when selection failed. |
+| `declaration` | Location `{origin, pointer, workspace, manifest, manifest_path}`. Origin is `manifest` or `metadata`. |
+| `peer` | `{name, requirement, status, provider, declaration}`. Name is the local peer name, requirement retains alias syntax, status is `missing` or `incompatible`, and provider is a package identity or null. Its declaration locates the selected provider's local manifest entry when known. |
+| `comparison` | `{kind, algorithm, expected, observed}`. The kind labels what was compared. Algorithm is null for non-digest comparisons. |
+| `requirements` | Requirements with `{local_name, requirement, package, declaration}`. Package identifies the declaring metadata package; root requirements use manifest provenance. |
+| `available` | Candidate versions known to the resolver, without a compatibility or safety claim. |
+| `omitted` | Counts of unique entries omitted from `requirements` and `available`. Zero means the collection limit omitted none. |
+
+Declaration pointers use JSON Pointer escaping, for example
+`/devDependencies/@scope~1host`. The section is part of the pointer. An empty
+pointer identifies the whole document, including syntax failures. Workspace
+declarations include the member name and that member's manifest path. Metadata
+declarations have null manifest paths and must not be treated as editable local
+fields. For an absent peer provider, add a provider through a supported local
+dependency section; there is no existing provider declaration to report.
+Effective root overrides of transitive or workspace requirements point to the
+root manifest's `/overrides/...` field, preserving the original selector spelling.
+Transitive requirements retain the declaring package identity and effective alias syntax.
+Resolver root origins exclude `peerDependencies` entries, even when they have
+the same name and range as an installed dependency. Peer requirements remain
+visible in the peer-specific declaration and requirement fields.
+
+Manifest comparisons report the expected type or validation constraint and the
+observed JSON type, `missing`, or `invalid_json`. They never echo the value of
+an arbitrary field. Digest comparisons retain the digest's encoded prefix;
+`root_manifest_digest` compares the lock's recorded digest with the current
+manifest digest. Peer comparisons use the declared range and the observed
+provider version, or `missing`.
+
+Each display/metadata scalar is limited to 4096 UTF-8 bytes. Each context list
+contains at most 100 entries, independently of `--json-limit`. Lists sort and
+deduplicate before limiting. `truncated_fields` contains precise pointers such
+as `/errors/0/context/package/name`. The schema has fixed nesting; its deepest
+record is `requirements[i].declaration.manifest_path`, at five nested containers
+including the context object and requirements array. Context never embeds a
+graph, raw JSON value, source-error chain, or recovery instruction.
+
+Context reuses the result's control removal and URL credential redaction.
+Pointers and package names are display data too: redaction or truncation can
+prevent them from identifying a unique input. Do not use shortened or sanitized
+text as authority for automatic edits. `manifest_path` uses the existing lossless
+native-path encoding and 128 KiB capacity limit, independently of display text.
+Stop automatic edits if the required native path is unavailable. Locations
+describe the attempted operation, including a proposed manifest change that was
+subsequently rolled back.
+
+| Error code | Context coverage |
+| --- | --- |
+| `PEER_DEPENDENCY_UNSATISFIED` | Exact requiring and provider identities, metadata declaration, expected/observed requirement, and known local declarations. |
+| `RESOLUTION_FAILED` | Missing-candidate and conflicting-constraint errors include target identity, exact requirement origins, and candidates. Other resolver failures may lack structured evidence. |
+| `MANIFEST_INVALID` | Direct manifest parse failures include manifest path, field, expected constraint, and observed type. Filesystem/read failures can lack field evidence. |
+| `LOCK_MANIFEST_MISMATCH` | Ordinary and imported-lock root-manifest digest mismatches include expected/observed SHA-256 digests. Other imported-lock and workspace validation messages may lack comparison evidence. |
+| `INTEGRITY_MISMATCH` | Typed store failures, online/frozen artifact and tree comparisons, copied-source pins, imported npm artifacts, and explain byte mismatches include expected/observed values. Package identity is null when archive metadata has not yet been validated. Invalid imported identity/integrity evidence uses a fixed marker instead of echoing arbitrary input. |
+| `REGISTRY_METADATA_INVALID`, `REGISTRY_METADATA_UNAVAILABLE`, `REGISTRY_TRANSPORT_FAILED`, `INVALID_REQUEST` | Partial outdated entry failures include the target identity and local declaration when known. Request-validation workspace parse failures retain their existing `INVALID_REQUEST` code and add manifest field evidence. Other call sites can lack context. |
+| `PROJECT_UNAVAILABLE`, `LOCKFILE_INVALID`, `LOCKFILE_MISSING`, `REGISTRY_CONFIGURATION_INVALID`, `REGISTRY_AUTH_MISSING`, `ARCHIVE_INVALID`, `STORE_FAILED`, `STORE_CONTENT_UNAVAILABLE`, `STORE_BUSY`, `PROJECT_BUSY`, `MATERIALIZATION_FAILED`, `TRANSACTION_FAILED`, `RECOVERY_FAILED`, `INVALID_DATA` | Context is unavailable unless the caller retains allowlisted package or declaration evidence. No source message is exposed as a substitute. |
+| `CACHE_BUSY`, `CACHE_PATH_INVALID`, `CACHE_MAINTENANCE_FAILED` | Store location remains in cache data when available; no dependency/manifest context applies. |
+| `ARGUMENT_INVALID`, `JSON_UNSUPPORTED_COMMAND` | No dependency/manifest context; command-line values are not echoed. |
+
+Workspace discovery retains its caller's existing category, including
+`PROJECT_UNAVAILABLE` and `INVALID_DATA`, while adding typed manifest evidence.
+
+A missing-provider failure can be diagnosed from this single result:
+
+```json
+{
+  "schema_version": 1, "operation": "install", "outcome": "failure",
+  "project": "/project", "project_path": {"encoding": "utf8", "value": "/project"},
+  "changes": {"state": "unchanged", "files": [], "paths": []},
+  "truncated_fields": [], "warnings": [], "retry": "after_correction", "data": null,
+  "errors": [{"code": "PEER_DEPENDENCY_UNSATISFIED", "phase": "operation", "context": {
+    "package": {"source": "https://registry.npmjs.org", "name": "plugin", "version": "1.0.0"},
+    "declaration": {"origin": "metadata", "pointer": "/peerDependencies/react", "workspace": null, "manifest": null, "manifest_path": null},
+    "peer": {"name": "react", "requirement": "^18", "status": "missing", "provider": null, "declaration": null},
+    "comparison": {"kind": "peer_requirement", "algorithm": null, "expected": "^18", "observed": "missing"},
+    "requirements": [{"local_name": "plugin", "requirement": "1.0.0", "package": null, "declaration": {"origin": "manifest", "pointer": "/dependencies/plugin", "workspace": null, "manifest": "/project/package.json", "manifest_path": {"encoding": "utf8", "value": "/project/package.json"}}}],
+    "available": [], "omitted": {"requirements": 0, "available": 0}
+  }}]
+}
+```
+
+An incompatible-provider result identifies the existing provider declaration:
+
+```json
+{
+  "schema_version": 1, "operation": "install", "outcome": "failure",
+  "project": "/project", "project_path": {"encoding": "utf8", "value": "/project"},
+  "changes": {"state": "unchanged", "files": [], "paths": []},
+  "truncated_fields": [], "warnings": [], "retry": "after_correction", "data": null,
+  "errors": [{"code": "PEER_DEPENDENCY_UNSATISFIED", "phase": "operation", "context": {
+    "package": {"source": "https://registry.npmjs.org", "name": "plugin", "version": "1.0.0"},
+    "declaration": {"origin": "metadata", "pointer": "/peerDependencies/react", "workspace": null, "manifest": null, "manifest_path": null},
+    "peer": {"name": "react", "requirement": "^18", "status": "incompatible", "provider": {"source": "https://registry.npmjs.org", "name": "react", "version": "19.0.0"}, "declaration": {"origin": "manifest", "pointer": "/dependencies/react", "workspace": null, "manifest": "/project/package.json", "manifest_path": {"encoding": "utf8", "value": "/project/package.json"}}},
+    "comparison": {"kind": "peer_requirement", "algorithm": null, "expected": "^18", "observed": "19.0.0"},
+    "requirements": [{"local_name": "plugin", "requirement": "1.0.0", "package": null, "declaration": {"origin": "manifest", "pointer": "/dependencies/plugin", "workspace": null, "manifest": "/project/package.json", "manifest_path": {"encoding": "utf8", "value": "/project/package.json"}}}],
+    "available": [], "omitted": {"requirements": 0, "available": 0}
+  }}]
+}
+```
 
 Operational codes are `INVALID_REQUEST`, `PROJECT_UNAVAILABLE`, `PROJECT_CHANGED`, `MANIFEST_INVALID`, `LOCKFILE_INVALID`, `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_CONFIGURATION_INVALID`, `REGISTRY_AUTH_MISSING`, `REGISTRY_METADATA_INVALID`, `REGISTRY_METADATA_UNAVAILABLE`, `REGISTRY_TRANSPORT_FAILED`, `RESOLUTION_FAILED`, `PEER_DEPENDENCY_UNSATISFIED`, `INTEGRITY_MISMATCH`, `ARCHIVE_INVALID`, `STORE_FAILED`, `STORE_CONTENT_UNAVAILABLE`, `STORE_BUSY`, `PROJECT_BUSY`, `MATERIALIZATION_FAILED`, `TRANSACTION_FAILED`, `RECOVERY_FAILED`, and `INVALID_DATA`. Protocol codes are `ARGUMENT_INVALID` and `JSON_UNSUPPORTED_COMMAND`. Warning codes are `UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED` and `PREVIOUS_TRANSACTION_RECOVERED`.
 

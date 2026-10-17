@@ -340,11 +340,9 @@ fn perform_install(
         ));
     }
     let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
-    online::validate_manifest_roots(&project_dir, &preflight_manifest)
-        .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+    online::validate_manifest_roots(&project_dir, &preflight_manifest)?;
     if let Some(updated) = manifest_override {
-        online::validate_manifest_roots(&project_dir, updated.updated)
-            .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+        online::validate_manifest_roots(&project_dir, updated.updated)?;
     }
     if let Some(spec) = package {
         let (name, requirement) = package_spec::parse(spec);
@@ -361,8 +359,7 @@ fn perform_install(
         let candidate = read_manifest(&manifest_path)?
             .with_dependency(name, requirement)
             .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
-        online::validate_manifest_roots(&project_dir, &candidate)
-            .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+        online::validate_manifest_roots(&project_dir, &candidate)?;
     }
     let lock_path = project_dir.join("tapid.lock");
     let mut imported = if lock_path.is_file() {
@@ -739,6 +736,7 @@ fn perform_install(
     lock.validate_replay(&current_manifest_digest)
         .map_err(|error| {
             OperationalError::from(error)
+                .at_manifest(&project_dir.join("package.json"))
                 .context(format!("invalid lockfile {}", lock_path.display()))
         })?;
     let registry_config = crate::registry::RegistryConfig::load(&project_dir)

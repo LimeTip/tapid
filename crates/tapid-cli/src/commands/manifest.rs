@@ -48,9 +48,9 @@ pub(crate) fn read_manifest(path: &std::path::Path) -> Result<PackageManifest, S
 pub(crate) fn read_manifest_typed(
     path: &std::path::Path,
 ) -> Result<PackageManifest, OperationalError> {
-    let input =
-        crate::filesystem::read::read_bounded_file(path, MAX_MANIFEST_BYTES).map_err(|error| {
-            match error {
+    let result = (|| {
+        let input = crate::filesystem::read::read_bounded_file(path, MAX_MANIFEST_BYTES).map_err(
+            |error| match error {
                 crate::filesystem::read::ReadError::CapacityExceeded => OperationalError::new(
                     ErrorKind::Manifest,
                     format!("manifest exceeds maximum size of {MAX_MANIFEST_BYTES} bytes"),
@@ -70,12 +70,18 @@ pub(crate) fn read_manifest_typed(
                     OperationalError::from_source(ErrorKind::Manifest, source)
                         .context(format!("cannot read manifest {}", path.display()))
                 }
-            }
+            },
+        )?;
+        let input = String::from_utf8(input).map_err(|source| {
+            OperationalError::from_source(ErrorKind::Manifest, source)
+                .context(format!("cannot read manifest {}", path.display()))
         })?;
-    let input = String::from_utf8(input).map_err(|source| {
-        OperationalError::from_source(ErrorKind::Manifest, source)
-            .context(format!("cannot read manifest {}", path.display()))
-    })?;
-    PackageManifest::parse(&input)
-        .map_err(|error| OperationalError::from_source(ErrorKind::Manifest, error))
+        PackageManifest::parse(&input).map_err(|error| {
+            let evidence = error.diagnostic(&input);
+            let diagnostic =
+                crate::application::outcome::DiagnosticContext::manifest_error(&evidence, path);
+            OperationalError::from_source(ErrorKind::Manifest, error).with_diagnostic(diagnostic)
+        })
+    })();
+    result.map_err(|error: OperationalError| error.at_manifest(path))
 }

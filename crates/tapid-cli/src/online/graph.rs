@@ -46,7 +46,16 @@ pub(super) fn resolve_package_graph(
         members: _,
         registry_dependencies: _,
         peer_dependencies: workspace_peer_dependencies,
+        declarations,
     } = workspace;
+    let declarations = crate::application::outcome::DiagnosticContext::manifest_requirements(
+        manifest,
+        &project.join("package.json"),
+        None,
+    )
+    .into_iter()
+    .chain(declarations)
+    .collect::<Vec<_>>();
     let fixture = fixture_path.map(fixture).transpose()?;
     let mut fixture_records = BTreeMap::<(String, String, String), PackageRecord>::new();
     if let Some(f) = &fixture {
@@ -283,7 +292,20 @@ pub(super) fn resolve_package_graph(
         &preferred,
         seed,
         |fetched| progress(crate::application::install::Progress::Metadata(fetched)),
-    )?;
+    )
+    .map_err(|mut error| {
+        if let Some(context) = &mut error.diagnostic {
+            context.locate_requirements(&declarations);
+            resolution::locate_override_requirements(
+                context,
+                &declarations,
+                manifest,
+                &project.join("package.json"),
+                &overrides,
+            );
+        }
+        error
+    })?;
     validate_workspace_peer_providers(
         &workspace_peer_dependencies,
         &root_registry_identities,
