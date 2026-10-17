@@ -397,13 +397,17 @@ pub(crate) fn preview(
 ) -> ExitCode {
     let mut result = envelope(operation, "success", Some(&report.outcome));
     let mut data = serde_json::to_value(report).expect("preview serialization");
-    let mut truncated = Vec::new();
+    let mut truncated = result["truncated_fields"]
+        .as_array()
+        .expect("truncation list")
+        .iter()
+        .map(|value| value.as_str().expect("truncation pointer").to_owned())
+        .collect::<Vec<_>>();
     sanitize_preview(&mut data, "/data", &mut truncated);
     result["data"] = data;
-    result["truncated_fields"]
-        .as_array_mut()
-        .expect("truncation list")
-        .extend(truncated.into_iter().map(Value::String));
+    truncated.sort_unstable();
+    truncated.dedup();
+    result["truncated_fields"] = json!(truncated);
     emit(result, 0)
 }
 

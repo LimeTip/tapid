@@ -536,3 +536,50 @@ fn dependency_dry_run_reports_new_root_binding_for_an_existing_transitive_packag
         .unwrap();
     assert_eq!(node["change"], "unchanged");
 }
+
+#[test]
+fn dependency_dry_run_truncation_pointers_are_sorted_and_unique() {
+    let project = preview_project("preview-truncation-order");
+    let path = project.path().join("package.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let requirement = format!("^1.0.0{}", " ".repeat(5000));
+    for index in 0..12 {
+        manifest["peerDependencies"][format!("peer-{index:02}")] = requirement.clone().into();
+    }
+    project
+        .write("package.json", manifest.to_string().as_bytes())
+        .unwrap();
+    let output = isolated_command(
+        project.path(),
+        &[
+            "--json",
+            "update",
+            "--latest",
+            "--dry-run",
+            "--registry-fixture",
+            "registry.json",
+        ],
+        true,
+    )
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(output.stderr.is_empty());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let pointers = result["truncated_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(pointers.contains(&"/data/declarations/10/before"));
+    assert!(
+        pointers.windows(2).all(|pair| pair[0] < pair[1]),
+        "{pointers:?}"
+    );
+}
