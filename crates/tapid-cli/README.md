@@ -329,7 +329,9 @@ compatibility or successful installation, replay, or script execution. Exit 1
 means blockers, read failures, detected changes, or inspection truncation.
 Dependency resolution, registry access, engine/platform requirements, installed
 tree integrity, shared-store recovery, lifecycle approvals, and runner assurance
-remain unchecked. A managed marker establishes ownership only.
+remain unchecked. A managed marker establishes ownership only. An invalid existing marker blocks
+operation even when node_modules is absent. Root and member manifest discovery
+and workspace planning reads are limited to 32 MiB per manifest.
 
 Snapshot entries identify inspected metadata using SHA-256 or explicit missing
 and unreadable states. Directory and journal entries use metadata identities;

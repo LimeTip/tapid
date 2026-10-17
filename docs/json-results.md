@@ -110,7 +110,8 @@ supported lock/spec forms in the experimental `capabilities` summary. Use
 `tapid --json status --help` for arguments and defaults from Clap definitions.
 
 The report includes at most 128 blockers, 128 workspace members, and 128
-declarations from each dependency section. File digests are bounded to 32 MiB, registry configuration to 64 KiB,
+declarations from each dependency section. Workspace discovery and planning bound root/member manifest reads to 32 MiB
+before parsing or hashing. File digests are bounded to 32 MiB, registry configuration to 64 KiB,
 and marker reads to 1 KiB. A truncated inspection exits 1. Display locations are
 sanitized and bounded to 4 KiB; they are descriptive and must not be used for
 automatic recovery. Use the envelope's lossless `project_path` to identify the

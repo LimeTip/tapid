@@ -294,9 +294,10 @@ fn inspect_installation(
 ) {
     let path = project.join("node_modules");
     snapshots.insert(path.clone(), (0, fingerprint(&path, 0)));
+    let valid = validate_managed_node_modules(project).is_ok();
     let state = match fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent",
-        Ok(_) if validate_managed_node_modules(project).is_ok() => "managed",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && valid => "absent",
+        Ok(_) if valid => "managed",
         _ => {
             report.block("INSTALLATION_NOT_MANAGED", &path);
             "unmanaged_or_invalid"

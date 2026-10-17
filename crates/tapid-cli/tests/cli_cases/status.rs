@@ -266,3 +266,121 @@ fn status_bounds_blockers_and_marks_partial_inspection() {
             .any(|e| e["code"] == "INSPECTION_TRUNCATED")
     );
 }
+
+#[test]
+fn status_rejects_invalid_markers_even_without_node_modules() {
+    for kind in ["empty", "invalid", "oversized", "directory", "valid"] {
+        let project = tapid_test_support::TempProject::new("status-absent-tree-marker").unwrap();
+        let manifest = br#"{"name":"app","version":"1.0.0"}"#;
+        project.write("package.json", manifest).unwrap();
+        let lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+        project
+            .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+            .unwrap();
+        match kind {
+            "empty" => {
+                project.write(".tapid-managed", b"").unwrap();
+            }
+            "invalid" => {
+                project.write(".tapid-managed", b"invalid").unwrap();
+            }
+            "oversized" => {
+                project.write(".tapid-managed", &[b'x'; 129]).unwrap();
+            }
+            "directory" => {
+                fs::create_dir(project.path().join(".tapid-managed")).unwrap();
+            }
+            "valid" => {
+                project
+                    .write(".tapid-managed", b"tapid-managed-v1\n")
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let (output, value) = status(project.path(), &[]);
+        assert_eq!(output.status.success(), kind == "valid", "{kind}: {value}");
+        if kind == "valid" {
+            assert_eq!(value["data"]["installation"][0]["state"], "absent");
+        } else {
+            assert!(
+                value["data"]["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| b["code"] == "INSTALLATION_NOT_MANAGED"),
+                "{kind}: {value}"
+            );
+        }
+        assert!(!project.path().join("node_modules").exists());
+        assert!(fs::symlink_metadata(project.path().join(".tapid-managed")).is_ok());
+    }
+}
+
+#[test]
+fn status_blocks_oversized_members_before_workspace_parsing() {
+    use std::io::Write;
+    let project = tapid_test_support::TempProject::new("status-oversized-member").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    let path = project
+        .write(
+            "packages/member/package.json",
+            br#"{"name":"member","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    for _ in 0..1024 {
+        file.write_all(&[b' '; 32 * 1024]).unwrap();
+    }
+    drop(file);
+    let size = fs::metadata(&path).unwrap().len();
+    let (output, value) = status(project.path(), &[]);
+    assert!(!output.status.success());
+    assert!(
+        value["data"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["code"] == "WORKSPACE_INVALID"),
+        "{value}"
+    );
+    assert!(output.stdout.len() < 16 * 1024);
+    assert_eq!(fs::metadata(path).unwrap().len(), size);
+}
+
+#[cfg(unix)]
+#[test]
+fn status_rejects_symlinked_marker_without_following_or_replacing_it() {
+    let project = tapid_test_support::TempProject::new("status-symlink-marker").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    let lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+    let target = project
+        .write("private-marker", b"tapid-managed-v1\n")
+        .unwrap();
+    let marker = project.path().join(".tapid-managed");
+    std::os::unix::fs::symlink(&target, &marker).unwrap();
+    let (output, value) = status(project.path(), &[]);
+    assert!(!output.status.success());
+    assert!(
+        value["data"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["code"] == "INSTALLATION_NOT_MANAGED")
+    );
+    assert!(
+        fs::symlink_metadata(marker)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(target).unwrap(), b"tapid-managed-v1\n");
+}

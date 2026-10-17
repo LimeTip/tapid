@@ -308,9 +308,13 @@ pub(crate) fn workspace_materialization(
         let source =
             LocalWorkspaceSource::new(&relative_posix, member.name(), &version.to_string())
                 .map_err(|error| error.to_string())?;
-        let manifest_bytes = fs::read(member.path()).map_err(|error| {
+        let manifest_bytes = crate::commands::run::read_bounded_config_file(
+            member.path(),
+            tapid_manifest::MAX_MANIFEST_BYTES,
+        )
+        .map_err(|_| {
             format!(
-                "cannot read workspace member manifest {}: {error}",
+                "workspace member manifest must be a regular file no larger than 32 MiB: {}",
                 member.path().display()
             )
         })?;

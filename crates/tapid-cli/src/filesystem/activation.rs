@@ -32,18 +32,28 @@ pub(crate) fn activate_node_modules_with_lock(
     })
 }
 
-/// Preflight member trees without changing them. Activation rechecks the marker by name.
+/// Preflight trees and any existing ownership marker without changing them.
+/// Activation rechecks the marker by name.
 pub(crate) fn validate_managed_node_modules(project: &Path) -> Result<(), String> {
-    match fs::symlink_metadata(project.join("node_modules")) {
-        Ok(metadata) if metadata.file_type().is_dir() => {}
+    let tree_exists = match fs::symlink_metadata(project.join("node_modules")) {
+        Ok(metadata) if metadata.file_type().is_dir() => true,
         Ok(_) => return Err("refusing to replace non-directory or symlink node_modules".into()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(error) => return Err(error.to_string()),
-    }
+    };
     let marker = project.join(".tapid-managed");
-    if read_marker_backup(&marker).map_err(|e| format!("cannot read member .tapid-managed: {e}"))?
-        != MANAGED_MARKER
-    {
+    let contents = match read_marker_backup(&marker) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !tree_exists => {
+            // A dangling symlink still exists and must not be treated as an absent marker.
+            match fs::symlink_metadata(&marker) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                _ => return Err("refusing to use a non-regular .tapid-managed marker".into()),
+            }
+        }
+        Err(error) => return Err(format!("cannot read .tapid-managed: {error}")),
+    };
+    if contents != MANAGED_MARKER {
         return Err(
             "refusing to replace node_modules with an invalid .tapid-managed marker".into(),
         );
