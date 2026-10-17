@@ -518,24 +518,18 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
         None,
     )
     .expect("static backend identity must satisfy the checked contract");
-    if request.policy().network() {
+    if request.policy().network() && request.trusted_node_runtime.is_none() {
         return ContainmentSupport::unsupported(
             backend,
             "windows",
-            "network-enabled profiles are unsupported until AppContainer network capabilities are implemented",
+            "Windows networking requires the selected standard-Node compatibility component; no process was started",
             requested,
             EnforcementDimensions::none(),
             EnforcementDimensions::none(),
         );
     }
     let mechanism = windows_launch_mechanism(request);
-    let limitations: &[&str] = if request.windows_compatibility.is_some() {
-        &[
-            "Node compatibility covers application imports and normal LoadLibrary loads; system DLL internals, DLL initialization launches, manual mapping and dynamically resolved launch APIs are excluded",
-        ]
-    } else {
-        &[]
-    };
+    let limitations = windows_launch_limitations(request);
     let evidence = evidence_for_dimensions(&requested, &mechanism, limitations);
     ContainmentSupport::supported(
         backend,
@@ -547,6 +541,16 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
     )
 }
 
+fn windows_launch_limitations(request: &ExecutionRequest) -> &'static [&'static str] {
+    if request.windows_compatibility.is_some() {
+        &[
+            "Node compatibility covers application imports and normal LoadLibrary loads; system DLL internals, DLL initialization launches, manual mapping and dynamically resolved launch APIs are excluded",
+        ]
+    } else {
+        &[]
+    }
+}
+
 fn windows_launch_mechanism(request: &ExecutionRequest) -> String {
     let mut mechanism = String::from(
         "AppContainer token without network capabilities, explicit path ACL grants, suspended Job Object assignment, and bounded standard-handle capture",
@@ -555,6 +559,13 @@ fn windows_launch_mechanism(request: &ExecutionRequest) -> String {
         mechanism = format!(
             "AppContainer/Job, ACLs, bounded stdio; {}",
             compatibility::describe()
+        );
+    }
+    if request.policy().network() {
+        let identity = compatibility::describe();
+        let identity = identity.split("; ").next().expect("component identity");
+        mechanism = format!(
+            "AppContainer/Job; ACLs; stdio; {identity}; app-IAT, READ_ATTRIBUTES ancestors, EOF stdin; unrestricted IP via private standard-user socket broker; zero network SIDs"
         );
     }
     mechanism
@@ -569,6 +580,7 @@ struct WindowsExecutionLifecycle<'a> {
     job: Option<WindowsJob>,
     child: Option<WindowsSuspendedChild>,
     capture: Option<WindowsOutputCapture>,
+    network: Option<compatibility::Broker>,
     cleanup_error: Option<ExecutionError>,
 }
 
@@ -583,11 +595,19 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             job: None,
             child: None,
             capture: None,
+            network: None,
             cleanup_error: None,
         }
     }
 
     fn prepare(&mut self) -> Result<(), PreparationError> {
+        if self.request.policy().network() && self.request.windows_compatibility.is_none() {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::UnsupportedContainment,
+                "Windows networking requires prepared standard-Node compatibility",
+            )
+            .into());
+        }
         trace_windows_stage("prepare: cancellation");
         self.cancellation = Some(WindowsCancellation::install_and_activate()?);
         trace_windows_stage("prepare: AppContainer");
@@ -646,8 +666,20 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             .assign_suspended_process(
                 self.child.as_ref().expect("child created").process_handle(),
             )?;
+        let process = self.child.as_ref().expect("child created").process_handle();
+        let channels = if self.request.policy().network() {
+            let broker = compatibility::Broker::new(
+                self.job.as_ref().expect("Job prepared").handle(),
+                appcontainer.sid(),
+            )?;
+            let channel = broker.attach(process)?;
+            self.network = Some(broker);
+            Some((channel.request, channel.response))
+        } else {
+            None
+        };
         if let Some(binding) = self.request.windows_compatibility.as_ref() {
-            binding.install(self.child.as_ref().expect("child created").process_handle())?;
+            binding.install(process, channels)?;
         }
         let readers = pipes.into_parent_readers()?;
         self.capture = Some(WindowsOutputCapture::start(
@@ -688,6 +720,7 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             EMPTY_JOB_BEFORE_RESTORE.with(|count| count.set(count.get() + 1));
         }
         self.child.take();
+        self.network.take(); // Broker outlives clients, but not the execution.
         self.job.take(); // The tree is confirmed empty before the final kernel-owned handle closes.
         if let Some(capture) = self.capture.take()
             && let Err(error) = capture.finish()
@@ -792,7 +825,11 @@ impl ExecutionLifecycle for WindowsExecutionLifecycle<'_> {
         };
         let enforced = self.preflight.support.requested().clone();
         let mechanism = windows_launch_mechanism(&self.request);
-        let established = evidence_for_dimensions(&enforced, &mechanism, &[]);
+        let established = evidence_for_dimensions(
+            &enforced,
+            &mechanism,
+            windows_launch_limitations(&self.request),
+        );
         let receipt = EnforcementReceipt::checked(self.preflight, enforced, established)?;
         Ok(Box::new(ExecutionOutcome::checked(
             termination,

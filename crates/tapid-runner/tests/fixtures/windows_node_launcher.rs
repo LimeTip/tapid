@@ -5,6 +5,19 @@ use std::{
 };
 type Value = *mut c_void;
 type Callback = unsafe extern "C" fn(Value, Value) -> Value;
+#[link(name = "ws2_32")]
+unsafe extern "system" {
+    fn WSASocketW(
+        af: i32,
+        kind: i32,
+        protocol: i32,
+        info: *const c_void,
+        group: u32,
+        flags: u32,
+    ) -> usize;
+    fn WSAGetLastError() -> i32;
+    fn closesocket(socket: usize) -> i32;
+}
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetFinalPathNameByHandleW(handle: isize, path: *mut u16, length: u32, flags: u32) -> u32;
@@ -148,6 +161,27 @@ unsafe extern "C" fn reopen(env: Value, info: Value) -> Value {
     unsafe { integer(env, code, &mut result) };
     result
 }
+unsafe extern "C" fn socket_recovery(env: Value, _: Value) -> Value {
+    type Integer = unsafe extern "C" fn(Value, i32, *mut Value) -> i32;
+    // Probe a rejected raw socket, then require an ordinary TCP socket to remain usable.
+    let rejected = unsafe { WSASocketW(2, 3, 0, ptr::null(), 0, 1) };
+    let mut code = if rejected == usize::MAX {
+        0
+    } else {
+        unsafe { closesocket(rejected) };
+        1
+    };
+    let socket = unsafe { WSASocketW(2, 1, 6, ptr::null(), 0, 1) };
+    if socket == usize::MAX {
+        code = unsafe { WSAGetLastError() };
+    } else {
+        unsafe { closesocket(socket) };
+    }
+    let integer: Integer = unsafe { api(c"napi_create_int32") };
+    let mut result = ptr::null_mut();
+    unsafe { integer(env, code, &mut result) };
+    result
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn napi_register_module_v1(env: Value, exports: Value) -> Value {
     type Create =
@@ -181,6 +215,20 @@ pub unsafe extern "C" fn napi_register_module_v1(env: Value, exports: Value) -> 
         )
     } != 0
         || unsafe { set(env, exports, c"reopen".as_ptr().cast(), function) } != 0
+    {
+        return ptr::null_mut();
+    }
+    if unsafe {
+        create(
+            env,
+            c"socketRecovery".as_ptr().cast(),
+            usize::MAX,
+            Some(socket_recovery),
+            ptr::null_mut(),
+            &mut function,
+        )
+    } != 0
+        || unsafe { set(env, exports, c"socketRecovery".as_ptr().cast(), function) } != 0
     {
         return ptr::null_mut();
     }

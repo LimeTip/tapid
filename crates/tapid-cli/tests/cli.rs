@@ -4957,12 +4957,11 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
     )
     .unwrap();
     let policy = "[run.scripts.dev]\nenvironment = [\"SECRET_TOKEN\"]\n";
-    // Existing-target writes are supported; network-enabled profiles still
-    // reject before spawn, independent of the stand-in Node binary.
+    // A missing write target must still reject before spawn when networking is enabled.
     #[cfg(windows)]
     let policy = {
         fs::create_dir(dir.join("writable")).unwrap();
-        format!("{policy}network = true\nwrite = [\"writable\"]\n")
+        format!("{policy}network = true\nwrite = [\"missing/nested\"]\n")
     };
     fs::write(dir.join("tapid.toml"), policy).unwrap();
     let secret = "tapid-super-secret-value";
@@ -4992,10 +4991,7 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
         "{stderr}"
     );
     #[cfg(windows)]
-    assert!(
-        stderr.contains("network-enabled profiles are unsupported until AppContainer network capabilities are implemented"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("metadata open failed"), "{stderr}");
     assert!(stderr.contains("no enforcement receipt was issued"));
     assert!(!stderr.contains(secret));
     assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));

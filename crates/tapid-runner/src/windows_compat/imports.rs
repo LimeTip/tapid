@@ -67,33 +67,43 @@ pub fn imports(mut read: impl FnMut(usize, usize) -> Option<Vec<u8>>) -> Option<
                 terminated = true;
                 break;
             }
-            if name & (1usize << 63) != 0 {
-                continue;
-            }
-            let name = name.checked_add(2)?;
-            if name >= size {
-                return None;
-            }
             let mut symbol = Vec::new();
-            let mut ended = false;
-            for index in 0..256 {
-                let position = name.checked_add(index)?;
-                if position >= size {
+            if name & (1usize << 63) != 0 {
+                if name != (1usize << 63) | 23
+                    || module.checked_add(11)? > size
+                    || !read(module, 11)?.eq_ignore_ascii_case(b"ws2_32.dll\0")
+                {
+                    continue;
+                }
+                symbol.extend_from_slice(b"socket");
+            } else {
+                let name = name.checked_add(2)?;
+                if name >= size {
                     return None;
                 }
-                let byte = *read(position, 1)?.first()?;
-                if byte == 0 {
-                    ended = true;
-                    break;
+                let mut ended = false;
+                for index in 0..256 {
+                    let position = name.checked_add(index)?;
+                    if position >= size {
+                        return None;
+                    }
+                    let byte = *read(position, 1)?.first()?;
+                    if byte == 0 {
+                        ended = true;
+                        break;
+                    }
+                    symbol.push(byte);
                 }
-                symbol.push(byte);
-            }
-            if !ended {
-                return None;
+                if !ended {
+                    return None;
+                }
             }
             if matches!(
                 symbol.as_slice(),
-                b"CreateNamedPipeA"
+                b"WSASocketW"
+                    | b"WSASocketA"
+                    | b"socket"
+                    | b"CreateNamedPipeA"
                     | b"CreateFileA"
                     | b"CreateFileW"
                     | b"CreateProcessW"
@@ -173,7 +183,10 @@ mod tests {
     #[test]
     fn reads_loader_imports_and_accepts_an_image_without_imports() {
         for name in [
-            b"LoadLibraryW".as_slice(),
+            b"WSASocketW".as_slice(),
+            b"WSASocketA",
+            b"socket",
+            b"LoadLibraryW",
             b"LoadLibraryExW",
             b"LoadLibraryA",
             b"LoadLibraryExA",
@@ -187,6 +200,19 @@ mod tests {
         bytes[208..216].fill(0);
         assert!(parse(&bytes).unwrap().is_empty());
     }
+
+    #[test]
+    fn recognizes_winsock_socket_ordinals_only_in_the_system_socket_import() {
+        let mut bytes = image();
+        bytes[750..762].copy_from_slice(b"WS2_32.dll\0\0");
+        bytes[600..608].copy_from_slice(&((1u64 << 63) | 23).to_le_bytes());
+        let slots = parse(&bytes).unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].name, b"socket");
+        bytes[750..762].copy_from_slice(b"other.dll\0\0\0");
+        assert!(parse(&bytes).unwrap().is_empty());
+    }
+
     #[test]
     fn malformed_offsets_and_unterminated_tables_are_rejected() {
         for pe in [0, 63, 4097, u32::MAX] {

@@ -14,6 +14,8 @@ use tapid_runner::{
 
 #[path = "support/windows_acl.rs"]
 mod windows_acl;
+#[path = "support/windows_node.rs"]
+mod windows_node;
 
 fn temporary_child_directory(parent: &std::path::Path, label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -51,7 +53,7 @@ impl std::ops::Deref for DaclSnapshot {
     }
 }
 
-fn project_dacl(path: &PathBuf) -> DaclSnapshot {
+fn project_dacl(path: &std::path::Path) -> DaclSnapshot {
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
     let icacls = PathBuf::from(system_root).join("System32/icacls.exe");
     let output = Command::new(icacls).arg(path).output().unwrap();
@@ -325,7 +327,9 @@ fn windows_ctrl_c_cancels_execution_and_restores_project_dacl() {
 
     const HELPER_ENV: &str = "TAPID_WINDOWS_CTRL_C_HELPER";
     if std::env::var_os(HELPER_ENV).is_some() {
-        windows_ctrl_c_helper();
+        for network in [false, true] {
+            windows_ctrl_c_helper(network);
+        }
         return;
     }
 
@@ -384,8 +388,9 @@ fn windows_ctrl_c_cancels_execution_and_restores_project_dacl() {
                     "isolated Ctrl+C helper failed: status={}\nstdout:\n{stdout}\nstderr:\n{stderr}",
                     output.status
                 );
-                assert!(
-                    stdout.contains("CTRL_C_HELPER_SUCCESS"),
+                assert_eq!(
+                    stdout.matches("CTRL_C_HELPER_SUCCESS").count(),
+                    2,
                     "success marker missing; helper stdout:\n{stdout}\nhelper stderr:\n{stderr}"
                 );
                 break;
@@ -424,7 +429,7 @@ fn windows_ctrl_c_cancels_execution_and_restores_project_dacl() {
     }
 }
 
-fn windows_ctrl_c_helper() {
+fn windows_ctrl_c_helper(network: bool) {
     use std::sync::mpsc::{self, TryRecvError};
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::GetLastError;
@@ -447,7 +452,14 @@ fn windows_ctrl_c_helper() {
         std::process::id(),
         &console_processes[..copied_process_count]
     );
-    let root = temporary_project("ctrl-c");
+    let project = tapid_test_support::TempProject::new("ctrl-c").unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
+    windows_acl::initialize_inheritance(&root);
+    let runtime = tapid_test_support::TempProject::new("ctrl-c-runtime").unwrap();
+    let reservation = network.then(|| std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap());
+    let endpoint = reservation
+        .as_ref()
+        .map(|listener| listener.local_addr().unwrap());
     let baseline_acl = project_dacl(&root);
     eprintln!(
         "[windows-ctrl-c helper] baseline captured after {:?}: root={} dacl={:?}",
@@ -455,11 +467,52 @@ fn windows_ctrl_c_helper() {
         root.display(),
         String::from_utf8_lossy(&baseline_acl)
     );
-    let request = command_request(
-        &root,
-        "for /L %i in (1,1,2147483647) do @rem",
-        ExecutionLimits::new(Some(30), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
-    );
+    let request = if let Some(endpoint) = endpoint {
+        let node = runtime.path().join("node.exe");
+        fs::copy(
+            std::env::var_os("TAPID_TEST_NODE").expect("native Node is required"),
+            &node,
+        )
+        .unwrap();
+        let node = fs::canonicalize(node).unwrap();
+        windows_acl::initialize_inheritance(node.parent().unwrap());
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::ManagedTree,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            true,
+            vec!["SystemRoot".into()],
+            false,
+            ExecutionLimits::new(Some(30), Some(4096), Some(8), Some(256 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap();
+        let script = format!(
+            "require('node:net').createServer(s=>s.end('CTRL_C_NETWORK_READY')).listen({},'127.0.0.1',()=>console.log('NETWORK_LISTENING'));",
+            endpoint.port()
+        );
+        ExecutionRequest::builder(node.as_os_str())
+            .args(["-e", &script])
+            .executable_search_path(node.parent().unwrap())
+            .trusted_node_runtime(&node)
+            .project_root(&root)
+            .policy(policy)
+            .env("SystemRoot", std::env::var_os("SystemRoot").unwrap())
+            .build()
+            .unwrap()
+    } else {
+        command_request(
+            &root,
+            "for /L %i in (1,1,2147483647) do @rem",
+            ExecutionLimits::new(Some(30), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
+        )
+    };
+    let runtime_acls = network.then(|| {
+        (
+            project_dacl(runtime.path()),
+            project_dacl(&runtime.path().join("node.exe")),
+        )
+    });
+    drop(reservation);
     let (sender, receiver) = mpsc::channel();
     let worker = std::thread::spawn(move || {
         eprintln!("[windows-ctrl-c worker] execute started");
@@ -498,6 +551,32 @@ fn windows_ctrl_c_helper() {
         }
         std::thread::sleep(Duration::from_millis(10));
         active_acl = project_dacl(&root);
+    }
+
+    if let Some(endpoint) = endpoint {
+        use std::io::Read;
+        loop {
+            if let Ok(mut stream) =
+                std::net::TcpStream::connect_timeout(&endpoint, Duration::from_millis(100))
+            {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut payload = String::new();
+                stream.read_to_string(&mut payload).unwrap();
+                assert_eq!(payload, "CTRL_C_NETWORK_READY");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "network listener did not become ready before Ctrl+C"
+            );
+            assert!(
+                !worker.is_finished(),
+                "network execution exited before Ctrl+C"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     eprintln!(
@@ -562,6 +641,16 @@ fn windows_ctrl_c_helper() {
         .join()
         .unwrap_or_else(|panic| panic!("execution worker panicked: {panic:?}"));
     assert_eq!(outcome.termination(), &Termination::Cancelled);
+    if network {
+        assert!(String::from_utf8_lossy(outcome.stdout()).contains("NETWORK_LISTENING"));
+        assert!(
+            outcome
+                .enforcement()
+                .established_evidence()
+                .iter()
+                .any(|evidence| evidence.mechanism().contains("socket broker"))
+        );
+    }
     assert_eq!(
         outcome.completion().cleanup_confidence(),
         CleanupConfidence::KernelOwnedComplete
@@ -574,11 +663,17 @@ fn windows_ctrl_c_helper() {
         String::from_utf8_lossy(&baseline_acl),
         String::from_utf8_lossy(&restored_acl)
     );
+    if let Some((directory_acl, executable_acl)) = runtime_acls {
+        assert_eq!(project_dacl(runtime.path()), directory_acl);
+        assert_eq!(
+            project_dacl(&runtime.path().join("node.exe")),
+            executable_acl
+        );
+    }
     eprintln!(
         "[windows-ctrl-c helper] cleanup verified after {:?}: DACL restored exactly",
         started.elapsed()
     );
-    fs::remove_dir_all(root).unwrap();
     println!("CTRL_C_HELPER_SUCCESS elapsed={:?}", started.elapsed());
 }
 
@@ -793,32 +888,7 @@ fn windows_native_addon_launch_preserves_stock_node_metadata() {
     let node = fs::canonicalize(node).unwrap();
     windows_acl::initialize_inheritance(&root);
     windows_acl::initialize_inheritance(node.parent().unwrap());
-    let source =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/windows_node_launcher.rs");
-    let mut compiler = Command::new("rustc");
-    compiler
-        .args([
-            "--crate-type",
-            "cdylib",
-            "--edition",
-            "2024",
-            "-C",
-            "opt-level=2",
-            "-C",
-            "panic=abort",
-        ])
-        .arg(source)
-        .arg("-o")
-        .arg(root.join("launcher.node"));
-    if let Ok(flags) = std::env::var("RUSTFLAGS") {
-        compiler.args(flags.split_whitespace());
-    }
-    let compiled = compiler.output().unwrap();
-    assert!(
-        compiled.status.success(),
-        "{}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
+    windows_node::compile_launcher(&root.join("launcher.node"));
     let script = format!(
         r#"
 const assert = require('node:assert/strict');
@@ -1263,7 +1333,7 @@ fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
 }
 
 #[test]
-fn windows_network_enabled_policy_fails_closed_before_spawn() {
+fn windows_network_policy_without_selected_node_component_fails_closed_before_spawn() {
     let root = temporary_project("network-allowed-unavailable");
     let marker = root.join("must-not-spawn.txt");
     let command = format!("echo should-not-run>\"{}\"", marker.display());
@@ -1273,11 +1343,14 @@ fn windows_network_enabled_policy_fails_closed_before_spawn() {
         ExecutionLimits::new(Some(10), Some(4096), Some(4), Some(128 * 1024 * 1024)).unwrap(),
         true,
     );
-    let error = execute(&request).expect_err("network-enabled policy is not yet representable");
+    let error = execute(&request).expect_err("network policy requires the selected Node component");
     assert_eq!(
         error.category(),
         ExecutionErrorCategory::UnsupportedContainment
     );
+    assert!(error.to_string().contains(
+        "Windows networking requires the selected standard-Node compatibility component"
+    ));
     assert!(
         !marker.exists(),
         "untrusted code must not start for unsupported network policy"

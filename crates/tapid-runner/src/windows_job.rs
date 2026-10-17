@@ -176,6 +176,10 @@ impl WindowsJob {
         Ok(())
     }
 
+    pub(super) fn handle(&self) -> HANDLE {
+        self.handle
+    }
+
     pub(super) fn active_process_count(&self) -> Result<u32, ExecutionError> {
         // SAFETY: zeroed is a valid writable destination; the declared output length matches.
         let mut information: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
