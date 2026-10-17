@@ -81,6 +81,8 @@ An absent or null `context` means no allowlisted evidence is available. Inside
 a context object, null means unknown or inapplicable. Empty lists mean no
 entries are reported; inspect `omitted` before treating a list as complete.
 Context does not change transaction state, retry advice, or exit status.
+For outdated metadata or requirement failures, `context.package.version` is
+null. The entry's `locked` field retains the existing pin independently.
 
 | Context field | Meaning |
 | --- | --- |
@@ -99,6 +101,9 @@ declarations include the member name and that member's manifest path. Metadata
 declarations have null manifest paths and must not be treated as editable local
 fields. For an absent peer provider, add a provider through a supported local
 dependency section; there is no existing provider declaration to report.
+Resolver root origins exclude `peerDependencies` entries, even when they have
+the same name and range as an installed dependency. Peer requirements remain
+visible in the peer-specific declaration and requirement fields.
 
 Manifest comparisons report the expected type or validation constraint and the
 observed JSON type, `missing`, or `invalid_json`. They never echo the value of

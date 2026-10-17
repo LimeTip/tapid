@@ -72,6 +72,10 @@ impl Declaration {
         let escape = |value: &str| super::sanitize(value).replace('~', "~0").replace('/', "~1");
         format!("/{}/{}", escape(section), escape(name))
     }
+
+    fn selects_resolver_root(&self) -> bool {
+        self.origin == "manifest" && !self.pointer.starts_with("/peerDependencies/")
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -297,6 +301,10 @@ impl DiagnosticContext {
                 .filter(|candidate| {
                     candidate.local_name == requirement.local_name
                         && candidate.requirement == requirement.requirement
+                        && candidate
+                            .declaration
+                            .as_ref()
+                            .is_some_and(Declaration::selects_resolver_root)
                 })
                 .collect::<Vec<_>>();
             if requirement.declaration.is_none() && !matches.is_empty() {
@@ -312,9 +320,10 @@ impl DiagnosticContext {
                 .find(|candidate| {
                     candidate.local_name.as_deref() == Some(&peer.name)
                         && peer.provider.is_some()
-                        && candidate.declaration.as_ref().is_some_and(|location| {
-                            !location.pointer.starts_with("/peerDependencies/")
-                        })
+                        && candidate
+                            .declaration
+                            .as_ref()
+                            .is_some_and(Declaration::selects_resolver_root)
                 })
                 .and_then(|candidate| candidate.declaration.clone());
         }

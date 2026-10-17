@@ -656,7 +656,7 @@ fn outdated_entries(
                 .for_package(super::outcome::DiagnosticPackage {
                     source: origin.to_string(),
                     name: package_name.to_string(),
-                    version: locked_version.as_ref().map(ToString::to_string),
+                    version: None,
                 })
                 .at_dependency(
                     &selection.manifest_path,

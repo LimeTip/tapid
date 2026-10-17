@@ -28,7 +28,7 @@ fn json_peer_conflict_is_actionable_without_human_output() {
         project
             .write(
                 "package.json",
-                serde_json::json!({"name":"app","version":"1.0.0","dependencies":dependencies})
+                serde_json::json!({"name":"app","version":"1.0.0","dependencies":dependencies,"peerDependencies":{"plugin":"1.0.0"}})
                     .to_string()
                     .as_bytes(),
             )
@@ -73,6 +73,7 @@ fn json_peer_conflict_is_actionable_without_human_output() {
             }
         );
         assert_eq!(context["declaration"]["origin"], "metadata");
+        assert_eq!(context["requirements"].as_array().unwrap().len(), 1);
         assert_eq!(
             context["declaration"]["pointer"],
             "/peerDependencies/@local~1host"
@@ -352,7 +353,7 @@ fn json_workspace_conflict_locates_each_declaring_member() {
         )
         .unwrap();
     for (member, requirement) in [("a", "^1"), ("b", "^2")] {
-        project.write(format!("packages/{member}/package.json"), serde_json::json!({"name":member,"version":"1.0.0","dependencies":{"h3":requirement}}).to_string().as_bytes()).unwrap();
+        project.write(format!("packages/{member}/package.json"), serde_json::json!({"name":member,"version":"1.0.0","dependencies":{"h3":requirement},"peerDependencies":{"h3":requirement}}).to_string().as_bytes()).unwrap();
     }
     project
         .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
@@ -713,6 +714,68 @@ fn outdated_peer_declarations_do_not_claim_direct_lockfile_changes() {
             } else {
                 "changed"
             }
+        );
+    }
+}
+
+#[test]
+fn json_outdated_failures_do_not_label_locked_versions_as_selected() {
+    let project = TempProject::new("json-outdated-failure-version").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    project.write("empty.json", br#"{"packages":[]}"#).unwrap();
+    project.write("invalid.json", b"not json").unwrap();
+    let store = project.path().join("store");
+    let (output, installed) = invoke(
+        &project,
+        &[
+            "--json",
+            "install",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{installed}");
+    for (requirement, options, code) in [
+        ("1.0.0", vec!["--offline"], "REGISTRY_METADATA_UNAVAILABLE"),
+        (
+            "1.0.0",
+            vec!["--registry-fixture", "empty.json"],
+            "REGISTRY_METADATA_INVALID",
+        ),
+        (
+            "1.0.0",
+            vec!["--registry-fixture", "invalid.json"],
+            "REGISTRY_METADATA_INVALID",
+        ),
+        (
+            "invalid requirement ??",
+            vec!["--registry-fixture", "registry.json"],
+            "INVALID_REQUEST",
+        ),
+    ] {
+        project.write("package.json", serde_json::json!({"name":"app","version":"1.0.0","dependencies":{"h3":requirement}}).to_string().as_bytes()).unwrap();
+        let mut args = vec!["--json", "outdated"];
+        args.extend(options);
+        let (output, result) = invoke(&project, &args);
+        assert!(output.status.success(), "{result}");
+        assert_eq!(result["outcome"], "partial");
+        let entry = &result["data"]["entries"][0];
+        assert_eq!(entry["error"]["code"], code);
+        assert_eq!(entry["locked"], "1.0.0");
+        assert_eq!(entry["error"]["context"]["package"]["name"], "h3");
+        assert!(
+            entry["error"]["context"]["package"]["version"].is_null(),
+            "{entry}"
         );
     }
 }
