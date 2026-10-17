@@ -13,6 +13,10 @@ use tapid_lockfile::Lockfile;
 mod cache_tests;
 #[path = "cli_cases/ci.rs"]
 mod ci_tests;
+#[path = "cli_cases/command_fixture.rs"]
+mod command_fixture_tests;
+#[path = "cli_cases/command_support.rs"]
+mod command_support;
 #[path = "cli_cases/explain.rs"]
 mod explain_tests;
 #[path = "cli_cases/run_permissions.rs"]
@@ -96,30 +100,11 @@ fn test_homes()
 }
 
 fn isolated_command(cwd: &Path, args: &[&str], clear_environment: bool) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
-    if clear_environment {
-        command.env_clear();
-    }
-    command.args(args);
-    if args.first().is_some_and(|command| {
-        matches!(
-            *command,
-            "install" | "i" | "add" | "remove" | "update" | "prune"
-        )
-    }) && !args.contains(&"--store-dir")
-    {
-        command.arg("--store-dir").arg(cwd.join(".test-store"));
-    }
     let mut homes = test_homes().lock().unwrap();
     let home = homes
         .entry(cwd.to_path_buf())
         .or_insert_with(|| tapid_test_support::TempHome::new("cli-install").unwrap());
-    command
-        .current_dir(cwd)
-        .env("HOME", home.path())
-        .env("XDG_CACHE_HOME", home.path())
-        .env("LOCALAPPDATA", home.path());
-    command
+    command_support::command_in_home(cwd, home.path(), args, clear_environment)
 }
 
 fn prior_empty_lock() -> String {

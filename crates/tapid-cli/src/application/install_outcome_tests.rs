@@ -55,6 +55,91 @@ fn project_with_fixture(label: &str, integrity: &str) -> (TempProject, PathBuf) 
 }
 
 #[test]
+fn install_reclassifies_the_lock_after_recovery() {
+    use crate::filesystem::lifecycle_journal::LifecycleJournal;
+    use tapid_lockfile::ImportedNpmLockfile;
+
+    for (restore_imported, ci) in [(false, false), (true, false), (false, true), (true, true)] {
+        let (project, fixture) = project_with_fixture("recovered-lock-format", INTEGRITY);
+        let manifest_path = project.path().join("package.json");
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        let digest = crate::online::root_digest(project.path()).unwrap();
+        let native = Lockfile::new(&digest).unwrap().to_json().unwrap();
+        let imported = ImportedNpmLockfile::import(
+            r#"{"lockfileVersion":3,"packages":{"":{"name":"app","version":"1.0.0"}}}"#,
+            &manifest,
+            &digest,
+        )
+        .unwrap()
+        .to_json()
+        .unwrap();
+        let (restored, interrupted) = if restore_imported {
+            (&imported, &native)
+        } else {
+            (&native, &imported)
+        };
+        let activation = ActivationLock::acquire(project.path()).unwrap();
+        let journal = LifecycleJournal::begin(
+            project.path(),
+            &manifest_path,
+            activation.owner_line(),
+            manifest.as_bytes(),
+            Some(restored.as_bytes()),
+        )
+        .unwrap();
+        project.write("tapid.lock", interrupted.as_bytes()).unwrap();
+        std::mem::forget(journal);
+        drop(activation);
+
+        let result = run(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&project.path().join("store")),
+                mode: if ci {
+                    InstallMode::Ci
+                } else {
+                    InstallMode::Frozen
+                },
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
+            |_| {},
+        );
+        let outcome = if restore_imported && ci {
+            let failure = result.expect_err("CI must reject the recovered imported lock");
+            assert_eq!(failure.error.kind, ErrorKind::Lockfile);
+            assert!(!project.path().join("node_modules").exists());
+            *failure.outcome
+        } else {
+            let report = result.unwrap_or_else(|error| {
+                panic!("restore_imported={restore_imported}, ci={ci}: {error:?}")
+            });
+            assert_eq!(report.package_count, 0);
+            report.outcome
+        };
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| matches!(w, Warning::PreviousTransactionRecovered))
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            *restored
+        );
+        assert_eq!(fs::read_to_string(&manifest_path).unwrap(), manifest);
+        assert!(
+            !project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
+    }
+}
+
+#[test]
 fn failed_resolution_reports_rollback_and_preserves_its_category() {
     let (project, fixture) = project_with_fixture("typed-resolution", INTEGRITY);
     let original = fs::read(project.path().join("package.json")).unwrap();
@@ -120,6 +205,7 @@ enum Fault {
     AfterCommit,
     CleanupPending,
     RollbackPending,
+    PolicyChanged,
 }
 thread_local! { static FAULT: std::cell::Cell<Option<Fault>> = const { std::cell::Cell::new(None) }; }
 struct FaultGuard;
@@ -136,6 +222,10 @@ fn inject(fault: Fault) -> FaultGuard {
 // Mutate only this thread's temporary fixture at real filesystem boundaries.
 pub(super) fn checkpoint(point: &str, project: &Path, owner: &str) -> Result<(), OperationalError> {
     match (FAULT.get(), point) {
+        (Some(Fault::PolicyChanged), "before_acquire") => {
+            fs::write(project.join("tapid.lifecycle.toml"), b"schema = 2").unwrap();
+            Ok(())
+        }
         (Some(Fault::AfterCommit), "after_commit") => Err(OperationalError::new(
             ErrorKind::Transaction,
             "injected post-commit failure",
@@ -160,6 +250,32 @@ pub(super) fn checkpoint(point: &str, project: &Path, owner: &str) -> Result<(),
         }
         _ => Ok(()),
     }
+}
+
+#[test]
+fn install_reads_lifecycle_policy_after_acquiring_the_project_lock() {
+    let (project, fixture) = project_with_fixture("policy-before-acquire", INTEGRITY);
+    project
+        .write("tapid.lifecycle.toml", b"schema = 1")
+        .unwrap();
+    let _fault = inject(Fault::PolicyChanged);
+    let result = run(
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    );
+    let failure = result
+        .expect_err("must reject the invalid current policy rather than use the earlier valid one");
+    assert_eq!(failure.error.kind, ErrorKind::InvalidRequest);
+    assert!(!project.path().join("node_modules").exists());
+    assert!(!project.path().join("tapid.lock").exists());
 }
 
 #[test]

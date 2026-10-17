@@ -139,6 +139,8 @@ A dry run never writes project files, creates an activation lock, recovers trans
 
 Lifecycle edits validate the manifest they were planned against after acquiring the project lock. An intervening semantic manifest edit fails with `PROJECT_CHANGED` before writing the override. This protects the planning-to-lock interval for cooperating commands; it does not protect against an uncooperative writer changing files during the transaction.
 
+Install reads lifecycle policy and classifies the current lockfile after acquiring the project lock and completing recovery. If recovery restores a different lock format, replay and CI restrictions apply to that recovered lock.
+
 `install`, `ci`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
 
 Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result is unchanged unless a pending transaction requires recovery. In that case it reports `recovery_required` and the paths to inspect without attempting recovery.

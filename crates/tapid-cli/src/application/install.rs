@@ -313,7 +313,6 @@ fn perform_install(
         ));
     }
     session.outcome.project_dir = project_dir.clone();
-    let lifecycle_policy = super::dependency_scripts::load_policy(&project_dir)?;
     let target_candidate = if target_manifest_path.is_absolute() {
         target_manifest_path.to_path_buf()
     } else {
@@ -362,36 +361,18 @@ fn perform_install(
         online::validate_manifest_roots(&project_dir, &candidate)?;
     }
     let lock_path = project_dir.join("tapid.lock");
-    let mut imported = if lock_path.is_file() {
-        let bytes = fs::read_to_string(&lock_path)
-            .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
-        if serde_json::from_str::<serde_json::Value>(&bytes)
-            .ok()
-            .is_some_and(|v| v["lockfileVersion"] == 8)
-        {
-            Some(
-                tapid_lockfile::ImportedNpmLockfile::from_json(&bytes)
-                    .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?,
-            )
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    if ci && imported.is_some() {
-        return Err(OperationalError::new(
-            ErrorKind::Lockfile,
-            "ci requires an ordinary verified-tree lock; use install --frozen to install imported npm locks",
-        ));
+    // Preserve preflight rejection without activating anything. Pending recovery
+    // must run first because its snapshot may replace the current lock format.
+    if !crate::filesystem::lifecycle_journal::has_pending(&project_dir)
+        .map_err(|error| OperationalError::new(ErrorKind::Recovery, error))?
+        && lock_path.is_file()
+    {
+        let bytes = fs::read(&lock_path)
+            .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
+        parse_install_lock(&bytes, &lock_path, ci)?;
     }
-    let has_imported_lock = imported.is_some();
-    if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
-        imported = None;
-    }
-    if lock_path.is_file() && !has_imported_lock {
-        read_lock(&lock_path)?;
-    }
+    #[cfg(test)]
+    outcome_tests::checkpoint("before_acquire", &project_dir, "")?;
     session.lock = Some(ActivationLock::acquire(&project_dir)?);
     let activation_lock = session.lock.as_ref().expect("project lock acquired");
     if activation_lock.recovered {
@@ -403,6 +384,7 @@ fn perform_install(
     if cfg!(debug_assertions) && std::env::var_os("TAPID_TEST_RECOVER_ONLY").is_some() {
         return Ok((0, false));
     }
+    let lifecycle_policy = super::dependency_scripts::load_policy(&project_dir)?;
     let current_manifest = read_manifest(&manifest_path)?;
     if let Some(edit) = manifest_override
         && edit.expected != &current_manifest
@@ -424,16 +406,19 @@ fn perform_install(
                 .context("cannot preserve tapid.lock for recovery"));
         }
     };
-    if imported.is_some() {
-        imported = original_lock
-            .as_deref()
-            .map(|bytes| {
-                let input = std::str::from_utf8(bytes)
-                    .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
-                tapid_lockfile::ImportedNpmLockfile::from_json(input)
-                    .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))
-            })
-            .transpose()?;
+    // Recovery may restore a different lock format. Classify the current snapshot
+    // under the project lock, before choosing native replay or npm hydration.
+    let current_lock = original_lock
+        .as_deref()
+        .map(|bytes| parse_install_lock(bytes, &lock_path, ci))
+        .transpose()?;
+    let (previous_lock, mut imported) = match current_lock {
+        Some(InstallLock::Native(lock)) => (Some(lock), None),
+        Some(InstallLock::Imported(lock)) => (None, Some(lock)),
+        None => (None, None),
+    };
+    if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
+        imported = None;
     }
     if offline || frozen || manifest_override.is_some() || package.is_some() {
         session.journal = Some(
@@ -492,11 +477,6 @@ fn perform_install(
             default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
         }
     });
-    let previous_lock = if lock_path.is_file() && !has_imported_lock {
-        Some(read_lock(&lock_path)?)
-    } else {
-        None
-    };
     let mut replayable = true;
     if let Some(lock) = &previous_lock {
         match lock.validate_replay(lock.root_manifest_digest()) {
@@ -952,6 +932,42 @@ fn perform_install(
         .finish()
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
     Ok((lock.packages().len(), true))
+}
+
+enum InstallLock {
+    Native(Lockfile),
+    Imported(tapid_lockfile::ImportedNpmLockfile),
+}
+
+fn parse_install_lock(
+    bytes: &[u8],
+    path: &Path,
+    ci: bool,
+) -> Result<InstallLock, OperationalError> {
+    let input = std::str::from_utf8(bytes)
+        .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
+    let lock = if serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .is_some_and(|value| value["lockfileVersion"] == 8)
+    {
+        tapid_lockfile::ImportedNpmLockfile::from_json(input)
+            .map(InstallLock::Imported)
+            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error.to_string()))?
+    } else {
+        Lockfile::from_json(input)
+            .map(InstallLock::Native)
+            .map_err(|error| {
+                OperationalError::from(error)
+                    .context(format!("invalid lockfile {}", path.display()))
+            })?
+    };
+    if ci && matches!(lock, InstallLock::Imported(_)) {
+        return Err(OperationalError::new(
+            ErrorKind::Lockfile,
+            "ci requires an ordinary verified-tree lock; use install --frozen to install imported npm locks",
+        ));
+    }
+    Ok(lock)
 }
 
 fn read_lock(path: &Path) -> Result<Lockfile, OperationalError> {

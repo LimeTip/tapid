@@ -228,9 +228,19 @@ pub(super) fn resolve_package_graph(
     });
     seed.extend(copied_records.values().cloned());
     let mut metadata_lookups = 0;
-    // Root refresh, tagged workspace peers, incremental resolution, and saved
-    // declarations share fresh metadata for this operation. Keep it separate
-    // from locked evidence, which the resolver reconciles with fetched records.
+    // Keep metadata shared by root refresh, tagged peers, and saved declarations.
+    // Incremental resolution already deduplicates its own retrievals; retaining
+    // all of its packuments too would duplicate the largest part of the graph.
+    // Peer-only saves may need metadata fetched during resolution because they
+    // have no installed root binding, so retain it for that later consumer.
+    let resolving = std::cell::Cell::new(false);
+    let save_peer_metadata =
+        update.is_some_and(|request| {
+            request.save.is_some()
+                && request.plan.mutations.iter().any(|mutation| {
+                    mutation.kind == tapid_manifest::DependencyKind::PeerDependencies
+                })
+        });
     let mut metadata = BTreeMap::<(PackageSource, PackageName), Vec<PackageRecord>>::new();
     let mut fetch_records = |registry: &PackageSource, name: &PackageName| {
         let key = (registry.clone(), name.clone());
@@ -269,7 +279,11 @@ pub(super) fn resolve_package_graph(
                 allow_missing_integrity,
             )?
         };
-        Ok(metadata.entry(key).or_insert(records).clone())
+        if !resolving.get() || save_peer_metadata {
+            Ok(metadata.entry(key).or_insert(records).clone())
+        } else {
+            Ok(records)
+        }
     };
     if let Some(request) = update.filter(|request| request.named) {
         update::refresh_selected(
@@ -292,6 +306,7 @@ pub(super) fn resolve_package_graph(
             seed.extend(provider_records);
         }
     }
+    resolving.set(true);
     let (resolution, records) = resolution::resolve_with_preferences(
         &roots,
         |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
@@ -314,6 +329,7 @@ pub(super) fn resolve_package_graph(
         }
         error
     })?;
+    resolving.set(false);
     validate_workspace_peer_providers(
         &workspace_peer_dependencies,
         &root_registry_identities,
@@ -365,6 +381,47 @@ pub(super) fn workspace_registry_target<'a>(
 mod tests {
     use super::*;
     use crate::application::lifecycle::{SavePolicy, plan_update};
+
+    #[test]
+    fn peer_only_save_reuses_metadata_retrieved_for_a_transitive_dependency() {
+        let project = tapid_test_support::TempProject::new("graph-peer-save-metadata").unwrap();
+        let text = r#"{"name":"app","version":"1.0.0","dependencies":{"parent":"^1"},"peerDependencies":{"child":"^1"}}"#;
+        project.write("package.json", text.as_bytes()).unwrap();
+        let fixture = serde_json::json!({"packages":[
+            {"registry":NPM,"name":"parent","version":"1.0.0","dependencies":{"child":"^1"},"integrity":integrity(b"parent").to_string(),"artifact":"never-download"},
+            {"registry":NPM,"name":"child","version":"1.1.0","integrity":integrity(b"child").to_string(),"artifact":"never-download"}
+        ]});
+        let fixture = project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let manifest = PackageManifest::parse(text).unwrap();
+        let plan = plan_update(&manifest, &["child".into()], false).unwrap();
+        let config = crate::registry::RegistryConfig::default();
+        let target = project.path().join("package.json");
+        let resolved = resolve_package_graph(
+            project.path(),
+            &manifest,
+            workspace_materialization(project.path(), &config).unwrap(),
+            Some(&fixture),
+            false,
+            &config,
+            None,
+            Some(UpdateRequest {
+                plan: &plan,
+                target: &target,
+                named: true,
+                original_root_digest: None,
+                save: Some(SavePolicy::Exact),
+            }),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(resolved.resolution.selected.len(), 2);
+        assert_eq!(resolved.metadata_lookups, 2);
+        let saved = resolved.updated_manifest.unwrap();
+        assert_eq!(saved.dependencies()["parent"], "^1");
+        assert_eq!(saved.peer_dependencies()["child"], "1.1.0");
+    }
 
     #[test]
     fn named_update_keeps_metadata_from_distinct_sources_separate() {
