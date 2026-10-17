@@ -960,6 +960,10 @@ fn tool_retries_interrupted_ownership_publication_without_claiming_unowned_files
             home.path().join("tools with spaces/.tapid-tools").exists(),
             published
         );
+        let recovered = list(&project, &home);
+        assert_eq!(recovered["data"]["tools"], json!([]));
+        assert!(home.path().join("tools with spaces/bin").is_dir());
+        assert!(home.path().join("tools with spaces/environments").is_dir());
         assert_success(&install(&project, &home));
         assert_eq!(
             list(&project, &home)["data"]["tools"][0]["name"],
@@ -982,6 +986,19 @@ fn tool_retries_interrupted_ownership_publication_without_claiming_unowned_files
     assert!(!output.status.success());
     assert_eq!(fs::read(&unowned).unwrap(), b"tapid-tools-v1\n");
     assert!(!root.join(".tapid-tools").exists());
+}
+
+#[test]
+fn tool_list_preserves_an_empty_unowned_root() {
+    let project = TempProject::new("tool-list-unowned").unwrap();
+    let home = TempHome::new("tool-list-unowned").unwrap();
+    let root = home.path().join("tools with spaces");
+    fs::create_dir(&root).unwrap();
+    let output = command(&project, &home, &["tool", "list"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
 }
 
 #[test]
@@ -1015,6 +1032,10 @@ fn tool_initialization_rejects_invalid_ownership_and_preserves_unknown_entries()
         if case == "directory-temp" {
             fs::create_dir(root.join(".tapid-tool-write-abc")).unwrap();
         }
+        let listed = command(&project, &home, &["tool", "list"])
+            .output()
+            .unwrap();
+        assert!(!listed.status.success(), "{case}");
         assert!(!install(&project, &home).status.success(), "{case}");
         assert!(!root.join(".tapid-tools").exists());
         assert!(marker.exists());

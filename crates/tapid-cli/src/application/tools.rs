@@ -188,7 +188,7 @@ pub(crate) fn run(
         }
     }
     if matches!(action, Action::List) {
-        state::verify(&root)
+        state::resume_initialization(&root)
     } else {
         state::initialize(&root)
     }

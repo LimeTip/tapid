@@ -253,7 +253,7 @@ pub(super) fn write_new(
     }
     result
 }
-fn validate_unmarked_root(root: &Path) -> Result<(), OperationalError> {
+fn validate_unmarked_root(root: &Path) -> Result<bool, OperationalError> {
     let mut owned_initialization = false;
     let mut nonempty = false;
     for entry in fs::read_dir(root).map_err(error)? {
@@ -286,7 +286,16 @@ fn validate_unmarked_root(root: &Path) -> Result<(), OperationalError> {
             "refusing a nonempty tools directory without Tapid ownership",
         ));
     }
-    Ok(())
+    Ok(owned_initialization)
+}
+
+/// Resume only previously owned state; listing must not claim an unused root.
+pub(super) fn resume_initialization(root: &Path) -> Result<(), OperationalError> {
+    check_path(root)?;
+    if !root.join(".tapid-tools").try_exists().map_err(error)? && !validate_unmarked_root(root)? {
+        return Err(error("tools directory has no Tapid ownership marker"));
+    }
+    initialize(root)
 }
 
 pub(super) fn initialize(root: &Path) -> Result<(), OperationalError> {

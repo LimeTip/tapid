@@ -43,6 +43,8 @@ block claiming the root. Existing temporary files are preserved. The final
 ownership file is synced before the initialization directory is removed
 nonrecursively. Unix command names reserve `node`, including case variants, so
 adding the tool bin directory to PATH cannot replace implicit runtime discovery.
+Listing resumes this owned initialization, including missing `bin` and
+`environments` directories, but does not claim an empty unowned root.
 
 Global commands run with normal user authority and an externally managed runtime.
 They are not root-script sandbox requests. Lifecycle hooks remain disabled;
