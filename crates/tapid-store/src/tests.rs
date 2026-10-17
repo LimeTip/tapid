@@ -177,6 +177,40 @@ fn version_two_coordinator_recovery_removes_prepared_transaction_tree() {
 }
 
 #[test]
+fn version_three_coordinator_recovery_removes_prepared_transaction_tree() {
+    let root = root();
+    let project = root.with_extension("v3-coordinator-project");
+    let store_root = root.join("store");
+    fs::create_dir_all(&store_root).unwrap();
+    let created_digest = make_marked_tree(&store_root, "version three transaction");
+    let coordinator = version_two_coordinator(&project, "Prepared");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&coordinator).unwrap()).unwrap();
+    record["version"] = serde_json::json!(3);
+    record["members"] = serde_json::json!([]);
+    fs::write(&coordinator, record.to_string()).unwrap();
+    write_store_journal(
+        &store_root,
+        &coordinator,
+        &[created_digest.as_str().to_owned()],
+        false,
+    )
+    .unwrap();
+
+    Store::new(&store_root).recover_transactions().unwrap();
+
+    assert!(
+        !store_root
+            .join("trees")
+            .join(created_digest.as_str())
+            .exists()
+    );
+    assert!(!store_root.join(STORE_JOURNAL).exists());
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(project);
+}
+
+#[test]
 fn missing_project_directory_rolls_back_orphaned_transaction() {
     let root = root();
     let project = root.with_extension("orphaned-project");

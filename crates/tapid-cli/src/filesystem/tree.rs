@@ -49,10 +49,12 @@ pub(crate) fn materialize_stage(
         trees,
         sources_are_verified_snapshots,
         &tapid_linker::WorkspaceLinkPlan::default(),
+        stage.parent().unwrap(),
         |_, _| {},
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_stage_with_workspace_links(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
@@ -60,6 +62,7 @@ pub(crate) fn materialize_stage_with_workspace_links(
     trees: &BTreeMap<String, PathBuf>,
     sources_are_verified_snapshots: bool,
     workspace_links: &tapid_linker::WorkspaceLinkPlan,
+    workspace_root: &Path,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<(), String> {
     fs::create_dir_all(stage.join("node_modules")).map_err(|e| e.to_string())?;
@@ -111,8 +114,8 @@ pub(crate) fn materialize_stage_with_workspace_links(
             ));
         }
     }
-    materialize_package_shims(stage, plan, workspace_links)?;
-    materialize_workspace_links(stage, workspace_links)?;
+    materialize_package_shims(stage, plan, workspace_links, workspace_root)?;
+    materialize_workspace_links(stage, workspace_links, workspace_root)?;
     report_materialization_completion(materialization_total, progress);
     Ok(())
 }
@@ -120,12 +123,8 @@ pub(crate) fn materialize_stage_with_workspace_links(
 fn materialize_workspace_links(
     stage: &Path,
     links: &tapid_linker::WorkspaceLinkPlan,
+    workspace_root: &Path,
 ) -> Result<(), String> {
-    let project_root = stage
-        .parent()
-        .ok_or_else(|| "workspace staging directory is not project-local".to_owned())?;
-    let project_root = fs::canonicalize(project_root)
-        .map_err(|error| format!("cannot resolve workspace project root: {error}"))?;
     for link in &links.links {
         let target = stage
             .join("node_modules")
@@ -142,8 +141,8 @@ fn materialize_workspace_links(
                 link.source.display()
             )
         })?;
-        if !source.starts_with(&project_root)
-            || source == project_root
+        if !source.starts_with(workspace_root)
+            || source == workspace_root
             || !source.join("package.json").is_file()
         {
             return Err(format!(
@@ -156,7 +155,9 @@ fn materialize_workspace_links(
             .ok_or("workspace link target has no parent")?;
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         #[cfg(unix)]
-        let final_parent = project_root
+        let final_parent = stage
+            .parent()
+            .ok_or("stage has no project root")?
             .join("node_modules")
             .join(link.name.as_str().split('/').collect::<PathBuf>())
             .parent()
@@ -229,7 +230,9 @@ pub(crate) fn validate_workspace_links(
         let raw_target = fs::read_link(&target)
             .map_err(|error| format!("cannot read staged workspace link: {error}"))?;
         #[cfg(unix)]
-        let final_parent = project_root
+        let final_parent = stage
+            .parent()
+            .ok_or("stage has no project root")?
             .join("node_modules")
             .join(link.name.as_str().split('/').collect::<PathBuf>())
             .parent()
@@ -409,6 +412,7 @@ fn materialize_package_shims(
     stage: &Path,
     plan: &tapid_linker::MaterializationPlan,
     workspace_links: &tapid_linker::WorkspaceLinkPlan,
+    workspace_root: &Path,
 ) -> Result<(), String> {
     let managed = ManagedRoot::new(stage.join("node_modules")).map_err(|e| e.to_string())?;
     let mut packages = Vec::new();
@@ -441,11 +445,6 @@ fn materialize_package_shims(
             bin_dir: bin_dir.to_path_buf(),
         });
     }
-    let project_root = stage
-        .parent()
-        .ok_or_else(|| "workspace staging directory is not project-local".to_owned())?;
-    let project_root = fs::canonicalize(project_root)
-        .map_err(|error| format!("cannot resolve workspace project root: {error}"))?;
     let mut workspace_packages = Vec::new();
     let mut workspace_link_roots = Vec::new();
     for link in &workspace_links.links {
@@ -455,8 +454,8 @@ fn materialize_package_shims(
                 link.source.display()
             )
         })?;
-        if !source.starts_with(&project_root)
-            || source == project_root
+        if !source.starts_with(workspace_root)
+            || source == workspace_root
             || !source.join("package.json").is_file()
         {
             return Err(format!(
@@ -480,7 +479,7 @@ fn materialize_package_shims(
     let shims = tapid_linker::plan_shims_with_workspace_packages(
         managed,
         packages,
-        &project_root,
+        workspace_root,
         workspace_packages,
         crate::application::replay::current_platform(),
     )

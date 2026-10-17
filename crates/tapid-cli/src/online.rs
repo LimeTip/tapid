@@ -6,7 +6,7 @@ pub(crate) use locked::{
     validate_locked_routes,
 };
 mod npm_import;
-pub(crate) use npm_import::fetch_imported;
+pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
 mod resolution;
 #[cfg(test)]
 use resolution::{
@@ -69,10 +69,50 @@ type ResolveAndFetchOutput = Result<
         NamedLayoutInput,
         BTreeMap<String, PathBuf>,
         StoreTransaction,
-        WorkspaceLinkPlan,
+        WorkspaceInstallPlan,
     ),
     OperationalError,
 >;
+
+/// Layouts activated together under the root lifecycle journal.
+#[derive(Default)]
+pub(crate) struct WorkspaceInstallPlan {
+    pub links: WorkspaceLinkPlan,
+    pub members: BTreeMap<PathBuf, WorkspaceMemberInstall>,
+}
+pub(crate) struct WorkspaceMemberInstall {
+    pub input: NamedLayoutInput,
+    pub links: WorkspaceLinkPlan,
+}
+impl WorkspaceInstallPlan {
+    /// Clear prior member layouts when converting an imported lock to native resolution.
+    pub(crate) fn include_owned_members(&mut self) -> Result<(), String> {
+        for link in &self.links.links {
+            if fs::symlink_metadata(link.source.join(".tapid-managed")).is_ok() {
+                crate::filesystem::activation::validate_managed_node_modules(&link.source)?;
+                self.members
+                    .entry(link.source.clone())
+                    .or_insert_with(|| WorkspaceMemberInstall {
+                        input: NamedLayoutInput {
+                            instances: Vec::new(),
+                            root_dependencies: Vec::new(),
+                            dependency_edges: Vec::new(),
+                        },
+                        links: WorkspaceLinkPlan::default(),
+                    });
+            }
+        }
+        Ok(())
+    }
+}
+impl From<WorkspaceLinkPlan> for WorkspaceInstallPlan {
+    fn from(links: WorkspaceLinkPlan) -> Self {
+        Self {
+            links,
+            members: BTreeMap::new(),
+        }
+    }
+}
 
 struct TemporaryTree(PathBuf);
 
@@ -209,7 +249,9 @@ pub(crate) fn workspace_materialization(
         .root_path()
         .parent()
         .ok_or("workspace root manifest has no parent")?;
-    if root != project {
+    let canonical_project = fs::canonicalize(project)
+        .map_err(|error| format!("cannot resolve install project root: {error}"))?;
+    if root != canonical_project {
         return Err("resolved workspace root does not match install project root".to_owned());
     }
     let mut packages = Vec::new();
@@ -1322,7 +1364,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         },
         trees,
         store_transaction,
-        workspace_links,
+        workspace_links.into(),
     ))
 }
 
