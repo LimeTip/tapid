@@ -41,7 +41,7 @@ pub(super) fn selected_platform_context_for(
     .map_err(|error| error.to_string())
 }
 
-pub(super) fn current_libc() -> Option<&'static str> {
+pub(crate) fn current_libc() -> Option<&'static str> {
     #[cfg(all(target_os = "linux", target_env = "musl"))]
     {
         Some("musl")
