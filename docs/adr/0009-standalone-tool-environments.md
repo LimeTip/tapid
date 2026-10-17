@@ -16,6 +16,10 @@ Give each installed npm tool a separate private project and ordinary lockfile,
 reusing verified installation and the shared cache. Export only its declared
 direct-package bins. Persist requirements, versions, generations, command
 mappings, and launcher ownership bytes in a versioned catalog.
+Each generation also records the installation OS, CPU, and libc using the shared
+platform context and libc detection. Execution requires the current host identity
+to match. Older records without that evidence
+remain listable, removable, and replaceable through update/reinstall.
 
 Use stable command launchers that dispatch through Tapid and the selected
 catalog. Serialize tool mutations and cleanup with the existing activation lock.
@@ -44,8 +48,8 @@ Unknown files and unowned/replaced launchers are preserved.
 First initialization atomically creates and syncs an empty
 `.tapid-tools-initializing-v1` directory before publishing the final ownership
 file. An interrupted initialization may resume only with that non-link ownership
-directory and regular, strictly named write temporaries; unknown entries still
-block claiming the root. Existing temporary files are preserved. The final
+directory and validated, strictly named write stages; unknown entries still
+block claiming the root. Legacy nonce-only temporary files are preserved. The final
 ownership file is synced before the initialization directory is removed
 nonrecursively. Unix command names reserve `node`, including case variants, so
 adding the tool bin directory to PATH cannot replace implicit runtime discovery.
@@ -56,6 +60,14 @@ Generation staging similarly syncs an empty
 generation. Recovery can then complete its ownership file and reuse normal
 retirement, while preserving unrelated markerless generations and rejecting
 invalid ownership records or links.
+
+Managed state writes atomically create and sync a
+`.tapid-tool-write-v1-<nonce>` ownership directory before creating its single
+regular `payload` file. Publication renames that payload into place and removes
+the empty directory. Under the catalog lock, recovery retires interrupted write
+directories in the root and launcher directory, including empty and partial
+stages. Unknown children, oversized payloads, and links fail closed. Write stages
+inside retired generations are handled by existing environment cleanup.
 
 Global commands run with normal user authority and an externally managed runtime.
 They are not root-script sandbox requests. Lifecycle hooks remain disabled;

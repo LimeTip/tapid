@@ -28,6 +28,25 @@ pub(crate) struct Tool {
     pub version: String,
     pub generation: String,
     pub commands: BTreeMap<String, ToolBin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_platform: Option<String>,
+}
+fn installation_platform() -> String {
+    tapid_core::PlatformContext::new(
+        Some(std::env::consts::OS),
+        Some(std::env::consts::ARCH),
+        crate::online::current_libc(),
+    )
+    .expect("host platform constants are valid")
+    .to_string()
+}
+fn validate_environment_platform(tool: &Tool) -> Result<(), OperationalError> {
+    if tool.installation_platform.as_deref() != Some(installation_platform().as_str()) {
+        return Err(error(
+            "tool environment has a different or unknown installation platform; update or reinstall the tool",
+        ));
+    }
+    Ok(())
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,6 +160,7 @@ fn stage(
         version: installed.version().to_string(),
         generation,
         commands,
+        installation_platform: Some(installation_platform()),
     })
 }
 pub(crate) fn run(
@@ -337,6 +357,7 @@ pub(crate) fn execute(
         .find_map(|tool| tool.commands.get(command).map(|bin| (tool, bin)))
         .ok_or_else(|| error("tool command is not installed"))?;
     let environment = root.join("environments").join(&tool.generation);
+    validate_environment_platform(tool)?;
     if state::read(&environment.join(".tapid-tool"))? != tool.generation.as_bytes() {
         return Err(error("tool ownership marker mismatch"));
     }

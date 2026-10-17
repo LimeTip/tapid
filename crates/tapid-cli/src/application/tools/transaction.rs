@@ -124,6 +124,8 @@ fn settle(
 }
 
 pub(super) fn recover(root: &Path) -> Result<bool, OperationalError> {
+    let writes_recovered =
+        state::cleanup_write_stages(root)? | state::cleanup_write_stages(&root.join("bin"))?;
     let pending = root.join("pending.json");
     state::check_path(&pending)?;
     if !pending.try_exists().map_err(error)? {
@@ -140,7 +142,7 @@ pub(super) fn recover(root: &Path) -> Result<bool, OperationalError> {
             fs::remove_file(root.join("committed")).map_err(error)?;
             return Ok(true);
         }
-        return Ok(false);
+        return Ok(writes_recovered);
     }
     let encoded = state::read(&pending)?;
     let journal: Journal = serde_json::from_slice(&encoded).map_err(error)?;
@@ -450,6 +452,37 @@ pub(super) fn cleanup(root: &Path, catalog: &Catalog) -> Result<Cleanup, Operati
 mod tests {
     use super::*;
     use tapid_test_support::TempHome;
+
+    #[test]
+    fn catalog_recovery_accepts_a_stage_from_before_platform_identity_was_recorded() {
+        let home = TempHome::new("tool-legacy-catalog-stage").unwrap();
+        let root = state::root_path(Some(home.path())).unwrap();
+        state::initialize(&root).unwrap();
+        let legacy = r#"{
+  "schema": 1,
+  "settled_transaction": null,
+  "tools": {
+    "hello-tool": {
+      "requirement": "1.0.0",
+      "version": "1.0.0",
+      "generation": "deadbeef",
+      "commands": {}
+    }
+  },
+  "shims": {}
+}"#;
+        let journal = format!("{{\"before\":{legacy},\"after\":{legacy}}}");
+        fs::write(root.join("pending.json"), &journal).unwrap();
+        let temporary = catalog_temporary(&root, journal.as_bytes());
+        fs::write(&temporary, legacy).unwrap();
+        assert!(recover(&root).unwrap());
+        assert!(!temporary.exists());
+        assert!(
+            state::load(&root).unwrap().tools["hello-tool"]
+                .installation_platform
+                .is_none()
+        );
+    }
 
     #[test]
     fn catalog_recovery_retires_only_expected_staging_bytes() {

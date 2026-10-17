@@ -209,10 +209,15 @@ pub(super) fn write_new(
     let parent = path
         .parent()
         .ok_or_else(|| error("managed file has no parent"))?;
-    let temporary = parent.join(format!(
-        ".tapid-tool-write-{:x}",
+    let stage = parent.join(format!(
+        "{WRITE_STAGE}{:x}",
         crate::filesystem::atomic::unique_nonce()
     ));
+    // Atomic directory creation is the ownership proof even before payload
+    // creation. Legacy nonce-only files remain unowned and are never swept.
+    fs::create_dir(&stage).map_err(error)?;
+    crate::filesystem::activation::sync_directory(parent).map_err(error)?;
+    let temporary = stage.join("payload");
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -250,12 +255,74 @@ pub(super) fn write_new(
         if path.file_name().is_some_and(|name| name == ".tapid-tool") {
             crate::filesystem::activation::test_crash_at("tool_environment_owner_renamed");
         }
+        crate::filesystem::activation::sync_directory(parent).map_err(error)?;
+        match fs::remove_dir(&stage) {
+            Ok(()) => {}
+            // Publishing the initial root marker can let another process
+            // acquire the catalog lock and retire this now-empty stage.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(error(e)),
+        }
         crate::filesystem::activation::sync_directory(parent).map_err(error)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
+        let _ = fs::remove_dir(&stage);
     }
     result
+}
+const WRITE_STAGE: &str = ".tapid-tool-write-v1-";
+
+fn validate_write_stage(path: &Path) -> Result<(), OperationalError> {
+    let metadata = fs::symlink_metadata(path).map_err(error)?;
+    if is_link(&metadata) || !metadata.is_dir() {
+        return Err(error(
+            "invalid tool write ownership directory; preserving files",
+        ));
+    }
+    for entry in fs::read_dir(path).map_err(error)? {
+        let entry = entry.map_err(error)?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(error)?;
+        if entry.file_name() != "payload"
+            || is_link(&metadata)
+            || !metadata.is_file()
+            || metadata.len() > LIMIT as u64
+        {
+            return Err(error(
+                "unknown contents in tool write directory; preserving files",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn cleanup_write_stages(parent: &Path) -> Result<bool, OperationalError> {
+    check_path(parent)?;
+    let mut stages = Vec::new();
+    for entry in fs::read_dir(parent).map_err(error)? {
+        let entry = entry.map_err(error)?;
+        if entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.strip_prefix(WRITE_STAGE))
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            validate_write_stage(&entry.path())?;
+            stages.push(entry.path());
+        }
+    }
+    for stage in &stages {
+        match fs::remove_file(stage.join("payload")) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(error(e)),
+        }
+        fs::remove_dir(stage).map_err(error)?;
+    }
+    if !stages.is_empty() {
+        crate::filesystem::activation::sync_directory(parent).map_err(error)?;
+    }
+    Ok(!stages.is_empty())
 }
 fn validate_unmarked_root(root: &Path) -> Result<bool, OperationalError> {
     let mut owned_initialization = false;
@@ -274,6 +341,14 @@ fn validate_unmarked_root(root: &Path) -> Result<bool, OperationalError> {
             }
             owned_initialization = true;
         } else {
+            if name
+                .to_str()
+                .and_then(|s| s.strip_prefix(WRITE_STAGE))
+                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
+                validate_write_stage(&entry.path())?;
+                continue;
+            }
             let temporary = name
                 .to_str()
                 .and_then(|s| s.strip_prefix(".tapid-tool-write-"));
@@ -399,6 +474,21 @@ mod tests {
     use crate::application::outcome::ErrorKind;
     use std::time::{Duration, Instant};
     use tapid_test_support::TempHome;
+
+    #[test]
+    fn write_stage_recovery_handles_empty_partial_and_completed_payloads() {
+        for contents in [None, Some(&b"partial"[..]), Some(&b"complete data"[..])] {
+            let home = TempHome::new("tool-write-stages").unwrap();
+            let stage = home.path().join(format!("{WRITE_STAGE}deadbeef"));
+            fs::create_dir(&stage).unwrap();
+            if let Some(contents) = contents {
+                fs::write(stage.join("payload"), contents).unwrap();
+            }
+            assert!(cleanup_write_stages(home.path()).unwrap());
+            assert!(!stage.exists());
+            assert!(!cleanup_write_stages(home.path()).unwrap());
+        }
+    }
 
     #[test]
     fn catalog_lock_contention_is_bounded_and_retryable() {

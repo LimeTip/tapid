@@ -154,6 +154,11 @@ Older Unix tools exporting `node` remain listable and removable, but execution
 of that reserved command is rejected; remove the conflicting tool before publishing
 other tool changes.
 
+Environments record the OS, CPU, and libc used during installation. Moving a
+tools directory to a different host platform requires update or reinstall before
+execution. Older environments without this identity also require update or
+reinstall; they remain listable and removable.
+
 Installed commands can start while an install or update stages its environment.
 Catalog recovery, publication, and invocation lease acquisition share a short-held
 lock. Invocations wait up to 30 seconds for that lock before reporting contention.

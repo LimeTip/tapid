@@ -975,6 +975,78 @@ fn tool_install_creates_locked_environment_without_touching_the_caller() {
 }
 
 #[test]
+fn tool_platform_migration_can_replace_multiple_legacy_tools_one_at_a_time() {
+    let project = TempProject::new("tool-platform-migration").unwrap();
+    let home = TempHome::new("tool-platform-migration").unwrap();
+    assert_success(&install(&project, &home));
+    assert_success(&install_multi(&project, &home, "other-tool@1.0.0"));
+    let path = home.path().join("tools with spaces/catalog.json");
+    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for tool in catalog["tools"].as_object_mut().unwrap().values_mut() {
+        tool.as_object_mut()
+            .unwrap()
+            .remove("installation_platform");
+    }
+    fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    assert_success(&install(&project, &home));
+    assert_success(
+        &command(&project, &home, &["tool", "remove", "other-tool"])
+            .output()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn tool_execution_rejects_foreign_or_unknown_installation_platforms() {
+    for dimension in ["missing", "os", "cpu", "libc"] {
+        let project = TempProject::new(dimension).unwrap();
+        let home = TempHome::new(dimension).unwrap();
+        assert_success(&install(&project, &home));
+        let path = home.path().join("tools with spaces/catalog.json");
+        let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let tool = &mut catalog["tools"]["hello-tool"];
+        if dimension == "missing" {
+            tool.as_object_mut()
+                .unwrap()
+                .remove("installation_platform");
+        } else {
+            let mut parts: Vec<_> = tool["installation_platform"]
+                .as_str()
+                .unwrap_or("legacy-host-")
+                .split('-')
+                .map(str::to_owned)
+                .collect();
+            parts[match dimension {
+                "os" => 0,
+                "cpu" => 1,
+                _ => 2,
+            }] = "foreign".to_owned();
+            tool["installation_platform"] = json!(parts.join("-"));
+        }
+        fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+        let output = command(&project, &home, &["__tool-exec", "--command", "hello-tool"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{dimension}: {output:?}");
+        assert!(output.stdout.is_empty(), "{dimension}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("update or reinstall"),
+            "{dimension}: {output:?}"
+        );
+        // Legacy/foreign records remain inspectable and reinstallable.
+        assert_eq!(
+            list(&project, &home)["data"]["tools"][0]["name"],
+            "hello-tool"
+        );
+        assert_success(&install(&project, &home));
+        let output = command(&project, &home, &["__tool-exec", "--command", "hello-tool"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(7), "{dimension}: {output:?}");
+    }
+}
+
+#[test]
 fn tool_command_forwards_arguments_and_exit_status() {
     let project = TempProject::new("tool-execution").unwrap();
     let home = TempHome::new("tool-execution").unwrap();
@@ -1040,6 +1112,18 @@ fn writing_crash_case(point: &str) {
     let project = TempProject::new(point).unwrap();
     let home = TempHome::new(point).unwrap();
     assert_success(&install(&project, &home));
+    let root = home.path().join("tools with spaces");
+    fs::write(root.join(".tapid-tool-write-deadbeef"), b"unowned").unwrap();
+    fs::write(root.join("bin/.tapid-tool-write-deadbeef"), b"unowned").unwrap();
+    let before: Vec<std::collections::BTreeSet<_>> = [&root, &root.join("bin")]
+        .into_iter()
+        .map(|path| {
+            fs::read_dir(path)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect()
+        })
+        .collect();
     let crashed = command(&project, &home, &["tool", "install", "hello-tool@^1"])
         .arg("--registry-fixture")
         .arg(multi_fixture(&project))
@@ -1052,6 +1136,24 @@ fn writing_crash_case(point: &str) {
     let recovered = list(&project, &home);
     assert_eq!(recovered["data"]["tools"][0]["version"], "1.0.0");
     assert!(!home.path().join("tools with spaces/pending.json").exists());
+    let after: Vec<std::collections::BTreeSet<_>> = [&root, &root.join("bin")]
+        .into_iter()
+        .map(|path| {
+            fs::read_dir(path)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect()
+        })
+        .collect();
+    assert_eq!(after, before, "abandoned generic write at {point}");
+    assert_eq!(
+        fs::read(root.join(".tapid-tool-write-deadbeef")).unwrap(),
+        b"unowned"
+    );
+    assert_eq!(
+        fs::read(root.join("bin/.tapid-tool-write-deadbeef")).unwrap(),
+        b"unowned"
+    );
 }
 
 #[test]
@@ -1294,6 +1396,61 @@ fn tool_initialization_rejects_invalid_ownership_and_preserves_unknown_entries()
     assert!(!root.join(".tapid-tools").exists());
     #[cfg(windows)]
     fs::remove_dir(marker).unwrap();
+}
+
+#[test]
+fn tool_write_recovery_preserves_unknown_contents_and_links() {
+    for case in ["unknown", "directory", "file", "link"] {
+        let project = TempProject::new(case).unwrap();
+        let home = TempHome::new(case).unwrap();
+        let outside = TempProject::new("tool-write-outside").unwrap();
+        let sentinel = outside.write("sentinel", b"user data").unwrap();
+        assert_success(&install(&project, &home));
+        let root = home.path().join("tools with spaces");
+        let stage = root.join(".tapid-tool-write-v1-deadbeef");
+        match case {
+            "file" => fs::write(&stage, b"user data").unwrap(),
+            "link" => {
+                #[cfg(windows)]
+                assert_success(
+                    &isolated_process(&project, &home, "cmd.exe")
+                        .args(["/d", "/c", "mklink", "/J"])
+                        .arg(&stage)
+                        .arg(outside.path())
+                        .output()
+                        .unwrap(),
+                );
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(outside.path(), &stage).unwrap();
+            }
+            _ => {
+                fs::create_dir(&stage).unwrap();
+                if case == "unknown" {
+                    fs::write(stage.join("user-file"), b"user data").unwrap();
+                } else {
+                    fs::create_dir(stage.join("payload")).unwrap();
+                }
+            }
+        }
+        let catalog = fs::read(root.join("catalog.json")).unwrap();
+        let result = command(&project, &home, &["tool", "list"])
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "{case}: {result:?}");
+        assert!(fs::symlink_metadata(&stage).is_ok());
+        assert_eq!(fs::read(root.join("catalog.json")).unwrap(), catalog);
+        assert_eq!(fs::read(&sentinel).unwrap(), b"user data");
+        if case == "unknown" {
+            assert_eq!(fs::read(stage.join("user-file")).unwrap(), b"user data");
+        }
+        if case == "file" {
+            assert_eq!(fs::read(&stage).unwrap(), b"user data");
+        }
+        #[cfg(windows)]
+        if case == "link" {
+            fs::remove_dir(stage).unwrap();
+        }
+    }
 }
 
 #[test]
