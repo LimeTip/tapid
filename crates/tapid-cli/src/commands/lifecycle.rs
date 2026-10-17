@@ -227,15 +227,16 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
             );
         }
     };
-    match crate::application::install::run_with_manifest_target(
-        &selection.root_dir,
-        &selection.manifest_path,
-        None,
-        None,
-        args.common.store_dir.as_deref(),
-        crate::application::install::InstallMode::Offline,
-        None,
-        false,
+    match crate::application::install::run(
+        crate::application::install::InstallRequest {
+            project_dir: &selection.root_dir,
+            target_manifest_path: &selection.manifest_path,
+            mutation: crate::application::install::ManifestMutation::None,
+            store_root: args.common.store_dir.as_deref(),
+            mode: crate::application::install::InstallMode::Offline,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
         |event| crate::output::report_progress(event, json),
     ) {
         Ok(report) => {
@@ -265,19 +266,22 @@ fn mutate_and_install(
     .map_err(|error| OperationFailure::unchanged(&common.project_dir, error))?;
     let plan = planner(&selection.manifest)
         .map_err(|error| OperationFailure::unchanged(&selection.root_dir, error))?;
-    crate::application::install::run_with_manifest_target(
-        &selection.root_dir,
-        &selection.manifest_path,
-        Some(&plan.manifest),
-        None,
-        common.store_dir.as_deref(),
-        if refresh {
-            crate::application::install::InstallMode::Refresh
-        } else {
-            crate::application::install::InstallMode::Online
+    crate::application::install::run(
+        crate::application::install::InstallRequest {
+            project_dir: &selection.root_dir,
+            target_manifest_path: &selection.manifest_path,
+            mutation: crate::application::install::ManifestMutation::ReplaceManifest(
+                &plan.manifest,
+            ),
+            store_root: common.store_dir.as_deref(),
+            mode: if refresh {
+                crate::application::install::InstallMode::Refresh
+            } else {
+                crate::application::install::InstallMode::Online
+            },
+            registry_fixture: common.registry_fixture.as_deref(),
+            allow_unverified_registry_artifacts: common.allow_unverified_registry_artifacts,
         },
-        common.registry_fixture.as_deref(),
-        common.allow_unverified_registry_artifacts,
         |event| crate::output::report_progress(event, json),
     )
 }

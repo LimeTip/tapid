@@ -2,6 +2,19 @@
 use super::*;
 use tapid_lockfile::ImportedNpmLockfile;
 
+enum ImportedTree {
+    Snapshot(tapid_store::VerifiedTreeSnapshot),
+    Extracted(TemporaryTree),
+}
+impl ImportedTree {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.path(),
+            Self::Extracted(tree) => &tree.0,
+        }
+    }
+}
+
 pub(crate) fn fetch_imported(
     imported: &mut ImportedNpmLockfile,
     project: &Path,
@@ -80,7 +93,7 @@ pub(crate) fn fetch_imported(
                     .map_err(|e| e.to_string())?;
                 store
                     .verified_tree_snapshot(&digest)
-                    .map(|tree| (digest, TemporaryTree(tree)))
+                    .map(|tree| (digest, ImportedTree::Snapshot(tree)))
                     .map_err(|e| e.to_string())
             })
             .transpose();
@@ -163,11 +176,11 @@ pub(crate) fn fetch_imported(
                     .map_err(|e| e.to_string())?
                     .parse()
                     .map_err(|e: tapid_core::DomainError| e.to_string())?;
-                (digest, temp)
+                (digest, ImportedTree::Extracted(temp))
             }
         };
         let artifact_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(temp.0.join("package/package.json")).map_err(|e| e.to_string())?,
+            &fs::read(temp.path().join("package/package.json")).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
         if artifact_manifest["name"].as_str() != Some(package.name.as_str())
@@ -179,7 +192,7 @@ pub(crate) fn fetch_imported(
             ));
         }
         let tree = transaction
-            .stage_verified_tree(&digest, &temp.0)
+            .stage_verified_tree(&digest, temp.path())
             .map_err(OperationalError::from)?;
         receipts.insert(path.clone(), digest.to_string());
         let mut locked = LockedPackage::new_with_context_and_provenance(
@@ -279,18 +292,16 @@ pub(crate) fn fetch_imported(
     imported
         .record_verified_trees(receipts.clone())
         .map_err(|e| e.to_string())?;
-    let artifact_receipts = imported
-        .graph()
-        .map_err(|e| e.to_string())?
+    let artifact_receipts = graph
         .packages
-        .into_iter()
+        .iter()
         .filter_map(|(path, package)| {
-            receipts.get(&path).map(|tree_digest| {
+            receipts.get(path).map(|tree_digest| {
                 (
-                    path,
+                    path.clone(),
                     tapid_lockfile::ImportedNpmArtifactReceipt {
                         tree_digest: tree_digest.clone(),
-                        resolved: package.resolved,
+                        resolved: package.resolved.clone(),
                         integrity: package.integrity.to_string(),
                     },
                 )
@@ -376,13 +387,15 @@ pub(crate) fn fetch_imported(
             .workspace_links
             .contains_key(&format!("node_modules/{}", link.name))
     });
-    Ok((
+    Ok(PreparedInstall {
         lock,
-        pinned_layout(roots, &instances, &edges),
-        trees,
+        layout: PreparedLayout {
+            input: pinned_layout(roots, &instances, &edges),
+            trees,
+            workspace: plan,
+        },
         transaction,
-        plan,
-    ))
+    })
 }
 
 /// Read the same contained workspace sources used by native installs.

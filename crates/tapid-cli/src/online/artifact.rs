@@ -23,7 +23,6 @@ impl ArtifactFetcher<'_> {
                 .map_err(|error: tapid_core::DomainError| error.to_string())?;
             match store.verified_tree_snapshot(&digest) {
                 Ok(snapshot) => {
-                    let _guard = TemporaryTree(snapshot.clone());
                     let tree = store_transaction.stage_verified_tree(&digest, &snapshot)?;
                     return Ok((
                         package

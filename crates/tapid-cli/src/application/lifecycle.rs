@@ -121,18 +121,7 @@ pub(crate) fn plan_update(
     let mut mutations = Vec::new();
     for name in selected {
         let mut declared = false;
-        for (kind, dependencies) in [
-            (DependencyKind::Dependencies, manifest.dependencies()),
-            (DependencyKind::DevDependencies, manifest.dev_dependencies()),
-            (
-                DependencyKind::OptionalDependencies,
-                manifest.optional_dependencies(),
-            ),
-            (
-                DependencyKind::PeerDependencies,
-                manifest.peer_dependencies(),
-            ),
-        ] {
+        for (kind, dependencies) in manifest.dependency_sections() {
             let Some(requirement) = dependencies.get(&name) else {
                 continue;
             };
@@ -274,7 +263,7 @@ pub(crate) struct OutdatedImpact {
 impl OutdatedEntry {
     pub(crate) fn impact(&self, target: Option<&str>) -> OutdatedImpact {
         // Peer declarations constrain consumers; they do not select installed roots.
-        let peer_declaration = self.kind == kind_name(DependencyKind::PeerDependencies);
+        let peer_declaration = self.kind == DependencyKind::PeerDependencies.field_name();
         let Some(target) = target.and_then(|value| value.parse::<PackageVersion>().ok()) else {
             return OutdatedImpact {
                 version_change: "unknown",
@@ -335,41 +324,7 @@ struct FixturePackage {
     version: String,
 }
 
-fn kind_name(kind: DependencyKind) -> &'static str {
-    match kind {
-        DependencyKind::Dependencies => "dependencies",
-        DependencyKind::DevDependencies => "devDependencies",
-        DependencyKind::OptionalDependencies => "optionalDependencies",
-        DependencyKind::PeerDependencies => "peerDependencies",
-    }
-}
-
-fn direct_dependencies(manifest: &PackageManifest) -> Vec<(String, String, DependencyKind)> {
-    [
-        (manifest.dependencies(), DependencyKind::Dependencies),
-        (manifest.dev_dependencies(), DependencyKind::DevDependencies),
-        (
-            manifest.optional_dependencies(),
-            DependencyKind::OptionalDependencies,
-        ),
-        (
-            manifest.peer_dependencies(),
-            DependencyKind::PeerDependencies,
-        ),
-    ]
-    .into_iter()
-    .flat_map(|(map, kind)| {
-        map.iter()
-            .map(move |(name, requirement)| (name.clone(), requirement.clone(), kind))
-    })
-    .collect()
-}
-
-fn versions_from_fixture(
-    path: &Path,
-    origin: &RegistryOrigin,
-    name: &PackageName,
-) -> Result<Vec<(PackageVersion, BTreeSet<String>)>, OperationalError> {
+fn read_fixture(path: &Path) -> Result<Fixture, OperationalError> {
     let fixture: Fixture = serde_json::from_str(&fs::read_to_string(path).map_err(|error| {
         OperationalError::from_source(ErrorKind::RegistryMetadata, error)
             .context("cannot read registry fixture")
@@ -378,9 +333,17 @@ fn versions_from_fixture(
         OperationalError::from_source(ErrorKind::RegistryMetadata, error)
             .context("invalid registry fixture")
     })?;
+    Ok(fixture)
+}
+
+fn versions_from_fixture(
+    fixture: &Fixture,
+    origin: &RegistryOrigin,
+    name: &PackageName,
+) -> Result<Vec<(PackageVersion, BTreeSet<String>)>, OperationalError> {
     fixture
         .packages
-        .into_iter()
+        .iter()
         .filter(|package| {
             package.registry == origin.to_string() && package.name == name.to_string()
         })
@@ -388,7 +351,7 @@ fn versions_from_fixture(
             package
                 .version
                 .parse()
-                .map(|version| (version, package.dist_tags))
+                .map(|version| (version, package.dist_tags.clone()))
                 .map_err(|error: tapid_core::DomainError| {
                     OperationalError::from_source(ErrorKind::RegistryMetadata, error)
                 })
@@ -478,7 +441,13 @@ fn outdated_entries(
     })?;
     let lock = Lockfile::from_json(&bytes).map_err(OperationalError::from)?;
     let locked = lock.packages_typed().map_err(OperationalError::from)?;
-    let direct_dependencies = direct_dependencies(&manifest);
+    let direct_dependencies = manifest
+        .dependency_sections()
+        .flat_map(|(kind, declarations)| {
+            declarations
+                .iter()
+                .map(move |(name, requirement)| (name, requirement, kind))
+        });
     let local_workspace_versions = Workspace::discover(project_dir)?
         .members()
         .iter()
@@ -489,10 +458,14 @@ fn outdated_entries(
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
+    let fixture = std::sync::OnceLock::new();
+    let mut metadata = std::collections::BTreeMap::new();
     let mut transports = std::collections::BTreeMap::new();
     let allowed_origins = registry_config.configured_origins();
     let mut entries = Vec::new();
     for (identity, declared, kind) in direct_dependencies {
+        let identity = identity.clone();
+        let declared = declared.clone();
         if let Some(local_version) = local_workspace_versions.get(&identity) {
             let requirement = crate::online::workspace_requirement(&declared, local_version)?;
             let compatible = requirement.matches(local_version);
@@ -509,7 +482,7 @@ fn outdated_entries(
                 .max();
             entries.push(OutdatedEntry {
                 identity,
-                kind: kind_name(kind).to_owned(),
+                kind: kind.field_name().to_owned(),
                 declared: declared.clone(),
                 locked: locked_version.map(|version| version.to_string()),
                 newest_compatible: compatible.then(|| local_version.to_string()),
@@ -556,7 +529,7 @@ fn outdated_entries(
                 });
             entries.push(OutdatedEntry {
                 identity,
-                kind: kind_name(kind).into(),
+                kind: kind.field_name().into(),
                 declared,
                 locked: pinned.map(|key| key.version.to_string()),
                 newest_compatible: None,
@@ -596,29 +569,37 @@ fn outdated_entries(
             })
             .map(|(key, _)| key.version.clone())
             .max();
-        let versions = match registry_fixture {
-            Some(path) => versions_from_fixture(path, &origin, &package_name),
-            None if offline => Err(OperationalError::new(
-                ErrorKind::RegistryMetadataUnavailable,
-                "offline: newer registry versions were not checked; use online outdated or --registry-fixture",
-            )),
-            None => {
-                let transport = crate::online::metadata_transport_for_package(
+        let cache_key = (origin.clone(), package_name.clone());
+        let versions = metadata.entry(cache_key).or_insert_with(|| {
+            let result = match registry_fixture {
+                Some(path) => {
+                    let loaded = fixture.get_or_init(|| {
+                        read_fixture(path).map_err(|error| (error.kind, error.to_string()))
+                    });
+                    match loaded {
+                        Ok(fixture) => versions_from_fixture(fixture, &origin, &package_name),
+                        Err((kind, message)) => Err(OperationalError::new(*kind, message)),
+                    }
+                }
+                None if offline => Err(OperationalError::new(
+                    ErrorKind::RegistryMetadataUnavailable,
+                    "offline: newer registry versions were not checked; use online outdated or --registry-fixture",
+                )),
+                None => crate::online::metadata_transport_for_package(
                     &mut transports,
                     &registry_config,
                     &origin,
                     &package_name,
                     &allowed_origins,
-                );
-                match transport {
-                    Ok(transport) => versions_from_registry(transport, &origin, &package_name),
-                    Err(error) => Err(error),
-                }
-            }
-        };
-        let (newest_compatible, newest_available, diagnostic) = match versions {
-            Ok(mut versions) => {
+                ).and_then(|transport| versions_from_registry(transport, &origin, &package_name)),
+            };
+            result.map(|mut versions| {
                 versions.sort();
+                versions
+            }).map_err(|error| (error.kind, error.to_string()))
+        });
+        let (newest_compatible, newest_available, diagnostic) = match versions {
+            Ok(versions) => {
                 let available = versions.last().map(|(version, _)| version.clone());
                 let compatible = requirement.as_ref().and_then(|requirement| {
                     versions
@@ -643,15 +624,17 @@ fn outdated_entries(
                 };
                 (compatible, available, diagnostic)
             }
-            Err(error) => (
+            Err((kind, message)) => (
                 None,
                 None,
-                Some(error.context("registry metadata unavailable")),
+                Some(
+                    OperationalError::new(*kind, message).context("registry metadata unavailable"),
+                ),
             ),
         };
         entries.push(OutdatedEntry {
             identity,
-            kind: kind_name(kind).to_owned(),
+            kind: kind.field_name().to_owned(),
             declared,
             locked: locked_version.map(|version| version.to_string()),
             newest_compatible: newest_compatible.map(|version| version.to_string()),

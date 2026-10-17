@@ -410,26 +410,11 @@ pub(crate) fn validate_locked_artifact_sources(
     Ok(())
 }
 
-type LockedInstallOutput = Result<
-    (
-        NamedLayoutInput,
-        BTreeMap<String, PathBuf>,
-        StoreTransaction,
-        LockedSnapshots,
-    ),
-    OperationalError,
->;
-
-/// Retain private verified snapshots through activation without republishing cached trees.
-pub(crate) struct LockedSnapshots {
-    trees: Vec<TemporaryTree>,
-}
-
-impl LockedSnapshots {
-    /// Keep an owned private snapshot alive until activation finishes.
-    pub(crate) fn retain(&mut self, tree: PathBuf) {
-        self.trees.push(TemporaryTree(tree));
-    }
+type LockedInstallOutput = Result<PreparedLockedInstall, OperationalError>;
+pub(crate) struct PreparedLockedInstall {
+    pub layout: PreparedLayout,
+    pub transaction: StoreTransaction,
+    pub snapshots: Vec<tapid_store::VerifiedTreeSnapshot>,
 }
 
 pub(crate) fn prepare_locked_install(
@@ -445,7 +430,7 @@ pub(crate) fn prepare_locked_install(
         OperationalError::from(error).context("cannot recover stale replay snapshots")
     })?;
     let mut transaction = store.transaction();
-    let mut snapshots = LockedSnapshots { trees: Vec::new() };
+    let mut snapshots = Vec::new();
     let mut fixtures = None;
     let mut transports = BTreeMap::new();
     let allowed_origins = registry_config.configured_origins();
@@ -454,7 +439,6 @@ pub(crate) fn prepare_locked_install(
         manifest,
         registry_config,
         report_progress,
-        false,
         |key, package| {
             let tree_digest: ArtifactDigest =
                 package
@@ -465,8 +449,9 @@ pub(crate) fn prepare_locked_install(
                     })?;
             match store.verified_tree_snapshot(&tree_digest) {
                 Ok(snapshot) => {
-                    snapshots.retain(snapshot.clone());
-                    return Ok(snapshot);
+                    let path = snapshot.path().to_owned();
+                    snapshots.push(snapshot);
+                    return Ok(path);
                 }
                 Err(tapid_store::IngestError::TreeMissing(_)) => {}
                 Err(error) => return Err(OperationalError::from(error)),
@@ -578,7 +563,15 @@ pub(crate) fn prepare_locked_install(
                 .map_err(OperationalError::from)
         },
     )?;
-    Ok((input, trees, transaction, snapshots))
+    Ok(PreparedLockedInstall {
+        layout: PreparedLayout {
+            input,
+            trees,
+            workspace: WorkspaceInstallPlan::default(),
+        },
+        transaction,
+        snapshots,
+    })
 }
 
 #[cfg(test)]
@@ -618,7 +611,11 @@ mod ci_tests {
             let package_key = package.key();
             lock.insert_package(package).unwrap();
             lock.set_roots([package_key]).unwrap();
-            let (input, trees, transaction, snapshots) = prepare_locked_install(
+            let PreparedLockedInstall {
+                layout: PreparedLayout { input, trees, .. },
+                transaction,
+                snapshots,
+            } = prepare_locked_install(
                 &lock,
                 &manifest,
                 &store,

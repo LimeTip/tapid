@@ -489,3 +489,22 @@ fn npm_import_member_links_preserve_nearest_local_identity() {
     input["packages"]["packages/a/children/b"]["dependencies"]["a"] = serde_json::json!("2");
     assert!(ImportedNpmLockfile::import(&input.to_string(), &root, DIGEST).is_err());
 }
+
+#[test]
+fn graph_cache_is_reused_and_deserialization_still_validates_graph() {
+    let lock = ImportedNpmLockfile::import(INPUT, MANIFEST, DIGEST).unwrap();
+    let first = lock.graph().unwrap();
+    let second = lock.graph().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    let restored = ImportedNpmLockfile::from_json(&lock.to_json().unwrap()).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &restored.graph().unwrap(),
+        &restored.graph().unwrap()
+    ));
+
+    let mut invalid: Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    invalid["npmLock"]["lockfileVersion"] = Value::from(1);
+    assert!(ImportedNpmLockfile::from_json(&invalid.to_string()).is_err());
+    let unchecked: ImportedNpmLockfile = serde_json::from_value(invalid).unwrap();
+    assert!(unchecked.graph().is_err());
+}

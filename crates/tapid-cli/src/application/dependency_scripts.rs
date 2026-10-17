@@ -58,6 +58,7 @@ pub(super) fn apply(
     store: &tapid_store::Store,
     mut transaction: Option<&mut tapid_store::StoreTransaction>,
     activation: &crate::filesystem::activation::ActivationLock,
+    snapshots: &mut Vec<tapid_store::VerifiedTreeSnapshot>,
 ) -> Result<Vec<Warning>, OperationalError> {
     let source_graph = lock.source_graph().to_json().map_err(error)?;
     let online = transaction.is_some();
@@ -82,12 +83,6 @@ pub(super) fn apply(
     } else {
         dependency_order(lock)?
     };
-    let mut snapshots = SnapshotGuard {
-        paths: Vec::new(),
-        retained: BTreeSet::new(),
-    };
-    // The caller owns source snapshots and transaction staging trees.
-    // This guard owns only snapshots acquired while selecting derived outputs.
     let mut system_identity = None;
     for key in order {
         let package = lock.packages()[&key].clone();
@@ -175,7 +170,6 @@ pub(super) fn apply(
                     previous.attestation(),
                 )
             {
-                snapshots.paths.push(snapshot.clone());
                 current = if let Some(transaction) = transaction.as_deref_mut() {
                     transaction
                         .stage_verified_tree(
@@ -184,8 +178,9 @@ pub(super) fn apply(
                         )
                         .map_err(error)?
                 } else {
-                    snapshot
+                    snapshot.path().to_owned()
                 };
+                snapshots.push(snapshot);
                 outputs.push(previous.clone());
                 continue;
             }
@@ -244,9 +239,6 @@ pub(super) fn apply(
             .map_err(error)?;
         completed.insert(key, outputs);
     }
-    if !online {
-        snapshots.retained.extend(trees.values().cloned());
-    }
     Ok(warnings)
 }
 
@@ -283,19 +275,6 @@ fn dependency_order(lock: &Lockfile) -> Result<Vec<String>, OperationalError> {
         visit(key, lock, &mut active, &mut done, &mut order)?;
     }
     Ok(order)
-}
-struct SnapshotGuard {
-    paths: Vec<PathBuf>,
-    retained: BTreeSet<PathBuf>,
-}
-impl Drop for SnapshotGuard {
-    fn drop(&mut self) {
-        for path in &self.paths {
-            if !self.retained.contains(path) {
-                let _ = fs::remove_dir_all(path);
-            }
-        }
-    }
 }
 struct BuildStage(PathBuf);
 impl BuildStage {
@@ -554,6 +533,7 @@ mod tests {
                 &tapid_store::Store::new(project.path().join("store")),
                 None,
                 &guard,
+                &mut Vec::new(),
             );
             if accepted {
                 assert!(result.unwrap().is_empty());

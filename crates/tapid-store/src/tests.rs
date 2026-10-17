@@ -653,7 +653,7 @@ fn deleted_snapshot_tree_releases_its_lease_for_parent_recovery() {
     let store = Store::new(&root);
     let snapshot = store.verified_tree_snapshot(&digest).unwrap();
     let reservation = snapshot.parent().unwrap().to_owned();
-    fs::remove_dir_all(snapshot).unwrap();
+    fs::remove_dir_all(snapshot.path()).unwrap();
 
     store.cleanup_stale_replay_snapshots().unwrap();
 
@@ -948,5 +948,45 @@ fn publication_snapshot_survives_rollback_without_reentering_store_lock() {
     publication.rollback().unwrap();
     assert_eq!(fs::read(snapshot.join("package.json")).unwrap(), b"{}");
     assert!(store.verified_tree_path(&digest).is_err());
-    fs::remove_dir_all(snapshot).unwrap();
+    fs::remove_dir_all(snapshot.path()).unwrap();
+}
+
+#[test]
+fn owned_snapshot_releases_reservation_on_drop() {
+    let fixture = tapid_test_support::TempProject::new("owned-snapshot").unwrap();
+    let store = Store::new(fixture.path().join("store"));
+    let source = fixture.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("file"), b"snapshot").unwrap();
+    let digest = tapid_archive::canonical_tree_digest(&source)
+        .unwrap()
+        .parse()
+        .unwrap();
+    store.activate_verified_tree(&digest, &source).unwrap();
+    let snapshot = store.verified_tree_snapshot(&digest).unwrap();
+    let reservation = snapshot.parent().unwrap().to_owned();
+    assert!(reservation.is_dir());
+    drop(snapshot);
+    assert!(!reservation.exists());
+}
+
+#[test]
+fn snapshot_drop_preserves_a_replaced_reservation() {
+    let project = tapid_test_support::TempProject::new("snapshot-identity").unwrap();
+    let store = Store::new(project.path().join("store"));
+    let source = project.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("file"), b"snapshot").unwrap();
+    let digest = tapid_archive::canonical_tree_digest(&source)
+        .unwrap()
+        .parse()
+        .unwrap();
+    store.activate_verified_tree(&digest, &source).unwrap();
+    let snapshot = store.verified_tree_snapshot(&digest).unwrap();
+    let reservation = snapshot.parent().unwrap().to_owned();
+    fs::rename(&reservation, project.path().join("moved")).unwrap();
+    fs::create_dir(&reservation).unwrap();
+    fs::write(reservation.join("replacement"), b"keep").unwrap();
+    drop(snapshot);
+    assert_eq!(fs::read(reservation.join("replacement")).unwrap(), b"keep");
 }

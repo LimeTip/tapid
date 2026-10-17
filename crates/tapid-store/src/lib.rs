@@ -16,6 +16,37 @@ mod lifecycle;
 mod maintenance;
 pub use maintenance::{CacheSummary, CacheUsage};
 
+/// A private verified tree. Its reservation and lease live until this owner is dropped.
+#[derive(Debug)]
+pub struct VerifiedTreeSnapshot {
+    path: PathBuf,
+    reservation: PathBuf,
+    identity: Handle,
+}
+impl VerifiedTreeSnapshot {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+impl std::ops::Deref for VerifiedTreeSnapshot {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        self.path()
+    }
+}
+impl AsRef<Path> for VerifiedTreeSnapshot {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+impl Drop for VerifiedTreeSnapshot {
+    fn drop(&mut self) {
+        // Keep the lease held while removing the identity-checked reservation.
+        remove_dir_all_if_unchanged(&self.reservation, &self.identity);
+        release_replay_lease(&self.path);
+    }
+}
+
 const REPLAY_LEASE: &str = ".tapid-replay-lease";
 
 #[cfg(test)]
@@ -44,6 +75,7 @@ pub struct StoreReadGuard {
 pub struct StoreTransaction {
     store: Store,
     staged: Vec<(ArtifactDigest, PathBuf)>,
+    staged_by_digest: std::collections::BTreeMap<String, PathBuf>,
 }
 
 /// Published trees remain rollback-capable until this guard is committed.
@@ -133,6 +165,7 @@ impl Store {
         StoreTransaction {
             store: self.clone(),
             staged: Vec::new(),
+            staged_by_digest: std::collections::BTreeMap::new(),
         }
     }
 
@@ -324,7 +357,10 @@ impl Store {
     /// Cloning or copying into private staging before hashing avoids validating
     /// one mutable view and then materializing another. If the source changes
     /// during snapshot creation, the completed snapshot digest fails closed.
-    pub fn verified_tree_snapshot(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
+    pub fn verified_tree_snapshot(
+        &self,
+        digest: &ArtifactDigest,
+    ) -> Result<VerifiedTreeSnapshot, IngestError> {
         self.verified_tree_snapshot_with(digest, clone_snapshot_tree)
     }
 
@@ -332,7 +368,7 @@ impl Store {
         &self,
         digest: &ArtifactDigest,
         clone_tree: F,
-    ) -> Result<PathBuf, IngestError>
+    ) -> Result<VerifiedTreeSnapshot, IngestError>
     where
         F: FnOnce(&Path, &Path) -> io::Result<bool>,
     {
@@ -344,7 +380,7 @@ impl Store {
         &self,
         digest: &ArtifactDigest,
         clone_tree: F,
-    ) -> Result<PathBuf, IngestError>
+    ) -> Result<VerifiedTreeSnapshot, IngestError>
     where
         F: FnOnce(&Path, &Path) -> io::Result<bool>,
     {
@@ -376,7 +412,11 @@ impl Store {
             remove_dir_all_if_unchanged(&reservation, &reservation_identity);
             return Err(error.into());
         }
-        Ok(snapshot)
+        Ok(VerifiedTreeSnapshot {
+            path: snapshot,
+            reservation,
+            identity: reservation_identity,
+        })
     }
 
     /// Activates a tree only after recomputing its canonical digest. This is
@@ -816,11 +856,7 @@ impl StoreTransaction {
                 actual: actual_archive,
             });
         }
-        if let Some((_, path)) = self
-            .staged
-            .iter()
-            .find(|(digest, _)| digest == expected_tree)
-        {
+        if let Some(path) = self.staged_by_digest.get(expected_tree.as_str()) {
             return Ok(path.clone());
         }
         let staging = private_staging_path(&self.store.root, "transaction-archive")?;
@@ -834,6 +870,8 @@ impl StoreTransaction {
                 });
             }
             fs::write(staging.join(".tapid-tree"), expected_tree.as_str())?;
+            self.staged_by_digest
+                .insert(expected_tree.to_string(), staging.clone());
             self.staged.push((expected_tree.clone(), staging.clone()));
             Ok(staging.clone())
         })();
@@ -850,7 +888,7 @@ impl StoreTransaction {
         digest: &ArtifactDigest,
         source: &Path,
     ) -> Result<PathBuf, IngestError> {
-        if let Some((_, staged)) = self.staged.iter().find(|(existing, _)| existing == digest) {
+        if let Some(staged) = self.staged_by_digest.get(digest.as_str()) {
             return Ok(staged.clone());
         }
         let actual = tapid_archive::canonical_tree_digest(source)?;
@@ -871,6 +909,8 @@ impl StoreTransaction {
                 });
             }
             fs::write(staging.join(".tapid-tree"), digest.as_str())?;
+            self.staged_by_digest
+                .insert(digest.to_string(), staging.clone());
             self.staged.push((digest.clone(), staging.clone()));
             Ok(staging.clone())
         })();
@@ -1009,6 +1049,7 @@ impl StoreTransaction {
             return Err(error.into());
         }
         self.staged.clear();
+        self.staged_by_digest.clear();
         Ok(StorePublication {
             _file: file,
             published,
@@ -1046,7 +1087,10 @@ impl StorePublication {
     /// Creates a digest-verified replay snapshot while this publication holds
     /// the exclusive store lock, without trying to acquire a second lock.
     /// The snapshot remains independent if the publication rolls back.
-    pub fn verified_tree_snapshot(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
+    pub fn verified_tree_snapshot(
+        &self,
+        digest: &ArtifactDigest,
+    ) -> Result<VerifiedTreeSnapshot, IngestError> {
         let store = Store::new(
             self.trees_dir
                 .parent()

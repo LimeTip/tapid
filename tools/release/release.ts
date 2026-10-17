@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 const execFileAsync = promisify(execFile);
 
-const TARGETS = [
+export const TARGETS = [
   "aarch64-apple-darwin",
   "aarch64-pc-windows-msvc",
   "aarch64-unknown-linux-gnu",

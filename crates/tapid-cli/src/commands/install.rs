@@ -78,29 +78,21 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     } else {
         crate::application::install::InstallMode::Online
     };
-    let result = if args.workspace.is_some() {
-        crate::application::install::run_with_manifest_target(
-            &args.project_dir,
-            &target_manifest_path,
-            None,
-            args.package.as_deref(),
-            args.store_dir.as_deref(),
+    let result = crate::application::install::run(
+        crate::application::install::InstallRequest {
+            project_dir: &args.project_dir,
+            target_manifest_path: &target_manifest_path,
+            mutation: args.package.as_deref().map_or(
+                crate::application::install::ManifestMutation::None,
+                crate::application::install::ManifestMutation::AddPackage,
+            ),
+            store_root: args.store_dir.as_deref(),
             mode,
-            args.registry_fixture.as_deref(),
-            args.allow_unverified_registry_artifacts,
-            |event| reporter.progress(event),
-        )
-    } else {
-        crate::application::install::run(
-            &args.project_dir,
-            args.package.as_deref(),
-            args.store_dir.as_deref(),
-            mode,
-            args.registry_fixture.as_deref(),
-            args.allow_unverified_registry_artifacts,
-            |event| reporter.progress(event),
-        )
-    };
+            registry_fixture: args.registry_fixture.as_deref(),
+            allow_unverified_registry_artifacts: args.allow_unverified_registry_artifacts,
+        },
+        |event| reporter.progress(event),
+    );
     match result {
         Ok(report) => {
             if json {

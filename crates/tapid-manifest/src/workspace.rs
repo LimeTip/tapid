@@ -1,6 +1,7 @@
 use crate::PackageManifest;
 use serde_json::Value;
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -54,9 +55,7 @@ impl Workspace {
         let root_path = contained_path(&project_dir, &root_manifest_path)?;
         let root_text = read_file(&root_path)?;
         let root = PackageManifest::parse(&root_text).map_err(|error| error.to_string())?;
-        let document: Value = serde_json::from_str(&root_text)
-            .map_err(|error| format!("invalid workspace package.json: {error}"))?;
-        let patterns = workspace_patterns(&document)?;
+        let patterns = workspace_patterns(root.extra.get("workspaces"))?;
         let mut paths = Vec::new();
         for pattern in patterns {
             paths.extend(expand_pattern(&project_dir, &pattern)?);
@@ -83,6 +82,7 @@ impl Workspace {
         paths.sort();
         paths.dedup();
         let mut members = Vec::new();
+        let mut names = BTreeSet::from([root.name().to_string()]);
         for path in paths {
             let canonical = fs::canonicalize(&path).map_err(|error| {
                 format!(
@@ -118,11 +118,7 @@ impl Workspace {
             let manifest = PackageManifest::parse(&text).map_err(|error| {
                 format!("invalid workspace member {}: {error}", canonical.display())
             })?;
-            if members
-                .iter()
-                .any(|member: &WorkspaceMember| member.name == manifest.name().to_string())
-                || manifest.name() == root.name()
-            {
+            if !names.insert(manifest.name().to_string()) {
                 return Err(format!(
                     "duplicate workspace package name '{}'",
                     manifest.name()
@@ -199,8 +195,8 @@ fn read_file(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
 }
 
-fn workspace_patterns(document: &Value) -> Result<Vec<String>, String> {
-    let value = match document.get("workspaces") {
+fn workspace_patterns(workspaces: Option<&Value>) -> Result<Vec<String>, String> {
+    let value = match workspaces {
         None => return Ok(Vec::new()),
         Some(Value::String(pattern)) => return Ok(vec![pattern.to_owned()]),
         Some(Value::Array(values)) => values,

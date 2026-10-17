@@ -7,8 +7,8 @@ pub(crate) use copied::{
 mod locked;
 use crate::application::outcome::{ErrorKind, OperationalError};
 pub(crate) use locked::{
-    hydrate_locked, prepare_locked_install, validate_locked_artifact_sources,
-    validate_locked_routes,
+    PreparedLockedInstall, hydrate_locked, prepare_locked_install,
+    validate_locked_artifact_sources, validate_locked_routes,
 };
 mod npm_import;
 pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
@@ -68,16 +68,37 @@ const NPM: &str = "https://registry.npmjs.org";
 const JSR: &str = "https://jsr.io";
 static NEXT_TEMP_TREE_ID: AtomicU64 = AtomicU64::new(0);
 
-type ResolveAndFetchOutput = Result<
-    (
-        Lockfile,
-        NamedLayoutInput,
-        BTreeMap<String, PathBuf>,
-        StoreTransaction,
-        WorkspaceInstallPlan,
-    ),
-    OperationalError,
->;
+type ResolveAndFetchOutput = Result<PreparedInstall, OperationalError>;
+
+pub(crate) struct PreparedInstall {
+    pub lock: Lockfile,
+    pub layout: PreparedLayout,
+    pub transaction: StoreTransaction,
+}
+
+/// All paths that must move together when transaction trees are published.
+pub(crate) struct PreparedLayout {
+    pub input: NamedLayoutInput,
+    pub trees: BTreeMap<String, PathBuf>,
+    pub workspace: WorkspaceInstallPlan,
+}
+impl PreparedLayout {
+    pub(crate) fn rebase(&mut self, publication: &tapid_store::StorePublication) {
+        for path in self.trees.values_mut() {
+            *path = publication.resolve_path(path);
+        }
+        for input in std::iter::once(&mut self.input).chain(
+            self.workspace
+                .members
+                .values_mut()
+                .map(|member| &mut member.input),
+        ) {
+            for instance in &mut input.instances {
+                instance.tree.root = publication.resolve_path(&instance.tree.root);
+            }
+        }
+    }
+}
 
 /// Layouts activated together under the root lifecycle journal.
 #[derive(Default)]
@@ -1480,17 +1501,19 @@ pub(crate) fn resolve_and_fetch_with_lock(
             child: instance.clone(),
         });
     }
-    Ok((
+    Ok(PreparedInstall {
         lock,
-        NamedLayoutInput {
-            instances,
-            root_dependencies: root_deps,
-            dependency_edges: edge_list,
+        layout: PreparedLayout {
+            input: NamedLayoutInput {
+                instances,
+                root_dependencies: root_deps,
+                dependency_edges: edge_list,
+            },
+            trees,
+            workspace: workspace_links.into(),
         },
-        trees,
-        store_transaction,
-        workspace_links.into(),
-    ))
+        transaction: store_transaction,
+    })
 }
 
 #[cfg(test)]
