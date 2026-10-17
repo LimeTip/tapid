@@ -25,6 +25,8 @@ registries are for tests and air-gapped development. For a real npm project,
 omit `--registry-fixture registry.json` and choose the intended shared store.
 Import preserves supported npm v3 selections without resolution. It writes
 tapid.lock, refuses unsupported metadata, and does not verify downloaded bytes.
+Import uses one replacement rename. If publication fails, the previous lock stays
+in place; correct the failure before retrying, without install recovery.
 The first locked install verifies pinned artifacts and records verification receipts
 in tapid.lock without changing selected versions or placements. Lock verification checks
 schema and internal consistency, not manifest agreement or store contents.

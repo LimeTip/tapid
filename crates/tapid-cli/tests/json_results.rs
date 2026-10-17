@@ -4,19 +4,25 @@ use tapid_test_support::{TempHome, TempProject};
 /// Run an isolated CLI command and require a single JSON result with empty stderr.
 fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, serde_json::Value) {
     let home = TempHome::new("json-result").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+    let output = command(project, &home, args).output().unwrap();
+    let value = serde_json::from_slice(&output.stdout).expect("one JSON result on stdout");
+    assert!(output.stderr.is_empty(), "{:?}", output);
+    (output, value)
+}
+
+/// Build isolated invocations, with explicit test hooks applied only by their scenarios.
+fn command(project: &TempProject, home: &TempHome, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+    command
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
         .env("XDG_CACHE_HOME", home.path())
         .env("LOCALAPPDATA", home.path())
         .env_remove("TAPID_NPM_TOKEN")
+        .env_remove("TAPID_TEST_LOCKFILE_RENAME_FAILURE")
         .current_dir(project.path())
-        .args(args)
-        .output()
-        .unwrap();
-    let value = serde_json::from_slice(&output.stdout).expect("one JSON result on stdout");
-    assert!(output.stderr.is_empty(), "{:?}", output);
-    (output, value)
+        .args(args);
+    command
 }
 
 #[test]
@@ -774,6 +780,71 @@ fn json_import_refuses_pending_recovery_and_nonregular_destination() {
             } else {
                 b"existing directory".as_slice()
             }
+        );
+    }
+}
+
+/// A failed replacement must keep the old lock even when restoring a moved backup would fail.
+#[test]
+fn json_import_failed_replacement_cannot_strand_the_old_lock() {
+    for failure in ["replace-and-rollback", "replace"] {
+        let project = TempProject::new("json-import-rename-failure").unwrap();
+        let home = TempHome::new("json-import-rename-failure").unwrap();
+        project
+            .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+            .unwrap();
+        project
+            .write(
+                "package-lock.json",
+                br#"{"lockfileVersion":3,"packages":{"":{"name":"app","version":"1.0.0"}}}"#,
+            )
+            .unwrap();
+        project.write("tapid.lock", b"previous lock bytes").unwrap();
+        project
+            .write("node_modules/KEEP", b"previous installation")
+            .unwrap();
+        let output = command(
+            &project,
+            &home,
+            &["--json", "import-package-lock", "package-lock.json"],
+        )
+        .env("TAPID_TEST_LOCKFILE_RENAME_FAILURE", failure)
+        .output()
+        .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).ok(),
+            Some(b"previous lock bytes".to_vec()),
+            "{failure}: {result}"
+        );
+        assert_eq!(result["errors"][0]["code"], "TRANSACTION_FAILED");
+        assert_eq!(result["changes"]["state"], "unchanged");
+        assert_eq!(result["changes"]["paths"], serde_json::json!([]));
+        assert_eq!(result["retry"], "after_correction");
+        assert_eq!(
+            fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+            b"previous installation"
+        );
+        assert!(!fs::read_dir(project.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".tapid-lock-")
+        }));
+        let (output, result) = invoke(
+            &project,
+            &["--json", "import-package-lock", "package-lock.json"],
+        );
+        assert!(output.status.success(), "{result}");
+        assert_eq!(result["changes"]["state"], "committed");
+        let imported = fs::read_to_string(project.path().join("tapid.lock")).unwrap();
+        assert!(tapid_lockfile::ImportedNpmLockfile::from_json(&imported).is_ok());
+        assert_eq!(
+            fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+            b"previous installation"
         );
     }
 }

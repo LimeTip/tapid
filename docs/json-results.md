@@ -68,11 +68,14 @@ Npm import success data contains `format: "npm_v3"` and
 changed output, preserving the original npm lock and installed files. Validation
 and contention failures preserve project outputs. Pending install state returns
 `RECOVERY_FAILED`, `recovery_required`, and `recover_first` without recovery.
-A replacement I/O failure conservatively reports `recovery_required` because
-restoration of a moved old lock cannot be guaranteed. Inspect the project and
-any .tapid-lock backup before recovery. A backup cleanup failure after replacement
-reports `committed_cleanup_pending` and `do_not_repeat`; it does not schedule
-background cleanup. Import errors classify manifest, lock, registry configuration,
+Import stages and syncs the new lock in the project directory, then replaces
+tapid.lock with one rename. It never moves the old lock to a backup first.
+A staging or replacement I/O failure reports `TRANSACTION_FAILED`, `unchanged`,
+empty changed paths, and `after_correction`; the previous lock remains in place.
+No rollback or install recovery is needed for these publication failures.
+Successful replacement reports `committed`. Multi-output installation retains
+its separate journal-backed rollback and recovery contract.
+Import errors classify manifest, lock, registry configuration,
 contention, and transaction failures at their operation boundaries. Workspace-member
 edits detected between discovery and import publication return
 `LOCK_MANIFEST_MISMATCH`; other workspace validation failures retain `INVALID_DATA`.

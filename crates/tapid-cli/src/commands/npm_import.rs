@@ -35,7 +35,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     }
 }
 
-/// Validate npm selections before locking, then track replacement and cleanup outcomes separately.
+/// Validate npm selections before locking, then publish the single lockfile without a rollback gap.
 fn import(args: Args) -> Result<OperationOutcome, OperationFailure> {
     let project = std::env::current_dir().map_err(|e| {
         OperationFailure::unchanged(
@@ -116,19 +116,10 @@ fn import(args: Args) -> Result<OperationOutcome, OperationFailure> {
             &current_workspace,
         )?)
         .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
-        let backup =
-            crate::filesystem::atomic::replace_lockfile(&destination, &json).map_err(|error| {
-                // Replacement may have moved the old lock before an I/O failure. Do not
-                // promise unchanged state when rollback could not be established.
-                outcome.state = ChangeState::RecoveryRequired;
-                OperationalError::new(ErrorKind::Transaction, error)
-            })?;
+        crate::filesystem::atomic::publish_lockfile(&destination, &json)
+            .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
         outcome.state = ChangeState::Committed;
         outcome.changed_files.push(destination);
-        crate::filesystem::atomic::discard_lockfile_backup(backup.as_deref()).map_err(|error| {
-            outcome.state = ChangeState::CommittedCleanupPending;
-            OperationalError::new(ErrorKind::Transaction, error)
-        })?;
         Ok(())
     })();
     match result {
