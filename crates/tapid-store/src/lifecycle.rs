@@ -26,7 +26,7 @@ impl Store {
         recipe: &ArtifactDigest,
         output: &ArtifactDigest,
         attestation: &str,
-    ) -> Result<PathBuf, IngestError> {
+    ) -> Result<VerifiedTreeSnapshot, IngestError> {
         let key = lifecycle_key(&self.root, false)?;
         let tag = attestation
             .strip_prefix("hmac-sha256-")

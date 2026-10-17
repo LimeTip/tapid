@@ -37,7 +37,8 @@ fn import(args: Args) -> Result<(), String> {
     let mut lock =
         ImportedNpmLockfile::import(&input, &manifest, &digest).map_err(|e| e.to_string())?;
     let config = crate::registry::RegistryConfig::load(&project)?;
-    let workspace = crate::online::workspace_materialization(&project, &config)?;
+    let workspace = crate::online::workspace_materialization(&project, &config)
+        .map_err(|error| error.to_string())?;
     lock.bind_workspace_manifests(&crate::online::imported_workspace_manifests(
         &project, &workspace,
     )?)
@@ -66,7 +67,8 @@ fn import(args: Args) -> Result<(), String> {
     if read_manifest(&manifest_path)? != manifest {
         return Err("package.json changed during import; retry".into());
     }
-    let current_workspace = crate::online::workspace_materialization(&project, &config)?;
+    let current_workspace = crate::online::workspace_materialization(&project, &config)
+        .map_err(|error| error.to_string())?;
     lock.validate_workspace_manifests(&crate::online::imported_workspace_manifests(
         &project,
         &current_workspace,

@@ -1,10 +1,11 @@
+import { compareStableVersions } from './versions.ts';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, lstat, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { checksumLines, releaseRecord, releaseVersion } from './release.ts';
+import { TARGETS, checksumLines, releaseRecord, releaseVersion } from './release.ts';
 import { renderInstallers, templatesForCommit, type InstallerTemplates } from './bootstrap.ts';
 
 export type Asset = { id: number; name: string; size: number };
@@ -31,7 +32,6 @@ export type Candidate = {
 export type UnsignedCandidate = Omit<Candidate,'schema'|'release_id'|'assets'> & {
   schema:'tapid-release-unsigned-candidate-v1'; assets:{name:string;size:number;sha256:string}[];
 };
-const targets = ['aarch64-apple-darwin','aarch64-pc-windows-msvc','aarch64-unknown-linux-gnu','x86_64-apple-darwin','x86_64-pc-windows-msvc','x86_64-unknown-linux-gnu'];
 function keys(value: unknown, expected: string[]): asserts value is Record<string,unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...expected].sort())) throw Error('unexpected release fields');
 }
@@ -41,9 +41,7 @@ function version(value: unknown): asserts value is string {
 }
 function compare(left: string, right: string): number {
   version(left); version(right);
-  const a=left.split('.').map(BigInt),b=right.split('.').map(BigInt);
-  for(let i=0;i<3;i++) if(a[i]!==b[i]) return a[i]>b[i] ? 1 : -1;
-  return 0;
+  return compareStableVersions(left, right)!;
 }
 function source(tag: string, commit: string): void {
   releaseVersion(tag,tag.slice(1));
@@ -73,7 +71,7 @@ export function validateReleaseIntent(input: unknown): ReleaseIntent {
 }
 export function expectedAssets(tag: string): string[] {
   source(tag,'0'.repeat(40));
-  return [...targets.map(t=>`tapid-${tag.slice(1)}-${t}.tar.gz`),'SHA256SUMS','tapid-release-v1.tsv','tapid-release-v1.tsv.sig','install.sh','install.ps1'].sort();
+  return [...TARGETS.map(t=>`tapid-${tag.slice(1)}-${t}.tar.gz`),'SHA256SUMS','tapid-release-v1.tsv','tapid-release-v1.tsv.sig','install.sh','install.ps1'].sort();
 }
 export async function selectCandidate(api: ReleaseAdapter, tag: string, commit: string) {
   source(tag,commit); repository(api.repository);

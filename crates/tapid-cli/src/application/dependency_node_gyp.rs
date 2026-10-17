@@ -34,7 +34,7 @@ pub(super) fn prepare(tools: &Path, node: &Path) -> Result<(), OperationalError>
     let destination = tools.join("npm/node_modules");
     snapshot_modules(&modules, &destination, &digest)?;
     check_package(&destination.join("node-gyp"), "node-gyp")?;
-    crate::commands::run::read_bounded_config_file(
+    crate::filesystem::read::read_bounded_file(
         &destination.join("node-gyp/bin/node-gyp.js"),
         1024 * 1024,
     )
@@ -45,13 +45,12 @@ pub(super) fn prepare(tools: &Path, node: &Path) -> Result<(), OperationalError>
 }
 
 fn check_package(root: &Path, expected: &str) -> Result<(), OperationalError> {
-    let bytes =
-        crate::commands::run::read_bounded_config_file(&root.join("package.json"), 1024 * 1024)
-            .map_err(|_| {
-                error(format!(
-                    "bundled {expected} package.json must be a regular file no larger than 1 MiB"
-                ))
-            })?;
+    let bytes = crate::filesystem::read::read_bounded_file(&root.join("package.json"), 1024 * 1024)
+        .map_err(|_| {
+            error(format!(
+                "bundled {expected} package.json must be a regular file no larger than 1 MiB"
+            ))
+        })?;
     let package: serde_json::Value = serde_json::from_slice(&bytes).map_err(error)?;
     if package["name"].as_str() != Some(expected) {
         return Err(error(format!(

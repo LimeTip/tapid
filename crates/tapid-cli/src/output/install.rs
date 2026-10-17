@@ -127,6 +127,7 @@ impl Reporter {
         let phase = match failure.error.kind {
             ErrorKind::InvalidRequest
             | ErrorKind::Project
+            | ErrorKind::ProjectChanged
             | ErrorKind::Manifest
             | ErrorKind::ProjectBusy => "project validation",
             ErrorKind::Lockfile | ErrorKind::LockfileMissing | ErrorKind::LockManifestMismatch => {

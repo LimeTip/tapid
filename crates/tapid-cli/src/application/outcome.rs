@@ -7,10 +7,16 @@ use std::{
 
 const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 
+mod diagnostic;
+pub(crate) use diagnostic::{
+    Declaration, DiagnosticContext, DiagnosticPackage, RequirementDiagnostic,
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorKind {
     InvalidRequest,
     Project,
+    ProjectChanged,
     Manifest,
     Lockfile,
     LockfileMissing,
@@ -39,6 +45,7 @@ impl ErrorKind {
         match self {
             Self::InvalidRequest => "INVALID_REQUEST",
             Self::Project => "PROJECT_UNAVAILABLE",
+            Self::ProjectChanged => "PROJECT_CHANGED",
             Self::Manifest => "MANIFEST_INVALID",
             Self::Lockfile => "LOCKFILE_INVALID",
             Self::LockfileMissing => "LOCKFILE_MISSING",
@@ -86,6 +93,13 @@ pub(crate) fn sanitize(message: &str) -> String {
             .find(|c: char| c.is_whitespace() || matches!(c, '\"' | '\'' | '<' | '>'))
             .unwrap_or(rest.len());
         let url = &rest[..end];
+        // A validated lock key contains a registry origin followed by |name@version.
+        // Its @ is package syntax, and source validation already excludes userinfo.
+        if url.parse::<tapid_lockfile::LockfilePackageKey>().is_ok() {
+            result.push_str(url);
+            rest = &rest[end..];
+            continue;
+        }
         let prefix_len = if url.as_bytes()[..7].eq_ignore_ascii_case(b"https:/") {
             8
         } else {
@@ -132,6 +146,7 @@ pub(crate) struct OperationalError {
     pub(crate) kind: ErrorKind,
     message: String,
     source: Option<Box<dyn Error + Send + Sync>>,
+    pub(crate) diagnostic: Option<Box<DiagnosticContext>>,
 }
 
 impl OperationalError {
@@ -140,6 +155,7 @@ impl OperationalError {
             kind,
             message: bounded(message.to_string()),
             source: None,
+            diagnostic: None,
         }
     }
 
@@ -147,8 +163,46 @@ impl OperationalError {
         Self {
             kind,
             message: bounded(source.to_string()),
+            diagnostic: DiagnosticContext::from_error(&source).map(Box::new),
             source: Some(Box::new(source)),
         }
+    }
+
+    pub(crate) fn with_diagnostic(mut self, diagnostic: DiagnosticContext) -> Self {
+        self.diagnostic = Some(Box::new(diagnostic));
+        self
+    }
+
+    pub(crate) fn for_package(mut self, package: DiagnosticPackage) -> Self {
+        self.diagnostic.get_or_insert_with(Default::default).package = Some(package);
+        self
+    }
+
+    pub(crate) fn at_manifest(mut self, path: &Path) -> Self {
+        let diagnostic = self.diagnostic.get_or_insert_with(Default::default);
+        diagnostic
+            .declaration
+            .get_or_insert_with(|| Declaration::manifest(path, String::new()));
+        self
+    }
+
+    pub(crate) fn at_dependency(
+        mut self,
+        path: &Path,
+        section: &str,
+        name: &str,
+        requirement: &str,
+    ) -> Self {
+        let diagnostic = self.diagnostic.get_or_insert_with(Default::default);
+        let declaration = Declaration::manifest(path, Declaration::pointer(section, name));
+        diagnostic.declaration = Some(declaration.clone());
+        diagnostic.requirements.push(RequirementDiagnostic {
+            local_name: Some(name.to_owned()),
+            requirement: requirement.to_owned(),
+            package: None,
+            declaration: Some(declaration),
+        });
+        self
     }
 
     pub(crate) fn context(mut self, context: impl fmt::Display) -> Self {
@@ -176,6 +230,11 @@ impl From<tapid_resolver::ResolveError> for OperationalError {
             _ => ErrorKind::Resolution,
         };
         Self::from_source(kind, error)
+    }
+}
+impl From<tapid_manifest::WorkspaceError> for OperationalError {
+    fn from(error: tapid_manifest::WorkspaceError) -> Self {
+        Self::from_source(ErrorKind::Project, error)
     }
 }
 impl From<tapid_lockfile::LockfileError> for OperationalError {
@@ -207,6 +266,7 @@ impl From<tapid_store::IngestError> for OperationalError {
             IngestError::DigestMismatch { .. } | IngestError::TreeDigestMismatch { .. } => {
                 ErrorKind::Integrity
             }
+            IngestError::TreeMissing(_) => ErrorKind::StoreUnavailable,
             IngestError::Archive(_) => ErrorKind::Archive,
             IngestError::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 ErrorKind::StoreBusy
@@ -262,6 +322,7 @@ pub(crate) enum RetryAdvice {
 pub(crate) enum Warning {
     UnapprovedDependencyScriptsAllowed,
     DependencyScriptsWithoutContainment,
+    UpdateGraphChange { package: String, reason: String },
     UnverifiedRegistryArtifactsAllowed,
     PreviousTransactionRecovered,
     DependencyLifecycleHookSkipped { package: String, hook: String },
@@ -269,6 +330,9 @@ pub(crate) enum Warning {
 }
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::UpdateGraphChange { package, reason } = self {
+            return write!(f, "update graph change for {package}: {reason}");
+        }
         if let Self::DependencyLifecycleDiscoveryFailed { package } = self {
             return write!(
                 f,
@@ -286,7 +350,7 @@ impl fmt::Display for Warning {
             Self::DependencyScriptsWithoutContainment => "dependency hooks execute without containment; they can access the host and leave surviving descendants; generated outputs will not enter the verified build cache",
             Self::UnverifiedRegistryArtifactsAllowed => "npm artifacts without registry integrity are not authenticated against a registry-declared digest",
             Self::PreviousTransactionRecovered => "recovered an interrupted project transaction before this operation",
-            Self::DependencyLifecycleHookSkipped { .. } | Self::DependencyLifecycleDiscoveryFailed { .. } => unreachable!(),
+            Self::UpdateGraphChange { .. } | Self::DependencyLifecycleHookSkipped { .. } | Self::DependencyLifecycleDiscoveryFailed { .. } => unreachable!(),
         })
     }
 }
@@ -387,6 +451,22 @@ mod tests {
                 assert!(!rendered.contains("fixture-query-secret"), "{rendered}");
                 assert!(rendered.contains("registry.example"));
             }
+        }
+    }
+
+    #[test]
+    fn canonical_package_keys_survive_sanitizing_but_credential_bearing_imitations_do_not() {
+        let key = "https://registry.npmjs.org|@scope/child@1.2.0|peer=-|platform=os=;cpu=;libc=";
+        assert!(key.parse::<tapid_lockfile::LockfilePackageKey>().is_ok());
+        assert_eq!(
+            sanitize(&format!("selected {key}")),
+            format!("selected {key}")
+        );
+        for value in [
+            "https://user:secret@registry.npmjs.org|child@1.2.0|peer=-|platform=os=;cpu=;libc=",
+            "https://registry.npmjs.org/path?token=secret|child@1.2.0",
+        ] {
+            assert!(!sanitize(value).contains("secret"));
         }
     }
 
