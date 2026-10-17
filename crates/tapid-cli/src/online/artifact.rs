@@ -34,16 +34,7 @@ impl ArtifactFetcher<'_> {
                         tree,
                     ));
                 }
-                Err(tapid_store::IngestError::Io(error))
-                    if error.kind() == std::io::ErrorKind::NotFound
-                        && !store
-                            .root()
-                            .join("trees")
-                            .join(digest.as_str())
-                            .try_exists()
-                            .map_err(|error| {
-                                OperationalError::from_source(ErrorKind::Store, error)
-                            })? => {}
+                Err(tapid_store::IngestError::TreeMissing(_)) => {}
                 Err(error) => {
                     return Err(
                         OperationalError::from(error).context("locked store tree is invalid")
@@ -62,61 +53,39 @@ impl ArtifactFetcher<'_> {
             ));
         }
         let bytes = if let Some(bytes) = &record.copied_archive {
-            bytes.as_ref().clone()
-        } else if record.fixture {
-            if let Some(encoded) = record.artifact.strip_prefix("base64:") {
-                STANDARD.decode(encoded).map_err(|e| {
-                    OperationalError::from_source(ErrorKind::RegistryMetadata, e)
-                        .context("invalid artifact encoding")
-                })?
-            } else {
-                fs::read(&record.artifact).map_err(|e| {
-                    OperationalError::from_source(ErrorKind::RegistryTransport, e)
-                        .context(format!("cannot read artifact {}", record.artifact))
-                })?
-            }
+            std::borrow::Cow::Borrowed(bytes.as_slice())
         } else {
-            let transport = artifact_transport_for_package(
-                &mut self.transports,
-                self.config,
-                id.registry
-                    .registry()
-                    .ok_or("copied artifact cannot use registry transport")?,
-                &id.name,
-                &self.allowed_origins,
-            )?;
-            let response = if record.registry.to_string() == JSR {
-                JsrRegistry::new(
-                    transport,
-                    record
-                        .registry
-                        .registry()
-                        .ok_or("copied artifact cannot use registry transport")?
-                        .clone(),
-                )
-                .download_artifact(&record.artifact)
+            std::borrow::Cow::Owned(if record.fixture {
+                if let Some(encoded) = record.artifact.strip_prefix("base64:") {
+                    STANDARD.decode(encoded).map_err(|e| {
+                        OperationalError::from_source(ErrorKind::RegistryMetadata, e)
+                            .context("invalid artifact encoding")
+                    })?
+                } else {
+                    fs::read(&record.artifact).map_err(|e| {
+                        OperationalError::from_source(ErrorKind::RegistryTransport, e)
+                            .context(format!("cannot read artifact {}", record.artifact))
+                    })?
+                }
             } else {
-                NpmRegistry::new(
-                    transport,
-                    record
-                        .registry
+                let transport = artifact_transport_for_package(
+                    &mut self.transports,
+                    self.config,
+                    id.registry
                         .registry()
-                        .ok_or("copied artifact cannot use registry transport")?
-                        .clone(),
-                )
-                .download_artifact(&record.artifact)
-            }
-            .map_err(|e| {
-                OperationalError::from_source(ErrorKind::RegistryTransport, e)
-                    .context(format!("cannot download {id}"))
-            })?;
-            if response.status != 200 {
-                return Err(OperationalError::new(
-                    ErrorKind::RegistryTransport,
-                    format!("cannot download {}: HTTP {}", id, response.status),
-                ));
-            }
-            response.body
+                        .ok_or("copied artifact cannot use registry transport")?,
+                    &id.name,
+                    &self.allowed_origins,
+                )?;
+                let response =
+                    tapid_registry_client::download_artifact(transport, &record.artifact).map_err(
+                        |e| {
+                            OperationalError::from_source(ErrorKind::RegistryTransport, e)
+                                .context(format!("cannot download {id}"))
+                        },
+                    )?;
+                response.body
+            })
         };
         if record
             .registry

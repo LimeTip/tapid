@@ -378,8 +378,7 @@ fn graph(lock: &Lockfile) -> Result<BTreeMap<String, Vec<Edge>>, OperationalErro
         .filter_map(|key| key.parse::<LockfilePackageKey>().ok())
         .collect::<Vec<_>>();
     for source in keys.clone() {
-        let peer_context = crate::context::parse_peer(&source.peer_context)
-            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+        let peer_context = source.peer_context()?;
         for (name, version) in peer_context.entries() {
             let Some(target) = keys.iter().find(|candidate| {
                 candidate.source == source.source

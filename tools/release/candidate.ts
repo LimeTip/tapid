@@ -1,3 +1,4 @@
+import { compareStableVersions } from './versions.ts';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, lstat, mkdtemp, readdir, rm } from 'node:fs/promises';
@@ -41,9 +42,7 @@ function version(value: unknown): asserts value is string {
 }
 function compare(left: string, right: string): number {
   version(left); version(right);
-  const a=left.split('.').map(BigInt),b=right.split('.').map(BigInt);
-  for(let i=0;i<3;i++) if(a[i]!==b[i]) return a[i]>b[i] ? 1 : -1;
-  return 0;
+  return compareStableVersions(left, right)!;
 }
 function source(tag: string, commit: string): void {
   releaseVersion(tag,tag.slice(1));

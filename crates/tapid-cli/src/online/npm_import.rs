@@ -61,16 +61,12 @@ pub(crate) fn fetch_imported(
     for path in &selected {
         let package = &graph.packages[path];
         let peer = graph.peer_context(path);
-        let platform = selected_platform_context_for(
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            current_libc(),
-            &PackagePlatform {
-                os: package.os.clone(),
-                cpu: package.cpu.clone(),
-                libc: package.libc.clone(),
-            },
-        )?;
+        let platform = PackagePlatform {
+            os: package.os.clone(),
+            cpu: package.cpu.clone(),
+            libc: package.libc.clone(),
+        }
+        .selected_context(std::env::consts::OS, std::env::consts::ARCH, current_libc())?;
         let cached = imported
             .verified_artifact(path)
             .filter(|receipt| {
@@ -136,8 +132,7 @@ pub(crate) fn fetch_imported(
                         &package.name,
                         &origins,
                     )?;
-                    NpmRegistry::new(transport, package.registry.clone())
-                        .download_artifact(&package.resolved)
+                    tapid_registry_client::download_artifact(transport, &package.resolved)
                         .map_err(|e| {
                             OperationalError::from_source(ErrorKind::RegistryTransport, e)
                         })?

@@ -101,7 +101,7 @@ pub(super) fn file_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, Stri
     if !canonical.starts_with(&root) {
         return Err("file dependency escapes the project".into());
     }
-    crate::commands::run::read_bounded_config_file(
+    crate::filesystem::read::read_bounded_file(
         &canonical,
         crate::filesystem::atomic::MAX_ARTIFACT_BYTES,
     )
@@ -154,7 +154,7 @@ fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, Operat
     .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
     let root = crate::filesystem::tree::package_content_root(&tree)?;
     let manifest_bytes =
-        crate::commands::run::read_bounded_config_file(&root.join("package.json"), 1024 * 1024)
+        crate::filesystem::read::read_bounded_file(&root.join("package.json"), 1024 * 1024)
             .map_err(|_| "copied package requires a regular package.json no larger than 1 MiB")?;
     let text =
         std::str::from_utf8(&manifest_bytes).map_err(|_| "copied package.json is not UTF-8")?;

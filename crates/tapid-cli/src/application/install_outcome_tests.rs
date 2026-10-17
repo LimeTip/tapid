@@ -1596,10 +1596,7 @@ fn changed_peer_roots_rebind_compatible_ranges_and_release_incompatible_pins() {
             lock.root_bindings()["plugin"].parse().unwrap();
         assert_eq!(key.version.to_string(), plugin_version);
         assert_eq!(
-            crate::context::parse_peer(&key.peer_context)
-                .unwrap()
-                .entries()[&"react".parse().unwrap()]
-                .to_string(),
+            key.peer_context().unwrap().entries()[&"react".parse().unwrap()].to_string(),
             provider
         );
     }

@@ -28,6 +28,38 @@ fn make_marked_tree(root: &Path, contents: &str) -> ArtifactDigest {
     digest
 }
 
+#[test]
+fn verified_tree_miss_is_distinct_from_a_missing_marker_or_symlink() {
+    let project = tapid_test_support::TempProject::new("tree-miss").unwrap();
+    let store = Store::new(project.path());
+    let digest = digest(b"missing");
+    assert!(matches!(
+        store.verified_tree_path(&digest),
+        Err(IngestError::TreeMissing(_))
+    ));
+    assert!(matches!(
+        store.verified_tree_snapshot(&digest),
+        Err(IngestError::TreeMissing(_))
+    ));
+    let tree = project.path().join("trees").join(digest.as_str());
+    fs::create_dir_all(&tree).unwrap();
+    assert!(!matches!(
+        store.verified_tree_path(&digest).unwrap_err(),
+        IngestError::TreeMissing(_)
+    ));
+    assert!(store.verified_tree_snapshot(&digest).is_err());
+    #[cfg(unix)]
+    {
+        fs::remove_dir(&tree).unwrap();
+        std::os::unix::fs::symlink(project.path().join("absent"), &tree).unwrap();
+        assert!(!matches!(
+            store.verified_tree_path(&digest).unwrap_err(),
+            IngestError::TreeMissing(_)
+        ));
+        assert!(store.verified_tree_snapshot(&digest).is_err());
+    }
+}
+
 fn coordinator(project: &Path, state: &str) -> PathBuf {
     fs::create_dir_all(project).unwrap();
     let path = project.join(".tapid-lifecycle-journal.json");

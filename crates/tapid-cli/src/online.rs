@@ -29,9 +29,7 @@ pub(crate) use routing::metadata_transport_for_package;
 use routing::transport_for_route;
 
 mod platform;
-#[cfg(test)]
-use platform::platform_matches_for;
-use platform::{current_libc, current_platform_matches, selected_platform_context_for};
+use platform::{current_libc, current_platform_matches};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
@@ -1166,13 +1164,10 @@ pub(crate) fn resolve_and_fetch_with_lock(
                 record.artifact = url.to_owned();
             }
         }
-        let platform_context = selected_platform_context_for(
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            current_libc(),
-            &record.platform,
-        )
-        .map_err(|error| OperationalError::new(ErrorKind::Resolution, error))?;
+        let platform_context = record
+            .platform
+            .selected_context(std::env::consts::OS, std::env::consts::ARCH, current_libc())
+            .map_err(|error| OperationalError::new(ErrorKind::Resolution, error))?;
         platform_contexts.insert(id.clone(), platform_context.clone());
         let (actual, tree_digest, tree) =
             artifact_fetcher.prepare(id, &record, pinned, &mut store_transaction)?;

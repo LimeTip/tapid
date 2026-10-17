@@ -96,9 +96,9 @@ fn percent_decode(value: &str, original: &str) -> Result<String, LockfileError> 
     String::from_utf8(decoded).map_err(|_| LockfileError::InvalidPackageKey(original.into()))
 }
 
-fn validate_peer_context(value: &str, original: &str) -> Result<(), LockfileError> {
+fn decode_peer_context(value: &str, original: &str) -> Result<PeerContext, LockfileError> {
     if value.is_empty() {
-        return Ok(());
+        return Ok(PeerContext::default());
     }
     let mut context = PeerContext::default();
     for item in value.split(',') {
@@ -118,12 +118,12 @@ fn validate_peer_context(value: &str, original: &str) -> Result<(), LockfileErro
     if canonical_peer_context(&context) != value {
         return Err(LockfileError::InvalidPackageKey(original.into()));
     }
-    Ok(())
+    Ok(context)
 }
 
-fn validate_platform_context(value: &str, original: &str) -> Result<(), LockfileError> {
+fn decode_platform_context(value: &str, original: &str) -> Result<PlatformContext, LockfileError> {
     if value.is_empty() {
-        return Ok(());
+        return PlatformContext::new(None, None, None).map_err(LockfileError::Domain);
     }
     let (os, rest) = value
         .strip_prefix("os=")
@@ -147,7 +147,7 @@ fn validate_platform_context(value: &str, original: &str) -> Result<(), Lockfile
     if canonical_platform_context(&context) != value {
         return Err(LockfileError::InvalidPackageKey(original.into()));
     }
-    Ok(())
+    Ok(context)
 }
 
 /// Identifies a package provided by a workspace member.
@@ -326,6 +326,16 @@ pub struct LockfilePackageKey {
 }
 
 impl LockfilePackageKey {
+    /// Decodes a canonical peer context, rejecting noncanonical public-field mutations.
+    pub fn peer_context(&self) -> Result<PeerContext, LockfileError> {
+        decode_peer_context(&self.peer_context, &self.to_string())
+    }
+
+    /// Decodes a canonical platform context without interpreting legacy shorthand.
+    pub fn platform_context(&self) -> Result<PlatformContext, LockfileError> {
+        decode_platform_context(&self.platform_context, &self.to_string())
+    }
+
     pub fn from_source(
         source: PackageSource,
         name: PackageName,
@@ -440,8 +450,8 @@ impl std::str::FromStr for LockfilePackageKey {
             peer_context: parse_context(p[2], "peer=", value)?,
             platform_context: parse_context(p[3], "platform=", value)?,
         };
-        validate_peer_context(&key.peer_context, value)?;
-        validate_platform_context(&key.platform_context, value)?;
+        decode_peer_context(&key.peer_context, value)?;
+        decode_platform_context(&key.platform_context, value)?;
         if key.to_string() != value {
             return Err(LockfileError::InvalidPackageKey(value.into()));
         }
@@ -1347,8 +1357,8 @@ impl LockedPackage {
             .parse::<ArtifactDigest>()
             .map_err(LockfileError::Domain)?;
         let key = self.key();
-        validate_peer_context(&self.peer_context, &key)?;
-        validate_platform_context(&self.platform_context, &key)?;
+        decode_peer_context(&self.peer_context, &key)?;
+        decode_platform_context(&self.platform_context, &key)?;
         if registry.registry().is_some() {
             validation::validate_registry_url(&self.registry)?;
         } else if self.registry_integrity_declared.is_some()

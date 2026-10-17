@@ -207,6 +207,7 @@ impl From<tapid_store::IngestError> for OperationalError {
             IngestError::DigestMismatch { .. } | IngestError::TreeDigestMismatch { .. } => {
                 ErrorKind::Integrity
             }
+            IngestError::TreeMissing(_) => ErrorKind::StoreUnavailable,
             IngestError::Archive(_) => ErrorKind::Archive,
             IngestError::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 ErrorKind::StoreBusy

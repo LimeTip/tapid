@@ -15,6 +15,10 @@ The CLI also replays verified package trees at `STORE/trees/<sha256-...>/`. Each
 
 `StorePublication::verified_tree_snapshot` verifies and copies a tree under the publication's existing exclusive lock. Frozen hydration uses these snapshots before activation, and retains rollback until the project commit decision. The snapshot is independent of subsequent publication rollback.
 
+Verified-tree reads report `IngestError::TreeMissing` only when the tree directory
+is absent. An existing tree with a missing marker, a symlink, or an invalid digest
+remains an error; callers must not treat it as an ordinary cache miss.
+
 Lifecycle outputs carry store-local HMAC-SHA256 attestations over their recipe and output tree identities. An owner-only 32-byte `.tapid-lifecycle-key` is separate from ingested archives. Replay verifies the tag and tree together; missing, forged, symlinked, or publicly readable key material fails closed. Key creation is durable store infrastructure, while derived tree publication retains the existing transaction rollback boundary.
 
 `Store::cache_info` reports counts and logical byte sizes for published digest-named artifacts and marked trees without creating files or recovering transactions. `Store::clean_cache` explicitly evicts that recognized data under an exclusive store lock. Staging, lifecycle keys, journals, and unrecognized entries remain with their owners. Maintenance refuses busy locks, symlinked roots/namespaces/locks, pending recovery, and populated stores without a lock. Artifact ingestion also holds the store lock, so eviction cannot race publication. A `CacheCleanup` error means eviction started and may have removed some data; retry is safe. Installed project materializations and authoritative lockfiles are not cache data.

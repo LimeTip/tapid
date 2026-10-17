@@ -60,6 +60,8 @@ pub struct StorePublication {
 #[derive(Debug)]
 pub enum IngestError {
     Io(io::Error),
+    /// The tree directory is absent. An existing tree with missing evidence is an error.
+    TreeMissing(ArtifactDigest),
     /// Eviction started and may have removed some cache entries before failing.
     CacheCleanup(io::Error),
     DigestMismatch {
@@ -78,6 +80,7 @@ pub enum IngestError {
 impl fmt::Display for IngestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TreeMissing(digest) => write!(f, "store tree is missing: {digest}"),
             Self::Io(e) => write!(f, "store I/O error: {e}"),
             Self::CacheCleanup(e) => write!(f, "cache cleanup incomplete: {e}"),
             Self::DigestMismatch { expected, actual } => {
@@ -178,7 +181,13 @@ impl Store {
     /// Callers must separately verify the tree digest before trusting its bytes.
     fn marked_tree_path(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
         let path = self.root.join("trees").join(digest.as_str());
-        let metadata = fs::symlink_metadata(&path)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(IngestError::TreeMissing(digest.clone()));
+            }
+            Err(error) => return Err(error.into()),
+        };
         if !metadata.file_type().is_dir() {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidData, "tree is not a directory").into(),

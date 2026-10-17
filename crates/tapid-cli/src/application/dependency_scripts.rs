@@ -3,7 +3,6 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read,
     path::{Path, PathBuf},
 };
 use tapid_linker::NamedLayoutInput;
@@ -14,12 +13,12 @@ fn error(message: impl std::fmt::Display) -> OperationalError {
     OperationalError::new(ErrorKind::InvalidRequest, message)
 }
 pub(super) fn load_policy(project: &Path) -> Result<DependencyLifecyclePolicy, OperationalError> {
-    match crate::commands::run::read_bounded_config_file(
+    match crate::filesystem::read::read_bounded_file(
         &project.join("tapid.lifecycle.toml"),
         tapid_runner::config::MAX_CONFIG_BYTES,
     ) {
         Ok(bytes) => DependencyLifecyclePolicy::parse(&bytes).map_err(error),
-        Err(crate::commands::run::ConfigReadError::Io(e))
+        Err(crate::filesystem::read::ReadError::Io(e))
             if e.kind() == std::io::ErrorKind::NotFound =>
         {
             Ok(DependencyLifecyclePolicy::denied())
@@ -32,23 +31,15 @@ pub(super) fn load_policy(project: &Path) -> Result<DependencyLifecyclePolicy, O
 fn commands(tree: &Path) -> Result<Vec<(String, String)>, OperationalError> {
     let root = crate::filesystem::tree::package_content_root(tree).map_err(error)?;
     let path = root.join("package.json");
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(value) => value,
+    // Only an initially absent manifest is optional. A later disappearance is an error.
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(error(e)),
-    };
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024 {
-        return Err(error(
-            "dependency package.json must be a regular file no larger than 1 MiB",
-        ));
     }
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .and_then(|file| file.take(1024 * 1024 + 1).read_to_end(&mut bytes))
-        .map_err(error)?;
-    if bytes.len() > 1024 * 1024 {
-        return Err(error("dependency package.json exceeds 1 MiB"));
-    }
+    let bytes = crate::filesystem::read::read_bounded_file(&path, 1024 * 1024).map_err(|_| {
+        error("dependency package.json must be a regular file no larger than 1 MiB")
+    })?;
     let text = std::str::from_utf8(&bytes).map_err(error)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     tapid_manifest::dependency_lifecycle_commands(text, root.join("binding.gyp").is_file())
@@ -78,6 +69,13 @@ pub(super) fn apply(
         Some(lock.clone())
     };
     let mut warnings = Vec::new();
+    let mut instance_indices = BTreeMap::new();
+    for (index, instance) in input.instances.iter().enumerate() {
+        let key = tapid_linker::InstanceKey::from(instance);
+        if instance_indices.insert(key, index).is_some() {
+            return Err(error("duplicate lifecycle package instance"));
+        }
+    }
     let mut completed = BTreeMap::<String, Vec<DerivedHookOutput>>::new();
     let order = if policy.approvals().is_empty() {
         lock.packages().keys().cloned().collect()
@@ -93,15 +91,24 @@ pub(super) fn apply(
     let mut system_identity = None;
     for key in order {
         let package = lock.packages()[&key].clone();
-        let index = input
-            .instances
-            .iter()
-            .position(|i| {
-                i.id.name.as_str() == package.name()
-                    && i.id.version.to_string() == package.version()
-                    && i.id.registry.as_str() == package.registry()
-                    && trees.get(&key) == Some(&i.tree.root)
-            })
+        let typed: tapid_lockfile::LockfilePackageKey = key.parse().map_err(error)?;
+        let peer_context = typed.peer_context().map_err(error)?;
+        let platform_context = typed.platform_context().map_err(error)?;
+        let identity = tapid_linker::InstanceKey {
+            id: tapid_core::PackageInstanceId::from_source(
+                typed
+                    .source
+                    .package_source()
+                    .ok_or_else(|| error("lifecycle package has no artifact source"))?,
+                typed.name,
+                typed.version,
+            ),
+            peer_context,
+            platform_context,
+        };
+        let index = *instance_indices
+            .get(&identity)
+            .filter(|&&index| trees.get(&key) == Some(&input.instances[index].tree.root))
             .ok_or_else(|| error("lifecycle package mapping lost"))?;
         let source = input.instances[index].tree.root.clone();
         let hooks = match commands(&source) {
@@ -312,19 +319,9 @@ impl Drop for BuildStage {
 }
 fn tool_bytes(tool: &tapid_runner::LifecycleTool) -> Result<Vec<u8>, OperationalError> {
     let path = fs::canonicalize(tool.path()).map_err(error)?;
-    let metadata = fs::metadata(&path).map_err(error)?;
-    if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
-        return Err(error(
-            "lifecycle tool must be a regular executable no larger than 512 MiB",
-        ));
-    }
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .and_then(|f| f.take(512 * 1024 * 1024 + 1).read_to_end(&mut bytes))
-        .map_err(error)?;
-    if bytes.len() > 512 * 1024 * 1024
-        || format!("sha256-{:x}", Sha256::digest(&bytes)) != tool.digest()
-    {
+    let bytes = crate::filesystem::read::read_bounded_file(&path, 512 * 1024 * 1024)
+        .map_err(|_| error("lifecycle tool must be a regular executable no larger than 512 MiB"))?;
+    if format!("sha256-{:x}", Sha256::digest(&bytes)) != tool.digest() {
         return Err(error(format!(
             "lifecycle tool digest mismatch for {}",
             tool.name()
@@ -473,6 +470,103 @@ fn validate_output(root: &Path) -> Result<(), OperationalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_mapping_requires_the_exact_peer_and_platform_context() {
+        let project = tapid_test_support::TempProject::new("lifecycle-context").unwrap();
+        project
+            .write("package.json", br#"{"name":"plugin","version":"1.0.0"}"#)
+            .unwrap();
+        let digest = tapid_archive::canonical_tree_digest(project.path()).unwrap();
+        let peer = tapid_core::PeerContext::default()
+            .with("react".parse().unwrap(), "1.0.0".parse().unwrap());
+        let platform = tapid_core::PlatformContext::new(Some("linux"), Some("x64"), None).unwrap();
+        let package = tapid_lockfile::LockedPackage::new_with_context_and_provenance(
+            "https://registry.npmjs.org",
+            "plugin",
+            "1.0.0",
+            &format!("sha512-{}==", "A".repeat(86)),
+            &digest,
+            (&peer, &platform),
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        let key = package.key();
+        let mut lock = Lockfile::new(&digest).unwrap();
+        lock.insert_package(package).unwrap();
+        lock.set_roots([key.clone()]).unwrap();
+        let legacy_json = lock
+            .to_json()
+            .unwrap()
+            .replace("platform=os=linux;cpu=x64;libc=", "platform=-")
+            .replace("\"os=linux;cpu=x64;libc=\"", "\"\"");
+        for (actual_peer, actual_platform, accepted, legacy) in [
+            (
+                tapid_core::PeerContext::default(),
+                platform.clone(),
+                false,
+                false,
+            ),
+            (
+                peer.clone(),
+                tapid_core::PlatformContext::new(None, None, None).unwrap(),
+                false,
+                false,
+            ),
+            (peer.clone(), platform.clone(), true, false),
+            (
+                peer.clone(),
+                tapid_core::PlatformContext::new(None, None, None).unwrap(),
+                true,
+                true,
+            ),
+        ] {
+            let mut case_lock = if legacy {
+                Lockfile::from_json(&legacy_json).unwrap()
+            } else {
+                lock.clone()
+            };
+            let key = case_lock.packages().keys().next().unwrap().clone();
+            let mut input = NamedLayoutInput {
+                instances: vec![tapid_linker::PackageInstance {
+                    id: tapid_core::PackageInstanceId::new(
+                        "https://registry.npmjs.org".parse().unwrap(),
+                        "plugin".parse().unwrap(),
+                        "1.0.0".parse().unwrap(),
+                    ),
+                    peer_context: actual_peer,
+                    platform_context: actual_platform,
+                    tree: tapid_linker::VerifiedTreeReference::new(&digest, project.path())
+                        .unwrap(),
+                }],
+                root_dependencies: Vec::new(),
+                dependency_edges: Vec::new(),
+            };
+            let mut trees = [(key.clone(), project.path().to_path_buf())].into();
+            let guard =
+                crate::filesystem::activation::ActivationLock::acquire(project.path()).unwrap();
+            let result = apply(
+                project.path(),
+                &DependencyLifecyclePolicy::denied(),
+                &mut case_lock,
+                &mut input,
+                &mut trees,
+                &tapid_store::Store::new(project.path().join("store")),
+                None,
+                &guard,
+            );
+            if accepted {
+                assert!(result.unwrap().is_empty());
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("lifecycle package mapping lost")
+                );
+            }
+        }
+    }
     #[test]
     fn lifecycle_discovery_accepts_a_leading_bom_without_changing_script_bytes() {
         let project = tapid_test_support::TempProject::new("lifecycle-discovery-bom").unwrap();

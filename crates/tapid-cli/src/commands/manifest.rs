@@ -1,6 +1,6 @@
 use crate::application::outcome::{ErrorKind, OperationalError};
 use clap::{Args as ClapArgs, Subcommand};
-use std::{fs::File, io::Read, path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode};
 use tapid_manifest::PackageManifest;
 
 const MAX_MANIFEST_BYTES: usize = 1_048_576;
@@ -48,36 +48,30 @@ pub(crate) fn read_manifest(path: &std::path::Path) -> Result<PackageManifest, S
 pub(crate) fn read_manifest_typed(
     path: &std::path::Path,
 ) -> Result<PackageManifest, OperationalError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|source| {
-        OperationalError::from_source(ErrorKind::Manifest, source)
-            .context(format!("cannot read manifest {}", path.display()))
-    })?;
-    if !metadata.file_type().is_file() {
-        return Err(OperationalError::new(
-            ErrorKind::Manifest,
-            format!(
-                "manifest must be a regular file, not a symlink: {}",
-                path.display()
-            ),
-        ));
-    }
-    let file = File::open(path).map_err(|source| {
-        OperationalError::from_source(ErrorKind::Manifest, source)
-            .context(format!("cannot read manifest {}", path.display()))
-    })?;
-    let mut input = Vec::with_capacity(MAX_MANIFEST_BYTES + 1);
-    file.take((MAX_MANIFEST_BYTES + 1) as u64)
-        .read_to_end(&mut input)
-        .map_err(|source| {
-            OperationalError::from_source(ErrorKind::Manifest, source)
-                .context(format!("cannot read manifest {}", path.display()))
+    let input =
+        crate::filesystem::read::read_bounded_file(path, MAX_MANIFEST_BYTES).map_err(|error| {
+            match error {
+                crate::filesystem::read::ReadError::CapacityExceeded => OperationalError::new(
+                    ErrorKind::Manifest,
+                    format!("manifest exceeds maximum size of {MAX_MANIFEST_BYTES} bytes"),
+                ),
+                crate::filesystem::read::ReadError::Io(source)
+                    if source.kind() == std::io::ErrorKind::InvalidInput =>
+                {
+                    OperationalError::new(
+                        ErrorKind::Manifest,
+                        format!(
+                            "manifest must be a regular file, not a symlink: {}",
+                            path.display()
+                        ),
+                    )
+                }
+                crate::filesystem::read::ReadError::Io(source) => {
+                    OperationalError::from_source(ErrorKind::Manifest, source)
+                        .context(format!("cannot read manifest {}", path.display()))
+                }
+            }
         })?;
-    if input.len() > MAX_MANIFEST_BYTES {
-        return Err(OperationalError::new(
-            ErrorKind::Manifest,
-            format!("manifest exceeds maximum size of {MAX_MANIFEST_BYTES} bytes"),
-        ));
-    }
     let input = String::from_utf8(input).map_err(|source| {
         OperationalError::from_source(ErrorKind::Manifest, source)
             .context(format!("cannot read manifest {}", path.display()))

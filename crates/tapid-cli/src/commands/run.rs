@@ -1,10 +1,11 @@
+use crate::filesystem::read::{ReadError, read_bounded_file};
 use clap::Args as ClapArgs;
 mod permissions;
 use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -116,11 +117,11 @@ pub(crate) fn run(args: Args) -> ExitCode {
     let invocation_mode = args.permissions.enabled();
     let config_bytes = match read_run_config(&config_path) {
         Ok(bytes) => bytes,
-        Err(ConfigReadError::CapacityExceeded) => {
+        Err(ReadError::CapacityExceeded) => {
             eprintln!("error: invalid run configuration (capacity-exceeded)");
             return ExitCode::from(1);
         }
-        Err(ConfigReadError::Io(error)) => {
+        Err(ReadError::Io(error)) => {
             if error.kind() == std::io::ErrorKind::NotFound && invocation_mode {
                 Vec::new()
             } else {
@@ -254,58 +255,8 @@ pub(crate) fn run(args: Args) -> ExitCode {
     }
 }
 
-pub(crate) enum ConfigReadError {
-    CapacityExceeded,
-    Io(io::Error),
-}
-
-fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigReadError> {
-    read_bounded_config_file(path, tapid_runner::MAX_CONFIG_BYTES)
-}
-
-pub(crate) fn read_bounded_config_file(
-    path: &std::path::Path,
-    max_bytes: usize,
-) -> Result<Vec<u8>, ConfigReadError> {
-    let max_bytes = u64::try_from(max_bytes).map_err(|_| ConfigReadError::CapacityExceeded)?;
-    let read_limit = max_bytes
-        .checked_add(1)
-        .ok_or(ConfigReadError::CapacityExceeded)?;
-    let metadata = fs::symlink_metadata(path).map_err(ConfigReadError::Io)?;
-    if !metadata.file_type().is_file() {
-        return Err(ConfigReadError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "configuration is not a regular file",
-        )));
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // A replaced FIFO must not block the open, nor may a replaced symlink
-        // redirect the read after the initial metadata check.
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = options.open(path).map_err(ConfigReadError::Io)?;
-    let metadata = file.metadata().map_err(ConfigReadError::Io)?;
-    if !metadata.is_file() {
-        return Err(ConfigReadError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "configuration is not a regular file",
-        )));
-    }
-    if metadata.len() > max_bytes {
-        return Err(ConfigReadError::CapacityExceeded);
-    }
-    let mut bytes = Vec::new();
-    file.take(read_limit)
-        .read_to_end(&mut bytes)
-        .map_err(ConfigReadError::Io)?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(ConfigReadError::CapacityExceeded);
-    }
-    Ok(bytes)
+fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ReadError> {
+    read_bounded_file(path, tapid_runner::MAX_CONFIG_BYTES)
 }
 
 fn execution_error_category(category: tapid_runner::ExecutionErrorCategory) -> &'static str {

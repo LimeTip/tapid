@@ -1,3 +1,4 @@
+import { stableVersionParts } from "./versions.ts";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -21,7 +22,7 @@ export function releaseVersion(tag: string, cargoVersion: string): string {
   const match = /^v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$/.exec(tag);
   if (!match) throw new Error(`release tag must match vX.Y.Z: ${tag}`);
   const version = match[1];
-  if (version.split(".").some((part) => BigInt(part) > 18446744073709551615n)) {
+  if (stableVersionParts(version)!.some((part) => part > 18446744073709551615n)) {
     throw new Error("release version components must fit unsigned 64-bit integers");
   }
   if (cargoVersion !== version) {

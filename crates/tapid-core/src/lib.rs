@@ -1,3 +1,8 @@
+mod platform;
+pub use platform::PackagePlatform;
+mod artifact_url;
+pub use artifact_url::ArtifactUrl;
+
 use std::{fmt, str::FromStr};
 
 use base64::{
@@ -350,6 +355,7 @@ pub enum DomainError {
     InvalidPackageIntegrity(String),
     InvalidPlatformContext,
     InvalidPackageSource,
+    InvalidArtifactUrl,
 }
 
 impl fmt::Display for DomainError {
@@ -360,6 +366,7 @@ impl fmt::Display for DomainError {
             Self::InvalidArtifactDigest(value) => write!(f, "invalid artifact digest: {value}"),
             Self::InvalidRegistryOrigin(value) => write!(f, "invalid registry origin: {value}"),
             Self::InvalidPackageIntegrity(value) => write!(f, "invalid package integrity: {value}"),
+            Self::InvalidArtifactUrl => f.write_str("invalid artifact URL"),
             Self::InvalidPackageSource => f.write_str("invalid copied package source"),
             Self::InvalidPlatformContext => f.write_str("invalid platform context"),
         }
@@ -375,6 +382,32 @@ fn is_name_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_urls_preserve_canonical_bytes_and_reject_ambiguous_references() {
+        for value in [
+            "https://registry.example/@scope/pkg.tgz",
+            "https://registry.example/@scope%2Fpkg.tgz",
+        ] {
+            assert_eq!(value.parse::<ArtifactUrl>().unwrap().as_str(), value);
+        }
+        for value in [
+            "http://registry.example/a",
+            "https://USER:secret@registry.example/a",
+            "https://@registry.example/a",
+            "https://REGISTRY.example/a",
+            "https://registry.example:443/a",
+            "https://registry.example/%61",
+            "https://registry.example/%2f",
+            "https://registry.example/%00",
+            "https://registry.example/a?token=secret",
+            "https://registry.example/a#fragment",
+            "https://registry.example/a\\b",
+            "https://registry.example/é",
+        ] {
+            assert!(value.parse::<ArtifactUrl>().is_err(), "accepted {value}");
+        }
+    }
 
     #[test]
     fn accepts_scoped_and_unscoped_package_names() {

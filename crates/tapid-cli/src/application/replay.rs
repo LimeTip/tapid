@@ -1,5 +1,4 @@
 use super::outcome::{ErrorKind, OperationalError};
-use crate::context;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 use tapid_core::PackageInstanceId;
 use tapid_linker::{
@@ -145,10 +144,8 @@ pub(crate) fn replay_input_with_tree_source(
         if owns_snapshots {
             snapshots.paths.push(tree.clone());
         }
-        let peer = context::parse_peer(&key.peer_context)
-            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
-        let platform = context::parse_platform(&key.platform_context)
-            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+        let peer = key.peer_context()?;
+        let platform = key.platform_context()?;
         let registry = key.source.package_source().ok_or_else(|| {
             OperationalError::new(
                 ErrorKind::Lockfile,
