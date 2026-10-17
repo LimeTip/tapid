@@ -4,7 +4,7 @@ use super::{
 };
 use crate::application::outcome::OperationalError;
 use std::{collections::BTreeMap, path::Path};
-use tapid_linker::{ManagedRoot, ShimPackage, plan_shims};
+use tapid_linker::{ManagedRoot, ShimInterpreter, ShimPackage, plan_shims};
 use tapid_manifest::PackageManifest;
 
 pub(super) fn validate_command(command: &str) -> Result<(), OperationalError> {
@@ -61,13 +61,19 @@ pub(super) fn package_commands(
             .read_to_end(&mut contents)
             .map_err(error)?;
         let first_line = contents.split(|b| *b == b'\n').next().unwrap_or_default();
-        let node = matches!(
-            first_line,
-            b"#!/usr/bin/env node"
-                | b"#!/usr/bin/env node\r"
-                | b"#!/usr/bin/node"
-                | b"#!/usr/bin/node\r"
-        );
+        let node = if cfg!(windows) {
+            entry.interpreter == ShimInterpreter::Node
+        } else {
+            // Unix shim plans leave interpreter selection to the target. Keep
+            // standalone Node dispatch for the supported Unix shebangs.
+            matches!(
+                first_line,
+                b"#!/usr/bin/env node"
+                    | b"#!/usr/bin/env node\r"
+                    | b"#!/usr/bin/node"
+                    | b"#!/usr/bin/node\r"
+            )
+        };
         if !node && cfg!(windows) && !contents.starts_with(b"MZ") {
             return Err(error(
                 "unsupported tool interpreter; Windows supports Node shebangs and native executables",
@@ -126,6 +132,39 @@ pub(super) fn plan(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn windows_tool_bins_reuse_the_planners_node_interpreters() {
+        let project = tapid_test_support::TempProject::new("tool-node-interpreters").unwrap();
+        let root = super::state::root_path(Some(project.path())).unwrap();
+        let package = root.join("node_modules/tool");
+        std::fs::create_dir_all(&package).unwrap();
+        let manifest = tapid_manifest::PackageManifest::parse(
+            r#"{"name":"tool","version":"1.0.0","bin":{"tool":"cli.js"}}"#,
+        )
+        .unwrap();
+        for shebang in [
+            "#!node\n",
+            "#!node.exe\n",
+            "#!/usr/bin/node.exe\n",
+            "#!/usr/bin/env node.exe\n",
+            "#! /usr/bin/node\r\n",
+            "#!/usr/bin/env\tnode\n",
+        ] {
+            std::fs::write(package.join("cli.js"), shebang).unwrap();
+            let commands = super::package_commands(&root, &root, &package, &manifest)
+                .unwrap_or_else(|e| panic!("{shebang:?}: {e}"));
+            assert!(commands["tool"].node, "{shebang:?}");
+        }
+        for shebang in ["#!/bin/sh\n", "#!/usr/bin/env node --inspect\n"] {
+            std::fs::write(package.join("cli.js"), shebang).unwrap();
+            assert!(
+                super::package_commands(&root, &root, &package, &manifest).is_err(),
+                "{shebang:?}"
+            );
+        }
+    }
+
     #[test]
     fn large_native_tool_bin_is_planned_without_a_state_file_size_limit() {
         let project = tapid_test_support::TempProject::new("tool-native-prefix").unwrap();
