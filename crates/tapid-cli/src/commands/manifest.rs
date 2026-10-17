@@ -69,40 +69,47 @@ pub(crate) fn read_manifest(path: &std::path::Path) -> Result<PackageManifest, S
 pub(crate) fn read_manifest_typed(
     path: &std::path::Path,
 ) -> Result<PackageManifest, OperationalError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|source| {
-        OperationalError::from_source(ErrorKind::Manifest, source)
-            .context(format!("cannot read manifest {}", path.display()))
-    })?;
-    if !metadata.file_type().is_file() {
-        return Err(OperationalError::new(
-            ErrorKind::Manifest,
-            format!(
-                "manifest must be a regular file, not a symlink: {}",
-                path.display()
-            ),
-        ));
-    }
-    let file = File::open(path).map_err(|source| {
-        OperationalError::from_source(ErrorKind::Manifest, source)
-            .context(format!("cannot read manifest {}", path.display()))
-    })?;
-    let mut input = Vec::with_capacity(MAX_MANIFEST_BYTES + 1);
-    file.take((MAX_MANIFEST_BYTES + 1) as u64)
-        .read_to_end(&mut input)
-        .map_err(|source| {
+    let result = (|| {
+        let metadata = std::fs::symlink_metadata(path).map_err(|source| {
             OperationalError::from_source(ErrorKind::Manifest, source)
                 .context(format!("cannot read manifest {}", path.display()))
         })?;
-    if input.len() > MAX_MANIFEST_BYTES {
-        return Err(OperationalError::new(
-            ErrorKind::Manifest,
-            format!("manifest exceeds maximum size of {MAX_MANIFEST_BYTES} bytes"),
-        ));
-    }
-    let input = String::from_utf8(input).map_err(|source| {
-        OperationalError::from_source(ErrorKind::Manifest, source)
-            .context(format!("cannot read manifest {}", path.display()))
-    })?;
-    PackageManifest::parse(&input)
-        .map_err(|error| OperationalError::from_source(ErrorKind::Manifest, error))
+        if !metadata.file_type().is_file() {
+            return Err(OperationalError::new(
+                ErrorKind::Manifest,
+                format!(
+                    "manifest must be a regular file, not a symlink: {}",
+                    path.display()
+                ),
+            ));
+        }
+        let file = File::open(path).map_err(|source| {
+            OperationalError::from_source(ErrorKind::Manifest, source)
+                .context(format!("cannot read manifest {}", path.display()))
+        })?;
+        let mut input = Vec::with_capacity(MAX_MANIFEST_BYTES + 1);
+        file.take((MAX_MANIFEST_BYTES + 1) as u64)
+            .read_to_end(&mut input)
+            .map_err(|source| {
+                OperationalError::from_source(ErrorKind::Manifest, source)
+                    .context(format!("cannot read manifest {}", path.display()))
+            })?;
+        if input.len() > MAX_MANIFEST_BYTES {
+            return Err(OperationalError::new(
+                ErrorKind::Manifest,
+                format!("manifest exceeds maximum size of {MAX_MANIFEST_BYTES} bytes"),
+            ));
+        }
+        let input = String::from_utf8(input).map_err(|source| {
+            OperationalError::from_source(ErrorKind::Manifest, source)
+                .context(format!("cannot read manifest {}", path.display()))
+        })?;
+        PackageManifest::parse(&input).map_err(|error| {
+            let evidence = error.diagnostic(&input);
+            let diagnostic =
+                crate::application::outcome::DiagnosticContext::manifest_error(&evidence, path);
+            OperationalError::from_source(ErrorKind::Manifest, error).with_diagnostic(diagnostic)
+        })
+    })();
+    result.map_err(|error: OperationalError| error.at_manifest(path))
 }

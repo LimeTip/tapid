@@ -1,5 +1,6 @@
 //! Verify pinned npm artifacts and compose the existing install transaction.
 use super::*;
+use crate::application::outcome::{DiagnosticContext, DiagnosticPackage};
 use tapid_lockfile::ImportedNpmLockfile;
 
 pub(crate) fn fetch_imported(
@@ -12,9 +13,21 @@ pub(crate) fn fetch_imported(
 ) -> ResolveAndFetchOutput {
     let manifest = fs::read_to_string(project.join("package.json"))
         .map_err(|e| OperationalError::from_source(ErrorKind::Manifest, e))?;
+    let current_digest = root_digest(project)?;
     imported
-        .validate_replay(&manifest, &root_digest(project)?)
-        .map_err(|e| OperationalError::new(ErrorKind::LockManifestMismatch, e.to_string()))?;
+        .validate_replay(&manifest, &current_digest)
+        .map_err(|source| {
+            let mut error = OperationalError::from_source(ErrorKind::LockManifestMismatch, source);
+            if imported.root_manifest_digest() != current_digest {
+                error = error.with_diagnostic(DiagnosticContext::comparison(
+                    "root_manifest_digest",
+                    Some("sha256"),
+                    imported.root_manifest_digest(),
+                    &current_digest,
+                ));
+            }
+            error.at_manifest(&project.join("package.json"))
+        })?;
     let workspace = workspace_materialization(project, registry_config)?;
     imported
         .validate_workspace_manifests(&imported_workspace_manifests(project, &workspace)?)
@@ -27,6 +40,11 @@ pub(crate) fn fetch_imported(
         .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?;
     for path in &selected {
         let package = &graph.packages[path];
+        let identity = DiagnosticPackage {
+            source: package.registry.to_string(),
+            name: package.name.to_string(),
+            version: Some(package.version.to_string()),
+        };
         let origin = registry_config
             .origin_for_name(&package.name)
             .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
@@ -37,7 +55,7 @@ pub(crate) fn fetch_imported(
                     "registry identity mismatch for package {} at {path}: selected {origin}, imported {}",
                     package.name, package.registry
                 ),
-            ));
+            ).with_diagnostic(DiagnosticContext::comparison("registry_identity", None, origin, &package.registry)).for_package(identity));
         }
     }
     let fixture: Option<Fixture> = fixture_path
@@ -61,6 +79,11 @@ pub(crate) fn fetch_imported(
     for path in &selected {
         let package = &graph.packages[path];
         let peer = graph.peer_context(path);
+        let identity = DiagnosticPackage {
+            source: package.registry.to_string(),
+            name: package.name.to_string(),
+            version: Some(package.version.to_string()),
+        };
         let platform = selected_platform_context_for(
             std::env::consts::OS,
             std::env::consts::ARCH,
@@ -121,7 +144,23 @@ pub(crate) fn fetch_imported(
                             format!(
                                 "fixture integrity disagrees with imported selection at {path}"
                             ),
-                        ));
+                        )
+                        .with_diagnostic(DiagnosticContext::comparison(
+                            "artifact_integrity",
+                            Some("sha512"),
+                            &package.integrity,
+                            record
+                                .integrity
+                                .as_ref()
+                                .map(|value| {
+                                    value
+                                        .parse::<PackageIntegrity>()
+                                        .map(|value| value.to_string())
+                                        .unwrap_or_else(|_| "invalid_integrity".into())
+                                })
+                                .unwrap_or_else(|| "missing".into()),
+                        ))
+                        .for_package(identity));
                     }
                     if let Some(encoded) = record.artifact.strip_prefix("base64:") {
                         STANDARD.decode(encoded).map_err(|e| e.to_string())?
@@ -150,7 +189,14 @@ pub(crate) fn fetch_imported(
                             "integrity mismatch for {}@{} at {path}",
                             package.name, package.version
                         ),
-                    ));
+                    )
+                    .with_diagnostic(DiagnosticContext::comparison(
+                        "artifact_integrity",
+                        Some("sha512"),
+                        &package.integrity,
+                        integrity(&bytes),
+                    ))
+                    .for_package(identity));
                 }
                 let temp = TemporaryTree(store.root().join(format!(
                     ".npm-import-tree-{}-{}",
@@ -178,10 +224,27 @@ pub(crate) fn fetch_imported(
         if artifact_manifest["name"].as_str() != Some(package.name.as_str())
             || artifact_manifest["version"].as_str() != Some(&package.version.to_string())
         {
+            let observed = artifact_manifest["name"]
+                .as_str()
+                .and_then(|value| value.parse::<PackageName>().ok())
+                .zip(
+                    artifact_manifest["version"]
+                        .as_str()
+                        .and_then(|value| value.parse::<PackageVersion>().ok()),
+                )
+                .map(|(name, version)| format!("{name}@{version}"))
+                .unwrap_or_else(|| "invalid_package_identity".into());
             return Err(OperationalError::new(
                 ErrorKind::Integrity,
                 format!("archive identity disagrees with imported selection at {path}"),
-            ));
+            )
+            .with_diagnostic(DiagnosticContext::comparison(
+                "artifact_identity",
+                None,
+                format!("{}@{}", package.name, package.version),
+                observed,
+            ))
+            .for_package(identity));
         }
         let tree = transaction
             .stage_verified_tree(&digest, &temp.0)
