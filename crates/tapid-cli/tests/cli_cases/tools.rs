@@ -302,6 +302,52 @@ fn tool_preserves_replaced_launcher_and_unknown_environment() {
 }
 
 #[test]
+fn tool_catalog_recovery_retires_interrupted_replacement_files() {
+    for point in ["lockfile_writing", "lockfile_staged", "lockfile_published"] {
+        let project = TempProject::new(point).unwrap();
+        let home = TempHome::new(point).unwrap();
+        assert_success(&install(&project, &home));
+        let root = home.path().join("tools with spaces");
+        // Neither a lookalike filename nor an old unbound nonce proves ownership.
+        for name in [
+            ".tapid-lock-user.tmp",
+            ".tapid-lock-123-456.bak",
+            ".tapid-tool-catalog-user.tmp",
+        ] {
+            fs::write(root.join(name), b"unowned").unwrap();
+        }
+        let before: std::collections::BTreeSet<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        let crashed = command(&project, &home, &["tool", "remove", "hello-tool"])
+            .env("TAPID_TEST_CRASH_POINT", point)
+            .output()
+            .unwrap();
+        assert!(!crashed.status.success(), "{point}");
+        assert!(root.join("pending.json").is_file(), "{point}");
+        let interrupted_recovery = command(&project, &home, &["tool", "list"])
+            .env("TAPID_TEST_CRASH_POINT", point)
+            .output()
+            .unwrap();
+        assert!(!interrupted_recovery.status.success(), "{point}");
+        assert_eq!(list(&project, &home)["data"]["tools"], json!([]), "{point}");
+        let after: std::collections::BTreeSet<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(after, before, "abandoned replacement file at {point}");
+        for name in [
+            ".tapid-lock-user.tmp",
+            ".tapid-lock-123-456.bak",
+            ".tapid-tool-catalog-user.tmp",
+        ] {
+            assert_eq!(fs::read(root.join(name)).unwrap(), b"unowned");
+        }
+    }
+}
+
+#[test]
 fn tool_recovers_interrupted_activation_before_and_after_commit() {
     for (point, version) in [
         ("tool_launchers", "1.0.0"),

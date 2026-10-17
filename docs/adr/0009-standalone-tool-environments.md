@@ -29,8 +29,11 @@ launchers; local drift requires updating or removing the affected tool.
 Record both catalogs in a bounded journal;
 a digest-bound, separately synced commit decision selects the new state.
 Recovery is idempotent and treats recorded launcher bytes as the only files it
-may replace. Catalog replacement reuses the existing atomic lockfile writer,
-with the tool journal covering its interruption window. Parent directory syncing
+may replace. Catalog replacement reuses the existing atomic lockfile publisher
+with a journal-derived staging filename and no separate backup. Recovery retires
+only that journal's staging file with expected complete or partial catalog bytes;
+unknown files and modified staging files are preserved. The tool journal covers
+the publication interruption window. Parent directory syncing
 reuses the existing filesystem activation helper.
 
 Keep old generations until commit and defer cleanup while a direct invocation

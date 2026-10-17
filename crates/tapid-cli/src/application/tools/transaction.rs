@@ -57,7 +57,19 @@ fn preflight(root: &Path, before: &Catalog, after: &Catalog) -> Result<(), Opera
     Ok(())
 }
 
-fn settle(root: &Path, desired: &Catalog, alternate: &Catalog) -> Result<(), OperationalError> {
+fn catalog_temporary(root: &Path, journal: &[u8]) -> PathBuf {
+    root.join(format!(
+        ".tapid-tool-catalog-{}.tmp",
+        crate::filesystem::atomic::digest_bytes(journal)
+    ))
+}
+
+fn settle(
+    root: &Path,
+    desired: &Catalog,
+    alternate: &Catalog,
+    temporary: &Path,
+) -> Result<(), OperationalError> {
     // Only recorded bytes may be replaced/deleted. A user's replacement blocks
     // settlement rather than becoming permission to overwrite it.
     for name in desired
@@ -90,8 +102,23 @@ fn settle(root: &Path, desired: &Catalog, alternate: &Catalog) -> Result<(), Ope
     let path = root.join("catalog.json");
     state::check_path(&path)?;
     let encoded = serde_json::to_string_pretty(desired).map_err(error)?;
-    let backup = crate::filesystem::atomic::replace_lockfile(&path, &encoded).map_err(error)?;
-    crate::filesystem::atomic::discard_lockfile_backup(backup.as_deref()).map_err(error)?;
+    state::check_path(temporary)?;
+    match fs::symlink_metadata(temporary) {
+        Ok(_) => {
+            // A crash can leave an empty, partial, or fully written stage. Only
+            // this journal's name and an expected byte prefix authorize removal.
+            if !encoded.as_bytes().starts_with(&state::read(temporary)?) {
+                return Err(error(
+                    "modified tool catalog staging file; preserving files",
+                ));
+            }
+            fs::remove_file(temporary).map_err(error)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(error(e)),
+    }
+    crate::filesystem::atomic::publish_lockfile_with_temp(&path, &encoded, temporary)
+        .map_err(error)?;
     crate::filesystem::activation::sync_directory(&root.join("bin")).map_err(error)?;
     crate::filesystem::activation::sync_directory(root).map_err(error)
 }
@@ -136,7 +163,12 @@ pub(super) fn recover(root: &Path) -> Result<bool, OperationalError> {
     if decision {
         desired.settled_transaction = Some(crate::filesystem::atomic::digest_bytes(&encoded));
     }
-    settle(root, &desired, alternate)?;
+    settle(
+        root,
+        &desired,
+        alternate,
+        &catalog_temporary(root, &encoded),
+    )?;
     fs::remove_file(pending).map_err(error)?;
     crate::filesystem::activation::sync_directory(root).map_err(error)?;
     crate::filesystem::activation::test_crash_at("tool_settled");
@@ -161,6 +193,13 @@ pub(super) fn activate(
     .map_err(error)?;
     if encoded.len() > state::LIMIT {
         return Err(error("tool transaction exceeds its bounded state limit"));
+    }
+    let temporary = catalog_temporary(root, &encoded);
+    state::check_path(&temporary)?;
+    match fs::symlink_metadata(&temporary) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return Err(error("unowned tool catalog staging file; preserving files")),
+        Err(e) => return Err(error(e)),
     }
     state::write_new(&root.join("pending.json"), &encoded, false)?;
     for (name, contents) in &after.shims {
@@ -411,6 +450,91 @@ pub(super) fn cleanup(root: &Path, catalog: &Catalog) -> Result<Cleanup, Operati
 mod tests {
     use super::*;
     use tapid_test_support::TempHome;
+
+    #[test]
+    fn catalog_recovery_retires_only_expected_staging_bytes() {
+        for case in ["empty", "partial", "complete", "modified", "directory"] {
+            let home = TempHome::new(case).unwrap();
+            let root = state::root_path(Some(home.path())).unwrap();
+            state::initialize(&root).unwrap();
+            let catalog = Catalog::default();
+            let journal = serde_json::to_vec(&Journal {
+                before: catalog.clone(),
+                after: catalog.clone(),
+            })
+            .unwrap();
+            fs::write(root.join("pending.json"), &journal).unwrap();
+            let temporary = catalog_temporary(&root, &journal);
+            let encoded = serde_json::to_vec_pretty(&catalog).unwrap();
+            match case {
+                "empty" => fs::write(&temporary, b"").unwrap(),
+                "partial" => fs::write(&temporary, &encoded[..encoded.len() / 2]).unwrap(),
+                "complete" => fs::write(&temporary, &encoded).unwrap(),
+                "modified" => fs::write(&temporary, b"user data").unwrap(),
+                "directory" => fs::create_dir(&temporary).unwrap(),
+                _ => unreachable!(),
+            }
+            if matches!(case, "modified" | "directory") {
+                assert!(recover(&root).is_err(), "{case}");
+                assert!(temporary.exists());
+                assert!(root.join("pending.json").exists());
+                if case == "modified" {
+                    assert_eq!(fs::read(&temporary).unwrap(), b"user data");
+                }
+            } else {
+                assert!(recover(&root).unwrap(), "{case}");
+                assert!(!temporary.exists());
+                assert_eq!(state::load(&root).unwrap(), catalog);
+                assert!(!recover(&root).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_publication_preserves_a_preexisting_staging_path() {
+        let home = TempHome::new("tool-catalog-collision").unwrap();
+        let root = state::root_path(Some(home.path())).unwrap();
+        state::initialize(&root).unwrap();
+        let catalog = Catalog::default();
+        let journal = serde_json::to_vec(&Journal {
+            before: catalog.clone(),
+            after: catalog.clone(),
+        })
+        .unwrap();
+        let temporary = catalog_temporary(&root, &journal);
+        fs::write(&temporary, b"user data").unwrap();
+        assert!(activate(&root, &catalog, &catalog).is_err());
+        assert!(!root.join("pending.json").exists());
+        assert_eq!(fs::read(temporary).unwrap(), b"user data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_recovery_preserves_a_staging_symlink() {
+        let home = TempHome::new("tool-catalog-link").unwrap();
+        let root = state::root_path(Some(home.path())).unwrap();
+        state::initialize(&root).unwrap();
+        let catalog = Catalog::default();
+        let journal = serde_json::to_vec(&Journal {
+            before: catalog.clone(),
+            after: catalog,
+        })
+        .unwrap();
+        fs::write(root.join("pending.json"), &journal).unwrap();
+        let outside = TempHome::new("tool-catalog-outside").unwrap();
+        let sentinel = outside.path().join("sentinel");
+        fs::write(&sentinel, b"user data").unwrap();
+        let temporary = catalog_temporary(&root, &journal);
+        std::os::unix::fs::symlink(&sentinel, &temporary).unwrap();
+        assert!(recover(&root).is_err());
+        assert!(
+            fs::symlink_metadata(temporary)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(sentinel).unwrap(), b"user data");
+    }
 
     #[test]
     fn generation_creation_preserves_an_existing_unowned_directory() {
