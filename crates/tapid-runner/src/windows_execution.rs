@@ -552,25 +552,21 @@ fn windows_launch_limitations(request: &ExecutionRequest) -> &'static [&'static 
 }
 
 fn windows_launch_mechanism(request: &ExecutionRequest) -> String {
-    let mut mechanism = String::from(
-        "AppContainer token without network capabilities, explicit path ACL grants, suspended Job Object assignment, and bounded standard-handle capture",
-    );
-    if request.windows_compatibility.is_some() {
-        mechanism = format!(
-            "AppContainer/Job, ACLs, bounded stdio; {}",
-            compatibility::describe()
-        );
+    if request.windows_compatibility.is_some() || request.policy().network() {
+        let description = compatibility::describe();
+        let identity = description.split("; ").next().expect("component identity");
+        let network = if request.policy().network() {
+            "unrestricted IP via private standard-user socket broker with native DNS"
+        } else {
+            "persistent exact-SID WFP v4/v6 bind guard"
+        };
+        format!(
+            "AppContainer/Job; ACLs; stdio; {identity}; app-IAT, READ_ATTRIBUTES ancestors, EOF stdin; {network}; zero network SIDs"
+        )
+    } else {
+        "AppContainer token without network capabilities; explicit ACLs; suspended Job assignment; bounded stdio; persistent exact-SID WFP v4/v6 bind guard".into()
     }
-    if request.policy().network() {
-        let identity = compatibility::describe();
-        let identity = identity.split("; ").next().expect("component identity");
-        mechanism = format!(
-            "AppContainer/Job; ACLs; stdio; {identity}; app-IAT, READ_ATTRIBUTES ancestors, EOF stdin; unrestricted IP via private standard-user socket broker; zero network SIDs"
-        );
-    }
-    mechanism
 }
-
 struct WindowsExecutionLifecycle<'a> {
     request: ExecutionRequest,
     preflight: &'a ValidatedPreflight,
@@ -581,6 +577,7 @@ struct WindowsExecutionLifecycle<'a> {
     child: Option<WindowsSuspendedChild>,
     capture: Option<WindowsOutputCapture>,
     network: Option<compatibility::Broker>,
+    guard: Option<super::windows_guard::Guard>,
     cleanup_error: Option<ExecutionError>,
 }
 
@@ -596,6 +593,7 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             child: None,
             capture: None,
             network: None,
+            guard: None,
             cleanup_error: None,
         }
     }
@@ -676,6 +674,10 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             self.network = Some(broker);
             Some((channel.request, channel.response))
         } else {
+            self.guard = Some(super::windows_guard::Guard::register(
+                process,
+                self.job.as_ref().expect("Job prepared").handle(),
+            )?);
             None
         };
         if let Some(binding) = self.request.windows_compatibility.as_ref() {
@@ -721,6 +723,11 @@ impl<'a> WindowsExecutionLifecycle<'a> {
         }
         self.child.take();
         self.network.take(); // Broker outlives clients, but not the execution.
+        if let Some(guard) = self.guard.take()
+            && let Err(error) = guard.finish()
+        {
+            cleanup_error.get_or_insert(error);
+        }
         self.job.take(); // The tree is confirmed empty before the final kernel-owned handle closes.
         if let Some(capture) = self.capture.take()
             && let Err(error) = capture.finish()

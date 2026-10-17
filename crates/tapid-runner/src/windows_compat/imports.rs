@@ -101,6 +101,8 @@ pub fn imports(mut read: impl FnMut(usize, usize) -> Option<Vec<u8>>) -> Option<
             if matches!(
                 symbol.as_slice(),
                 b"WSASocketW"
+                    | b"GetAddrInfoW"
+                    | b"FreeAddrInfoW"
                     | b"WSASocketA"
                     | b"socket"
                     | b"CreateNamedPipeA"
@@ -183,7 +185,9 @@ mod tests {
     #[test]
     fn reads_loader_imports_and_accepts_an_image_without_imports() {
         for name in [
-            b"WSASocketW".as_slice(),
+            b"GetAddrInfoW".as_slice(),
+            b"FreeAddrInfoW",
+            b"WSASocketW",
             b"WSASocketA",
             b"socket",
             b"LoadLibraryW",

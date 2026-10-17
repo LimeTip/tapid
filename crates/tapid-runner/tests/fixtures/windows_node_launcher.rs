@@ -16,8 +16,120 @@ unsafe extern "system" {
         flags: u32,
     ) -> usize;
     fn WSAGetLastError() -> i32;
+    fn WSASetLastError(error: i32);
     fn closesocket(socket: usize) -> i32;
 }
+#[repr(C)]
+struct AddressInfo {
+    flags: i32,
+    family: i32,
+    kind: i32,
+    protocol: i32,
+    length: usize,
+    canonical: *mut u16,
+    address: *mut c_void,
+    next: *mut AddressInfo,
+}
+#[link(name = "ws2_32")]
+unsafe extern "system" {
+    fn GetAddrInfoW(
+        name: *const u16,
+        service: *const u16,
+        hints: *const AddressInfo,
+        result: *mut *mut AddressInfo,
+    ) -> i32;
+    fn FreeAddrInfoW(info: *mut AddressInfo);
+}
+unsafe extern "C" fn lookup_recovery(env: Value, _: Value) -> Value {
+    let check = || -> i32 {
+        let name: Vec<_> = "localhost\0".encode_utf16().collect();
+        let service: Vec<_> = "443\0".encode_utf16().collect();
+        let mut hints: AddressInfo = unsafe { std::mem::zeroed() };
+        hints.flags = i32::MIN;
+        hints.kind = 1;
+        hints.protocol = 6;
+        let mut result = ptr::null_mut();
+        unsafe { WSASetLastError(12345) };
+        let rejected =
+            unsafe { GetAddrInfoW(name.as_ptr(), service.as_ptr(), &hints, &mut result) };
+        if rejected != 10022 || unsafe { WSAGetLastError() } != 10022 || !result.is_null() {
+            return 1;
+        }
+        hints.flags = 2;
+        for _ in 0..128 {
+            let error =
+                unsafe { GetAddrInfoW(name.as_ptr(), service.as_ptr(), &hints, &mut result) };
+            if error != 0 {
+                return error;
+            }
+            if result.is_null() {
+                return 2;
+            }
+            let info = unsafe { &*result };
+            let valid = matches!((info.family, info.length), (2, 16) | (23, 28))
+                && !info.address.is_null()
+                && !info.canonical.is_null();
+            unsafe { FreeAddrInfoW(result) };
+            if !valid {
+                return 3;
+            }
+        }
+        for head_first in [false, true] {
+            let error =
+                unsafe { GetAddrInfoW(name.as_ptr(), service.as_ptr(), &hints, &mut result) };
+            if error != 0 {
+                return error;
+            }
+            let tail = unsafe { (*result).next };
+            if tail.is_null() {
+                unsafe { FreeAddrInfoW(result) };
+                return 4;
+            }
+            unsafe {
+                (*result).next = ptr::null_mut();
+            }
+            if head_first {
+                unsafe {
+                    FreeAddrInfoW(result);
+                    FreeAddrInfoW(tail);
+                }
+            } else {
+                unsafe {
+                    FreeAddrInfoW(tail);
+                    FreeAddrInfoW(result);
+                }
+            }
+        }
+        // Free a genuine system allocation through the adapted import as well.
+        type Lookup = unsafe extern "system" fn(
+            *const u16,
+            *const u16,
+            *const AddressInfo,
+            *mut *mut AddressInfo,
+        ) -> i32;
+        let module: Vec<_> = "ws2_32.dll\0".encode_utf16().collect();
+        let direct: Lookup = unsafe {
+            std::mem::transmute(GetProcAddress(
+                GetModuleHandleW(module.as_ptr()),
+                c"GetAddrInfoW".as_ptr().cast(),
+            ))
+        };
+        let numeric: Vec<_> = "127.0.0.1\0".encode_utf16().collect();
+        hints.flags = 4;
+        let error = unsafe { direct(numeric.as_ptr(), service.as_ptr(), &hints, &mut result) };
+        if error != 0 {
+            return error;
+        }
+        unsafe { FreeAddrInfoW(result) };
+        0
+    };
+    type Integer = unsafe extern "C" fn(Value, i32, *mut Value) -> i32;
+    let integer: Integer = unsafe { api(c"napi_create_int32") };
+    let mut result = ptr::null_mut();
+    unsafe { integer(env, check(), &mut result) };
+    result
+}
+
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetFinalPathNameByHandleW(handle: isize, path: *mut u16, length: u32, flags: u32) -> u32;
@@ -189,48 +301,27 @@ pub unsafe extern "C" fn napi_register_module_v1(env: Value, exports: Value) -> 
     type Set = unsafe extern "C" fn(Value, Value, *const u8, Value) -> i32;
     let create: Create = unsafe { api(c"napi_create_function") };
     let set: Set = unsafe { api(c"napi_set_named_property") };
-    let mut function = ptr::null_mut();
-    if unsafe {
-        create(
-            env,
-            c"launch".as_ptr().cast(),
-            usize::MAX,
-            Some(launch),
-            ptr::null_mut(),
-            &mut function,
-        )
-    } != 0
-        || unsafe { set(env, exports, c"launch".as_ptr().cast(), function) } != 0
-    {
-        return ptr::null_mut();
-    }
-    if unsafe {
-        create(
-            env,
-            c"reopen".as_ptr().cast(),
-            usize::MAX,
-            Some(reopen),
-            ptr::null_mut(),
-            &mut function,
-        )
-    } != 0
-        || unsafe { set(env, exports, c"reopen".as_ptr().cast(), function) } != 0
-    {
-        return ptr::null_mut();
-    }
-    if unsafe {
-        create(
-            env,
-            c"socketRecovery".as_ptr().cast(),
-            usize::MAX,
-            Some(socket_recovery),
-            ptr::null_mut(),
-            &mut function,
-        )
-    } != 0
-        || unsafe { set(env, exports, c"socketRecovery".as_ptr().cast(), function) } != 0
-    {
-        return ptr::null_mut();
+    for (name, callback) in [
+        (c"launch", launch as Callback),
+        (c"reopen", reopen as Callback),
+        (c"socketRecovery", socket_recovery as Callback),
+        (c"lookupRecovery", lookup_recovery as Callback),
+    ] {
+        let mut function = ptr::null_mut();
+        if unsafe {
+            create(
+                env,
+                name.as_ptr().cast(),
+                usize::MAX,
+                Some(callback),
+                ptr::null_mut(),
+                &mut function,
+            )
+        } != 0
+            || unsafe { set(env, exports, name.as_ptr().cast(), function) } != 0
+        {
+            return ptr::null_mut();
+        }
     }
     exports
 }

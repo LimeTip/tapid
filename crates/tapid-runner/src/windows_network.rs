@@ -1,5 +1,6 @@
 //! Per-execution socket authority. A single polling owner bounds every client and I/O operation.
 use super::{native::OwnedHandle, network_protocol as wire};
+use crate::execution::windows_job::token_information;
 use crate::execution::{ExecutionError, ExecutionErrorCategory};
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
@@ -29,6 +30,9 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetProcessId, OpenProcessToken, PROCESS_DUP_HANDLE,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
+
+#[path = "windows_lookup.rs"]
+mod lookup;
 
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
@@ -92,6 +96,7 @@ struct Client {
     filled: usize,
     id: u32,
     pending: Option<Pending>,
+    lookup: Option<lookup::Lookup>,
     output: Option<([u8; wire::RESPONSE_SIZE], usize, Instant)>,
 }
 fn failure(error: u32) -> ExecutionError {
@@ -181,20 +186,6 @@ impl Authority {
         }
         Ok(pid)
     }
-}
-fn token_information(token: isize, class: i32) -> Result<Vec<usize>, u32> {
-    let mut length = 0;
-    unsafe { GetTokenInformation(token, class, null_mut(), 0, &mut length) };
-    if length == 0 || length > 65536 {
-        return Err(WSAEACCES as u32);
-    }
-    let mut bytes = vec![0usize; (length as usize).div_ceil(size_of::<usize>())];
-    if unsafe { GetTokenInformation(token, class, bytes.as_mut_ptr().cast(), length, &mut length) }
-        == 0
-    {
-        return Err(WSAEACCES as u32);
-    }
-    Ok(bytes)
 }
 impl Broker {
     pub(in crate::execution) fn new(job: isize, sid: PSID) -> Result<Self, ExecutionError> {
@@ -320,6 +311,7 @@ fn attach(
             filled: 0,
             id: 1,
             pending: None,
+            lookup: None,
             output: None,
         },
         Channel {
@@ -376,6 +368,14 @@ fn poll_client(
         .is_some_and(|pending| pending.since.elapsed() >= TRANSFER_TIMEOUT)
     {
         return Err(());
+    }
+    if let Some(lookup) = &mut client.lookup {
+        let Some(response) = lookup.poll(client.id) else {
+            return Ok(None);
+        };
+        client.lookup = None;
+        client.output = Some((response, 0, Instant::now()));
+        advance(client)?;
     }
     if let Some((bytes, written, since)) = &mut client.output {
         if since.elapsed() >= TRANSFER_TIMEOUT {
@@ -453,6 +453,20 @@ fn poll_client(
         wire::ACK => {
             client.pending = None;
             advance(client)?;
+        }
+        wire::LOOKUP => {
+            authority.validate(client.process.0).map_err(|_| ())?;
+            let query = super::lookup_protocol::Query::decode(&client.frame, &request).ok_or(())?;
+            match lookup::Lookup::start(query) {
+                Ok(lookup) => {
+                    client.lookup = Some(lookup);
+                    return Ok(None);
+                }
+                Err(error) => {
+                    response = wire::response(request.id, error, 0, 0);
+                    advance(client)?;
+                }
+            }
         }
         wire::REGISTER => {
             let result = duplicate(
@@ -597,6 +611,7 @@ mod tests {
                 filled: 0,
                 id: 1,
                 pending: None,
+                lookup: None,
                 output: None,
             },
             writer,

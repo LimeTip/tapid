@@ -1,7 +1,7 @@
 //! Contained compatibility client. Kernel restrictions remain independent of these hooks.
 use super::{SETUP, native::*, network_protocol as wire, protocol::Setup};
 use std::{ffi::c_void, ptr, sync::Mutex};
-static REQUEST: Mutex<u32> = Mutex::new(1);
+pub(super) static REQUEST: Mutex<u32> = Mutex::new(1);
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn ReadFile(
@@ -41,7 +41,7 @@ unsafe extern "system" {
     fn WSASetLastError(error: i32);
     fn closesocket(socket: usize) -> i32;
 }
-fn transfer(handle: Handle, bytes: &mut [u8], write: bool) -> Result<(), u32> {
+pub(super) fn transfer(handle: Handle, bytes: &mut [u8], write: bool) -> Result<(), u32> {
     let mut at = 0;
     while at < bytes.len() {
         let mut done = 0;

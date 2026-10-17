@@ -21,6 +21,15 @@ mod windows_node;
 
 #[test]
 fn windows_network_denial_blocks_native_loopback_connect_in_root_and_descendant() {
+    native_network_denial(false);
+}
+
+#[test]
+fn windows_network_denial_blocks_native_bind_in_root_and_descendant() {
+    native_network_denial(true);
+}
+
+fn native_network_denial(bind: bool) {
     for descendant in [false, true] {
         let project = TempProject::new("network-denial-project").unwrap();
         let runtime = TempProject::new("network-denial-runtime").unwrap();
@@ -38,7 +47,12 @@ fn windows_network_denial_blocks_native_loopback_connect_in_root_and_descendant(
         listener.set_nonblocking(true).unwrap();
         let endpoint = listener.local_addr().unwrap().to_string();
         let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
-        let mode = if descendant { "descendant" } else { "root" };
+        let mode = match (bind, descendant) {
+            (false, false) => "root",
+            (false, true) => "descendant",
+            (true, false) => "bind",
+            (true, true) => "descendant-bind",
+        };
         let arguments = [
             "--exact",
             "windows_native_network_probe_helper",
@@ -58,19 +72,25 @@ fn windows_network_denial_blocks_native_loopback_connect_in_root_and_descendant(
             .unwrap();
         assert!(control.status.success(), "host control failed: {control:?}");
         assert!(
-            String::from_utf8_lossy(&control.stdout).contains("TCP_CONNECT_RESULT=connected"),
+            String::from_utf8_lossy(&control.stdout).contains(if bind {
+                "BIND_RESULT=bound"
+            } else {
+                "TCP_CONNECT_RESULT=connected"
+            }),
             "the host control must connect: {control:?}"
         );
-        let (mut connection, _) = listener
-            .accept()
-            .expect("host control connection must arrive");
-        connection
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut payload = String::new();
-        connection.read_to_string(&mut payload).unwrap();
-        assert_eq!(payload, "TAPID_NATIVE_NETWORK_CONTROL_V1");
-        drop(connection);
+        if !bind {
+            let (mut connection, _) = listener
+                .accept()
+                .expect("host control connection must arrive");
+            connection
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut payload = String::new();
+            connection.read_to_string(&mut payload).unwrap();
+            assert_eq!(payload, "TAPID_NATIVE_NETWORK_CONTROL_V1");
+            drop(connection);
+        }
 
         let policy = SandboxPolicy::new_with_assurance(
             SandboxMode::Required,
@@ -106,13 +126,24 @@ fn windows_network_denial_blocks_native_loopback_connect_in_root_and_descendant(
             "probe must complete rather than crash: descendant={descendant}; stdout={stdout}; stderr={stderr}"
         );
         assert!(
-            stdout.contains("TCP_CONNECT_RESULT=denied"),
+            stdout.contains(if bind {
+                "BIND_RESULT=denied"
+            } else {
+                "TCP_CONNECT_RESULT=denied"
+            }),
             "stdout={stdout}; stderr={stderr}"
         );
         assert!(
-            !stdout.contains("TCP_CONNECT_RESULT=connected"),
+            !stdout.contains(if bind {
+                "BIND_RESULT=bound"
+            } else {
+                "TCP_CONNECT_RESULT=connected"
+            }),
             "stdout={stdout}; stderr={stderr}"
         );
+        if bind {
+            assert_eq!(stdout.matches("BIND_RESULT=denied").count(), 4, "{stdout}");
+        }
         if descendant {
             assert!(
                 stdout.contains("TCP_DESCENDANT_COMPLETED"),
@@ -146,18 +177,47 @@ fn windows_native_network_probe_helper() {
         return;
     };
     match std::env::var("TAPID_NETWORK_MODE").as_deref() {
-        Ok("descendant") => {
+        Ok(mode @ ("descendant" | "descendant-bind")) => {
             let child = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "windows_native_network_probe_helper",
                     "--nocapture",
                 ])
-                .env("TAPID_NETWORK_MODE", "root")
+                .env(
+                    "TAPID_NETWORK_MODE",
+                    if mode == "descendant-bind" {
+                        "bind"
+                    } else {
+                        "root"
+                    },
+                )
                 .status()
                 .expect("native network descendant must start");
             assert!(child.success(), "native network descendant failed: {child}");
             println!("TCP_DESCENDANT_COMPLETED");
+        }
+        Ok("bind") => {
+            for endpoint in ["127.0.0.1:0", "[::1]:0"] {
+                for tcp in [true, false] {
+                    let result = if tcp {
+                        TcpListener::bind(endpoint).map(drop)
+                    } else {
+                        std::net::UdpSocket::bind(endpoint).map(drop)
+                    };
+                    match result {
+                        Ok(()) => println!("BIND_RESULT=bound endpoint={endpoint} tcp={tcp}"),
+                        Err(error) => {
+                            assert_eq!(
+                                error.kind(),
+                                std::io::ErrorKind::PermissionDenied,
+                                "not bind-denial evidence: {error:?}"
+                            );
+                            println!("BIND_RESULT=denied endpoint={endpoint} tcp={tcp}");
+                        }
+                    }
+                }
+            }
         }
         Ok("root") => {
             let endpoint = endpoint.to_str().unwrap().parse().unwrap();
@@ -429,4 +489,32 @@ assert.equal(child.status, 0);
         execute(&fixture.request(script, "", true, 10)).unwrap(),
         "SOCKET_RECOVERY_CHILD_OK",
     );
+}
+
+#[test]
+fn windows_network_native_lookup_preserves_results_freeing_and_descendant_channels() {
+    let fixture = NodeNetworkProject::new();
+    windows_node::compile_launcher(&fixture.root.join("launcher.node"));
+    let payload = r#"
+const assert=require('node:assert/strict');
+assert.equal(require('./launcher.node').lookupRecovery(),0);
+const dns=require('node:dns').promises;
+Promise.all(Array.from({length:12},()=>dns.lookup('localhost',{all:true}))).then(results=>{
+for(const addresses of results) assert(addresses.some(a=>a.address==='127.0.0.1'||a.address==='::1'));
+console.log('NATIVE_LOOKUP_OK');
+}).catch(e=>{console.error(e);process.exitCode=1;});
+"#;
+    for descendant in [false, true] {
+        let script = if descendant {
+            format!(
+                "const r=require('node:child_process').spawnSync(process.execPath,['-e',{payload:?}],{{stdio:'inherit'}});if(r.error)throw r.error;process.exit(r.status??1)"
+            )
+        } else {
+            payload.to_owned()
+        };
+        assert_node_network_success(
+            execute(&fixture.request(&script, "", true, 10)).unwrap(),
+            "NATIVE_LOOKUP_OK",
+        );
+    }
 }

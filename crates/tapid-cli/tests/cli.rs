@@ -6819,3 +6819,30 @@ fn why_reconstructs_only_manifest_matching_roots_and_reports_nested_instances() 
             .contains("|foo@1.0.0|")
     );
 }
+
+#[test]
+fn sandbox_help_exposes_one_time_guard_management() {
+    let project = tapid_test_support::TempProject::new("sandbox-help").unwrap();
+    let output = isolated_command(project.path(), &["sandbox", "--help"], true)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let help = String::from_utf8(output.stdout).unwrap();
+    for command in ["install", "status", "uninstall"] {
+        assert!(help.contains(command), "{help}");
+    }
+}
+
+#[test]
+fn sandbox_json_rejects_install_before_privileged_management() {
+    let project = tapid_test_support::TempProject::new("sandbox-json").unwrap();
+    let output = isolated_command(project.path(), &["--json", "sandbox", "install"], true)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("JSON_UNSUPPORTED_COMMAND"),
+        "{:?}",
+        output
+    );
+}

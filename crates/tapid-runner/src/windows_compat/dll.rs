@@ -2,9 +2,14 @@
 //! authority independently of these hooks; bypassing them cannot grant host access.
 #[cfg(not(test))]
 mod imports;
+mod lookup;
+#[cfg(not(test))]
+mod lookup_protocol;
 #[cfg(not(test))]
 mod native;
 mod network;
+#[cfg(test)]
+use super::lookup_protocol;
 #[cfg(not(test))]
 mod network_protocol;
 #[cfg(not(test))]
@@ -33,6 +38,8 @@ static LOAD_EX_W: AtomicUsize = AtomicUsize::new(0);
 static LOAD_W: AtomicUsize = AtomicUsize::new(0);
 static LOAD_A: AtomicUsize = AtomicUsize::new(0);
 static LOAD_EX_A: AtomicUsize = AtomicUsize::new(0);
+static LOOKUP: AtomicUsize = AtomicUsize::new(0);
+static FREE_LOOKUP: AtomicUsize = AtomicUsize::new(0);
 static SOCKET_W: AtomicUsize = AtomicUsize::new(0);
 static SOCKET_A: AtomicUsize = AtomicUsize::new(0);
 static SOCKET: AtomicUsize = AtomicUsize::new(0);
@@ -97,6 +104,8 @@ fn system_exports() -> Result<Vec<SystemExport>, u32> {
         b"LoadLibraryW",
         b"LoadLibraryA",
         b"LoadLibraryExA",
+        b"GetAddrInfoW",
+        b"FreeAddrInfoW",
         b"WSASocketW",
         b"WSASocketA",
         b"socket",
@@ -104,7 +113,10 @@ fn system_exports() -> Result<Vec<SystemExport>, u32> {
     .into_iter()
     .map(|name| {
         let symbol = CString::new(name).map_err(|_| 193u32)?;
-        let sockets = name == b"socket" || name.starts_with(b"WSASocket");
+        let sockets = name == b"socket"
+            || name.starts_with(b"WSASocket")
+            || name == b"GetAddrInfoW"
+            || name == b"FreeAddrInfoW";
         let module = if sockets {
             let name: Vec<_> = "ws2_32.dll\0".encode_utf16().collect();
             unsafe { GetModuleHandleW(name.as_ptr()) }
@@ -137,6 +149,8 @@ fn patch_module(base: usize, node: bool, exports: &[SystemExport]) -> Result<(),
     for entry in entries {
         let sockets = SETUP.get().is_some_and(|setup| setup.network_request != 0);
         let (replacement, original, kind) = match entry.name.as_slice() {
+            b"GetAddrInfoW" if sockets => (lookup::lookup as *const () as usize, &LOOKUP, 0),
+            b"FreeAddrInfoW" if sockets => (lookup::free as *const () as usize, &FREE_LOOKUP, 0),
             b"WSASocketW" if sockets => (network::socket_w as *const () as usize, &SOCKET_W, 0),
             b"WSASocketA" if sockets => (network::socket_a as *const () as usize, &SOCKET_A, 0),
             b"socket" if sockets => (network::socket as *const () as usize, &SOCKET, 0),

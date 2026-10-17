@@ -27,6 +27,9 @@ mod native;
 #[path = "windows_compat/protocol.rs"]
 mod protocol;
 
+#[allow(dead_code)] // Query encoding is used by the embedded client and codec tests.
+#[path = "windows_compat/lookup_protocol.rs"]
+mod lookup_protocol;
 #[path = "windows_network.rs"]
 mod network_broker;
 #[allow(dead_code)] // The same codec is also compiled into the contained component.

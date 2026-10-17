@@ -1,11 +1,12 @@
 //! Bounded, pointer-free socket broker frames shared by the host and contained component.
-pub const VERSION: u32 = 1;
-pub const REQUEST_SIZE: usize = 40;
-pub const RESPONSE_SIZE: usize = 664;
+pub const VERSION: u32 = 2;
+pub const REQUEST_SIZE: usize = 616;
+pub const RESPONSE_SIZE: usize = 2084;
 pub const PROTOCOL_SIZE: usize = 628;
 pub const SOCKET: u32 = 1;
 pub const REGISTER: u32 = 2;
 pub const ACK: u32 = 3;
+pub const LOOKUP: u32 = 4;
 pub const MAX_CLIENTS: usize = 64;
 
 #[derive(Clone, Copy, Debug)]
@@ -51,10 +52,14 @@ impl Request {
         };
         let empty =
             request.family == 0 && request.kind == 0 && request.protocol == 0 && request.flags == 0;
+        if request.operation != LOOKUP && bytes[40..].iter().any(|byte| *byte != 0) {
+            return None;
+        }
         match request.operation {
             SOCKET if request.child == 0 => Some(request),
             REGISTER if empty && request.child != 0 && request.child != u64::MAX => Some(request),
             ACK if empty && request.child == 0 => Some(request),
+            LOOKUP if request.child <= 3 => Some(request),
             _ => None,
         }
     }
@@ -79,7 +84,7 @@ pub fn response_error(bytes: &[u8; RESPONSE_SIZE], id: u32) -> Result<u32, u32> 
     if bytes[..4] != VERSION.to_le_bytes()
         || bytes[4..8] != id.to_le_bytes()
         || bytes[12..16] != [0; 4]
-        || bytes[660..] != [0; 4]
+        || bytes[RESPONSE_SIZE - 4..] != [0; 4]
     {
         return Err(10022);
     }
@@ -129,7 +134,7 @@ mod tests {
         }
         let mut reply = response(1, 0, 0, 0);
         assert_eq!(response_error(&reply, 2), Err(10022));
-        reply[660] = 1;
+        reply[RESPONSE_SIZE - 4] = 1;
         assert_eq!(response_error(&reply, 1), Err(10022));
     }
 }
