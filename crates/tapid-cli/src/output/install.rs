@@ -110,6 +110,7 @@ impl Reporter {
         let phase = match failure.error.kind {
             ErrorKind::InvalidRequest
             | ErrorKind::Project
+            | ErrorKind::ProjectChanged
             | ErrorKind::Manifest
             | ErrorKind::ProjectBusy => "project validation",
             ErrorKind::Lockfile | ErrorKind::LockfileMissing | ErrorKind::LockManifestMismatch => {
@@ -118,6 +119,7 @@ impl Reporter {
             ErrorKind::RegistryConfiguration
             | ErrorKind::RegistryCredentialMissing
             | ErrorKind::RegistryMetadata
+            | ErrorKind::RegistryMetadataUnavailable
             | ErrorKind::RegistryTransport => "registry access",
             ErrorKind::Resolution | ErrorKind::PeerDependency => "dependency resolution",
             ErrorKind::Integrity | ErrorKind::Archive => "artifact verification",

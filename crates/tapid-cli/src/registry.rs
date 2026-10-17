@@ -143,13 +143,13 @@ impl RegistryConfig {
 
     pub(crate) fn registry_for_dependency(
         &self,
-        parent: &RegistryOrigin,
+        parent: &tapid_core::PackageSource,
         dependency: &PackageName,
-    ) -> Result<RegistryOrigin, String> {
+    ) -> Result<tapid_core::PackageSource, String> {
         if parent.to_string() == JSR {
             Ok(parent.clone())
         } else {
-            self.origin_for_name(dependency)
+            self.origin_for_name(dependency).map(Into::into)
         }
     }
 

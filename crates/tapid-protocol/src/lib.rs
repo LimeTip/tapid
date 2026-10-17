@@ -6,7 +6,7 @@
 #![deny(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use tapid_core::{PackageInstanceId, PackageName, PackageVersion, RegistryOrigin};
+use tapid_core::{PackageInstanceId, PackageName, PackageSource, PackageVersion};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -32,8 +32,8 @@ impl TryFrom<PackageInstanceWire> for PackageInstanceId {
     type Error = tapid_core::DomainError;
 
     fn try_from(value: PackageInstanceWire) -> Result<Self, Self::Error> {
-        Ok(Self::new(
-            value.registry.parse::<RegistryOrigin>()?,
+        Ok(Self::from_source(
+            value.registry.parse::<PackageSource>()?,
             value.name.parse::<PackageName>()?,
             value.version.parse::<PackageVersion>()?,
         ))

@@ -11,6 +11,7 @@ const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 pub(crate) enum ErrorKind {
     InvalidRequest,
     Project,
+    ProjectChanged,
     Manifest,
     Lockfile,
     LockfileMissing,
@@ -18,6 +19,7 @@ pub(crate) enum ErrorKind {
     RegistryConfiguration,
     RegistryCredentialMissing,
     RegistryMetadata,
+    RegistryMetadataUnavailable,
     RegistryTransport,
     Resolution,
     PeerDependency,
@@ -38,6 +40,7 @@ impl ErrorKind {
         match self {
             Self::InvalidRequest => "INVALID_REQUEST",
             Self::Project => "PROJECT_UNAVAILABLE",
+            Self::ProjectChanged => "PROJECT_CHANGED",
             Self::Manifest => "MANIFEST_INVALID",
             Self::Lockfile => "LOCKFILE_INVALID",
             Self::LockfileMissing => "LOCKFILE_MISSING",
@@ -45,6 +48,7 @@ impl ErrorKind {
             Self::RegistryConfiguration => "REGISTRY_CONFIGURATION_INVALID",
             Self::RegistryCredentialMissing => "REGISTRY_AUTH_MISSING",
             Self::RegistryMetadata => "REGISTRY_METADATA_INVALID",
+            Self::RegistryMetadataUnavailable => "REGISTRY_METADATA_UNAVAILABLE",
             Self::RegistryTransport => "REGISTRY_TRANSPORT_FAILED",
             Self::Resolution => "RESOLUTION_FAILED",
             Self::PeerDependency => "PEER_DEPENDENCY_UNSATISFIED",
@@ -84,6 +88,13 @@ pub(crate) fn sanitize(message: &str) -> String {
             .find(|c: char| c.is_whitespace() || matches!(c, '\"' | '\'' | '<' | '>'))
             .unwrap_or(rest.len());
         let url = &rest[..end];
+        // A validated lock key contains a registry origin followed by |name@version.
+        // Its @ is package syntax, and source validation already excludes userinfo.
+        if url.parse::<tapid_lockfile::LockfilePackageKey>().is_ok() {
+            result.push_str(url);
+            rest = &rest[end..];
+            continue;
+        }
         let prefix_len = if url.as_bytes()[..7].eq_ignore_ascii_case(b"https:/") {
             8
         } else {
@@ -381,6 +392,22 @@ mod tests {
                 assert!(!rendered.contains("fixture-query-secret"), "{rendered}");
                 assert!(rendered.contains("registry.example"));
             }
+        }
+    }
+
+    #[test]
+    fn canonical_package_keys_survive_sanitizing_but_credential_bearing_imitations_do_not() {
+        let key = "https://registry.npmjs.org|@scope/child@1.2.0|peer=-|platform=os=;cpu=;libc=";
+        assert!(key.parse::<tapid_lockfile::LockfilePackageKey>().is_ok());
+        assert_eq!(
+            sanitize(&format!("selected {key}")),
+            format!("selected {key}")
+        );
+        for value in [
+            "https://user:secret@registry.npmjs.org|child@1.2.0|peer=-|platform=os=;cpu=;libc=",
+            "https://registry.npmjs.org/path?token=secret|child@1.2.0",
+        ] {
+            assert!(!sanitize(value).contains("secret"));
         }
     }
 

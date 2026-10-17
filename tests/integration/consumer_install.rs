@@ -262,14 +262,15 @@ fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
     ));
 
     let dependency = Dependency::new(
-        npm_origin.clone(),
+        npm_origin.clone().into(),
         "demo".parse().unwrap(),
         "1.0.0".parse::<Requirement>().unwrap(),
     );
     let transitive = RegistryMetadata::normalize(
-        npm_origin.clone(),
+        npm_origin.clone().into(),
         vec![
             PackageVersionMetadata {
+                dist_tags: Default::default(),
                 name: "demo".parse().unwrap(),
                 version: "1.0.0".parse().unwrap(),
                 dependencies: [("dep".parse().unwrap(), "1.0.0".parse().unwrap())]
@@ -279,6 +280,7 @@ fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
                 optional_peer_dependencies: BTreeSet::new(),
             },
             PackageVersionMetadata {
+                dist_tags: Default::default(),
                 name: "dep".parse().unwrap(),
                 version: "1.0.0".parse().unwrap(),
                 dependencies: BTreeMap::new(),

@@ -406,6 +406,10 @@ fn source_kind(key: &str) -> &'static str {
             source: LockfilePackageSource::Workspace(_),
             ..
         }) => "workspace",
+        Ok(LockfilePackageKey {
+            source: LockfilePackageSource::Copied(_),
+            ..
+        }) => "copied",
         _ => "registry",
     }
 }

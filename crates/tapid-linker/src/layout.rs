@@ -511,7 +511,7 @@ fn plan_named_layout_inner(
 
 // Hash the complete canonical origin so punctuation, paths, ports, and filesystem
 // case folding cannot collapse distinct registry identities into one directory.
-fn registry_component(registry: &tapid_core::RegistryOrigin) -> String {
+fn registry_component(registry: &tapid_core::PackageSource) -> String {
     format!(
         "registry-{:x}",
         Sha256::digest(registry.as_str().as_bytes())
