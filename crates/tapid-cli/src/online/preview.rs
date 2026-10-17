@@ -1,5 +1,6 @@
 //! Metadata-only graph inspection. This module never prepares artifacts or a store.
 use super::*;
+use crate::application::lifecycle::UpdateRequest;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -71,7 +72,8 @@ pub(crate) fn resolve(
     allow_missing_integrity: bool,
     config: &crate::registry::RegistryConfig,
     previous: Option<&Lockfile>,
-) -> Result<(GraphSnapshot, usize), OperationalError> {
+    update: Option<UpdateRequest<'_>>,
+) -> Result<(GraphSnapshot, usize, Option<PackageManifest>), OperationalError> {
     let workspace =
         workspace_materialization_with_manifest(project, config, Some((target, updated)))?;
     let resolved = graph::resolve_package_graph(
@@ -82,6 +84,7 @@ pub(crate) fn resolve(
         allow_missing_integrity,
         config,
         previous,
+        update,
         |_| {},
     )?;
     let pinned_identities = previous
@@ -205,7 +208,11 @@ pub(crate) fn resolve(
         let id: LockfilePackageKey = key.parse()?;
         snapshot.roots.insert(id.name.to_string(), key.clone());
     }
-    Ok((snapshot, resolved.metadata_lookups))
+    Ok((
+        snapshot,
+        resolved.metadata_lookups,
+        resolved.updated_manifest,
+    ))
 }
 
 fn source_text(source: &tapid_lockfile::LockfilePackageSource) -> String {

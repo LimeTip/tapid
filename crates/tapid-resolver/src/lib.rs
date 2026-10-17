@@ -499,6 +499,8 @@ pub struct ResolutionOptions {
 pub struct ResolutionPreferences {
     /// Previously selected versions, including transitive versions.
     pub versions: BTreeSet<(PackageSource, PackageName, PackageVersion)>,
+    /// Roots that use highest-version selection while retaining transitive preferences.
+    pub refresh_roots: BTreeSet<(PackageSource, PackageName, PackageName)>,
     /// Previously selected direct bindings, ahead of other locked versions.
     pub roots: BTreeMap<(PackageSource, PackageName, PackageName), PackageVersion>,
 }
@@ -665,7 +667,17 @@ where
     let mut root_bindings = BTreeMap::new();
     let mut queue = Vec::new();
     let mut missing_metadata = BTreeSet::new();
+    let fresh = ResolutionPreferences::default();
     for ((registry, local_name, name), requirements) in root_constraints {
+        let preferred = if preferred.refresh_roots.contains(&(
+            registry.clone(),
+            local_name.clone(),
+            name.clone(),
+        )) {
+            &fresh
+        } else {
+            preferred
+        };
         let package = match select_package(
             &registry,
             &name,

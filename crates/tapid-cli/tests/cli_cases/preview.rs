@@ -404,7 +404,11 @@ fn dependency_dry_run_install_package_and_latest_show_declaration_edits() {
             String::from_utf8_lossy(&output.stdout)
         );
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let after = if args[0] == "install" { "^2.0.0" } else { "*" };
+        let after = if args[0] == "install" {
+            "^2.0.0"
+        } else {
+            "^1.1.0"
+        };
         assert_eq!(value["data"]["declarations"][0]["after"], after);
         assert_eq!(
             fs::read(project.path().join("package.json")).unwrap(),
@@ -550,6 +554,24 @@ fn dependency_dry_run_truncation_pointers_are_sorted_and_unique() {
     project
         .write("package.json", manifest.to_string().as_bytes())
         .unwrap();
+    let fixture_path = project.path().join("registry.json");
+    let mut fixture: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture_path).unwrap()).unwrap();
+    for index in 0..12 {
+        fixture["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "registry":"https://registry.npmjs.org",
+                "name":format!("peer-{index:02}"),
+                "version":"1.0.0",
+                "integrity":format!("sha512-{}", STANDARD.encode([1; 64])),
+                "artifact":"never-download"
+            }));
+    }
+    project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
     let output = isolated_command(
         project.path(),
         &[
@@ -582,4 +604,77 @@ fn dependency_dry_run_truncation_pointers_are_sorted_and_unique() {
         pointers.windows(2).all(|pair| pair[0] < pair[1]),
         "{pointers:?}"
     );
+}
+
+#[test]
+fn dependency_dry_run_named_update_preserves_alias_pin_and_reports_save_policy() {
+    for (flag, saved) in [
+        ("--save-exact", "1.1.0"),
+        ("--save-caret", "^1.1.0"),
+        ("--save-tilde", "~1.1.0"),
+    ] {
+        let project = preview_project("named-update-save-preview");
+        let manifest = r#"{"name":"app","version":"1.0.0","dependencies":{"parent":"^1.0.0","unrelated":"npm:parent@*"}} "#;
+        project.write("package.json", manifest.as_bytes()).unwrap();
+        let mut lock = tapid_lockfile::Lockfile::from_json(
+            &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        )
+        .unwrap();
+        // Rebind the fixture lock to the expanded manifest and retain both aliases.
+        let mut expanded = lock_for_manifest(manifest);
+        for package in lock.packages().values() {
+            expanded.insert_package(package.clone()).unwrap();
+        }
+        expanded.set_roots(lock.roots().iter().cloned()).unwrap();
+        let root = lock.root_bindings()["parent"].clone();
+        expanded
+            .set_root_bindings(std::collections::BTreeMap::from([
+                ("parent".into(), root.clone()),
+                ("unrelated".into(), root),
+            ]))
+            .unwrap();
+        lock = expanded;
+        let lock_bytes = lock.to_json().unwrap();
+        project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+        let output = isolated_command(
+            project.path(),
+            &[
+                "--json",
+                "update",
+                "parent",
+                "--latest",
+                flag,
+                "--dry-run",
+                "--registry-fixture",
+                "registry.json",
+            ],
+            true,
+        )
+        .output()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["data"]["declarations"][0]["after"], saved);
+        let changes = value["data"]["root_changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 1, "{value}");
+        assert_eq!(changes[0]["name"], "parent");
+        assert!(changes[0]["after"].as_str().unwrap().contains("1.1.0"));
+        assert_eq!(value["data"]["effects"]["project_writes"], false);
+        assert_eq!(value["data"]["effects"]["cache_writes"], false);
+        assert_eq!(
+            fs::read_to_string(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes
+        );
+        for path in ["node_modules", ".tapid-activation.lock", ".tapid"] {
+            assert!(!project.path().join(path).exists(), "{path}");
+        }
+    }
 }

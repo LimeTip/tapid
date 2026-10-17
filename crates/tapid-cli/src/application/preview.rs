@@ -175,10 +175,17 @@ fn inspect(
         .map(GraphSnapshot::from_lock)
         .transpose()?
         .unwrap_or_default();
-    let preserve = matches!(mode, InstallMode::Online);
+    let update = match mode {
+        InstallMode::Update(request) => Some(request),
+        _ => None,
+    };
+    let preserve =
+        matches!(mode, InstallMode::Online) || update.is_some_and(|request| request.named);
+    let mut updated_manifest = None;
+
     let policy = super::dependency_scripts::load_policy(project)?;
     let matching = if let Some(lock) = &previous {
-        preserve
+        matches!(mode, InstallMode::Online)
             && replayable
             && before == after
             && super::install::can_replay_online(project, lock, &config, &policy)?
@@ -220,7 +227,7 @@ fn inspect(
             "lockfile",
         )
     } else {
-        let (graph, count) = online::resolve_preview_graph(
+        let (graph, count, saved) = online::resolve_preview_graph(
             project,
             &manifest,
             &target,
@@ -229,7 +236,9 @@ fn inspect(
             allow_unverified,
             &config,
             if preserve { previous.as_ref() } else { None },
+            update,
         )?;
+        updated_manifest = saved;
         (
             graph,
             count,
@@ -240,7 +249,7 @@ fn inspect(
             },
         )
     };
-    let declarations = declarations(before, after);
+    let declarations = declarations(before, updated_manifest.as_ref().unwrap_or(after));
     let root_changes = old
         .roots
         .keys()

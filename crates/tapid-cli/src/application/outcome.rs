@@ -269,6 +269,7 @@ pub(crate) enum RetryAdvice {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Warning {
+    UpdateGraphChange { package: String, reason: String },
     UnverifiedRegistryArtifactsAllowed,
     PreviousTransactionRecovered,
     DependencyLifecycleHookSkipped { package: String, hook: String },
@@ -276,6 +277,9 @@ pub(crate) enum Warning {
 }
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::UpdateGraphChange { package, reason } = self {
+            return write!(f, "update graph change for {package}: {reason}");
+        }
         if let Self::DependencyLifecycleDiscoveryFailed { package } = self {
             return write!(
                 f,
@@ -291,7 +295,7 @@ impl fmt::Display for Warning {
         f.write_str(match self {
             Self::UnverifiedRegistryArtifactsAllowed => "npm artifacts without registry integrity are not authenticated against a registry-declared digest",
             Self::PreviousTransactionRecovered => "recovered an interrupted project transaction before this operation",
-            Self::DependencyLifecycleHookSkipped { .. } | Self::DependencyLifecycleDiscoveryFailed { .. } => unreachable!(),
+            Self::UpdateGraphChange { .. } | Self::DependencyLifecycleHookSkipped { .. } | Self::DependencyLifecycleDiscoveryFailed { .. } => unreachable!(),
         })
     }
 }

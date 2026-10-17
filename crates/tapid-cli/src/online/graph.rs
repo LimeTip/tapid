@@ -1,6 +1,8 @@
 use super::*;
+use crate::application::lifecycle::UpdateRequest;
 
 pub(super) struct ResolvedGraph {
+    pub updated_manifest: Option<PackageManifest>,
     pub metadata_lookups: usize,
     pub resolution: Resolution,
     pub records: BTreeMap<PackageRecordKey, PackageRecord>,
@@ -21,6 +23,7 @@ pub(super) fn resolve_package_graph(
     allow_missing_integrity: bool,
     registry_config: &crate::registry::RegistryConfig,
     previous_lock: Option<&Lockfile>,
+    update: Option<UpdateRequest<'_>>,
     mut progress: impl FnMut(crate::application::install::Progress),
 ) -> Result<ResolvedGraph, OperationalError> {
     let WorkspaceRootResolution {
@@ -111,6 +114,7 @@ pub(super) fn resolve_package_graph(
         previous_lock,
         &fixture_records,
         fixture.is_some(),
+        update,
     )?;
     let mut copied_records = BTreeMap::new();
     for (dependency, record) in copied_roots {
@@ -155,6 +159,7 @@ pub(super) fn resolve_package_graph(
         .transpose()?
         .unwrap_or_default();
     let mut preferred = tapid_resolver::ResolutionPreferences {
+        refresh_roots: BTreeSet::new(),
         versions: preferred,
         roots: BTreeMap::new(),
     };
@@ -173,6 +178,12 @@ pub(super) fn resolve_package_graph(
                 .map(|(name, key)| Ok((name.clone(), key.parse()?)))
                 .collect::<Result<Vec<_>, OperationalError>>()?
         };
+        let mut bindings = bindings;
+        for member in lock.workspace_packages().values() {
+            for (local, key) in member.dependencies() {
+                bindings.push((local.clone(), key.parse()?));
+            }
+        }
         for (local, key) in bindings {
             if let Some(registry) = key.source.package_source()
                 && preferred.versions.contains(&(
@@ -243,6 +254,15 @@ pub(super) fn resolve_package_graph(
             )
         }
     };
+    if let Some(request) = update.filter(|request| request.named) {
+        update::refresh_selected(
+            request,
+            &roots,
+            &mut preferred,
+            &mut seed,
+            &mut fetch_records,
+        )?;
+    }
     let mut tagged_providers = BTreeSet::new();
     for peer in &workspace_peer_dependencies {
         if peer.requirement.dist_tag().is_some()
@@ -259,7 +279,7 @@ pub(super) fn resolve_package_graph(
         &roots,
         |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
         &overrides,
-        fetch_records,
+        &mut fetch_records,
         &preferred,
         seed,
         |fetched| progress(crate::application::install::Progress::Metadata(fetched)),
@@ -271,7 +291,19 @@ pub(super) fn resolve_package_graph(
         &records,
     )?;
 
+    let updated_manifest = update
+        .map(|request| {
+            update::saved_manifest(
+                project,
+                request,
+                registry_config,
+                &resolution,
+                &mut fetch_records,
+            )
+        })
+        .transpose()?;
     Ok(ResolvedGraph {
+        updated_manifest,
         metadata_lookups,
         resolution,
         records,
@@ -289,11 +321,12 @@ pub(super) fn workspace_registry_target<'a>(
     resolution: &'a Resolution,
     records: &BTreeMap<PackageRecordKey, PackageRecord>,
 ) -> Result<&'a tapid_registry_client::RegistryPackageId, OperationalError> {
-    resolution.roots.iter().find(|id| {
-        id.registry == dependency.registry && id.name == dependency.package
-            && records.get(&(id.registry.to_string(), id.name.to_string(), id.version.to_string()))
-                .is_some_and(|record| dependency.requirement.matches_tagged_version(&id.version, &record.dist_tags))
-    }).ok_or_else(|| OperationalError::new(ErrorKind::Resolution, format!(
-        "no selected registry package satisfies workspace member dependency '{}' ({:?})",
-        dependency.manifest_name, dependency.requirement)))
+    let (_, local) = dep_parts(&dependency.manifest_name)?;
+    resolution.root_bindings.get(&(dependency.registry.clone(), local))
+        .filter(|id| id.name == dependency.package && records.get(&(id.registry.to_string(), id.name.to_string(), id.version.to_string()))
+            .is_some_and(|record| dependency.requirement.matches_tagged_version(&id.version, &record.dist_tags)))
+        .ok_or_else(|| OperationalError::new(ErrorKind::Resolution, format!(
+            "no selected registry package satisfies workspace member dependency '{}' ({:?})",
+            dependency.manifest_name, dependency.requirement
+        )))
 }

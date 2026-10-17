@@ -55,9 +55,15 @@ pub(crate) struct UpdateArgs {
     pub(crate) packages: Vec<String>,
     #[arg(
         long,
-        help = "Replace selected version requirements with * in package.json and resolve again"
+        help = "Update selected packages beyond their ranges and save resolved versions with a caret by default"
     )]
     pub(crate) latest: bool,
+    #[arg(long, conflicts_with_all = ["save_caret", "save_tilde"], help = "Save selected resolved versions as exact requirements")]
+    pub(crate) save_exact: bool,
+    #[arg(long, conflicts_with_all = ["save_exact", "save_tilde"], help = "Save selected resolved versions with a caret range")]
+    pub(crate) save_caret: bool,
+    #[arg(long, conflicts_with_all = ["save_exact", "save_caret"], help = "Save selected resolved versions with a tilde range")]
+    pub(crate) save_tilde: bool,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
 }
@@ -176,9 +182,63 @@ pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
 }
 
 pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
-    let result = mutate_and_install(&args.common, json, true, args.dry_run, |manifest| {
-        crate::application::lifecycle::plan_update(manifest, &args.packages, args.latest)
-    });
+    use crate::application::lifecycle::{SavePolicy, UpdateRequest};
+    let result = (|| {
+        let selection = crate::application::lifecycle::resolve_workspace(
+            &args.common.project_dir,
+            args.common.workspace.as_deref(),
+        )
+        .map_err(|error| OperationFailure::unchanged(&args.common.project_dir, error))?;
+        let plan = crate::application::lifecycle::plan_update(
+            &selection.manifest,
+            &args.packages,
+            args.latest,
+        )
+        .map_err(|error| OperationFailure::unchanged(&selection.root_dir, error))?;
+        let save = if args.save_exact {
+            Some(SavePolicy::Exact)
+        } else if args.save_tilde {
+            Some(SavePolicy::Tilde)
+        } else if args.save_caret || args.latest {
+            Some(SavePolicy::Caret)
+        } else {
+            None
+        };
+        let mode = crate::application::install::InstallMode::Update(UpdateRequest {
+            plan: &plan,
+            target: &selection.manifest_path,
+            named: !args.packages.is_empty(),
+            original_root_digest: None,
+            save,
+        });
+        if args.dry_run {
+            return crate::application::preview::run(
+                &selection.root_dir,
+                &selection.manifest_path,
+                &selection.manifest,
+                &plan.manifest,
+                mode,
+                args.common.registry_fixture.as_deref(),
+                args.common.allow_unverified_registry_artifacts,
+            )
+            .map(LifecycleReport::Preview);
+        }
+        crate::application::install::run_with_manifest_target(
+            &selection.root_dir,
+            &selection.manifest_path,
+            Some(crate::application::install::ManifestEdit {
+                expected: &selection.manifest,
+                updated: &plan.manifest,
+            }),
+            None,
+            args.common.store_dir.as_deref(),
+            mode,
+            args.common.registry_fixture.as_deref(),
+            args.common.allow_unverified_registry_artifacts,
+            |event| crate::output::report_progress(event, json),
+        )
+        .map(LifecycleReport::Installed)
+    })();
     report(result, json, "update", "Updated dependencies")
 }
 
@@ -465,6 +525,56 @@ mod stale_tests {
             std::fs::read(project.path().join("package.json")).unwrap(),
             newer
         );
+        for path in ["tapid.lock", "node_modules", "store"] {
+            assert!(!project.path().join(path).exists(), "{path}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod stale_update_tests {
+    use crate::application::{
+        install::{InstallMode, ManifestEdit, run_with_manifest_target},
+        lifecycle::{SavePolicy, UpdateRequest, plan_update},
+    };
+    use tapid_test_support::TempProject;
+
+    #[test]
+    fn stale_named_update_preserves_intervening_manifest_edit() {
+        let project = TempProject::new("stale-named-update").unwrap();
+        let path = project
+            .write(
+                "package.json",
+                br#"{"name":"app","version":"1.0.0","dependencies":{"react":"^18"}}"#,
+            )
+            .unwrap();
+        let before = crate::commands::manifest::read_manifest_typed(&path).unwrap();
+        let plan = plan_update(&before, &["react".into()], true).unwrap();
+        let newer = br#"{"name":"app","version":"1.0.0","dependencies":{"react":"^19"},"description":"another writer"}"#;
+        project.write("package.json", newer).unwrap();
+        let failure = run_with_manifest_target(
+            project.path(),
+            &path,
+            Some(ManifestEdit {
+                expected: &before,
+                updated: &plan.manifest,
+            }),
+            None,
+            Some(&project.path().join("store")),
+            InstallMode::Update(UpdateRequest {
+                plan: &plan,
+                target: &path,
+                named: true,
+                original_root_digest: None,
+                save: Some(SavePolicy::Exact),
+            }),
+            None,
+            false,
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(failure.error.kind.code(), "PROJECT_CHANGED");
+        assert_eq!(std::fs::read(path).unwrap(), newer);
         for path in ["tapid.lock", "node_modules", "store"] {
             assert!(!project.path().join(path).exists(), "{path}");
         }
