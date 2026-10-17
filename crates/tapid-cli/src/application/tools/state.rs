@@ -58,6 +58,7 @@ fn lock_catalog_for(
     }
 }
 const MARKER: &[u8] = b"tapid-tools-v1\n";
+const INITIALIZING: &str = ".tapid-tools-initializing-v1";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -224,6 +225,7 @@ pub(super) fn write_new(
     let mut file = options.open(&temporary).map_err(error)?;
     let result = (|| {
         let crash = match path.file_name().and_then(|name| name.to_str()) {
+            Some(".tapid-tools") => "tool_writing_owner",
             Some("pending.json") => "tool_writing_journal",
             Some("committed") => "tool_writing_decision",
             _ if parent.file_name().is_some_and(|name| name == "bin") => "tool_writing_launcher",
@@ -233,6 +235,9 @@ pub(super) fn write_new(
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(error)?;
+        if path.file_name().is_some_and(|name| name == ".tapid-tools") {
+            crate::filesystem::activation::test_crash_at("tool_owner_synced");
+        }
         drop(file);
         // The catalog lock serializes Tapid publishers. Concurrent replacement
         // by a host process with write access is outside the ownership contract.
@@ -248,21 +253,72 @@ pub(super) fn write_new(
     }
     result
 }
-pub(super) fn initialize(root: &Path) -> Result<(), OperationalError> {
-    check_path(root)?;
-    if root.exists()
-        && !root.join(".tapid-tools").exists()
-        && fs::read_dir(root).map_err(error)?.next().is_some()
-    {
+fn validate_unmarked_root(root: &Path) -> Result<(), OperationalError> {
+    let mut owned_initialization = false;
+    let mut nonempty = false;
+    for entry in fs::read_dir(root).map_err(error)? {
+        let entry = entry.map_err(error)?;
+        nonempty = true;
+        let name = entry.file_name();
+        let metadata = fs::symlink_metadata(entry.path()).map_err(error)?;
+        if name == INITIALIZING {
+            if is_link(&metadata)
+                || !metadata.is_dir()
+                || fs::read_dir(entry.path()).map_err(error)?.next().is_some()
+            {
+                return Err(error("invalid tool initialization ownership marker"));
+            }
+            owned_initialization = true;
+        } else {
+            let temporary = name
+                .to_str()
+                .and_then(|s| s.strip_prefix(".tapid-tool-write-"));
+            if !temporary.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                || is_link(&metadata)
+                || !metadata.is_file()
+            {
+                return Err(error("unowned files in an incomplete tools directory"));
+            }
+        }
+    }
+    if nonempty && !owned_initialization {
         return Err(error(
             "refusing a nonempty tools directory without Tapid ownership",
         ));
     }
+    Ok(())
+}
+
+pub(super) fn initialize(root: &Path) -> Result<(), OperationalError> {
+    check_path(root)?;
+    if root.exists() && !root.join(".tapid-tools").exists() {
+        validate_unmarked_root(root)?;
+    }
     fs::create_dir_all(root).map_err(error)?;
     if !root.join(".tapid-tools").exists() {
+        let initializing = root.join(INITIALIZING);
+        match fs::create_dir(&initializing) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                validate_unmarked_root(root)?;
+            }
+            Err(e) => return Err(error(e)),
+        }
+        // This atomic ownership proof survives even an empty/partial marker
+        // temporary. Temporary names alone never authorize claiming a root.
+        crate::filesystem::activation::sync_directory(root).map_err(error)?;
+        crate::filesystem::activation::test_crash_at("tool_initializing_owner");
         write_new(&root.join(".tapid-tools"), MARKER, false)?;
+        crate::filesystem::activation::test_crash_at("tool_owner_published");
     }
     verify(root)?;
+    let initializing = root.join(INITIALIZING);
+    check_path(&initializing)?;
+    match fs::remove_dir(&initializing) {
+        Ok(()) => crate::filesystem::activation::sync_directory(root).map_err(error)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(error(e)),
+    }
     for directory in ["bin", "environments"] {
         let path = root.join(directory);
         check_path(&path)?;
@@ -290,7 +346,10 @@ pub(super) fn validate(catalog: &Catalog) -> Result<(), OperationalError> {
             return Err(error("invalid tool generation"));
         }
         for (command, bin) in &tool.commands {
-            super::launchers::validate_command(command)?;
+            super::launchers::validate_command(
+                command,
+                crate::application::replay::current_platform(),
+            )?;
             if bin.target.is_absolute()
                 || bin
                     .target

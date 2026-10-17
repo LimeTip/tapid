@@ -35,6 +35,15 @@ holds its environment lease. A settled catalog retains the journal digest so
 recovery can distinguish a crash between journal removal and decision cleanup.
 Unknown files and unowned/replaced launchers are preserved.
 
+First initialization atomically creates and syncs an empty
+`.tapid-tools-initializing-v1` directory before publishing the final ownership
+file. An interrupted initialization may resume only with that non-link ownership
+directory and regular, strictly named write temporaries; unknown entries still
+block claiming the root. Existing temporary files are preserved. The final
+ownership file is synced before the initialization directory is removed
+nonrecursively. Unix command names reserve `node`, including case variants, so
+adding the tool bin directory to PATH cannot replace implicit runtime discovery.
+
 Global commands run with normal user authority and an externally managed runtime.
 They are not root-script sandbox requests. Lifecycle hooks remain disabled;
 runtime downloads/setup require an explicit package command. No caller-project

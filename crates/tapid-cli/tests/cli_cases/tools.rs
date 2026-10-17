@@ -220,6 +220,43 @@ fn tool_reinstall_changes_requirement_and_keeps_one_active_environment() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn tool_can_remove_a_legacy_node_launcher() {
+    let project = TempProject::new("tool-legacy-node").unwrap();
+    let home = TempHome::new("tool-legacy-node").unwrap();
+    assert_success(&install(&project, &home));
+    let root = home.path().join("tools with spaces");
+    let path = root.join("catalog.json");
+    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let bin = catalog["tools"]["hello-tool"]["commands"]["hello-tool"].take();
+    catalog["tools"]["hello-tool"]["commands"] = json!({"node":bin});
+    let shim = catalog["shims"]["hello-tool"]
+        .as_str()
+        .unwrap()
+        .replace("hello-tool", "node");
+    catalog["shims"] = json!({"node":shim});
+    fs::rename(root.join("bin/hello-tool"), root.join("bin/node")).unwrap();
+    fs::write(root.join("bin/node"), shim).unwrap();
+    fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    // Reject legacy runtime dispatch before PATH discovery can recurse.
+    let rejected = command(&project, &home, &["__tool-exec", "--command", "node"])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("tool command collides with the Node runtime")
+    );
+    assert_success(
+        &command(&project, &home, &["tool", "remove", "hello-tool"])
+            .output()
+            .unwrap(),
+    );
+    assert!(!root.join("bin/node").exists());
+    assert_eq!(list(&project, &home)["data"]["tools"], json!([]));
+}
+
 #[test]
 fn tool_rejects_invalid_specs_before_creating_state() {
     let project = TempProject::new("tool-invalid").unwrap();
@@ -899,6 +936,117 @@ fn writing_crash_case(point: &str) {
     assert_eq!(recovered["data"]["tools"][0]["version"], "1.0.0");
     assert!(!home.path().join("tools with spaces/pending.json").exists());
 }
+
+#[test]
+fn tool_retries_interrupted_ownership_publication_without_claiming_unowned_files() {
+    for (point, published) in [
+        ("tool_initializing_owner", false),
+        ("tool_writing_owner", false),
+        ("tool_owner_synced", false),
+        ("tool_owner_published", true),
+    ] {
+        let project = TempProject::new(point).unwrap();
+        let home = TempHome::new(point).unwrap();
+        let crashed = command(&project, &home, &["tool", "install", "hello-tool@1.0.0"])
+            .arg("--registry-fixture")
+            .arg(fixture(&project))
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .env("TAPID_TEST_CRASH_POINT", point)
+            .output()
+            .unwrap();
+        assert!(!crashed.status.success());
+        assert_eq!(
+            home.path().join("tools with spaces/.tapid-tools").exists(),
+            published
+        );
+        assert_success(&install(&project, &home));
+        assert_eq!(
+            list(&project, &home)["data"]["tools"][0]["name"],
+            "hello-tool"
+        );
+        assert!(
+            !home
+                .path()
+                .join("tools with spaces/.tapid-tools-initializing-v1")
+                .exists()
+        );
+    }
+    let project = TempProject::new("tool-unowned-initialization").unwrap();
+    let home = TempHome::new("tool-unowned-initialization").unwrap();
+    let root = home.path().join("tools with spaces");
+    fs::create_dir(&root).unwrap();
+    let unowned = root.join(".tapid-tool-write-abc");
+    fs::write(&unowned, b"tapid-tools-v1\n").unwrap();
+    let output = install(&project, &home);
+    assert!(!output.status.success());
+    assert_eq!(fs::read(&unowned).unwrap(), b"tapid-tools-v1\n");
+    assert!(!root.join(".tapid-tools").exists());
+}
+
+#[test]
+fn tool_initialization_rejects_invalid_ownership_and_preserves_unknown_entries() {
+    for case in [
+        "file",
+        "nonempty",
+        "unknown",
+        "invalid-temp",
+        "directory-temp",
+    ] {
+        let project = TempProject::new(case).unwrap();
+        let home = TempHome::new(case).unwrap();
+        let root = home.path().join("tools with spaces");
+        let marker = root.join(".tapid-tools-initializing-v1");
+        fs::create_dir(&root).unwrap();
+        if case == "file" {
+            fs::write(&marker, b"user file").unwrap();
+        } else {
+            fs::create_dir(&marker).unwrap();
+        }
+        let preserved = match case {
+            "nonempty" => Some(marker.join("user-file")),
+            "unknown" => Some(root.join("user-file")),
+            "invalid-temp" => Some(root.join(".tapid-tool-write-not-hex")),
+            _ => None,
+        };
+        if let Some(path) = &preserved {
+            fs::write(path, b"user file").unwrap();
+        }
+        if case == "directory-temp" {
+            fs::create_dir(root.join(".tapid-tool-write-abc")).unwrap();
+        }
+        assert!(!install(&project, &home).status.success(), "{case}");
+        assert!(!root.join(".tapid-tools").exists());
+        assert!(marker.exists());
+        if let Some(path) = preserved {
+            assert_eq!(fs::read(path).unwrap(), b"user file");
+        }
+    }
+    let project = TempProject::new("tool-init-link").unwrap();
+    let home = TempHome::new("tool-init-link").unwrap();
+    let outside = TempProject::new("tool-init-outside").unwrap();
+    let sentinel = outside.write("user-file", b"user file").unwrap();
+    let root = home.path().join("tools with spaces");
+    fs::create_dir(&root).unwrap();
+    let marker = root.join(".tapid-tools-initializing-v1");
+    #[cfg(windows)]
+    assert_success(
+        &isolated_process(&project, &home, "cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&marker)
+            .arg(outside.path())
+            .output()
+            .unwrap(),
+    );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), &marker).unwrap();
+    assert!(!install(&project, &home).status.success());
+    assert_eq!(fs::read(sentinel).unwrap(), b"user file");
+    assert!(!root.join(".tapid-tools").exists());
+    #[cfg(windows)]
+    fs::remove_dir(marker).unwrap();
+}
+
 #[test]
 fn tool_recovers_a_stop_inside_journal_publication() {
     writing_crash_case("tool_writing_journal");

@@ -4,10 +4,10 @@ use super::{
 };
 use crate::application::outcome::OperationalError;
 use std::{collections::BTreeMap, path::Path};
-use tapid_linker::{ManagedRoot, ShimInterpreter, ShimPackage, plan_shims};
+use tapid_linker::{ManagedRoot, Platform, ShimInterpreter, ShimPackage, plan_shims};
 use tapid_manifest::PackageManifest;
 
-pub(super) fn validate_command(command: &str) -> Result<(), OperationalError> {
+pub(super) fn validate_command(command: &str, platform: Platform) -> Result<(), OperationalError> {
     if command.is_empty()
         || matches!(command, "." | "..")
         || !command
@@ -19,13 +19,24 @@ pub(super) fn validate_command(command: &str) -> Result<(), OperationalError> {
         ));
     }
     if command.eq_ignore_ascii_case("tapid")
-        || cfg!(windows)
+        || platform == Platform::Windows
             && Path::new(command)
                 .with_extension("cmd")
                 .file_stem()
                 .is_some_and(|s| s.eq_ignore_ascii_case("tapid"))
     {
         return Err(error("tool command collides with Tapid"));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_exported_command(
+    command: &str,
+    platform: Platform,
+) -> Result<(), OperationalError> {
+    validate_command(command, platform)?;
+    if platform == Platform::Unix && command.eq_ignore_ascii_case("node") {
+        return Err(error("tool command collides with the Node runtime"));
     }
     Ok(())
 }
@@ -53,7 +64,10 @@ pub(super) fn package_commands(
     }
     let mut commands = BTreeMap::new();
     for entry in plan.entries {
-        validate_command(&entry.command)?;
+        validate_exported_command(
+            &entry.command,
+            crate::application::replay::current_platform(),
+        )?;
         use std::io::Read;
         let mut contents = Vec::new();
         state::open_regular(&entry.source)?
@@ -121,7 +135,10 @@ pub(super) fn plan(
     .map_err(error)?;
     let mut result = BTreeMap::new();
     for entry in plan.entries {
-        validate_command(&entry.command)?;
+        validate_exported_command(
+            &entry.command,
+            crate::application::replay::current_platform(),
+        )?;
         result.extend(
             crate::filesystem::tool_shims::render(root, &entry.command, entry.strategy)
                 .map_err(error)?,
@@ -132,6 +149,24 @@ pub(super) fn plan(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unix_tool_commands_cannot_shadow_the_node_runtime() {
+        for name in ["node", "Node", "NODE"] {
+            assert!(
+                super::validate_exported_command(name, tapid_linker::Platform::Unix).is_err(),
+                "{name}"
+            );
+            assert!(
+                super::validate_exported_command(name, tapid_linker::Platform::Windows).is_ok(),
+                "{name}"
+            );
+        }
+        assert!(super::validate_command("node-tool", tapid_linker::Platform::Unix).is_ok());
+        for name in ["node", "Node", "NODE"] {
+            assert!(super::validate_command(name, tapid_linker::Platform::Unix).is_ok());
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_tool_bins_reuse_the_planners_node_interpreters() {

@@ -332,6 +332,7 @@ pub(crate) fn execute(
     command: &str,
     arguments: &[OsString],
 ) -> Result<i32, OperationalError> {
+    launchers::validate_exported_command(command, crate::application::replay::current_platform())?;
     let root = state::root_path(Some(root))?;
     state::verify(&root)?;
     let lock = state::lock_catalog(&root)?;

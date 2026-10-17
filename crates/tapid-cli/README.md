@@ -141,12 +141,16 @@ invoke agent-browser install to request its browser download. Tapid neither
 performs that download implicitly nor claims the package is fully configured.
 
 A new environment is verified before activation. Cross-tool command collisions,
-Windows case/extension collisions, the reserved tapid command, and unowned
+Windows case/extension collisions, the reserved tapid command, the Unix node
+runtime command (including case variants), and unowned
 command files are rejected. Updates/removals verify recorded launcher bytes;
 user replacements and unrecognized files/directories are preserved. A durable
 journal selects the old catalog before commit and the new catalog after commit.
 The next tool operation or invocation settles interrupted publication. List can
 recover pending work and retire inactive owned environments.
+Older Unix tools exporting `node` remain listable and removable, but execution
+of that reserved command is rejected; remove the conflicting tool before publishing
+other tool changes.
 
 Installed commands can start while an install or update stages its environment.
 Catalog recovery, publication, and invocation lease acquisition share a short-held
