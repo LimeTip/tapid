@@ -1411,14 +1411,18 @@ fn windows_network_probe_is_denied_with_a_reachable_host_positive_control() {
         ),
         "the AppContainer established a TCP connection to the reachable host listener; stdout={stdout:?}, stderr={stderr:?}"
     );
-    assert_eq!(
-        outcome.termination(),
-        &Termination::Exited(28),
-        "curl did not report a connection timeout for the blocked listener; stdout={stdout:?}, stderr={stderr:?}"
-    );
+    // AppContainer isolation can time out the connection; the WFP guard can
+    // reject socket assignment first, which curl reports as a connection failure.
+    let diagnostic = match outcome.termination() {
+        Termination::Exited(7) => "curl: (7)",
+        Termination::Exited(28) => "curl: (28)",
+        other => panic!(
+            "curl did not report connection failure or timeout: {other:?}; stdout={stdout:?}, stderr={stderr:?}"
+        ),
+    };
     assert!(
-        stderr.contains("curl: (28)"),
-        "expected curl's timeout diagnostic; stdout={stdout:?}, stderr={stderr:?}"
+        stderr.contains(diagnostic),
+        "expected curl's connection-failure or timeout diagnostic; stdout={stdout:?}, stderr={stderr:?}"
     );
     assert_eq!(
         outcome.completion().cleanup_confidence(),
