@@ -1,6 +1,9 @@
 mod policy_ceiling;
 mod request;
 mod uncontained;
+#[cfg(any(windows, test))]
+#[path = "windows_evidence.rs"]
+mod windows_evidence;
 #[cfg(target_os = "macos")]
 use request::TrustedNodeRuntime;
 #[cfg(any(windows, test))]

@@ -548,16 +548,12 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
 }
 
 fn windows_launch_mechanism(request: &ExecutionRequest) -> String {
-    let mut mechanism = String::from(
-        "verified Less-Privileged AppContainer token with registryRead runtime capability and no network capabilities, explicit path ACL grants with validated existing write targets, suspended Job Object assignment, and bounded standard-handle capture",
-    );
-    if request.windows_compatibility.is_some() {
-        mechanism = format!(
-            "verified LPAC with registryRead and no network capabilities, Job, ACLs, bounded stdio; {}",
-            compatibility::describe()
-        );
-    }
-    mechanism
+    super::windows_evidence::launch_mechanism(
+        request
+            .windows_compatibility
+            .as_ref()
+            .map(|_| compatibility::COMPONENT),
+    )
 }
 
 struct WindowsExecutionLifecycle<'a> {
