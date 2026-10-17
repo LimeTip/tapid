@@ -126,7 +126,17 @@ impl ArtifactFetcher<'_> {
             return Err(OperationalError::new(
                 ErrorKind::Integrity,
                 "copied artifact digest mismatch",
-            ));
+            )
+            .with_diagnostic(crate::application::outcome::DiagnosticContext::comparison(
+                "artifact_digest",
+                Some("sha256"),
+                record
+                    .registry
+                    .artifact_digest()
+                    .expect("mismatched copied digest"),
+                digest(&bytes),
+            ))
+            .for_package(id.into()));
         }
         let actual = integrity(&bytes);
         if record
@@ -140,7 +150,17 @@ impl ArtifactFetcher<'_> {
                     "integrity mismatch for {}@{} from {}",
                     id.name, id.version, id.registry
                 ),
-            ));
+            )
+            .with_diagnostic(crate::application::outcome::DiagnosticContext::comparison(
+                "artifact_integrity",
+                Some("sha512"),
+                record
+                    .integrity
+                    .as_ref()
+                    .expect("mismatched declared integrity"),
+                &actual,
+            ))
+            .for_package(id.into()));
         }
         let temp_id = NEXT_TEMP_TREE_ID.fetch_add(1, Ordering::Relaxed);
         let temp = store.root().join(format!(
@@ -174,7 +194,14 @@ impl ArtifactFetcher<'_> {
                     "locked tree digest mismatch for {}@{} from {}",
                     id.name, id.version, id.registry
                 ),
-            ));
+            )
+            .with_diagnostic(crate::application::outcome::DiagnosticContext::comparison(
+                "tree_digest",
+                Some("sha256"),
+                pinned.expect("mismatched pinned tree").tree_digest(),
+                &tree_digest,
+            ))
+            .for_package(id.into()));
         }
         let tree = store_transaction
             .stage_verified_tree(&tree_digest, &temp)

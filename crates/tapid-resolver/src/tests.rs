@@ -914,9 +914,17 @@ fn incompatible_constraints_are_structured_and_deterministic() {
         &[m],
         Default::default(),
     );
-    assert!(
-        matches!(result, Err(ResolveError::Conflict { requirements, .. }) if requirements == vec!["^1.0.0", "^2.0.0"])
-    );
+    let Err(ResolveError::Conflict {
+        requirements,
+        origin,
+        ..
+    }) = result
+    else {
+        panic!("expected root conflict")
+    };
+    assert_eq!(requirements, vec!["^1.0.0", "^2.0.0"]);
+    assert_eq!(origin.name.as_str(), "foo");
+    assert!(origin.package.is_none());
 }
 
 #[test]

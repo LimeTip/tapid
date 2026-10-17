@@ -4,6 +4,7 @@ use crate::application::{
     lifecycle::OutdatedReport,
     outcome::{ChangeState, OperationFailure, OperationOutcome, RetryAdvice, Warning},
 };
+mod diagnostic;
 mod paths;
 
 use serde_json::{Value, json};
@@ -144,7 +145,7 @@ pub(crate) fn explain(
         Ok(report) => report,
         Err(error) => {
             let mut result = envelope("explain", "failure", None);
-            result["errors"] = json!([{"code": error.kind.code(), "phase": "operation"}]);
+            diagnostic::record(&mut result, error, "operation");
             return emit(result, 1);
         }
     };
@@ -200,14 +201,32 @@ pub(crate) fn explain(
     truncated.sort();
     result["truncated_fields"] = json!(truncated);
     if mismatch {
-        result["errors"] = json!([{"code": "INTEGRITY_MISMATCH", "phase": "operation"}]);
+        let context = crate::application::outcome::DiagnosticContext::comparison(
+            "artifact_integrity",
+            Some("sha512"),
+            evidence
+                .integrity
+                .as_ref()
+                .expect("mismatch requires expected integrity"),
+            report
+                .actual_integrity
+                .as_ref()
+                .expect("mismatch requires observed integrity"),
+        );
+        let error = crate::application::outcome::OperationalError::new(
+            crate::application::outcome::ErrorKind::Integrity,
+            "integrity mismatch",
+        )
+        .with_diagnostic(context)
+        .for_package((&evidence.identity).into());
+        diagnostic::record(&mut result, &error, "operation");
     }
     emit(result, u8::from(mismatch))
 }
 
 pub(crate) fn operation_error(operation: &str, code: &str) -> ExitCode {
     let mut result = envelope(operation, "failure", None);
-    result["errors"] = json!([{"code": code, "phase": "operation"}]);
+    result["errors"] = json!([{"code": code, "phase": "operation", "context": null}]);
     emit(result, 1)
 }
 
@@ -231,11 +250,10 @@ pub(crate) fn failure_or_human(
 
 fn failure_result(failure: &OperationFailure, operation: &str) -> Value {
     let mut result = envelope(operation, "failure", Some(&failure.outcome));
-    let mut errors = vec![json!({"code": failure.error.kind.code(), "phase": "operation"})];
+    diagnostic::record(&mut result, &failure.error, "operation");
     if let Some(error) = &failure.recovery_error {
-        errors.push(json!({"code": error.kind.code(), "phase": "recovery"}));
+        diagnostic::record(&mut result, error, "recovery");
     }
-    result["errors"] = json!(errors);
     result["retry"] = json!(match failure.retry {
         RetryAdvice::AfterCorrection => "after_correction",
         RetryAdvice::AfterContention => "after_contention",
@@ -278,10 +296,13 @@ fn why_result(
     (result, u8::from(not_found))
 }
 
-pub(crate) fn why_failure(project: &std::path::Path, code: &str) -> ExitCode {
+pub(crate) fn why_failure(
+    project: &std::path::Path,
+    error: &crate::application::outcome::OperationalError,
+) -> ExitCode {
     let outcome = OperationOutcome::unchanged(project);
     let mut result = envelope("why", "failure", Some(&outcome));
-    result["errors"] = json!([{"code": code, "phase": "operation"}]);
+    diagnostic::record(&mut result, error, "operation");
     emit(result, 1)
 }
 
@@ -329,7 +350,7 @@ fn outdated_result(report: &OutdatedReport, operation: &str, limit: usize) -> Va
                 "newest_available": entry.newest_available.as_ref().map(|value| field(value, "newest_available")),
                 "compatible_impact": entry.impact(entry.newest_compatible.as_deref()),
                 "available_impact": entry.impact(entry.newest_available.as_deref()),
-                "error": entry.diagnostic.as_ref().map(|error| json!({"code": error.kind.code()})),
+                "error": entry.diagnostic.as_ref().map(|error| diagnostic::error(error, None, &format!("/data/entries/{index}/error"), &mut truncated_fields)),
             })
         })
         .collect::<Vec<_>>();
@@ -396,6 +417,116 @@ mod tests {
     use super::*;
     use crate::application::outcome::{ErrorKind, OperationalError};
     use std::path::Path;
+
+    #[test]
+    fn typed_failure_context_is_bounded_redacted_and_separate_per_phase() {
+        let project = tapid_test_support::TempProject::new("json-error-context").unwrap();
+        let error = tapid_resolver::ResolveError::Conflict {
+            origin: Box::new(tapid_resolver::RequirementOrigin {
+                name: "package".parse().unwrap(),
+                package: None,
+            }),
+            registry: "https://user:fixture-secret@example.test?token=hidden#fragment".into(),
+            name: "界".repeat(2000),
+            requirements: (0..101).rev().map(|i| format!("^{i}.0.0")).collect(),
+            available: vec!["2.0.0".into(), "1.0.0".into(), "1.0.0".into()],
+        };
+        let mut reordered = error.clone();
+        if let tapid_resolver::ResolveError::Conflict {
+            requirements,
+            available,
+            ..
+        } = &mut reordered
+        {
+            requirements.reverse();
+            available.reverse();
+        }
+        let failure = OperationFailure::new(
+            OperationalError::from(error),
+            OperationOutcome::unchanged(project.path()),
+            Some(OperationalError::from(
+                tapid_lockfile::LockfileError::RootManifestDigestMismatch {
+                    expected: "a".repeat(64),
+                    actual: "b".repeat(64),
+                },
+            )),
+        );
+        let result = failure_result(&failure, "install");
+        let reordered = OperationFailure::new(
+            OperationalError::from(reordered),
+            OperationOutcome::unchanged(project.path()),
+            Some(OperationalError::from(
+                tapid_lockfile::LockfileError::RootManifestDigestMismatch {
+                    expected: "a".repeat(64),
+                    actual: "b".repeat(64),
+                },
+            )),
+        );
+        assert_eq!(result, failure_result(&reordered, "install"));
+        let context = &result["errors"][0]["context"];
+        assert_eq!(context["requirements"].as_array().unwrap().len(), 100);
+        assert_eq!(context["omitted"]["requirements"], 1);
+        assert_eq!(context["available"], json!(["1.0.0", "2.0.0"]));
+        assert!(context["package"]["name"].as_str().unwrap().len() <= 4096);
+        assert!(
+            result["truncated_fields"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("/errors/0/context/package/name"))
+        );
+        assert_eq!(result["errors"][1]["phase"], "recovery");
+        assert_eq!(
+            result["errors"][1]["context"]["comparison"]["expected"],
+            "a".repeat(64)
+        );
+        assert_eq!(
+            result["errors"][1]["context"]["comparison"]["observed"],
+            "b".repeat(64)
+        );
+        for secret in ["fixture-secret", "hidden", "fragment"] {
+            assert!(!result.to_string().contains(secret));
+        }
+    }
+
+    #[test]
+    fn diagnostic_native_manifest_paths_are_never_shortened() {
+        let project = tapid_test_support::TempProject::new("json-diagnostic-native-path").unwrap();
+        let path = project.path().join("界".repeat(2000)).join("package.json");
+        let failure = OperationFailure::unchanged(
+            project.path(),
+            OperationalError::new(ErrorKind::Manifest, "read failed").at_manifest(&path),
+        );
+        let result = failure_result(&failure, "install");
+        assert_eq!(
+            result["errors"][0]["context"]["declaration"]["manifest_path"]["value"],
+            path.to_str().unwrap()
+        );
+        assert!(
+            result["truncated_fields"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("/errors/0/context/declaration/manifest"))
+        );
+    }
+
+    #[test]
+    fn manifest_pointer_does_not_hide_a_credential_url_from_redaction() {
+        let project = tapid_test_support::TempProject::new("json-pointer-redaction").unwrap();
+        let input = r#"{"name":"app","version":"1.0.0","scripts":{"https://user:fixture-secret@example.test/path?token=hidden#fragment":false}}"#;
+        let error = tapid_manifest::PackageManifest::parse(input).unwrap_err();
+        let context = crate::application::outcome::DiagnosticContext::manifest_error(
+            &error.diagnostic(input),
+            &project.path().join("package.json"),
+        );
+        let failure = OperationFailure::unchanged(
+            project.path(),
+            OperationalError::from_source(ErrorKind::Manifest, error).with_diagnostic(context),
+        );
+        let result = failure_result(&failure, "install");
+        for secret in ["fixture-secret", "hidden", "fragment"] {
+            assert!(!result.to_string().contains(secret), "{result}");
+        }
+    }
 
     #[test]
     fn recovery_instructions_come_only_from_typed_state() {

@@ -2,6 +2,43 @@
 use crate::application::outcome::{ErrorKind, OperationalError};
 
 use super::*;
+use crate::application::outcome::RequirementDiagnostic;
+
+fn resolution_error(
+    error: ResolveError,
+    roots: &[Dependency],
+    records: &BTreeMap<PackageRecordKey, PackageRecord>,
+) -> OperationalError {
+    let mut result = OperationalError::from(error);
+    if let Some(context) = &mut result.diagnostic
+        && context.peer.is_some()
+        && let Some(package) = &context.package
+    {
+        let record = records.get(&(
+            package.source.clone(),
+            package.name.clone(),
+            package.version.clone().unwrap_or_default(),
+        ));
+        context.requirements = roots
+            .iter()
+            .filter(|root| {
+                root.registry.to_string() == package.source
+                    && root.requirement.package_name(&root.name).as_str() == package.name
+                    && record.is_some_and(|record| {
+                        root.requirement
+                            .matches_tagged_version(&record.version, &record.dist_tags)
+                    })
+            })
+            .map(|root| RequirementDiagnostic {
+                local_name: Some(root.name.to_string()),
+                requirement: root.requirement.raw.clone(),
+                package: None,
+                declaration: None,
+            })
+            .collect();
+    }
+    result
+}
 
 #[derive(Clone)]
 pub(super) struct NormalizedRecord {
@@ -576,9 +613,9 @@ where
                 if !fetched.insert(key) {
                     let discarded = discarded_version_diagnostics(&normalized, &registry, &name);
                     return if discarded.is_empty() {
-                        Err(OperationalError::from(error).context("resolution failed"))
+                        Err(resolution_error(error, roots, &records).context("resolution failed"))
                     } else {
-                        Err(OperationalError::from(error)
+                        Err(resolution_error(error, roots, &records)
                             .context(format!("resolution failed; {discarded}")))
                     };
                 }
@@ -638,9 +675,7 @@ where
                             record.registry.clone(),
                             record.name.clone(),
                             record.version.clone(),
-                        )
-                        .to_string()
-                            == *package
+                        ) == **package
                     })
                     .map(|record| {
                         (
@@ -650,7 +685,9 @@ where
                         )
                     });
                 let Some((registry, name, version)) = candidate else {
-                    return Err(OperationalError::from(error).context("resolution failed"));
+                    return Err(
+                        resolution_error(error, roots, &records).context("resolution failed")
+                    );
                 };
                 if fetched.insert((registry.to_string(), name.to_string())) {
                     if metadata_progress_checkpoint(fetched.len()) {
@@ -681,11 +718,15 @@ where
                             }))
                     });
                     if !removed {
-                        return Err(OperationalError::from(error).context("resolution failed"));
+                        return Err(
+                            resolution_error(error, roots, &records).context("resolution failed")
+                        );
                     }
                 }
             }
-            Err(error) => return Err(OperationalError::from(error).context("resolution failed")),
+            Err(error) => {
+                return Err(resolution_error(error, roots, &records).context("resolution failed"));
+            }
         }
     }
 }

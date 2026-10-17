@@ -99,7 +99,7 @@ pub(crate) fn explain(
     })?;
     let lock = Lockfile::from_json(&lock_bytes).map_err(OperationalError::from)?;
     lock.validate_replay(&root_digest)
-        .map_err(OperationalError::from)?;
+        .map_err(|error| OperationalError::from(error).at_manifest(&root_manifest_path))?;
 
     let roots = if selection.manifest_path == root_manifest_path {
         direct_roots(&lock, &selection.manifest, &selection.root_dir)?
