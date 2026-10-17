@@ -13,6 +13,9 @@ pub use lifecycle::{dependency_lifecycle_commands, dependency_lifecycle_hooks};
 pub use model::{BinTarget, DependencyKind, PackageBin, PackageManifest};
 pub use workspace::{Workspace, WorkspaceMember};
 
+/// Maximum bytes read from each root or member manifest during workspace discovery.
+pub const MAX_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
+
 /// Returns the current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

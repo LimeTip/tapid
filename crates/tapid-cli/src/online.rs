@@ -357,9 +357,13 @@ pub(super) fn workspace_materialization_with_manifest(
         let manifest_bytes = if replacement.is_some_and(|(path, _)| path == member.path()) {
             manifest.to_json().into_bytes()
         } else {
-            fs::read(member.path()).map_err(|error| {
+            crate::filesystem::read::read_bounded_file(
+                member.path(),
+                tapid_manifest::MAX_MANIFEST_BYTES,
+            )
+            .map_err(|_| {
                 format!(
-                    "cannot read workspace member manifest {}: {error}",
+                    "workspace member manifest must be a regular file no larger than 32 MiB: {}",
                     member.path().display()
                 )
             })?
