@@ -85,3 +85,29 @@ fn cancelled_termination_maps_to_sigint_exit_code() {
         ExitCode::from(130)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn result_file_is_empty_and_close_on_exec_before_execution() {
+    use std::os::fd::AsRawFd;
+    let project = tapid_test_support::TempProject::new("run-result-project").unwrap();
+    let results = tapid_test_support::TempProject::new("run-result-owner").unwrap();
+    let path = results.path().join("result.json");
+    let file = result::create_file(&path, project.path()).unwrap();
+    assert!(fs::read(path).unwrap().is_empty());
+    // SAFETY: F_GETFD only inspects the live descriptor owned by `file`.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+    assert!(flags >= 0);
+    assert_ne!(flags & libc::FD_CLOEXEC, 0);
+}
+
+#[test]
+fn result_file_delivery_errors_are_reported_without_a_complete_record() {
+    let project = tapid_test_support::TempProject::new("run-result-project").unwrap();
+    let results = tapid_test_support::TempProject::new("run-result-owner").unwrap();
+    let path = results.path().join("result.json");
+    drop(result::create_file(&path, project.path()).unwrap());
+    let mut read_only = fs::File::open(&path).unwrap();
+    assert!(result::write(&mut read_only, &Err(RunFailure::ScriptMissing), None).is_err());
+    assert!(fs::read(path).unwrap().is_empty());
+}
