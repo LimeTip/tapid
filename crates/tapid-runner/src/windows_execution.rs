@@ -548,16 +548,12 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
 }
 
 fn windows_launch_mechanism(request: &ExecutionRequest) -> String {
-    let mut mechanism = String::from(
-        "AppContainer token without network capabilities, explicit path ACL grants, suspended Job Object assignment, and bounded standard-handle capture",
-    );
-    if request.windows_compatibility.is_some() {
-        mechanism = format!(
-            "AppContainer/Job, ACLs, bounded stdio; {}",
-            compatibility::describe()
-        );
-    }
-    mechanism
+    super::windows_evidence::launch_mechanism(
+        request
+            .windows_compatibility
+            .as_ref()
+            .map(|_| compatibility::COMPONENT),
+    )
 }
 
 struct WindowsExecutionLifecycle<'a> {
@@ -629,7 +625,7 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             add_node_appcontainer_options(&mut child_environment);
         }
         let environment = windows_environment_block_units(&child_environment)?;
-        let working_directory = process_working_directory(&self.preflight.policy.project_root)?;
+        let working_directory = process_working_directory(self.request.working_directory())?;
         let mut pipes = WindowsStdioPipes::new()?;
         trace_windows_stage("prepare: suspended child");
         self.child = Some(WindowsSuspendedChild::create_with_stdio(

@@ -15,16 +15,6 @@ use tapid_runner::{
 #[path = "support/windows_acl.rs"]
 mod windows_acl;
 
-fn temporary_child_directory(parent: &std::path::Path, label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = parent.join(format!("tapid-{label}-{}-{nonce}", std::process::id()));
-    fs::create_dir(&path).unwrap();
-    path
-}
-
 fn temporary_project(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -138,6 +128,108 @@ fn command_request_with_policy(
         .windows_verbatim_arguments(true)
         .build()
         .unwrap()
+}
+
+#[test]
+fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants() {
+    let project = tapid_test_support::TempProject::new("windows-lpac-project").unwrap();
+    let outside = tapid_test_support::TempProject::new("windows-lpac-outside").unwrap();
+    project.write("approved.txt", b"approved-input").unwrap();
+    let secret = outside.write("undeclared.txt", b"ambient-input").unwrap();
+    windows_acl::initialize_inheritance(project.path());
+    windows_acl::initialize_inheritance(outside.path());
+    let system32 =
+        fs::canonicalize(PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32"))
+            .unwrap();
+    let grant = Command::new(system32.join("icacls.exe"))
+        .arg(outside.path())
+        .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)"])
+        .output()
+        .unwrap();
+    assert!(
+        grant.status.success(),
+        "{}",
+        String::from_utf8_lossy(&grant.stderr)
+    );
+    // The host can read the fixture. Its only package-side grant is ambient AAP;
+    // neither this file nor its directory appears in the execution policy.
+    assert_eq!(fs::read(&secret).unwrap(), b"ambient-input");
+    let baseline = project_dacl(&outside.path().to_owned());
+    let root = fs::canonicalize(project.path()).unwrap();
+    let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let child = root.join("probe.exe");
+    fs::copy(&executable, &child).unwrap();
+    project
+        .write("outside-path.txt", secret.to_str().unwrap().as_bytes())
+        .unwrap();
+    let request = ExecutionRequest::builder(child.as_os_str())
+        .args([
+            "--exact",
+            "windows_ambient_read_probe_helper",
+            "--nocapture",
+        ])
+        .executable_search_path(&root)
+        .executable_search_path(&system32)
+        .project_root(&root)
+        .policy(managed_policy_with_flags(
+            ExecutionLimits::new(Some(30), Some(8192), Some(4), None).unwrap(),
+            true,
+            false,
+        ))
+        .env("TAPID_TEST_MARKER", "ambient-root")
+        .build()
+        .unwrap();
+    let outcome = execute(&request).expect("approved root and descendant must execute");
+    let stdout = String::from_utf8_lossy(outcome.stdout());
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "stdout={stdout}; stderr={}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert!(
+        stdout.contains("approved-root"),
+        "root positive control missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("approved-child"),
+        "descendant positive control missing: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ambient-input"),
+        "undeclared AAP input was readable: {stdout}"
+    );
+    assert_eq!(project_dacl(&outside.path().to_owned()), baseline);
+}
+
+#[test]
+fn windows_ambient_read_probe_helper() {
+    let mode = std::env::var("TAPID_TEST_MARKER").unwrap_or_default();
+    if mode != "ambient-root" && mode != "ambient-child" {
+        return;
+    }
+    assert_eq!(fs::read("approved.txt").unwrap(), b"approved-input");
+    let outside = fs::read_to_string("outside-path.txt").unwrap();
+    let denied = fs::read(outside).expect_err("undeclared AAP file must be denied");
+    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    if mode == "ambient-root" {
+        println!("approved-root");
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "windows_ambient_read_probe_helper",
+                "--nocapture",
+            ])
+            .env("TAPID_TEST_MARKER", "ambient-child")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "descendant denied-read probe failed: {status}"
+        );
+    } else {
+        println!("approved-child");
+    }
 }
 
 #[test]
@@ -637,6 +729,10 @@ fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths()
     let executable_directory = executable.parent().expect("test executable directory");
     let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
     let system32 = fs::canonicalize(PathBuf::from(system_root).join("System32")).unwrap();
+    let private_tools = root.join("tools");
+    fs::create_dir(&private_tools).unwrap();
+    fs::copy(&executable, private_tools.join("probe.exe")).unwrap();
+    let private_tools = fs::canonicalize(private_tools).unwrap();
     let request = ExecutionRequest::builder(executable.as_os_str())
         .args([
             OsString::from("--exact"),
@@ -644,6 +740,7 @@ fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths()
             OsString::from("--nocapture"),
         ])
         .executable_search_path(executable_directory)
+        .executable_search_path(&private_tools)
         .executable_search_path(&system32)
         .project_root(&root)
         .policy(managed_policy_with_flags(
@@ -651,6 +748,7 @@ fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths()
             true,
             false,
         ))
+        .env("TAPID_TEST_MARKER", "runtime-child")
         .build()
         .unwrap();
     let outcome = execute(&request).expect("probe process should remain within the Job Object");
@@ -670,10 +768,17 @@ fn windows_appcontainer_can_launch_an_executable_subprocess_from_runtime_paths()
 
 #[test]
 fn windows_child_process_probe_helper() {
-    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is required");
-    let child = PathBuf::from(system_root).join("System32").join("cmd.exe");
+    if std::env::var("TAPID_TEST_MARKER").as_deref() != Ok("runtime-child") {
+        return;
+    }
+    let child = std::env::current_dir().unwrap().join("tools/probe.exe");
     let status = Command::new(&child)
-        .args(["/D", "/S", "/C", "echo CHILD_PROCESS_MARKER"])
+        .args([
+            "--exact",
+            "windows_runtime_child_marker_helper",
+            "--nocapture",
+        ])
+        .env("TAPID_TEST_MARKER", "runtime-marker")
         .status()
         .unwrap_or_else(|error| {
             panic!(
@@ -684,6 +789,13 @@ fn windows_child_process_probe_helper() {
             )
         });
     assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn windows_runtime_child_marker_helper() {
+    if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("runtime-marker") {
+        println!("CHILD_PROCESS_MARKER");
+    }
 }
 
 #[test]
@@ -968,19 +1080,15 @@ test('default test isolation retains ancestor capabilities and denied access',as
 
 #[test]
 fn windows_node_runtime_can_be_launched_directly_when_test_runtime_is_configured() {
-    let Some(local_app_data) = std::env::var_os("TAPID_TEST_LOCALAPPDATA").map(PathBuf::from)
-    else {
-        eprintln!("skipping: TAPID_TEST_LOCALAPPDATA is not set");
-        return;
-    };
     let Some(node) = std::env::var_os("TAPID_TEST_NODE").map(PathBuf::from) else {
         eprintln!("skipping: TAPID_TEST_NODE is not set");
         return;
     };
     let node = fs::canonicalize(node).unwrap();
-    fs::create_dir_all(&local_app_data).unwrap();
-    let root = temporary_child_directory(&local_app_data, "node-runtime");
-    let root = fs::canonicalize(root).unwrap();
+    let fixture = tapid_test_support::TempProject::new("direct-node-runtime").unwrap();
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    windows_acl::initialize_inheritance(&root);
+    let baseline_acl = project_dacl(&root);
     let runtime_bin = node.parent().unwrap().to_path_buf();
     let system32 = fs::canonicalize(
         PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot is required"))
@@ -1005,7 +1113,7 @@ fn windows_node_runtime_can_be_launched_directly_when_test_runtime_is_configured
         String::from_utf8_lossy(outcome.stderr())
     );
     assert!(String::from_utf8_lossy(outcome.stdout()).starts_with('v'));
-    fs::remove_dir_all(root).unwrap();
+    assert_eq!(project_dacl(&root), baseline_acl);
 }
 
 #[test]
@@ -1229,11 +1337,16 @@ fn windows_missing_write_target_fails_closed_without_materialization() {
 
 #[test]
 fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
-    let root = temporary_project("write-existing-file");
+    let fixture = tapid_test_support::TempProject::new("write-existing-file").unwrap();
+    let root = fixture.path().to_path_buf();
+    windows_acl::initialize_inheritance(&root);
     let writable = root.join("writable");
     fs::create_dir(&writable).unwrap();
     let authorized = writable.join("authorized.txt");
     fs::write(&authorized, "preexisting content").unwrap();
+    let baseline_root = project_dacl(&root);
+    let baseline_write = project_dacl(&writable);
+    let baseline_file = project_dacl(&authorized);
     let command = format!("echo TAPID_WRITE_GRANTED>\"{}\"", authorized.display());
     let policy = SandboxPolicy::new_with_assurance(
         SandboxMode::Required,
@@ -1259,7 +1372,160 @@ fn windows_appcontainer_can_modify_existing_file_in_declared_subtree() {
         fs::read_to_string(&authorized).unwrap().trim(),
         "TAPID_WRITE_GRANTED"
     );
-    fs::remove_dir_all(root).unwrap();
+    assert_eq!(project_dacl(&root), baseline_root);
+    assert_eq!(project_dacl(&writable), baseline_write);
+    assert_eq!(project_dacl(&authorized), baseline_file);
+    let command = format!("echo REOPENED>>\"{}\"", authorized.display());
+    let request = command_request_with_policy(&root, &command, request.policy().clone());
+    let outcome = execute(&request).unwrap();
+    assert_eq!(outcome.termination(), &Termination::Exited(0));
+    assert!(
+        fs::read_to_string(&authorized)
+            .unwrap()
+            .contains("REOPENED")
+    );
+    assert_eq!(project_dacl(&root), baseline_root);
+    assert_eq!(project_dacl(&writable), baseline_write);
+    assert_eq!(project_dacl(&authorized), baseline_file);
+}
+
+#[test]
+fn windows_private_write_tree_creates_and_reopens_files_without_outside_authority() {
+    let fixture = tapid_test_support::TempProject::new("private-write-boundary").unwrap();
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    windows_acl::initialize_inheritance(&root);
+    let writable = root.join("package");
+    fs::create_dir(&writable).unwrap();
+    fixture.write("readonly.txt", b"readonly data").unwrap();
+    let outside = tapid_test_support::TempProject::new("private-write-outside").unwrap();
+    outside.write("secret.txt", b"outside data").unwrap();
+    tapid_runner::prepare_private_dependency_write_tree(&writable).unwrap();
+    let root_acl = project_dacl(&root);
+    let outside_acl = project_dacl(&outside.path().to_path_buf());
+    let policy = SandboxPolicy::new_with_assurance(
+        SandboxMode::Required,
+        AssuranceLevel::ManagedTree,
+        FilesystemPolicy::new(vec![".".into()], vec!["package".into()]).unwrap(),
+        false,
+        vec![],
+        false,
+        ExecutionLimits::new(Some(10), Some(4096), Some(4), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let shell_request = command_request_with_policy(&root, "", policy.clone());
+    let command = format!(
+        "echo denied>..\\readonly.txt & type \"{}\">stolen.txt & echo denied>\"{}\" & echo CREATED>generated.txt&echo REOPENED>>generated.txt",
+        outside.path().join("secret.txt").display(),
+        outside.path().join("escaped.txt").display(),
+    );
+    let request = ExecutionRequest::builder(shell_request.program())
+        .executable_search_path(
+            std::path::Path::new(shell_request.program())
+                .parent()
+                .unwrap(),
+        )
+        .args([
+            OsString::from("/D"),
+            OsString::from("/S"),
+            OsString::from("/C"),
+            command.into(),
+        ])
+        .project_root(&root)
+        .working_directory(&writable)
+        .policy(policy)
+        .windows_verbatim_arguments(true)
+        .build()
+        .unwrap();
+    let outcome = execute(&request).unwrap();
+    assert_eq!(outcome.termination(), &Termination::Exited(0));
+    assert_eq!(
+        fs::read_to_string(writable.join("generated.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "CREATED\nREOPENED\n"
+    );
+    assert_eq!(
+        fs::read(root.join("readonly.txt")).unwrap(),
+        b"readonly data"
+    );
+    assert!(!outside.path().join("escaped.txt").exists());
+    assert!(
+        !fs::read(writable.join("stolen.txt"))
+            .unwrap_or_default()
+            .windows(b"outside data".len())
+            .any(|bytes| bytes == b"outside data")
+    );
+    assert_eq!(project_dacl(&root), root_acl);
+    assert_eq!(project_dacl(&outside.path().to_path_buf()), outside_acl);
+}
+
+#[test]
+fn windows_private_write_preparation_rejects_junctions_without_lowering_host_integrity() {
+    use std::os::windows::process::CommandExt;
+    let project = tapid_test_support::TempProject::new("private-write-junction").unwrap();
+    let root = project.path().to_path_buf();
+    windows_acl::initialize_inheritance(&root);
+    project.write("outside/host.txt", b"host data").unwrap();
+    let outside = root.join("outside");
+    let private = root.join("private");
+    fs::create_dir(&private).unwrap();
+    let shell = command_request_with_policy(&root, "", managed_policy());
+    let junction = private.join("junction");
+    let output = Command::new(shell.program())
+        .args(["/D", "/S", "/C"])
+        .raw_arg(format!(
+            "mklink /J \"{}\" \"{}\"",
+            junction.display(),
+            outside.display()
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let before = project_dacl(&outside);
+    assert!(tapid_runner::prepare_private_dependency_write_tree(&private).is_err());
+    assert_eq!(project_dacl(&outside), before);
+    assert_eq!(fs::read(outside.join("host.txt")).unwrap(), b"host data");
+    let policy = SandboxPolicy::new_with_assurance(
+        SandboxMode::Required,
+        AssuranceLevel::ManagedTree,
+        FilesystemPolicy::new(vec![".".into()], vec!["private".into()]).unwrap(),
+        false,
+        vec![],
+        false,
+        ExecutionLimits::new(Some(10), Some(4096), Some(4), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let error = execute(&command_request_with_policy(
+        &root,
+        "echo unexpected",
+        policy,
+    ))
+    .expect_err("junction write target must fail before spawn");
+    assert_eq!(
+        error.category(),
+        ExecutionErrorCategory::UnsupportedContainment
+    );
+    assert_eq!(project_dacl(&outside), before);
+    assert_eq!(fs::read(outside.join("host.txt")).unwrap(), b"host data");
+    fs::remove_dir(junction).unwrap();
+}
+
+#[test]
+fn windows_private_write_preparation_rejects_hardlinks_without_labelling_the_external_file() {
+    let project = tapid_test_support::TempProject::new("private-write-hardlink").unwrap();
+    project.write("outside.txt", b"host data").unwrap();
+    let outside = project.path().join("outside.txt");
+    let private = project.path().join("private");
+    fs::create_dir(&private).unwrap();
+    fs::hard_link(&outside, private.join("linked.txt")).unwrap();
+    let before = project_dacl(&outside);
+    assert!(tapid_runner::prepare_private_dependency_write_tree(&private).is_err());
+    assert_eq!(project_dacl(&outside), before);
+    assert_eq!(fs::read(&outside).unwrap(), b"host data");
 }
 
 #[test]
@@ -1338,14 +1604,15 @@ fn windows_network_probe_is_denied_with_a_reachable_host_positive_control() {
         ),
         "the AppContainer established a TCP connection to the reachable host listener; stdout={stdout:?}, stderr={stderr:?}"
     );
-    assert_eq!(
-        outcome.termination(),
-        &Termination::Exited(28),
-        "curl did not report a connection timeout for the blocked listener; stdout={stdout:?}, stderr={stderr:?}"
-    );
+    let denied = match outcome.termination() {
+        Termination::Exited(7) => stderr.contains("curl: (7) Failed to connect to"),
+        Termination::Exited(28) => stderr.contains("curl: (28)"),
+        _ => false,
+    };
     assert!(
-        stderr.contains("curl: (28)"),
-        "expected curl's timeout diagnostic; stdout={stdout:?}, stderr={stderr:?}"
+        denied,
+        "expected an immediate connection rejection or timeout after successful curl initialization; termination={:?}; stdout={stdout:?}, stderr={stderr:?}",
+        outcome.termination()
     );
     assert_eq!(
         outcome.completion().cleanup_confidence(),

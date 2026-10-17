@@ -82,6 +82,8 @@ byte mismatch; see the [JSON protocol](../../docs/json-results.md).
 
 `tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
 
+Dependency hooks remain denied without exact checked-in approval. Online installs offer separate invocation-only `--allow-unapproved-dependency-scripts` and `--unsafe-no-dependency-sandbox` overrides. The first retains required containment; the second explicitly permits host access but does not authorize unapproved hooks by itself. Override outputs never enter the authenticated build cache. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md) for limits, warnings, and platform requirements. These flags do not change `tapid run`.
+
 ## Inspect and clear the package cache
 
 `tapid cache` and `tapid cache info` report the package-store path, counts, and logical file bytes for published artifacts and marked package trees. They work offline without a project and do not create files or recover transactions. The default path is the same platform cache location used by installation. Use `--store-dir <PATH>` to inspect an explicit store. Human inspection and preview output labels sizes as logical bytes. Sizes exclude directory overhead, symlink targets, staging, and unrecognized entries. They measure file content lengths, not allocated disk space or predicted disk space reclaimed by cleaning. Hard links, compression, sparse files, and filesystem metadata can make those quantities differ.

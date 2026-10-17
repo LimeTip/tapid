@@ -13,7 +13,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1333,11 +1333,7 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
                 CleanupConfidence::NotGuaranteed
             },
         )?;
-        let termination = if let Some(code) = status.code() {
-            Termination::Exited(code)
-        } else {
-            Termination::Signaled(status.signal().unwrap_or(0))
-        };
+        let termination = Termination::from_process_status(status);
         Ok(Box::new(ExecutionOutcome::checked(
             termination,
             stdout,

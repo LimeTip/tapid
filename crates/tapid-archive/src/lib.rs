@@ -290,9 +290,32 @@ fn apply_portable_file_mode(_archive_mode: u32, _target: &Path) -> io::Result<()
 /// other permission bits are ignored. Platforms without Unix executable bits
 /// retain the non-executable regular-file framing.
 pub fn canonical_tree_digest(root: &Path) -> io::Result<String> {
-    let executable_paths = read_executable_manifest(root)?;
+    tree_digest(root, None)
+}
+
+/// Hash a tree view that omits exactly one named entry directly below its root.
+/// The caller must omit that same entry from the copied/consumed view. Normal
+/// archive and store verification must continue using canonical_tree_digest.
+pub fn canonical_tree_digest_without_root_entry(root: &Path, entry: &str) -> io::Result<String> {
+    if entry.is_empty()
+        || matches!(entry, "." | "..")
+        || entry.bytes().any(|b| matches!(b, 0 | b'/' | b'\\' | b':'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "excluded tree entry must be one filename",
+        ));
+    }
+    tree_digest(root, Some(entry))
+}
+
+fn tree_digest(root: &Path, excluded: Option<&str>) -> io::Result<String> {
+    let mut executable_paths = read_executable_manifest(root)?;
+    if let (Some(paths), Some(entry)) = (&mut executable_paths, excluded) {
+        paths.retain(|path| path != entry && !path.starts_with(&format!("{entry}/")));
+    }
     let mut files = Vec::new();
-    collect_tree(root, root, executable_paths.as_ref(), &mut files)?;
+    collect_tree(root, root, executable_paths.as_ref(), excluded, &mut files)?;
     if let Some(paths) = &executable_paths {
         let mut manifest = paths.iter().cloned().collect::<Vec<_>>().join("\n");
         if !manifest.is_empty() {
@@ -403,6 +426,7 @@ fn collect_tree(
     root: &Path,
     current: &Path,
     executable_paths: Option<&BTreeSet<String>>,
+    excluded: Option<&str>,
     out: &mut Vec<(String, u8, TreePayload)>,
 ) -> io::Result<()> {
     for item in fs::read_dir(current)? {
@@ -413,7 +437,7 @@ fn collect_tree(
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        if rel == ".tapid-tree" || rel == EXECUTABLE_MANIFEST {
+        if rel == ".tapid-tree" || rel == EXECUTABLE_MANIFEST || excluded == Some(rel.as_str()) {
             continue;
         }
         let m = fs::symlink_metadata(&p)?;
@@ -425,7 +449,7 @@ fn collect_tree(
         }
         if m.is_dir() {
             out.push((rel.clone(), 1, TreePayload::Bytes(Vec::new())));
-            collect_tree(root, &p, executable_paths, out)?;
+            collect_tree(root, &p, executable_paths, excluded, out)?;
         } else if m.is_file() {
             let kind = executable_paths.map_or_else(
                 || portable_file_kind(&m),
@@ -936,6 +960,51 @@ mod tests {
         assert!(extract_to(&bytes, ArchiveFormat::Tar, &dest, limits).is_err());
         assert!(!dest.exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn filtered_tree_digest_excludes_only_the_selected_root_entry() {
+        let source = tapid_test_support::TempProject::new("filtered-source").unwrap();
+        let view = tapid_test_support::TempProject::new("filtered-view").unwrap();
+        source.write(".bin/shim", b"ignored").unwrap();
+        for root in [&source, &view] {
+            root.write("module/.bin/runtime", b"included").unwrap();
+        }
+        let digest = canonical_tree_digest_without_root_entry(source.path(), ".bin").unwrap();
+        assert_eq!(digest, canonical_tree_digest(view.path()).unwrap());
+        source.write("module/.bin/runtime", b"changed").unwrap();
+        assert_ne!(
+            digest,
+            canonical_tree_digest_without_root_entry(source.path(), ".bin").unwrap()
+        );
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "module/.bin",
+            "C:escape",
+            "a\\b",
+        ] {
+            assert_eq!(
+                canonical_tree_digest_without_root_entry(source.path(), invalid)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filtered_tree_digest_keeps_all_other_link_rejections() {
+        let source = tapid_test_support::TempProject::new("filtered-links").unwrap();
+        source.write("module/index.js", b"runtime").unwrap();
+        std::os::unix::fs::symlink("module", source.path().join(".bin")).unwrap();
+        assert!(canonical_tree_digest(source.path()).is_err());
+        assert!(canonical_tree_digest_without_root_entry(source.path(), ".bin").is_ok());
+        std::os::unix::fs::symlink("module", source.path().join("escape")).unwrap();
+        assert!(canonical_tree_digest_without_root_entry(source.path(), ".bin").is_err());
     }
 
     #[cfg(unix)]
