@@ -52,17 +52,17 @@ pub(super) fn refresh_selected(
     Ok(())
 }
 
-/// Save only after resolution succeeds, under the install transaction's journal.
+/// Compute saved declarations without writing, so installs and previews agree.
 /// Workspace and copied source declarations keep their source semantics.
-pub(super) fn save_requirements(
+pub(super) fn saved_manifest(
     project: &Path,
     request: UpdateRequest<'_>,
     config: &crate::registry::RegistryConfig,
     resolution: &Resolution,
     mut fetch: impl FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
-) -> Result<(), OperationalError> {
+) -> Result<PackageManifest, OperationalError> {
     let Some(policy) = request.save else {
-        return Ok(());
+        return Ok(request.plan.manifest.clone());
     };
     let workspace = Workspace::discover(project)?;
     let mut manifest = request.plan.manifest.clone();
@@ -124,9 +124,5 @@ pub(super) fn save_requirements(
             .update_dependency_kind(mutation.kind, &mutation.name, &saved)
             .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
     }
-    fs::write(request.target, manifest.to_json()).map_err(|error| {
-        OperationalError::from_source(ErrorKind::Transaction, error)
-            .context("cannot save updated requirements")
-    })?;
-    Ok(())
+    Ok(manifest)
 }

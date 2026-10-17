@@ -8112,3 +8112,6 @@ fn why_reconstructs_only_manifest_matching_roots_and_reports_nested_instances() 
             .contains("|foo@1.0.0|")
     );
 }
+
+#[path = "cli_cases/preview.rs"]
+mod preview_tests;
