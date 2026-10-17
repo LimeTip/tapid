@@ -21,6 +21,7 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 url = "2"
 
 [dev-dependencies]
+tapid-test-support = { path = "../tapid-test-support" }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 
 [lib]

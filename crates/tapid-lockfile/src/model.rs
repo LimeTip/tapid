@@ -2,14 +2,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Component;
 use tapid_core::{
-    ArtifactDigest, PackageIntegrity, PackageName, PackageVersion, PeerContext, PlatformContext,
-    RegistryOrigin,
+    ArtifactDigest, PackageIntegrity, PackageName, PackageSource, PackageVersion, PeerContext,
+    PlatformContext, RegistryOrigin,
 };
 
 use crate::{
-    LEGACY_LOCKFILE_VERSION, LIFECYCLE_LOCKFILE_VERSION, LOCKFILE_VERSION, LockfileError,
-    PROVENANCE_LEGACY_LOCKFILE_VERSION, REGISTRY_ONLY_LOCKFILE_VERSION,
-    ROOTS_LEGACY_LOCKFILE_VERSION, validation,
+    COPIED_SOURCE_LOCKFILE_VERSION, LEGACY_LOCKFILE_VERSION, LIFECYCLE_LOCKFILE_VERSION,
+    LOCKFILE_VERSION, LockfileError, PROVENANCE_LEGACY_LOCKFILE_VERSION,
+    REGISTRY_ONLY_LOCKFILE_VERSION, ROOTS_LEGACY_LOCKFILE_VERSION, validation,
 };
 
 fn encode(value: &str) -> String {
@@ -279,20 +279,36 @@ fn canonical_workspace_path(value: &str) -> Result<String, LockfileError> {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum LockfilePackageSource {
     Registry(RegistryOrigin),
+    Copied(PackageSource),
     Workspace(LocalWorkspaceSource),
 }
 
 impl LockfilePackageSource {
+    pub fn package_source(&self) -> Option<PackageSource> {
+        match self {
+            Self::Registry(origin) => Some(origin.clone().into()),
+            Self::Copied(source) => Some(source.clone()),
+            Self::Workspace(_) => None,
+        }
+    }
+    pub fn copied(&self) -> Option<&PackageSource> {
+        if let Self::Copied(source) = self {
+            Some(source)
+        } else {
+            None
+        }
+    }
+
     pub fn registry(&self) -> Option<&RegistryOrigin> {
         match self {
             Self::Registry(origin) => Some(origin),
-            Self::Workspace(_) => None,
+            Self::Workspace(_) | Self::Copied(_) => None,
         }
     }
 
     pub fn workspace(&self) -> Option<&LocalWorkspaceSource> {
         match self {
-            Self::Registry(_) => None,
+            Self::Registry(_) | Self::Copied(_) => None,
             Self::Workspace(source) => Some(source),
         }
     }
@@ -310,6 +326,20 @@ pub struct LockfilePackageKey {
 }
 
 impl LockfilePackageKey {
+    pub fn from_source(
+        source: PackageSource,
+        name: PackageName,
+        version: PackageVersion,
+        peer: &PeerContext,
+        platform: &PlatformContext,
+    ) -> Self {
+        let source = match source.registry() {
+            Some(origin) => LockfilePackageSource::Registry(origin.clone()),
+            None => LockfilePackageSource::Copied(source),
+        };
+        Self::with_source(source, name, version, peer, platform)
+    }
+
     pub fn new(
         registry: RegistryOrigin,
         name: PackageName,
@@ -367,6 +397,7 @@ impl std::fmt::Display for LockfilePackageKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let source = match &self.source {
             LockfilePackageSource::Registry(origin) => origin.to_string(),
+            LockfilePackageSource::Copied(source) => source.to_string(),
             LockfilePackageSource::Workspace(source) => source.identity(),
         };
         write!(
@@ -393,6 +424,8 @@ impl std::str::FromStr for LockfilePackageKey {
             .ok_or_else(|| LockfileError::InvalidPackageKey(value.into()))?;
         let source = if p[0].starts_with("workspace:") {
             LockfilePackageSource::Workspace(p[0].parse()?)
+        } else if p[0].starts_with("file:") || p[0].starts_with("git+") {
+            LockfilePackageSource::Copied(p[0].parse().map_err(LockfileError::Domain)?)
         } else {
             let origin: RegistryOrigin = p[0].parse().map_err(LockfileError::Domain)?;
             if origin.as_str() != p[0] {
@@ -635,7 +668,7 @@ impl Lockfile {
             .ok_or_else(|| LockfileError::InvalidPackageKey(key.to_owned()))?;
         package.derived_hooks = outputs;
         if !package.derived_hooks.is_empty() {
-            self.lockfile_version = LIFECYCLE_LOCKFILE_VERSION;
+            self.lockfile_version = self.lockfile_version.max(LIFECYCLE_LOCKFILE_VERSION);
         }
         Ok(())
     }
@@ -725,6 +758,13 @@ impl Lockfile {
                     exists,
                 )?;
             }
+        }
+        if registry_packages.iter().any(|package| {
+            package
+                .source()
+                .is_some_and(|source| source.registry().is_none())
+        }) {
+            self.lockfile_version = COPIED_SOURCE_LOCKFILE_VERSION;
         }
         self.packages.extend(
             registry_packages
@@ -880,6 +920,15 @@ impl Lockfile {
                 "derived hooks require schema 9".into(),
             ));
         }
+        if self.lockfile_version < COPIED_SOURCE_LOCKFILE_VERSION
+            && self.packages.values().any(|package| {
+                package
+                    .source()
+                    .is_some_and(|source| source.registry().is_none())
+            })
+        {
+            return Err(LockfileError::UnsupportedVersion(self.lockfile_version));
+        }
         for package in self.packages.values() {
             validate_derived_hooks(&package.derived_hooks)?;
         }
@@ -906,10 +955,12 @@ impl Lockfile {
             return Err(LockfileError::MissingRoots);
         }
         if self.lockfile_version >= ROOTS_LEGACY_LOCKFILE_VERSION
-            && let Some((key, _)) = self
-                .packages
-                .iter()
-                .find(|(_, package)| package.registry_integrity_declared.is_none())
+            && let Some((key, _)) = self.packages.iter().find(|(_, package)| {
+                package
+                    .source()
+                    .is_some_and(|source| source.registry().is_some())
+                    && package.registry_integrity_declared.is_none()
+            })
         {
             return Err(LockfileError::MissingRegistryIntegrityProvenance(
                 key.clone(),
@@ -923,7 +974,8 @@ impl Lockfile {
     pub fn from_json(input: &str) -> Result<Self, LockfileError> {
         let mut lockfile: Self =
             serde_json::from_str(input).map_err(LockfileError::Serialization)?;
-        if lockfile.lockfile_version != LOCKFILE_VERSION
+        if lockfile.lockfile_version != COPIED_SOURCE_LOCKFILE_VERSION
+            && lockfile.lockfile_version != LOCKFILE_VERSION
             && lockfile.lockfile_version != LIFECYCLE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LEGACY_LOCKFILE_VERSION
             && lockfile.lockfile_version != PROVENANCE_LEGACY_LOCKFILE_VERSION
@@ -939,10 +991,12 @@ impl Lockfile {
             return Err(LockfileError::MissingRoots);
         }
         if lockfile.lockfile_version >= REGISTRY_ONLY_LOCKFILE_VERSION
-            && let Some((key, _)) = lockfile
-                .packages
-                .iter()
-                .find(|(_, package)| package.registry_integrity_declared.is_none())
+            && let Some((key, _)) = lockfile.packages.iter().find(|(_, package)| {
+                package
+                    .source()
+                    .is_some_and(|source| source.registry().is_some())
+                    && package.registry_integrity_declared.is_none()
+            })
         {
             return Err(LockfileError::MissingRegistryIntegrityProvenance(
                 key.clone(),
@@ -1161,7 +1215,7 @@ impl LockedPackage {
     ) -> Result<Self, LockfileError> {
         let package = Self {
             registry: registry
-                .parse::<RegistryOrigin>()
+                .parse::<PackageSource>()
                 .map_err(LockfileError::Domain)?
                 .to_string(),
             name: name
@@ -1176,10 +1230,16 @@ impl LockedPackage {
                 .parse::<PackageIntegrity>()
                 .map_err(LockfileError::Domain)?
                 .to_string(),
-            registry_integrity_declared: Some(matches!(
-                integrity_provenance,
-                RegistryIntegrityProvenance::RegistryDeclared
-            )),
+            registry_integrity_declared: registry.parse::<PackageSource>().ok().and_then(
+                |source| {
+                    source.registry().map(|_| {
+                        matches!(
+                            integrity_provenance,
+                            RegistryIntegrityProvenance::RegistryDeclared
+                        )
+                    })
+                },
+            ),
             unpacked_digest: unpacked_digest
                 .parse::<ArtifactDigest>()
                 .map_err(LockfileError::Domain)?
@@ -1197,7 +1257,7 @@ impl LockedPackage {
     }
 
     pub fn key(&self) -> String {
-        let registry: RegistryOrigin = self.registry.parse().expect("validated registry origin");
+        let registry: PackageSource = self.registry.parse().expect("validated package source");
         let name: PackageName = self.name.parse().expect("validated package name");
         let version: PackageVersion = self.version.parse().expect("validated package version");
         format!(
@@ -1220,6 +1280,9 @@ impl LockedPackage {
     }
     pub fn version(&self) -> &str {
         &self.version
+    }
+    pub fn source(&self) -> Option<PackageSource> {
+        self.registry.parse().ok()
     }
     pub fn registry(&self) -> &str {
         &self.registry
@@ -1257,7 +1320,7 @@ impl LockedPackage {
     fn validate(&self) -> Result<(), LockfileError> {
         let registry = self
             .registry
-            .parse::<RegistryOrigin>()
+            .parse::<PackageSource>()
             .map_err(LockfileError::Domain)?;
         if registry.as_str() != self.registry {
             return Err(LockfileError::NonCanonicalRegistryIdentity);
@@ -1286,7 +1349,14 @@ impl LockedPackage {
         let key = self.key();
         validate_peer_context(&self.peer_context, &key)?;
         validate_platform_context(&self.platform_context, &key)?;
-        validation::validate_registry_url(&self.registry)?;
+        if registry.registry().is_some() {
+            validation::validate_registry_url(&self.registry)?;
+        } else if self.registry_integrity_declared.is_some()
+            || self.artifact_url.is_some()
+            || !self.derived_hooks.is_empty()
+        {
+            return Err(LockfileError::InvalidCopiedArtifactEvidence);
+        }
         if let Some(url) = &self.artifact_url {
             validation::validate_artifact_url(url)?;
         }

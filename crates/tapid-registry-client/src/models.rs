@@ -1,9 +1,6 @@
 use crate::MetadataError;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-};
+use std::collections::{BTreeMap, BTreeSet};
 use tapid_core::{PackageIntegrity, PackageName, PackageVersion, RegistryOrigin};
 use url::Url;
 
@@ -52,26 +49,8 @@ pub enum RegistryKind {
     Jsr,
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RegistryPackageId {
-    pub registry: RegistryOrigin,
-    pub name: PackageName,
-    pub version: PackageVersion,
-}
-impl RegistryPackageId {
-    pub fn new(registry: RegistryOrigin, name: PackageName, version: PackageVersion) -> Self {
-        Self {
-            registry,
-            name,
-            version,
-        }
-    }
-}
-impl fmt::Display for RegistryPackageId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}@{}", self.registry, self.name, self.version)
-    }
-}
+/// Exact package identity shared with the core and linker.
+pub type RegistryPackageId = tapid_core::PackageInstanceId;
 
 impl RegistrySnapshot {
     pub fn normalize(raw: RawRegistrySnapshot) -> Result<Self, MetadataError> {
@@ -100,7 +79,11 @@ impl RegistrySnapshot {
                 .integrity
                 .map(|v| v.parse().map_err(|_| MetadataError::InvalidIntegrity(v)))
                 .transpose()?;
-            let id = RegistryPackageId::new(registry.clone(), name.clone(), version.clone());
+            let id = RegistryPackageId::from_source(
+                registry.clone().into(),
+                name.clone(),
+                version.clone(),
+            );
             let candidates = packages.entry(name).or_insert_with(Vec::new);
             if candidates
                 .iter()
@@ -175,6 +158,8 @@ impl PackagePlatform {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryArtifact {
+    /// Dist-tags pointing to this exact version in the fetched packument.
+    pub dist_tags: BTreeSet<String>,
     pub identity: RegistryPackageId,
     pub artifact_url: String,
     pub integrity: Option<PackageIntegrity>,
@@ -216,12 +201,12 @@ mod tests {
 
     #[test]
     fn registry_identity_is_part_of_package_identity() {
-        let a = RegistryPackageId::new(
+        let a = RegistryPackageId::from_source(
             "https://a".parse().unwrap(),
             "foo".parse().unwrap(),
             "1.0.0".parse().unwrap(),
         );
-        let b = RegistryPackageId::new(
+        let b = RegistryPackageId::from_source(
             "https://b".parse().unwrap(),
             "foo".parse().unwrap(),
             "1.0.0".parse().unwrap(),

@@ -250,6 +250,26 @@ fn parse_npm(
             MetadataError::ConflictingField("name".into()),
         ));
     }
+    let tags = root
+        .get("dist-tags")
+        .map(|value| {
+            let object = value
+                .as_object()
+                .ok_or_else(|| MetadataError::InvalidJson("dist-tags must be an object".into()))?;
+            Ok::<_, MetadataError>(
+                object
+                    .iter()
+                    .filter_map(|(tag, value)| {
+                        // Match version-key handling: unusable targets are not candidates.
+                        let version = value.as_str()?.parse::<PackageVersion>().ok()?;
+                        Some((tag.clone(), version))
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+            )
+        })
+        .transpose()
+        .map_err(RegistryClientError::Metadata)?
+        .unwrap_or_default();
     let Some(versions) = root.get("versions") else {
         let metadata_name_matches =
             root.get("name").and_then(|value| value.as_str()) == Some(name.to_string().as_str());
@@ -365,7 +385,12 @@ fn parse_npm(
             _ => continue,
         };
         artifacts.push(RegistryArtifact {
-            identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
+            dist_tags: tags
+                .iter()
+                .filter(|(_, target)| *target == &version)
+                .map(|(tag, _)| tag.clone())
+                .collect(),
+            identity: RegistryPackageId::from_source(origin.clone().into(), name.clone(), version),
             artifact_url,
             integrity,
             dependencies,
@@ -484,6 +509,60 @@ fn parse_optional_peer_dependencies(
 mod tests {
     use super::*;
     use crate::TransportError;
+
+    #[test]
+    fn dist_tags_preserve_exact_targets_and_skip_unusable_targets() {
+        let origin = "https://registry.npmjs.org".parse().unwrap();
+        let name = "pkg".parse().unwrap();
+        let body = serde_json::json!({"name":"pkg", "dist-tags":{"next":"2.0.0-beta.1", "latest":"1.0.0", "missing":"3.0.0"}, "versions": {
+            "1.0.0": {"name":"pkg", "version":"1.0.0", "dist":{"tarball":"https://registry.npmjs.org/pkg/-/pkg-1.tgz"}},
+            "2.0.0-beta.1": {"name":"pkg", "version":"2.0.0-beta.1", "dist":{"tarball":"https://registry.npmjs.org/pkg/-/pkg-2.tgz"}}
+        }});
+        let artifacts =
+            parse_npm(&origin, &name, &serde_json::to_vec(&body).unwrap(), true).unwrap();
+        assert_eq!(artifacts.len(), 2);
+        for artifact in artifacts {
+            let expected = if artifact.identity.version.to_string() == "1.0.0" {
+                "latest"
+            } else {
+                "next"
+            };
+            assert_eq!(artifact.dist_tags, BTreeSet::from([expected.into()]));
+        }
+        for target in [
+            serde_json::json!(123),
+            serde_json::json!(null),
+            serde_json::json!("^1"),
+            serde_json::json!("1.0.0+build"),
+        ] {
+            let mut mixed = body.clone();
+            mixed["dist-tags"]["latest"] = target;
+            let artifacts =
+                parse_npm(&origin, &name, &serde_json::to_vec(&mixed).unwrap(), true).unwrap();
+            assert_eq!(artifacts.len(), 2);
+            assert!(
+                artifacts
+                    .iter()
+                    .all(|artifact| !artifact.dist_tags.contains("latest"))
+            );
+            assert!(
+                artifacts
+                    .iter()
+                    .any(|artifact| artifact.dist_tags.contains("next"))
+            );
+        }
+        for tags in [
+            serde_json::json!([]),
+            serde_json::json!(null),
+            serde_json::json!("latest"),
+        ] {
+            let mut invalid = body.clone();
+            invalid["dist-tags"] = tags;
+            assert!(
+                parse_npm(&origin, &name, &serde_json::to_vec(&invalid).unwrap(), true).is_err()
+            );
+        }
+    }
 
     pub(super) struct Fake {
         body: Vec<u8>,

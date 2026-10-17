@@ -19,3 +19,6 @@ pub use models::{
 };
 pub use npm::{NpmPackageEvidence, NpmRegistry};
 pub use transport::{HttpResponse, HttpTransport, HttpsTransport};
+
+mod git;
+pub use git::GitDependency;
