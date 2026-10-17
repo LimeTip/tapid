@@ -6,7 +6,7 @@ use std::{
     fmt,
     str::FromStr,
 };
-use tapid_core::{PackageName, PackageVersion, PeerContext, RegistryOrigin};
+use tapid_core::{PackageName, PackageSource, PackageVersion, PeerContext};
 use tapid_registry_client::{RegistryPackageId, RegistrySnapshot};
 
 #[cfg(test)]
@@ -24,12 +24,13 @@ fn requirement_base_parse_count() -> usize {
     REQUIREMENT_BASE_PARSE_COUNT.with(std::cell::Cell::get)
 }
 
-/// A validated npm version range, optionally bound to an alias target.
+/// A validated npm version range or dist-tag, optionally bound to an alias target.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Requirement {
     /// Canonical trimmed source requirement used for deterministic diagnostics.
     pub raw: String,
     alias: Option<PackageName>,
+    tag: Option<String>,
     clauses: Vec<RequirementClause>,
 }
 
@@ -60,7 +61,7 @@ enum RequirementOperator {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dependency {
     /// Registry from which candidates must be selected.
-    pub registry: RegistryOrigin,
+    pub registry: PackageSource,
     /// Package name constrained by this dependency.
     pub name: PackageName,
     /// Supported version requirement for the package.
@@ -68,7 +69,7 @@ pub struct Dependency {
 }
 impl Dependency {
     /// Creates a registry-qualified dependency constraint.
-    pub fn new(registry: RegistryOrigin, name: PackageName, requirement: Requirement) -> Self {
+    pub fn new(registry: PackageSource, name: PackageName, requirement: Requirement) -> Self {
         Self {
             registry,
             name,
@@ -104,7 +105,24 @@ impl FromStr for Requirement {
             return Ok(Self {
                 raw: raw.into(),
                 alias: None,
+                tag: None,
                 clauses: vec![RequirementClause::AnyStable],
+            });
+        }
+        if raw != "x"
+            && raw != "X"
+            && raw.as_bytes()[0].is_ascii_alphabetic()
+            && raw
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+            && parse_x_range(raw).is_none()
+            && parse_requirement_base(RequirementOperator::Exact, raw).is_none()
+        {
+            return Ok(Self {
+                raw: raw.into(),
+                alias: None,
+                tag: Some(raw.into()),
+                clauses: Vec::new(),
             });
         }
         let mut clauses = Vec::new();
@@ -191,6 +209,7 @@ impl FromStr for Requirement {
         Ok(Self {
             raw: raw.into(),
             alias: None,
+            tag: None,
             clauses,
         })
     }
@@ -205,6 +224,27 @@ impl Requirement {
     pub fn is_alias(&self) -> bool {
         self.alias.is_some()
     }
+    /// Mutable registry tag, resolved only against fetched metadata.
+    pub fn dist_tag(&self) -> Option<&str> {
+        self.tag.as_deref()
+    }
+
+    /// Matches a candidate using the tags explicitly assigned to that version.
+    pub fn matches_tagged_version(
+        &self,
+        version: &PackageVersion,
+        tags: &BTreeSet<String>,
+    ) -> bool {
+        self.dist_tag()
+            .map_or_else(|| self.matches(version), |tag| tags.contains(tag))
+    }
+
+    /// Validates a pinned selection after the consumer has checked the exact manifest digest.
+    /// A tag is never re-resolved during lock replay.
+    pub fn matches_locked_version(&self, version: &PackageVersion) -> bool {
+        self.tag.is_some() || self.matches(version)
+    }
+
     /// Returns whether an exact version satisfies this validated requirement.
     pub fn matches(&self, version: &PackageVersion) -> bool {
         matches_requirement(version, self)
@@ -396,6 +436,8 @@ pub struct PackageVersionMetadata {
     pub name: PackageName,
     /// Exact canonical version represented by this record.
     pub version: PackageVersion,
+    /// Registry dist-tags that point to this exact version.
+    pub dist_tags: BTreeSet<String>,
     /// Dependency requirements declared by this exact version.
     pub dependencies: BTreeMap<PackageName, Requirement>,
     /// Peer requirements declared by this exact version. These are never merged
@@ -409,17 +451,27 @@ pub struct PackageVersionMetadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryMetadata {
     /// Registry origin shared by every package record.
-    pub registry: RegistryOrigin,
+    pub registry: PackageSource,
     /// Records sorted by package name and descending version after normalization.
     pub packages: Vec<PackageVersionMetadata>,
 }
 impl RegistryMetadata {
     /// Sorts records deterministically and rejects duplicate exact identities.
     pub fn normalize(
-        registry: RegistryOrigin,
+        registry: PackageSource,
         mut packages: Vec<PackageVersionMetadata>,
     ) -> Result<Self, ResolveError> {
         packages.sort_by(|a, b| a.name.cmp(&b.name).then(b.version.cmp(&a.version)));
+        let mut tags = BTreeSet::new();
+        for package in &packages {
+            for tag in &package.dist_tags {
+                if !tags.insert((package.name.clone(), tag.clone())) {
+                    return Err(ResolveError::DuplicateMetadata {
+                        package: format!("{registry}:{}@{tag}", package.name),
+                    });
+                }
+            }
+        }
         for pair in packages.windows(2) {
             if pair[0].name == pair[1].name && pair[0].version == pair[1].version {
                 return Err(ResolveError::DuplicateMetadata {
@@ -446,9 +498,9 @@ pub struct ResolutionOptions {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ResolutionPreferences {
     /// Previously selected versions, including transitive versions.
-    pub versions: BTreeSet<(RegistryOrigin, PackageName, PackageVersion)>,
+    pub versions: BTreeSet<(PackageSource, PackageName, PackageVersion)>,
     /// Previously selected direct bindings, ahead of other locked versions.
-    pub roots: BTreeMap<(RegistryOrigin, PackageName, PackageName), PackageVersion>,
+    pub roots: BTreeMap<(PackageSource, PackageName, PackageName), PackageVersion>,
 }
 
 /// Exact package identities, root selections, and parent-to-child edges for a graph.
@@ -459,7 +511,7 @@ pub struct Resolution {
     /// Exact identities selected for direct manifest dependencies.
     pub roots: Vec<RegistryPackageId>,
     /// Local root names bound to exact actual package identities.
-    pub root_bindings: BTreeMap<(RegistryOrigin, PackageName), RegistryPackageId>,
+    pub root_bindings: BTreeMap<(PackageSource, PackageName), RegistryPackageId>,
     /// Exact dependency edges used by lockfile and linker construction.
     pub dependencies: Vec<ResolvedDependency>,
     /// Peer providers bound to each selected package identity.
@@ -554,7 +606,7 @@ pub fn resolve_graph_with_routing<F>(
     registry_for_dependency: F,
 ) -> Result<Resolution, ResolveError>
 where
-    F: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
 {
     resolve_graph_with_preferences(
         ds,
@@ -576,7 +628,7 @@ pub fn resolve_graph_with_preferences<F>(
     preferred: &ResolutionPreferences,
 ) -> Result<Resolution, ResolveError>
 where
-    F: FnMut(&RegistryOrigin, &PackageName) -> Result<RegistryOrigin, String>,
+    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
 {
     if options.frozen {
         return Err(ResolveError::UnsupportedMode(
@@ -590,7 +642,7 @@ where
     }
     let candidate_index = candidate_index(metadata);
     let mut root_constraints: BTreeMap<
-        (RegistryOrigin, PackageName, PackageName),
+        (PackageSource, PackageName, PackageName),
         BTreeSet<Requirement>,
     > = BTreeMap::new();
     for dependency in ds {
@@ -633,7 +685,7 @@ where
             }
             Err(error) => return Err(error),
         };
-        let id = RegistryPackageId::new(registry.clone(), name, package.version.clone());
+        let id = RegistryPackageId::from_source(registry.clone(), name, package.version.clone());
         selected.insert(id.clone());
         selected_packages.insert(id.clone(), package);
         roots.push(id.clone());
@@ -680,8 +732,11 @@ where
                 }
                 Err(error) => return Err(error),
             };
-            let child =
-                RegistryPackageId::new(registry, actual_name, child_package.version.clone());
+            let child = RegistryPackageId::from_source(
+                registry,
+                actual_name,
+                child_package.version.clone(),
+            );
             dependencies.insert(ResolvedDependency {
                 parent: parent.clone(),
                 dependency: dependency.clone(),
@@ -742,8 +797,9 @@ where
             }
 
             if !provider.is_some_and(|provider| {
-                requirement.matches(&provider.version)
-                    && (!requirement.is_alias() || requirement.package_name(peer) == &provider.name)
+                selected_packages.get(provider).is_some_and(|metadata| {
+                    requirement.matches_tagged_version(&provider.version, &metadata.dist_tags)
+                }) && (!requirement.is_alias() || requirement.package_name(peer) == &provider.name)
             }) {
                 return Err(ResolveError::PeerDependency {
                     package: id.to_string(),
@@ -772,7 +828,7 @@ where
     })
 }
 
-type CandidateIndex<'a> = BTreeMap<(RegistryOrigin, PackageName), Vec<&'a PackageVersionMetadata>>;
+type CandidateIndex<'a> = BTreeMap<(PackageSource, PackageName), Vec<&'a PackageVersionMetadata>>;
 
 fn candidate_index(metadata: &[RegistryMetadata]) -> CandidateIndex<'_> {
     let mut index = CandidateIndex::new();
@@ -788,7 +844,7 @@ fn candidate_index(metadata: &[RegistryMetadata]) -> CandidateIndex<'_> {
 }
 
 fn select_package(
-    registry: &RegistryOrigin,
+    registry: &PackageSource,
     name: &PackageName,
     requirements: &BTreeSet<Requirement>,
     candidates: &CandidateIndex<'_>,
@@ -803,9 +859,9 @@ fn select_package(
         .iter()
         .copied()
         .filter(|package| {
-            requirements
-                .iter()
-                .all(|requirement| matches_requirement(&package.version, requirement))
+            requirements.iter().all(|requirement| {
+                requirement.matches_tagged_version(&package.version, &package.dist_tags)
+            })
         })
         .max_by_key(|package| {
             (
@@ -982,7 +1038,7 @@ pub fn resolve(
     let metadata = snapshots
         .iter()
         .map(|snapshot| RegistryMetadata {
-            registry: snapshot.registry().clone(),
+            registry: snapshot.registry().clone().into(),
             packages: snapshot
                 .packages()
                 .values()
@@ -990,6 +1046,7 @@ pub fn resolve(
                 .map(|p| PackageVersionMetadata {
                     name: p.identity.name.clone(),
                     version: p.identity.version.clone(),
+                    dist_tags: BTreeSet::new(),
                     dependencies: BTreeMap::new(),
                     peer_dependencies: BTreeMap::new(),
                     optional_peer_dependencies: BTreeSet::new(),

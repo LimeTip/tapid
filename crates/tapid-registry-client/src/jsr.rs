@@ -160,7 +160,8 @@ fn parse_jsr(
         };
         let (dependencies, peer_dependencies) = parse_jsr_dependencies(version_object)?;
         artifacts.push(RegistryArtifact {
-            identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
+            dist_tags: Default::default(),
+            identity: RegistryPackageId::from_source(origin.clone().into(), name.clone(), version),
             artifact_url,
             integrity: Some(integrity),
             dependencies,

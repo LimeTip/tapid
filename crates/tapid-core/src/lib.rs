@@ -190,15 +190,32 @@ impl fmt::Display for RegistryOrigin {
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PackageInstanceId {
-    pub registry: RegistryOrigin,
+    pub registry: PackageSource,
     pub name: PackageName,
     pub version: PackageVersion,
 }
 
+impl fmt::Display for PackageInstanceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}@{}", self.registry, self.name, self.version)
+    }
+}
+
 impl PackageInstanceId {
-    pub fn new(registry: RegistryOrigin, name: PackageName, version: PackageVersion) -> Self {
+    pub fn from_source(
+        registry: PackageSource,
+        name: PackageName,
+        version: PackageVersion,
+    ) -> Self {
         Self {
             registry,
+            name,
+            version,
+        }
+    }
+    pub fn new(registry: RegistryOrigin, name: PackageName, version: PackageVersion) -> Self {
+        Self {
+            registry: registry.into(),
             name,
             version,
         }
@@ -332,6 +349,7 @@ pub enum DomainError {
     InvalidRegistryOrigin(String),
     InvalidPackageIntegrity(String),
     InvalidPlatformContext,
+    InvalidPackageSource,
 }
 
 impl fmt::Display for DomainError {
@@ -342,6 +360,7 @@ impl fmt::Display for DomainError {
             Self::InvalidArtifactDigest(value) => write!(f, "invalid artifact digest: {value}"),
             Self::InvalidRegistryOrigin(value) => write!(f, "invalid registry origin: {value}"),
             Self::InvalidPackageIntegrity(value) => write!(f, "invalid package integrity: {value}"),
+            Self::InvalidPackageSource => f.write_str("invalid copied package source"),
             Self::InvalidPlatformContext => f.write_str("invalid platform context"),
         }
     }
@@ -541,3 +560,43 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod copied_source_tests {
+    use super::*;
+
+    #[test]
+    fn copied_sources_preserve_immutable_identity_and_reject_secret_urls() {
+        let digest: ArtifactDigest = format!("sha256-{}", "a".repeat(64)).parse().unwrap();
+        let file = PackageSource::file("vendor/pkg.tgz", digest.clone()).unwrap();
+        assert_eq!(file.to_string().parse::<PackageSource>().unwrap(), file);
+        let git = PackageSource::git(
+            "https://example.test/repo.git",
+            &"b".repeat(40),
+            digest.clone(),
+        )
+        .unwrap();
+        assert_eq!(git.to_string().parse::<PackageSource>().unwrap(), git);
+        assert_ne!(file, git);
+        for path in [
+            "../pkg.tgz",
+            "/pkg.tgz",
+            "vendor/../pkg.tgz",
+            "vendor\\pkg.tgz",
+        ] {
+            assert!(PackageSource::file(path, digest.clone()).is_err());
+        }
+        for url in [
+            "https://user:secret@example.test/repo",
+            "ssh://example.test/repo",
+            "https://example.test/repo?token=secret",
+        ] {
+            let error = PackageSource::git(url, &"b".repeat(40), digest.clone()).unwrap_err();
+            assert!(!error.to_string().contains("secret"));
+        }
+        assert!(PackageSource::git("https://example.test/repo", "main", digest).is_err());
+    }
+}
+
+mod source;
+pub use source::{GitRepository, PackageSource};
