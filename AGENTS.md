@@ -2,6 +2,10 @@
 
 Tapid is a Rust package manager. Start with the task map below, relevant sections of the owning crate's README, its public interface, and nearby tests. Read applicable nested `AGENTS.md` files before changing their code. Read broader architecture or ADRs when changing a shared contract or security assumption; ordinary edits do not require reading every document.
 
+## Recommended skills
+
+For planning, implementation, review, PR descriptions, domain documentation, or session retrospectives, consult [recommended engineering skills](docs/recommended-skills.md) to select an installed skill and its workflow. Read the selected skill before using it; follow the repository rules below when its defaults differ.
+
 ## Task map
 
 | Task | Start here | Tests |
