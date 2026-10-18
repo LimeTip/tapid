@@ -12,6 +12,10 @@ node_modules/
 # Hermes planning and session artifacts
 .hermes/
 
+# Superpowers planning and session artifacts
+/.superpowers/
+/docs/superpowers/
+
 # Editor and operating-system files
 .DS_Store
 *.swp

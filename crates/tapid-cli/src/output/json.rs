@@ -7,6 +7,7 @@ mod dependency;
 mod explain;
 mod outdated;
 mod preview;
+mod tools;
 mod why;
 
 pub(crate) use cache::cache_result;
@@ -14,6 +15,7 @@ pub(crate) use dependency::installed;
 pub(crate) use explain::explain;
 pub(crate) use outdated::outdated;
 pub(crate) use preview::preview;
+pub(crate) use tools::tools;
 pub(crate) use why::{why_failure, why_success};
 
 mod diagnostic;

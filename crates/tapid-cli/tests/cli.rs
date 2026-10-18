@@ -21,6 +21,8 @@ mod command_support;
 mod explain_tests;
 #[path = "cli_cases/run_permissions.rs"]
 mod run_permission_tests;
+#[path = "cli_cases/tools.rs"]
+mod tool_tests;
 
 mod workspace_acceptance;
 
