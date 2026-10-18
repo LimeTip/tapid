@@ -64,12 +64,21 @@ fn catalog_temporary(root: &Path, journal: &[u8]) -> PathBuf {
     ))
 }
 
+fn encode_catalog(catalog: &Catalog) -> Result<String, OperationalError> {
+    let encoded = serde_json::to_string_pretty(catalog).map_err(error)?;
+    if encoded.len() > state::LIMIT {
+        return Err(error("tool catalog exceeds its bounded state limit"));
+    }
+    Ok(encoded)
+}
+
 fn settle(
     root: &Path,
     desired: &Catalog,
     alternate: &Catalog,
     temporary: &Path,
 ) -> Result<(), OperationalError> {
+    let encoded = encode_catalog(desired)?;
     // Only recorded bytes may be replaced/deleted. A user's replacement blocks
     // settlement rather than becoming permission to overwrite it.
     for name in desired
@@ -101,7 +110,6 @@ fn settle(
     }
     let path = root.join("catalog.json");
     state::check_path(&path)?;
-    let encoded = serde_json::to_string_pretty(desired).map_err(error)?;
     state::check_path(temporary)?;
     match fs::symlink_metadata(temporary) {
         Ok(_) => {
@@ -196,6 +204,12 @@ pub(super) fn activate(
     if encoded.len() > state::LIMIT {
         return Err(error("tool transaction exceeds its bounded state limit"));
     }
+    // Both rollback and commit must fit the same read bound. Include the
+    // decision digest added by recovery before publishing any transaction state.
+    encode_catalog(before)?;
+    let mut committed = after.clone();
+    committed.settled_transaction = Some(crate::filesystem::atomic::digest_bytes(&encoded));
+    encode_catalog(&committed)?;
     let temporary = catalog_temporary(root, &encoded);
     state::check_path(&temporary)?;
     match fs::symlink_metadata(&temporary) {
@@ -454,6 +468,83 @@ pub(super) fn cleanup(root: &Path, catalog: &Catalog) -> Result<Cleanup, Operati
 mod tests {
     use super::*;
     use tapid_test_support::TempHome;
+
+    #[test]
+    fn catalog_publication_rejects_oversized_encoding_before_changing_state() {
+        assert_oversized_catalog_rejected("pretty-expansion");
+    }
+
+    #[test]
+    fn catalog_publication_includes_commit_digest_in_size_bound() {
+        assert_oversized_catalog_rejected("commit-digest");
+    }
+
+    fn assert_oversized_catalog_rejected(case: &str) {
+        let home = TempHome::new(case).unwrap();
+        let root = state::root_path(Some(home.path())).unwrap();
+        state::initialize(&root).unwrap();
+        let before = Catalog::default();
+        let mut after = before.clone();
+        let mut commands = std::collections::BTreeMap::new();
+        let count = if case == "pretty-expansion" {
+            45_000
+        } else {
+            1
+        };
+        for index in 0..count {
+            commands.insert(
+                format!("hello-{index}"),
+                super::super::ToolBin {
+                    target: PathBuf::from("bin/hello.js"),
+                    node: true,
+                },
+            );
+        }
+        after.tools.insert(
+            "hello-tool".into(),
+            super::super::Tool {
+                requirement: "1.0.0".into(),
+                version: "1.0.0".into(),
+                generation: "deadbeef".into(),
+                commands,
+                installation_platform: None,
+            },
+        );
+        if case == "commit-digest" {
+            let size = serde_json::to_vec_pretty(&after).unwrap().len();
+            let target = &mut after
+                .tools
+                .get_mut("hello-tool")
+                .unwrap()
+                .commands
+                .get_mut("hello-0")
+                .unwrap()
+                .target;
+            *target = PathBuf::from("a".repeat(state::LIMIT - size + "bin/hello.js".len()));
+            assert_eq!(
+                serde_json::to_vec_pretty(&after).unwrap().len(),
+                state::LIMIT
+            );
+        } else {
+            assert!(serde_json::to_vec_pretty(&after).unwrap().len() > state::LIMIT);
+        }
+        assert!(
+            serde_json::to_vec(&Journal {
+                before: before.clone(),
+                after: after.clone(),
+            })
+            .unwrap()
+            .len()
+                <= state::LIMIT
+        );
+        assert!(activate(&root, &before, &after).is_err(), "{case}");
+        assert_eq!(state::load(&root).unwrap(), before, "{case}");
+        assert!(!root.join("pending.json").exists(), "{case}");
+        assert!(!root.join("committed").exists(), "{case}");
+        assert!(!recover(&root).unwrap(), "{case}");
+        activate(&root, &before, &before).unwrap();
+        state::load(&root).unwrap();
+    }
 
     #[test]
     fn catalog_recovery_accepts_a_stage_from_before_platform_identity_was_recorded() {
