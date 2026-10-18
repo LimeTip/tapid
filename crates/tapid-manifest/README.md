@@ -32,6 +32,9 @@ before deduplication. Exceeding either budget returns
 `WorkspaceError::DiscoveryLimitExceeded` before member parsing. Existing discovery
 entry points retain their unrestricted enumeration behavior.
 
+On Unix, manifest opens reject replacement symlinks and do not wait for FIFO
+writers. Discovery checks the opened descriptor is a regular file before reading.
+
 `Workspace::discover_bounded_with_member_source` passes each member's exact parsed
 UTF-8 source to a borrowed callback. Snapshot consumers can fingerprint those bytes
 before a later filesystem read. Discovery discards the source after each member;

@@ -245,8 +245,21 @@ fn contained_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
 }
 
 fn read_file(path: &Path) -> Result<String, String> {
-    let file =
-        fs::File::open(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    #[cfg(all(test, unix))]
+    read_race_tests::before_open(path);
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Type checks before opening cannot exclude replacement by a symlink or
+        // FIFO. Reject symlinks and never wait for a FIFO writer, then check the
+        // opened descriptor's type before reading any bytes.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
@@ -269,6 +282,129 @@ fn read_file(path: &Path) -> Result<String, String> {
         ));
     }
     String::from_utf8(bytes).map_err(|error| format!("cannot read {}: {error}", path.display()))
+}
+
+#[cfg(all(test, unix))]
+mod read_race_tests {
+    use super::*;
+    use std::{cell::RefCell, os::unix::fs::symlink};
+    use tapid_test_support::TempProject;
+
+    thread_local! {
+        static REPLACEMENT: RefCell<Option<(PathBuf, PathBuf)>> = const { RefCell::new(None) };
+    }
+
+    struct FaultGuard;
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            REPLACEMENT.with(|pending| pending.borrow_mut().take());
+        }
+    }
+
+    pub(super) fn before_open(path: &Path) {
+        let replacement = REPLACEMENT.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            if pending.as_ref().is_some_and(|(target, _)| target == path) {
+                pending.take()
+            } else {
+                None
+            }
+        });
+        if let Some((target, replacement)) = replacement {
+            fs::rename(replacement, target).unwrap();
+        }
+    }
+
+    fn project() -> TempProject {
+        let project = TempProject::new("workspace-open-race").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["member"]}"#,
+            )
+            .unwrap();
+        project
+            .write(
+                "member/package.json",
+                br#"{"name":"member","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        project
+    }
+
+    #[test]
+    fn discovery_rejects_symlink_replacements_before_open() {
+        for manifest in ["package.json", "member/package.json"] {
+            let project = project();
+            let external = TempProject::new("workspace-open-external").unwrap();
+            let source = br#"{"name":"external","version":"1.0.0"}"#;
+            let external_manifest = external.write("package.json", source).unwrap();
+            let replacement = project.path().join("replacement");
+            symlink(&external_manifest, &replacement).unwrap();
+            let target = project.path().join(manifest).canonicalize().unwrap();
+            REPLACEMENT.with(|pending| *pending.borrow_mut() = Some((target, replacement)));
+            let _guard = FaultGuard;
+            assert!(
+                Workspace::discover_typed(project.path()).is_err(),
+                "followed replacement for {manifest}"
+            );
+            assert_eq!(fs::read(external_manifest).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn discovery_rejects_fifo_replacements_without_waiting_for_a_writer() {
+        const ROOT_ENV: &str = "TAPID_TEST_WORKSPACE_FIFO_ROOT";
+        const MANIFEST_ENV: &str = "TAPID_TEST_WORKSPACE_FIFO_MANIFEST";
+        if let Some(root) = std::env::var_os(ROOT_ENV) {
+            let root = PathBuf::from(root);
+            let manifest = std::env::var_os(MANIFEST_ENV).unwrap();
+            let target = root.join(manifest).canonicalize().unwrap();
+            REPLACEMENT.with(|pending| {
+                *pending.borrow_mut() = Some((target, root.join("replacement")));
+            });
+            let _guard = FaultGuard;
+            assert!(Workspace::discover_typed(&root).is_err());
+            return;
+        }
+
+        // A blocking open must fail this test rather than hang the test runner.
+        for manifest in ["package.json", "member/package.json"] {
+            let project = project();
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(project.path().join("replacement"))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "workspace::read_race_tests::discovery_rejects_fifo_replacements_without_waiting_for_a_writer", "--nocapture"])
+                .env(ROOT_ENV, project.path())
+                .env(MANIFEST_ENV, manifest)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if child.try_wait().unwrap().is_some() {
+                    let output = child.wait_with_output().unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("discovery blocked opening replacement FIFO for {manifest}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
 }
 
 fn workspace_patterns(workspaces: Option<&Value>) -> Result<Vec<String>, String> {

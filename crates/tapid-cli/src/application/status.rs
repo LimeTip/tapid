@@ -202,6 +202,10 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
                 report.block("WORKSPACE_DISCOVERY_LIMIT", &manifest_path);
                 None
             }
+            Err(tapid_manifest::WorkspaceError::Manifest { path, .. }) => {
+                report.block("WORKSPACE_INVALID", path);
+                None
+            }
             Err(_) => {
                 report.block("WORKSPACE_INVALID", &manifest_path);
                 None

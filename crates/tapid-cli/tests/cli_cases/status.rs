@@ -13,6 +13,33 @@ fn status(project: &Path, extra: &[&str]) -> (std::process::Output, serde_json::
 }
 
 #[test]
+fn status_reports_the_malformed_workspace_member_path() {
+    let project = tapid_test_support::TempProject::new("status-invalid-member").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    let member = project
+        .write("packages/a/package.json", b"malformed JSON")
+        .unwrap();
+    let (output, value) = status(project.path(), &[]);
+    assert!(!output.status.success(), "{value}");
+    let blocker = value["data"]["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|blocker| blocker["code"] == "WORKSPACE_INVALID")
+        .unwrap();
+    assert_eq!(
+        blocker["location"],
+        member.canonicalize().unwrap().display().to_string(),
+        "{value}"
+    );
+}
+
+#[test]
 fn status_ignores_member_overrides_but_checks_root_overrides_and_member_specs() {
     for (root_override, invalid_spec) in [(false, false), (true, false), (false, true)] {
         let project = tapid_test_support::TempProject::new("status-member-overrides").unwrap();
