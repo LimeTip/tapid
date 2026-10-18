@@ -1,9 +1,23 @@
 //! Version 1 command results. Never render capability error text in this protocol.
-use crate::application::{
-    install::InstallReport,
-    lifecycle::OutdatedReport,
-    outcome::{ChangeState, OperationFailure, OperationOutcome, RetryAdvice, Warning},
+use crate::application::outcome::{
+    ChangeState, OperationFailure, OperationOutcome, RetryAdvice, Warning,
 };
+mod cache;
+mod dependency;
+mod explain;
+mod outdated;
+mod preview;
+mod tools;
+mod why;
+
+pub(crate) use cache::cache_result;
+pub(crate) use dependency::installed;
+pub(crate) use explain::explain;
+pub(crate) use outdated::outdated;
+pub(crate) use preview::preview;
+pub(crate) use tools::tools;
+pub(crate) use why::{why_failure, why_success};
+
 mod diagnostic;
 mod paths;
 
@@ -142,121 +156,6 @@ pub(crate) fn information(operation: &str, data: Value) -> ExitCode {
     emit(result, 0)
 }
 
-pub(crate) fn tools(report: &crate::application::tools::Report) -> ExitCode {
-    let mut result = envelope("tool", "success", Some(&report.outcome));
-    let mut truncated = Vec::new();
-    let tools = report.tools.iter().enumerate().map(|(index, info)| {
-        let base = format!("/data/tools/{index}");
-        let commands = info.tool.commands.iter().enumerate().map(|(command_index, (name, bin))| {
-            let path = format!("{base}/commands/{command_index}");
-            json!({"name":recorded_text(name, &format!("{path}/name"), &mut truncated),
-                "target":recorded_text(bin.target.display(), &format!("{path}/target"), &mut truncated)})
-        }).collect::<Vec<_>>();
-        let mut field = |value: &dyn std::fmt::Display, key: &str| recorded_text(value, &format!("{base}/{key}"), &mut truncated);
-        json!({
-            "name":field(&info.name,"name"), "version":field(&info.tool.version,"version"),
-            "requirement":field(&info.tool.requirement,"requirement"),
-            "environment":field(&info.environment.display(),"environment"),
-            "lockfile":field(&info.environment.join("tapid.lock").display(),"lockfile"),
-            "commands": commands
-        })
-    }).collect::<Vec<_>>();
-    result["data"] = json!({"tools":tools, "bin_dir":recorded_text(report.bin_dir.display(), "/data/bin_dir", &mut truncated)});
-    let fields = result["truncated_fields"].as_array_mut().unwrap();
-    fields.extend(truncated.into_iter().map(Value::String));
-    fields.sort_unstable_by(|a, b| a.as_str().cmp(&b.as_str()));
-    emit(result, 0)
-}
-
-pub(crate) fn explain(
-    report: Result<
-        &crate::application::explain::ExplainReport,
-        &crate::application::outcome::OperationalError,
-    >,
-) -> ExitCode {
-    let report = match report {
-        Ok(report) => report,
-        Err(error) => {
-            let mut result = envelope("explain", "failure", None);
-            diagnostic::record(&mut result, error, "operation");
-            return emit(result, 1);
-        }
-    };
-    let mismatch = report.byte_integrity == crate::application::explain::ByteIntegrity::Mismatch;
-    let mut result = envelope(
-        "explain",
-        if mismatch { "failure" } else { "success" },
-        None,
-    );
-    let mut truncated = Vec::new();
-    let evidence = &report.evidence;
-    let source = recorded_text(&report.source, "/data/source", &mut truncated);
-    let artifact = evidence
-        .artifact_url
-        .as_ref()
-        .map(|url| recorded_text(url, "/data/artifact", &mut truncated));
-    let attestation = evidence
-        .attestation_url
-        .as_ref()
-        .map(|url| recorded_text(url, "/data/provenance/reference", &mut truncated));
-    let name = recorded_text(&evidence.identity.name, "/data/package", &mut truncated);
-    let version = recorded_text(&evidence.identity.version, "/data/version", &mut truncated);
-    let registry = recorded_text(
-        &evidence.identity.registry,
-        "/data/registry",
-        &mut truncated,
-    );
-    result["data"] = json!({
-        "package": name,
-        "version": version,
-        "registry": registry,
-        "source": source,
-        "metadata_fetched_at": report.metadata_fetched_at,
-        "metadata_read_at": report.metadata_read_at,
-        "source_timestamp": evidence.modified_at,
-        "source_timestamp_status": if evidence.modified_at.is_some() { "reported" } else { "missing" },
-        "published_at": evidence.published_at,
-        "freshness": "unknown",
-        "artifact": artifact,
-        "registry_integrity": {
-            "status": if evidence.integrity.is_some() { "reported" } else { "missing" },
-            "value": evidence.integrity.as_ref().map(ToString::to_string),
-        },
-        "byte_integrity": {"status": report.byte_integrity, "actual": report.actual_integrity, "scope": report.actual_integrity.as_ref().map(|_| "supplied_local_artifact"), "checked_at": report.bytes_checked_at},
-        "registry_signatures": {"status": if evidence.signature_count.is_some() { "unverified" } else { "missing" }, "count": evidence.signature_count},
-        "provenance": {"status": if evidence.attestation_url.is_some() { "unverified" } else { "missing" }, "reference": attestation, "fetched": false},
-        "publisher_identity": {"status": "not_verified"},
-        "vulnerabilities": {"status": "unavailable", "reason": "no_provider_queried"},
-        "malware_analysis": {"status": "not_performed"},
-        "human_review": {"status": "unavailable"},
-        "limitations": ["Digest matches do not establish package safety, publisher identity, or intended content.", "Registry signatures and attestation references are not verified.", "Observation times and registry-reported timestamps do not establish evidence freshness."]
-    });
-    truncated.sort();
-    result["truncated_fields"] = json!(truncated);
-    if mismatch {
-        let context = crate::application::outcome::DiagnosticContext::comparison(
-            "artifact_integrity",
-            Some("sha512"),
-            evidence
-                .integrity
-                .as_ref()
-                .expect("mismatch requires expected integrity"),
-            report
-                .actual_integrity
-                .as_ref()
-                .expect("mismatch requires observed integrity"),
-        );
-        let error = crate::application::outcome::OperationalError::new(
-            crate::application::outcome::ErrorKind::Integrity,
-            "integrity mismatch",
-        )
-        .with_diagnostic(context)
-        .for_package((&evidence.identity).into());
-        diagnostic::record(&mut result, &error, "operation");
-    }
-    emit(result, u8::from(mismatch))
-}
-
 pub(crate) fn operation_error(operation: &str, code: &str) -> ExitCode {
     let mut result = envelope(operation, "failure", None);
     result["errors"] = json!([{"code": code, "phase": "operation", "context": null}]);
@@ -296,230 +195,11 @@ fn failure_result(failure: &OperationFailure, operation: &str) -> Value {
     result
 }
 
-pub(crate) fn why_success(
-    report: &crate::application::why::WhyReport,
-    project: &std::path::Path,
-) -> ExitCode {
-    let (result, status) = why_result(report, project);
-    emit(result, status)
-}
-
-fn why_result(
-    report: &crate::application::why::WhyReport,
-    project: &std::path::Path,
-) -> (Value, u8) {
-    let outcome = OperationOutcome::unchanged(project);
-    let not_found = report.paths.is_empty() && !report.truncated;
-    let mut result = envelope(
-        "why",
-        if report.truncated {
-            "partial"
-        } else {
-            "success"
-        },
-        Some(&outcome),
-    );
-    result["data"] = json!({
-        "package": &report.package,
-        "paths": &report.paths,
-        "truncated": report.truncated,
-        "not_found": not_found,
-        "graph_warnings": &report.warnings,
-    });
-    (result, u8::from(not_found))
-}
-
-pub(crate) fn why_failure(
-    project: &std::path::Path,
-    error: &crate::application::outcome::OperationalError,
-) -> ExitCode {
-    let outcome = OperationOutcome::unchanged(project);
-    let mut result = envelope("why", "failure", Some(&outcome));
-    diagnostic::record(&mut result, error, "operation");
-    emit(result, 1)
-}
-
 /// Emit a successful version 1 result with typed changes and command-specific data.
 pub(crate) fn completed(outcome: &OperationOutcome, operation: &str, data: Value) -> ExitCode {
     let mut result = envelope(operation, "success", Some(outcome));
     result["data"] = data;
     emit(result, 0)
-}
-
-pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
-    let mut result = envelope(operation, "success", Some(&report.outcome));
-    result["data"] = json!({"package_count": report.package_count, "replayed": report.replayed});
-    if operation == "update" {
-        let mut truncated = Vec::new();
-        let changes = report
-            .outcome
-            .warnings
-            .iter()
-            .filter_map(|warning| match warning {
-                Warning::UpdateGraphChange { package, reason } => Some((package, reason)),
-                _ => None,
-            })
-            .enumerate()
-            .map(|(index, (package, reason))| {
-                let package = recorded_text(
-                    package,
-                    &format!("/data/graph_changes/{index}/package"),
-                    &mut truncated,
-                );
-                let reason = recorded_text(
-                    reason,
-                    &format!("/data/graph_changes/{index}/reason"),
-                    &mut truncated,
-                );
-                json!({"package": package, "reason": reason})
-            })
-            .collect::<Vec<_>>();
-        result["data"]["graph_changes"] = json!(changes);
-        let fields = result["truncated_fields"]
-            .as_array_mut()
-            .expect("envelope truncation list");
-        fields.extend(truncated.into_iter().map(Value::String));
-        fields.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-    }
-    emit(result, 0)
-}
-
-pub(crate) fn outdated(report: &OutdatedReport, operation: &str, limit: usize) -> ExitCode {
-    emit(outdated_result(report, operation, limit), 0)
-}
-
-fn outdated_result(report: &OutdatedReport, operation: &str, limit: usize) -> Value {
-    let partial = report
-        .entries
-        .iter()
-        .any(|entry| entry.diagnostic.is_some());
-    let mut result = envelope(
-        operation,
-        if partial { "partial" } else { "success" },
-        Some(&report.outcome),
-    );
-    let mut truncated_fields = result["truncated_fields"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut entries = report.entries.iter().collect::<Vec<_>>();
-    entries.sort_by(|a, b| (&a.identity, &a.kind).cmp(&(&b.identity, &b.kind)));
-    let entries = entries
-        .into_iter()
-        .take(if limit == 0 { usize::MAX } else { limit })
-        .enumerate()
-        .map(|(index, entry)| {
-            let mut field = |value: &str, key: &str| recorded_text(value, &format!("/data/entries/{index}/{key}"), &mut truncated_fields);
-            json!({
-                "identity": field(&entry.identity, "identity"),
-                "kind": field(&entry.kind, "kind"),
-                "declared": field(&entry.declared, "declared"),
-                "locked": entry.locked.as_ref().map(|value| field(value, "locked")),
-                "newest_compatible": entry.newest_compatible.as_ref().map(|value| field(value, "newest_compatible")),
-                "newest_available": entry.newest_available.as_ref().map(|value| field(value, "newest_available")),
-                "compatible_impact": entry.impact(entry.newest_compatible.as_deref()),
-                "available_impact": entry.impact(entry.newest_available.as_deref()),
-                "error": entry.diagnostic.as_ref().map(|error| diagnostic::error(error, None, &format!("/data/entries/{index}/error"), &mut truncated_fields)),
-            })
-        })
-        .collect::<Vec<_>>();
-    truncated_fields.sort_unstable();
-    result["truncated_fields"] = json!(truncated_fields);
-    result["data"] = json!({"entries": entries, "total_entries": report.entries.len(), "truncated": limit != 0 && report.entries.len() > limit});
-    result
-}
-
-pub(crate) fn cache_result(
-    operation: &str,
-    root: &std::path::Path,
-    clean: bool,
-    remove: bool,
-    report: Result<tapid_store::CacheSummary, tapid_store::IngestError>,
-) -> ExitCode {
-    let mut result = envelope(
-        operation,
-        if report.is_ok() { "success" } else { "failure" },
-        None,
-    );
-    let mut truncated = Vec::new();
-    result["data"] = json!({
-        "scope": "published_package_data",
-        "store": recorded_text(root.display(), "/data/store", &mut truncated),
-        "store_path": paths::encode(root),
-        "action": if remove { "clean" } else if clean { "preview" } else { "info" },
-        "summary": null,
-    });
-    result["truncated_fields"] = json!(truncated);
-    match report {
-        Ok(summary) => {
-            result["data"]["summary"] = json!({
-                "artifacts": {"entries": summary.artifacts.entries, "bytes": summary.artifacts.bytes},
-                "trees": {"entries": summary.trees.entries, "bytes": summary.trees.bytes},
-                "preserved_entries": summary.preserved_entries,
-            });
-            if remove && (summary.artifacts.entries != 0 || summary.trees.entries != 0) {
-                result["changes"]["state"] = json!("committed");
-            }
-            emit(result, 0)
-        }
-        Err(error) => {
-            let busy = matches!(&error, tapid_store::IngestError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock);
-            let invalid_path = matches!(
-                &error,
-                tapid_store::IngestError::InvalidRoot | tapid_store::IngestError::CachePath(_)
-            );
-            result["errors"] = json!([{"code": if busy { "CACHE_BUSY" } else if invalid_path { "CACHE_PATH_INVALID" } else { "CACHE_MAINTENANCE_FAILED" }, "phase": "operation"}]);
-            if busy {
-                result["retry"] = json!("after_contention");
-            } else if matches!(error, tapid_store::IngestError::CacheCleanup(_)) {
-                // A deletion failure can leave a partially cleared cache. No
-                // project state or recovery transaction is involved.
-                result["changes"]["state"] = json!("committed_cleanup_pending");
-            }
-            emit(result, 1)
-        }
-    }
-}
-
-pub(crate) fn preview(
-    report: &crate::application::preview::PreviewReport,
-    operation: &str,
-) -> ExitCode {
-    let mut result = envelope(operation, "success", Some(&report.outcome));
-    let mut data = serde_json::to_value(report).expect("preview serialization");
-    let mut truncated = result["truncated_fields"]
-        .as_array()
-        .expect("truncation list")
-        .iter()
-        .map(|value| value.as_str().expect("truncation pointer").to_owned())
-        .collect::<Vec<_>>();
-    sanitize_preview(&mut data, "/data", &mut truncated);
-    result["data"] = data;
-    truncated.sort_unstable();
-    truncated.dedup();
-    result["truncated_fields"] = json!(truncated);
-    emit(result, 0)
-}
-
-fn sanitize_preview(value: &mut Value, pointer: &str, truncated: &mut Vec<String>) {
-    match value {
-        Value::String(value) => *value = recorded_text(&*value, pointer, truncated),
-        Value::Array(values) => {
-            for (index, value) in values.iter_mut().enumerate() {
-                sanitize_preview(value, &format!("{pointer}/{index}"), truncated);
-            }
-        }
-        Value::Object(values) => {
-            for (key, value) in values {
-                let key = key.replace('~', "~0").replace('/', "~1");
-                sanitize_preview(value, &format!("{pointer}/{key}"), truncated);
-            }
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]
@@ -674,99 +354,5 @@ mod tests {
             failure_result(&failure, "install")["retry"],
             "after_contention"
         );
-    }
-
-    #[test]
-    fn outdated_is_sorted_bounded_and_partial_even_when_error_is_beyond_limit() {
-        let entries = (0..101)
-            .rev()
-            .map(|index| crate::application::lifecycle::OutdatedEntry {
-                identity: format!("package-{index:03}"),
-                kind: "dependencies".into(),
-                declared: format!(
-                    "https://user:secret@example.com/path?token=hidden#fragment{}",
-                    "界".repeat(4096)
-                ),
-                locked: None,
-                newest_compatible: None,
-                newest_available: None,
-                diagnostic: (index == 100)
-                    .then(|| OperationalError::new(ErrorKind::RegistryMetadata, "secret")),
-            })
-            .collect();
-        let report = OutdatedReport {
-            entries,
-            outcome: OperationOutcome::unchanged(Path::new("project")),
-        };
-        let result = outdated_result(&report, "outdated", 100);
-        assert_eq!(result["outcome"], "partial");
-        assert_eq!(result["data"]["truncated"], true);
-        assert_eq!(result["data"]["total_entries"], 101);
-        assert_eq!(result["data"]["entries"].as_array().unwrap().len(), 100);
-        assert_eq!(result["data"]["entries"][0]["identity"], "package-000");
-        assert!(!result.to_string().contains("secret"));
-        assert!(!result.to_string().contains("hidden"));
-        assert!(!result.to_string().contains("fragment"));
-        assert!(text("界".repeat(4096)).0.len() <= MAX_TEXT_BYTES);
-        assert!(!text("x".repeat(MAX_TEXT_BYTES)).1);
-        assert!(!text("a\u{1b}[31m\n").0.contains('\u{1b}'));
-    }
-
-    #[test]
-    fn shortened_scalars_are_marked_and_recovery_paths_remain_complete() {
-        let project = tapid_test_support::TempProject::new("json-path-display").unwrap();
-        let long_path = project.path().join("界".repeat(2000));
-        let mut outcome = OperationOutcome::unchanged(&long_path);
-        for name in ["node_modules", "package.json", "tapid.lock"] {
-            outcome.changed_files.push(long_path.join(name));
-        }
-        let result = envelope("install", "failure", Some(&outcome));
-        assert_eq!(result["project_path"]["encoding"], "utf8");
-        assert_eq!(result["project_path"]["value"], long_path.to_str().unwrap());
-        assert_eq!(
-            result["changes"]["paths"][0]["value"],
-            long_path.join("node_modules").to_str().unwrap()
-        );
-        assert_eq!(result["changes"]["paths"].as_array().unwrap().len(), 3);
-        let shortened = result["truncated_fields"].as_array().unwrap();
-        assert!(shortened.contains(&json!("/project")));
-        assert!(shortened.contains(&json!("/changes/files/0")));
-        assert!(result["project"].as_str().unwrap().len() <= MAX_TEXT_BYTES);
-
-        let report = OutdatedReport {
-            entries: vec![crate::application::lifecycle::OutdatedEntry {
-                identity: "x".repeat(5000),
-                kind: "dependencies".into(),
-                declared: "*".into(),
-                locked: None,
-                newest_compatible: None,
-                newest_available: None,
-                diagnostic: None,
-            }],
-            outcome,
-        };
-        let result = outdated_result(&report, "outdated", 100);
-        let shortened = result["truncated_fields"].as_array().unwrap();
-        assert!(shortened.contains(&json!("/project")));
-        assert!(shortened.contains(&json!("/data/entries/0/identity")));
-    }
-
-    #[test]
-    fn truncated_empty_why_result_is_partial_and_successful() {
-        let report = crate::application::why::WhyReport {
-            schema_version: 1,
-            operation: "why",
-            outcome: "not_found",
-            effective_project: "project".into(),
-            changes: Vec::new(),
-            warnings: Vec::new(),
-            package: "missing".into(),
-            paths: Vec::new(),
-            truncated: true,
-        };
-        let (result, status) = why_result(&report, Path::new("project"));
-        assert_eq!(result["outcome"], "partial");
-        assert_eq!(result["data"]["not_found"], false);
-        assert_eq!(status, 0);
     }
 }
