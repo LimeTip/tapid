@@ -117,21 +117,79 @@ test('ARM contracts reject cache bypass, matrix, flags, ordering and pin mutatio
 });
 
 const installerNames = ['Validate Unix developer installer at the checked head', 'Validate Windows developer installer'];
+test('Windows consumer validation provisions and cleans up its own network guard', async () => {
+  const consumer = job((await source('.github/workflows/ci.yml')).replaceAll('\r\n', '\n'), 'platform-consumer-validation');
+  const install = step(consumer, 'Install Windows network guard for consumer validation');
+  const cleanup = step(consumer, 'Remove Windows network guard after consumer validation');
+  assert.match(install, /if: runner.os == 'Windows'/);
+  assert(install.includes('& target/debug/tapid.exe sandbox install\n'));
+  assert(install.includes('& target/debug/tapid.exe sandbox status\n'));
+  assert(install.includes('if ($LASTEXITCODE -ne 0)'));
+  assert(consumer.indexOf(step(consumer, 'Build Tapid binary')) < consumer.indexOf(install));
+  assert(consumer.indexOf(install) < consumer.indexOf(step(consumer, 'Verify native read-only child, forwarding and exit codes (Windows)')));
+  assert(cleanup.includes("if: always() && runner.os == 'Windows' && steps.consumer-guard.outcome != 'skipped'"));
+  assert(cleanup.includes('& target/debug/tapid.exe sandbox uninstall\n'));
+  assert(cleanup.includes('if ($LASTEXITCODE -ne 0)'));
+  assert(consumer.indexOf(cleanup) > consumer.indexOf(step(consumer, 'Record Windows handoff artifact identity')));
+  assert.doesNotMatch(install + cleanup, /continue-on-error|\|\| true/);
+});
+
 const compilerEnv = '        env:\n          CARGO_TARGET_DIR: ${{ github.workspace }}/target\n';
+const guardNames = [
+  'Install Windows network guard for native containment tests',
+  'Verify Windows guard namespace removal and rollback',
+  'Remove Windows network guard after native tests',
+];
+const assertGuardPrerequisite = (native: string) => {
+  const [install, control, cleanup] = guardNames.map(name => step(native, name));
+  for (const owner of [install, control]) {
+    assert.match(owner, /\n        if: runner.os == 'Windows'\n        shell: pwsh\n/);
+    assert(owner.includes(compilerEnv));
+    assert.doesNotMatch(owner, /continue-on-error|cache-hit|\|\| true/);
+  }
+  assert(install.includes('scripts/dev.ts build -p tapid --bin tapid --locked'));
+  assert(install.includes('scripts/dev.ts metadata --no-deps --format-version 1 --locked'));
+  assert(install.includes('& $binary sandbox install\n'));
+  assert(install.includes('& $binary sandbox status\n'));
+  assert(install.includes('if ($LASTEXITCODE -ne 0)'));
+  assert(control.includes('guard_owned_namespace_removal -- --ignored'));
+  assert(native.indexOf(install) < native.indexOf(control));
+  assert(native.indexOf(control) < native.indexOf(step(native, 'Run tests')));
+  assert(cleanup.includes("if: always() && runner.os == 'Windows' && env.TAPID_CI_GUARD_CLI != ''"));
+  assert(cleanup.includes('& $env:TAPID_CI_GUARD_CLI sandbox uninstall\n'));
+  assert(native.indexOf(cleanup) > native.indexOf(step(native, 'Run nested integration workspace')));
+};
+
+test('Windows guard is mandatory before native tests and removed afterward', async () => {
+  const native = job(await source('.github/workflows/ci.yml'), 'test');
+  assertGuardPrerequisite(native);
+  const install = step(native, guardNames[0]);
+  for (const broken of [
+    native.replace(install, ''),
+    native.replace(install, install.replace("runner.os == 'Windows'", 'false')),
+    native.replace(install, '').replace(step(native, 'Run tests'), step(native, 'Run tests') + install),
+    native.replace('sandbox install\n', 'sandbox status\n'),
+    native.replace(step(native, guardNames[2]), ''),
+  ]) assert.throws(() => assertGuardPrerequisite(broken));
+});
+
 const assertInstallerCache = (ci: string) => {
   const native = job(ci, 'test');
+  assertGuardPrerequisite(native);
   for (const name of installerNames) {
     const install = step(native, name);
     assert(install.includes(compilerEnv), `${name} requires checkout-local compiler env`);
     assert.equal((install.match(/\n        env:/g) || []).length, 1);
   }
-  assert.equal((ci.match(/CARGO_TARGET_DIR/g) || []).length, 2, 'compiler target must not leak to other steps, jobs, global env or GITHUB_ENV');
-  // Normalize only the approved Test bootstrap input, pin migration and two compiler env blocks.
+  assert.equal((ci.match(/CARGO_TARGET_DIR/g) || []).length, 4, 'compiler target is confined to two installer and two guard steps');
+  // Strip the separately validated guard steps, then normalize the approved Test bootstrap,
+  // pin migration and two installer compiler env blocks.
   // All actual install commands, source-ref, fresh destination, help, uninstall,
-  // native tests and documentation ownership retain the snapshot with TypeScript helpers.
+  // Keep current-main TypeScript helper changes and freeze the reviewed Node prerequisite.
   assertTestBootstrap(ci);
-  const original = native.replace(testCacheInputs, '').replaceAll(compilerEnv, '').replaceAll(pin, 'Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2');
-  assert.equal(digest(original), '8e36fde77fc2b4c8fa19c886e543c42de1ccec795c7b88b107d9d376e0402fe1');
+  const withoutGuard = guardNames.reduce((text, name) => text.replace(step(native, name), ''), native);
+  const original = withoutGuard.replace(testCacheInputs, '').replaceAll(compilerEnv, '').replaceAll(pin, 'Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2');
+  assert.equal(digest(original), '62230f37cc0392d8dbb88f4feb23b1cc989bf5bc51372aeecf15fbe2f8ed8564');
 };
 const assertSourceInstallers = (sh: string, ps: string) => {
   const unixStart = sh.indexOf('if [ "$SOURCE_REF_SET" -eq 1 ]; then');

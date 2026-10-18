@@ -28,6 +28,38 @@ fn make_marked_tree(root: &Path, contents: &str) -> ArtifactDigest {
     digest
 }
 
+#[test]
+fn verified_tree_miss_is_distinct_from_a_missing_marker_or_symlink() {
+    let project = tapid_test_support::TempProject::new("tree-miss").unwrap();
+    let store = Store::new(project.path());
+    let digest = digest(b"missing");
+    assert!(matches!(
+        store.verified_tree_path(&digest),
+        Err(IngestError::TreeMissing(_))
+    ));
+    assert!(matches!(
+        store.verified_tree_snapshot(&digest),
+        Err(IngestError::TreeMissing(_))
+    ));
+    let tree = project.path().join("trees").join(digest.as_str());
+    fs::create_dir_all(&tree).unwrap();
+    assert!(!matches!(
+        store.verified_tree_path(&digest).unwrap_err(),
+        IngestError::TreeMissing(_)
+    ));
+    assert!(store.verified_tree_snapshot(&digest).is_err());
+    #[cfg(unix)]
+    {
+        fs::remove_dir(&tree).unwrap();
+        std::os::unix::fs::symlink(project.path().join("absent"), &tree).unwrap();
+        assert!(!matches!(
+            store.verified_tree_path(&digest).unwrap_err(),
+            IngestError::TreeMissing(_)
+        ));
+        assert!(store.verified_tree_snapshot(&digest).is_err());
+    }
+}
+
 fn coordinator(project: &Path, state: &str) -> PathBuf {
     fs::create_dir_all(project).unwrap();
     let path = project.join(".tapid-lifecycle-journal.json");
@@ -155,6 +187,40 @@ fn version_two_coordinator_recovery_removes_prepared_transaction_tree() {
     fs::create_dir_all(&store_root).unwrap();
     let created_digest = make_marked_tree(&store_root, "version two transaction");
     let coordinator = version_two_coordinator(&project, "Prepared");
+    write_store_journal(
+        &store_root,
+        &coordinator,
+        &[created_digest.as_str().to_owned()],
+        false,
+    )
+    .unwrap();
+
+    Store::new(&store_root).recover_transactions().unwrap();
+
+    assert!(
+        !store_root
+            .join("trees")
+            .join(created_digest.as_str())
+            .exists()
+    );
+    assert!(!store_root.join(STORE_JOURNAL).exists());
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(project);
+}
+
+#[test]
+fn version_three_coordinator_recovery_removes_prepared_transaction_tree() {
+    let root = root();
+    let project = root.with_extension("v3-coordinator-project");
+    let store_root = root.join("store");
+    fs::create_dir_all(&store_root).unwrap();
+    let created_digest = make_marked_tree(&store_root, "version three transaction");
+    let coordinator = version_two_coordinator(&project, "Prepared");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&coordinator).unwrap()).unwrap();
+    record["version"] = serde_json::json!(3);
+    record["members"] = serde_json::json!([]);
+    fs::write(&coordinator, record.to_string()).unwrap();
     write_store_journal(
         &store_root,
         &coordinator,
@@ -587,7 +653,7 @@ fn deleted_snapshot_tree_releases_its_lease_for_parent_recovery() {
     let store = Store::new(&root);
     let snapshot = store.verified_tree_snapshot(&digest).unwrap();
     let reservation = snapshot.parent().unwrap().to_owned();
-    fs::remove_dir_all(snapshot).unwrap();
+    fs::remove_dir_all(snapshot.path()).unwrap();
 
     store.cleanup_stale_replay_snapshots().unwrap();
 
@@ -882,5 +948,45 @@ fn publication_snapshot_survives_rollback_without_reentering_store_lock() {
     publication.rollback().unwrap();
     assert_eq!(fs::read(snapshot.join("package.json")).unwrap(), b"{}");
     assert!(store.verified_tree_path(&digest).is_err());
-    fs::remove_dir_all(snapshot).unwrap();
+    fs::remove_dir_all(snapshot.path()).unwrap();
+}
+
+#[test]
+fn owned_snapshot_releases_reservation_on_drop() {
+    let fixture = tapid_test_support::TempProject::new("owned-snapshot").unwrap();
+    let store = Store::new(fixture.path().join("store"));
+    let source = fixture.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("file"), b"snapshot").unwrap();
+    let digest = tapid_archive::canonical_tree_digest(&source)
+        .unwrap()
+        .parse()
+        .unwrap();
+    store.activate_verified_tree(&digest, &source).unwrap();
+    let snapshot = store.verified_tree_snapshot(&digest).unwrap();
+    let reservation = snapshot.parent().unwrap().to_owned();
+    assert!(reservation.is_dir());
+    drop(snapshot);
+    assert!(!reservation.exists());
+}
+
+#[test]
+fn snapshot_drop_preserves_a_replaced_reservation() {
+    let project = tapid_test_support::TempProject::new("snapshot-identity").unwrap();
+    let store = Store::new(project.path().join("store"));
+    let source = project.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("file"), b"snapshot").unwrap();
+    let digest = tapid_archive::canonical_tree_digest(&source)
+        .unwrap()
+        .parse()
+        .unwrap();
+    store.activate_verified_tree(&digest, &source).unwrap();
+    let snapshot = store.verified_tree_snapshot(&digest).unwrap();
+    let reservation = snapshot.parent().unwrap().to_owned();
+    fs::rename(&reservation, project.path().join("moved")).unwrap();
+    fs::create_dir(&reservation).unwrap();
+    fs::write(reservation.join("replacement"), b"keep").unwrap();
+    drop(snapshot);
+    assert_eq!(fs::read(reservation.join("replacement")).unwrap(), b"keep");
 }

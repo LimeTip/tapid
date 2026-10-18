@@ -9,4 +9,4 @@
 
 Wire-facing package identity contracts for the Tapid package ecosystem.
 
-`PackageInstanceWire` serializes registry, package name, and package version as camel-case transport strings while keeping those untrusted strings separate from `tapid-core` domain types. Conversion back to `PackageInstanceId` validates the registry origin, package name, and semantic version at the boundary. The crate currently defines package identity transport only; it is not a complete client-registry protocol.
+`PackageInstanceWire` serializes source, package name, and package version as camel-case transport strings while keeping those untrusted strings separate from `tapid-core` domain types. The historical `registry` field carries either a registry origin or an immutable copied file/Git source. Conversion back to `PackageInstanceId` validates the source, package name, and semantic version at the boundary. The crate currently defines package identity transport only; it is not a complete client-registry protocol.

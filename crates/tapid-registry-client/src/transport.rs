@@ -2,8 +2,8 @@ use crate::TransportError;
 use std::{io::Read, time::Duration};
 use url::Url;
 
-const STANDARD_METADATA_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
-const STANDARD_ARTIFACT_MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+pub(crate) const STANDARD_METADATA_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const STANDARD_ARTIFACT_MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_GET_ATTEMPTS: u32 = 3;
 const MAX_REDIRECT_HOPS: usize = 10;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -64,7 +64,7 @@ fn request_error_class(error: &reqwest::Error) -> &'static str {
     }
 }
 
-fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, TransportError> {
+pub(crate) fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, TransportError> {
     let mut body = Vec::new();
     let take_limit = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
     reader
@@ -182,61 +182,7 @@ impl Origin {
 }
 
 pub(crate) fn request_url_is_safe(raw: &str, url: &Url) -> bool {
-    if !raw.is_ascii() {
-        return false;
-    }
-    let Some(remainder) = raw.strip_prefix("https://") else {
-        return false;
-    };
-    let Some(authority) = remainder.split(['/', '?', '#']).next() else {
-        return false;
-    };
-    !authority.is_empty()
-        && !authority.starts_with('/')
-        && !authority.contains('@')
-        && url.as_str() == raw
-        && !raw
-            .bytes()
-            .any(|byte| byte.is_ascii_control() || byte == b' ')
-        && !raw.contains('\\')
-        && !path_has_noncanonical_percent_encoding(url.path())
-        && url.scheme() == "https"
-        && url.host_str().is_some()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.query().is_none()
-        && url.fragment().is_none()
-}
-
-fn path_has_noncanonical_percent_encoding(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'%' {
-            index += 1;
-            continue;
-        }
-        let Some(encoded) = bytes.get(index + 1..index + 3) else {
-            return true;
-        };
-        if encoded.iter().any(|byte| matches!(byte, b'a'..=b'f')) {
-            return true;
-        }
-        let Ok(encoded) = str::from_utf8(encoded) else {
-            return true;
-        };
-        let Ok(decoded) = u8::from_str_radix(encoded, 16) else {
-            return true;
-        };
-        if decoded.is_ascii_control()
-            || decoded.is_ascii_alphanumeric()
-            || b"-._~".contains(&decoded)
-        {
-            return true;
-        }
-        index += 3;
-    }
-    false
+    raw == url.as_str() && raw.parse::<tapid_core::ArtifactUrl>().is_ok()
 }
 
 fn redirect_is_allowed(

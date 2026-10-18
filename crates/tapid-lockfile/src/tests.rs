@@ -2,6 +2,47 @@ use super::{LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfil
 use proptest::prelude::*;
 
 #[test]
+fn copied_sources_require_schema_10_and_cannot_claim_registry_authentication() {
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let source = format!("file:vendor/tool.tgz#{digest}");
+    let original = package_fixture();
+    let package = LockedPackage::new_with_provenance(
+        &source,
+        "tool",
+        "1.0.0",
+        original.artifact_integrity(),
+        &digest,
+        super::RegistryIntegrityProvenance::LocallyComputed,
+    )
+    .unwrap();
+    let key = package.key();
+    let mut lock = Lockfile::new(&digest).unwrap();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    lock.set_root_bindings([("local".into(), key.clone())].into())
+        .unwrap();
+    let serialized = lock.to_json().unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(value["lockfileVersion"], 10);
+    assert!(
+        value["packages"][&key]
+            .get("registryIntegrityDeclared")
+            .is_none()
+    );
+    assert_eq!(
+        Lockfile::from_json(&serialized).unwrap().to_json().unwrap(),
+        serialized
+    );
+    for version in [4, 6, 7, 9] {
+        value["lockfileVersion"] = version.into();
+        assert!(Lockfile::from_json(&value.to_string()).is_err());
+    }
+    value["lockfileVersion"] = 10.into();
+    value["packages"][&key]["registryIntegrityDeclared"] = true.into();
+    assert!(Lockfile::from_json(&value.to_string()).is_err());
+}
+
+#[test]
 fn lifecycle_derived_outputs_require_schema_9_and_preserve_source_identity() {
     let package = package_fixture();
     let key = package.key();
@@ -872,10 +913,35 @@ fn package_key_roundtrips_contexts_without_loss() {
     let key = package.key();
     let parsed = key.parse::<super::LockfilePackageKey>().unwrap();
     assert_eq!(parsed.to_string(), key);
+    assert_eq!(parsed.peer_context().unwrap(), peer);
+    assert_eq!(parsed.platform_context().unwrap(), platform);
     assert!(key.contains("foo%2Dbar"));
     assert!(key.contains("linux%2Dgnu"));
     assert!(key.contains("x86_64%2Dunknown"));
     assert!(key.contains("musl%2Dextra"));
+}
+
+#[test]
+fn typed_context_accessors_reject_noncanonical_public_field_mutations() {
+    let key: super::LockfilePackageKey = package_fixture().key().parse().unwrap();
+    for peer in [
+        "react@1.0.0",
+        "name=react;version=%31.0.0",
+        "name=react;version=1.0.0,name=react;version=1.0.0",
+    ] {
+        let mut changed = key.clone();
+        changed.peer_context = peer.into();
+        assert!(changed.peer_context().is_err(), "accepted {peer}");
+    }
+    for platform in [
+        "linux-x64",
+        "os=linux;libc=;cpu=x64",
+        "os=%6Cinux;cpu=x64;libc=",
+    ] {
+        let mut changed = key.clone();
+        changed.platform_context = platform.into();
+        assert!(changed.platform_context().is_err(), "accepted {platform}");
+    }
 }
 
 #[test]

@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn workspace_materialization_compares_canonical_project_roots() {
+    let project = tapid_test_support::TempProject::new("workspace-root-identity").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/member/package.json",
+            br#"{"name":"member","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    std::fs::create_dir(project.path().join("child")).unwrap();
+    let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+    let noncanonical = project.path().join("child/..");
+    for path in [noncanonical.as_path(), project.path()] {
+        let workspace = workspace_materialization(path, &config).unwrap();
+        let manifests = imported_workspace_manifests(path, &workspace).unwrap();
+        assert!(manifests.contains_key("packages/member"));
+    }
+}
+
+#[test]
 fn fetched_locked_versions_fill_missing_registry_urls_without_changing_pins() {
     for fixture in [false, true] {
         let mut pinned = named_record("plugin", "1.0.0", &[("dep", "1.0.0")]);
@@ -65,7 +90,7 @@ fn fetched_locked_versions_refresh_only_peer_metadata() {
         .peer_dependencies
         .insert("react".into(), "^18".into());
     mutable.optional_peer_dependencies.insert("react".into());
-    let registry: RegistryOrigin = NPM.parse().unwrap();
+    let registry: PackageSource = NPM.parse().unwrap();
     let roots = [
         ("plugin", "1.0.0"),
         ("plugin-next", "npm:plugin@2.0.0"),
@@ -187,7 +212,7 @@ fn overriding_an_alias_range_preserves_its_actual_identity() {
 }
 #[test]
 fn custom_private_origins_use_the_npm_metadata_protocol() {
-    let registry: RegistryOrigin = "https://127.0.0.1:9".parse().unwrap();
+    let registry: PackageSource = "https://127.0.0.1:9".parse().unwrap();
     let transport =
         HttpsTransport::authenticated_metadata([registry.to_string()], std::iter::empty()).unwrap();
     let config = crate::registry::RegistryConfig::from_toml(
@@ -197,7 +222,7 @@ fn custom_private_origins_use_the_npm_metadata_protocol() {
     let error = remote_records(
         &transport,
         &config,
-        &registry,
+        registry.registry().unwrap(),
         &"private-package".parse().unwrap(),
         false,
     )
@@ -222,9 +247,13 @@ url='https://packages.acme.example'
     )
     .unwrap();
     let (private_origin, package_name) = config.identity_for_spec("@acme/widget").unwrap();
-    let root = Dependency::new(private_origin.clone(), package_name, "*".parse().unwrap());
+    let root = Dependency::new(
+        private_origin.clone().into(),
+        package_name,
+        "*".parse().unwrap(),
+    );
     let mut private_package = named_record("@acme/widget", "1.0.0", &[("left-pad", "^1")]);
-    private_package.registry = private_origin.clone();
+    private_package.registry = private_origin.clone().into();
     let public_origin: RegistryOrigin = NPM.parse().unwrap();
     let mut requests = Vec::new();
 
@@ -270,7 +299,7 @@ url='https://packages.acme.example'
     );
     let public_package = named_record("public-app", "1.0.0", &[("@acme/helper", "^1")]);
     let mut private_package = named_record("@acme/helper", "1.2.0", &[]);
-    private_package.registry = private_origin.clone();
+    private_package.registry = private_origin.clone().into();
     let mut requests = Vec::new();
 
     let result = resolve_with_fetch_routed(
@@ -318,7 +347,7 @@ url='https://packages.acme.example'
         .optional_dependencies
         .insert("@acme/feature".into(), "^1".into());
     let mut private_feature = named_record("@acme/feature", "1.1.0", &[]);
-    private_feature.registry = private_origin.clone();
+    private_feature.registry = private_origin.clone().into();
 
     let result = resolve_with_fetch_routed(
         &[root],
@@ -355,7 +384,7 @@ url='https://packages.acme.example'
             "*".parse().unwrap(),
         ),
         Dependency::new(
-            private_origin.clone(),
+            private_origin.clone().into(),
             "@acme/host".parse().unwrap(),
             "*".parse().unwrap(),
         ),
@@ -365,7 +394,7 @@ url='https://packages.acme.example'
         .peer_dependencies
         .insert("@acme/host".into(), "^1".into());
     let mut host = named_record("@acme/host", "1.2.0", &[]);
-    host.registry = private_origin.clone();
+    host.registry = private_origin.clone().into();
 
     let result = resolve_with_fetch_routed(
         &roots,
@@ -455,6 +484,41 @@ fn manifest_roots_rejects_conflicting_direct_dependency_override() {
 }
 
 #[test]
+fn override_diagnostics_preserve_non_npm_metadata_origins() {
+    use crate::application::outcome::{
+        Declaration, DiagnosticContext, DiagnosticPackage, RequirementDiagnostic,
+    };
+    let manifest =
+        PackageManifest::parse(r#"{"name":"app","version":"1.0.0","overrides":{"h3":"^3"}}"#)
+            .unwrap();
+    let overrides = manifest_overrides(&manifest).unwrap();
+    for source in ["https://registry.example.test", "https://jsr.io"] {
+        let original = RequirementDiagnostic {
+            local_name: Some("h3".into()),
+            requirement: "^3".into(),
+            package: Some(DiagnosticPackage {
+                source: source.into(),
+                name: "parent".into(),
+                version: Some("1.0.0".into()),
+            }),
+            declaration: Some(Declaration::metadata("dependencies", "h3")),
+        };
+        let mut context = DiagnosticContext {
+            requirements: vec![original.clone()],
+            ..DiagnosticContext::default()
+        };
+        resolution::locate_override_requirements(
+            &mut context,
+            &[],
+            &manifest,
+            Path::new("package.json"),
+            &overrides,
+        );
+        assert_eq!(context.requirements, vec![original]);
+    }
+}
+
+#[test]
 fn root_override_replaces_a_transitive_dependency_requirement() {
     let root = Dependency::new(
         NPM.parse().unwrap(),
@@ -493,7 +557,7 @@ fn root_override_replaces_a_transitive_dependency_requirement() {
 #[test]
 fn wide_required_frontier_rebuilds_metadata_only_once_per_wave() {
     RESOLVER_METADATA_BUILD_COUNT.set(0);
-    let registry: RegistryOrigin = NPM.parse().unwrap();
+    let registry: PackageSource = NPM.parse().unwrap();
     let roots = (0..64)
         .map(|index| {
             Dependency::new(
@@ -519,7 +583,7 @@ fn wide_required_frontier_rebuilds_metadata_only_once_per_wave() {
 #[test]
 fn deep_required_frontier_normalizes_each_version_once() {
     RESOLVER_METADATA_VERSION_VISITS.set(0);
-    let registry: RegistryOrigin = NPM.parse().unwrap();
+    let registry: PackageSource = NPM.parse().unwrap();
     let root = Dependency::new(registry, "pkg-0".parse().unwrap(), "1.0.0".parse().unwrap());
 
     let (resolution, _) = resolve_with_fetch(&[root], |_, name| {
@@ -541,7 +605,7 @@ fn deep_required_frontier_normalizes_each_version_once() {
 #[test]
 fn one_packument_updates_parent_metadata_once_per_version() {
     RESOLVER_METADATA_PARENT_VISITS.set(0);
-    let registry: RegistryOrigin = NPM.parse().unwrap();
+    let registry: PackageSource = NPM.parse().unwrap();
     let root = Dependency::new(registry, "large".parse().unwrap(), "*".parse().unwrap());
     let version_count = 256;
 
@@ -610,6 +674,9 @@ fn record(version: &str, dependency_requirement: Option<&str>) -> PackageRecord 
 
 fn named_record(name: &str, version: &str, dependencies: &[(&str, &str)]) -> PackageRecord {
     PackageRecord {
+        git_reference: None,
+        copied_archive: None,
+        dist_tags: BTreeSet::new(),
         registry: NPM.parse().unwrap(),
         name: name.parse().unwrap(),
         version: version.parse().unwrap(),
@@ -693,7 +760,7 @@ fn malformed_peer_requirement_fails_without_flattening() {
     let mut record = named_record("plugin", "1.0.0", &[("runtime", "^1.0.0")]);
     record
         .peer_dependencies
-        .insert("host".into(), "not-a-range".into());
+        .insert("host".into(), "not a range".into());
 
     let error = match normalize_record(&record) {
         Ok(_) => panic!("malformed peer metadata was accepted"),
@@ -715,50 +782,6 @@ fn malformed_peer_name_fails_closed() {
         Err(error) => error,
     };
     assert!(error.contains("peer dependency ../host has an unsupported name"));
-}
-
-#[test]
-fn selected_platform_constraints_produce_an_exact_lockfile_context() {
-    let platform = PackagePlatform {
-        os: vec!["darwin".into()],
-        cpu: vec!["arm64".into()],
-        libc: Vec::new(),
-    };
-
-    let context = selected_platform_context_for("macos", "aarch64", None, &platform).unwrap();
-
-    assert_eq!(context.os.as_deref(), Some("darwin"));
-    assert_eq!(context.cpu.as_deref(), Some("arm64"));
-    assert_eq!(context.libc, None);
-}
-
-#[test]
-fn libc_constraints_follow_linux_only_npm_semantics() {
-    let positive = PackagePlatform {
-        os: Vec::new(),
-        cpu: Vec::new(),
-        libc: vec!["glibc".into()],
-    };
-    let exclusion_only = PackagePlatform {
-        os: Vec::new(),
-        cpu: Vec::new(),
-        libc: vec!["!musl".into()],
-    };
-
-    assert!(platform_matches_for("macos", "aarch64", None, &positive));
-    assert!(!platform_matches_for("linux", "x86_64", None, &positive));
-    assert!(platform_matches_for(
-        "linux",
-        "x86_64",
-        None,
-        &exclusion_only
-    ));
-    assert_eq!(
-        selected_platform_context_for("macos", "aarch64", None, &positive)
-            .unwrap()
-            .libc,
-        None
-    );
 }
 
 #[test]
@@ -1090,4 +1113,134 @@ fn incremental_resolution_fetches_one_packument_for_multiple_selected_versions()
             "https://registry.npmjs.org:debug@4.3.7",
         ]
     );
+}
+
+#[test]
+fn dist_tags_resolve_transitive_alias_and_optional_edges() {
+    let roots = vec![Dependency::new(
+        NPM.parse().unwrap(),
+        "parent".parse().unwrap(),
+        "1".parse().unwrap(),
+    )];
+    let mut parent = named_record("parent", "1.0.0", &[("local", "npm:child@next")]);
+    parent
+        .optional_dependencies
+        .insert("optional".into(), "npm:child@next".into());
+    let mut tagged = named_record("child", "2.0.0-beta.1", &[]);
+    tagged.dist_tags.insert("next".into());
+    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+        Ok(if name.as_str() == "parent" {
+            vec![parent.clone()]
+        } else {
+            vec![tagged.clone(), named_record("child", "3.0.0", &[])]
+        })
+    })
+    .unwrap();
+    assert_eq!(resolution.dependencies.len(), 2);
+    for edge in resolution.dependencies {
+        assert_eq!(edge.child.version.to_string(), "2.0.0-beta.1");
+    }
+}
+
+#[test]
+fn dist_tag_peers_fetch_metadata_for_locked_root_providers() {
+    let roots = vec![
+        Dependency::new(
+            NPM.parse().unwrap(),
+            "host".parse().unwrap(),
+            "1".parse().unwrap(),
+        ),
+        Dependency::new(
+            NPM.parse().unwrap(),
+            "plugin".parse().unwrap(),
+            "1".parse().unwrap(),
+        ),
+    ];
+    let seed = vec![named_record("host", "1.0.0", &[])];
+    let mut fetched_host = false;
+    let (resolution, _) = resolution::resolve_with_preferences(
+        &roots,
+        |parent, _| Ok(parent.clone()),
+        &BTreeMap::new(),
+        |_, name| {
+            if name.as_str() == "host" {
+                fetched_host = true;
+                let mut host = named_record("host", "1.0.0", &[]);
+                host.dist_tags.insert("latest".into());
+                Ok(vec![host])
+            } else {
+                let mut plugin = named_record("plugin", "1.0.0", &[]);
+                plugin
+                    .peer_dependencies
+                    .insert("host".into(), "latest".into());
+                Ok(vec![plugin])
+            }
+        },
+        &tapid_resolver::ResolutionPreferences::default(),
+        seed,
+        |_| {},
+    )
+    .unwrap();
+    assert!(fetched_host);
+    assert_eq!(resolution.selected.len(), 2);
+}
+
+/// Concurrent member edits must keep their mismatch code; layout refusals keep INVALID_DATA.
+#[test]
+fn imported_workspace_manifest_failure_kinds() {
+    for changed in [true, false] {
+        let project = tapid_test_support::TempProject::new("import-workspace-error-kind").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        project
+            .write(
+                "packages/member/package.json",
+                br#"{"name":"member","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        project
+            .write("tapid.lock", b"preserve existing lock")
+            .unwrap();
+        let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+        let workspace = workspace_materialization(project.path(), &config).unwrap();
+        let manifest = if changed {
+            let updated = br#"{"name":"member","version":"2.0.0"}"#;
+            project
+                .write("packages/member/package.json", updated)
+                .unwrap();
+            updated.as_slice()
+        } else {
+            project
+                .write("packages/member/node_modules/KEEP", b"unmanaged")
+                .unwrap();
+            br#"{"name":"member","version":"1.0.0"}"#.as_slice()
+        };
+        let error = imported_workspace_manifests(project.path(), &workspace).unwrap_err();
+        assert_eq!(
+            error.kind,
+            if changed {
+                ErrorKind::LockManifestMismatch
+            } else {
+                ErrorKind::InvalidData
+            }
+        );
+        assert_eq!(
+            fs::read(project.path().join("packages/member/package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            b"preserve existing lock"
+        );
+        if !changed {
+            assert_eq!(
+                fs::read(project.path().join("packages/member/node_modules/KEEP")).unwrap(),
+                b"unmanaged"
+            );
+        }
+    }
 }

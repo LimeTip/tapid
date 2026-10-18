@@ -130,6 +130,33 @@ pub fn prepare_execution_request_with_working_directory(
         .exact_profile(script_name)
         .cloned()
         .ok_or_else(|| RunPreparationError::MissingProfile(script_name.to_owned()))?;
+    prepare_execution_request_with_policy(
+        &project_dir,
+        working_directory,
+        &policy,
+        None,
+        script,
+        arguments,
+        host,
+    )
+}
+
+/// Prepares an explicitly selected portable policy through the same runtime and
+/// argument-validation path as configuration-based callers.
+pub fn prepare_execution_request_with_policy(
+    project_dir: &Path,
+    working_directory: &Path,
+    policy: &tapid_runner::SandboxPolicy,
+    ceiling: Option<&tapid_runner::SandboxPolicy>,
+    script: &str,
+    arguments: &[OsString],
+    host: HostExecutionEnvironment<'_>,
+) -> Result<PreparedExecution, RunPreparationError> {
+    let project_dir =
+        fs::canonicalize(project_dir).map_err(|_| RunPreparationError::InvalidProjectDirectory)?;
+    if !project_dir.is_dir() {
+        return Err(RunPreparationError::InvalidProjectDirectory);
+    }
     if policy
         .environment()
         .iter()
@@ -207,7 +234,7 @@ pub fn prepare_execution_request_with_working_directory(
         })
         .collect::<BTreeMap<_, _>>();
     let (program, shell_arguments) = shell_invocation(script, arguments, &search_directories)?;
-    let request = ExecutionRequest::builder(program)
+    let mut request = ExecutionRequest::builder(program)
         .args(shell_arguments)
         .windows_verbatim_arguments(cfg!(windows))
         .executable_search_paths(search_directories.iter().cloned())
@@ -215,8 +242,12 @@ pub fn prepare_execution_request_with_working_directory(
         .allow_process_memory_stats(host.allow_process_memory_stats)
         .project_root(project_dir)
         .working_directory(working_directory)
-        .policy(policy)
-        .envs(environment)
+        .policy(policy.clone())
+        .envs(environment);
+    if let Some(ceiling) = ceiling {
+        request = request.policy_ceiling(ceiling.clone());
+    }
+    let request = request
         .build()
         .map_err(RunPreparationError::InvalidRequest)?;
 
@@ -228,7 +259,9 @@ pub fn prepare_execution_request_with_working_directory(
 
 const MAX_HOST_PATH_DIRECTORIES: usize = 256;
 
-fn discover_node_runtime(host_path: Option<&OsStr>) -> Result<PathBuf, RunPreparationError> {
+pub(crate) fn discover_node_runtime(
+    host_path: Option<&OsStr>,
+) -> Result<PathBuf, RunPreparationError> {
     let Some(host_path) = host_path else {
         return Err(RunPreparationError::MissingNodeRuntime);
     };

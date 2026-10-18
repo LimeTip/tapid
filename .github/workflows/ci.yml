@@ -103,6 +103,21 @@ jobs:
           done
           grep -Fx 'TAPID_NEWS_SITE_ACCEPTANCE_V1' "$RUNNER_TEMP/news-site-acceptance.txt"
 
+  rust-minimum:
+    name: Rust 1.88 minimum
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.88 toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.88.0
+      - name: Check locked production workspace
+        run: cargo check --workspace --all-targets --all-features --locked
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -131,6 +146,18 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
+      - name: Bind absolute Node for Windows native write tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $node = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          if (-not [IO.Path]::IsPathFullyQualified($node) -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
+            throw 'Native write tests require an absolute existing Node executable'
+          }
+          & $node --version
+          if ($LASTEXITCODE -ne 0) { throw 'Native write test Node is not executable' }
+          "TAPID_TEST_NODE=$node" >> $env:GITHUB_ENV
       - name: Verify pinned node-semver compatibility oracle
         if: matrix.os == 'ubuntu-latest'
         working-directory: tests/node-semver-oracle
@@ -142,6 +169,29 @@ jobs:
         run: cargo fmt --all --check
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Install Windows network guard for native containment tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node --experimental-strip-types scripts/dev.ts build -p tapid --bin tapid --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Guard CLI build failed' }
+          $metadata = node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
+          $binary = Join-Path $metadata.target_directory 'debug/tapid.exe'
+          & $binary sandbox install
+          if ($LASTEXITCODE -ne 0) { throw 'Administrator guard installation failed' }
+          "TAPID_CI_GUARD_CLI=$binary" >> $env:GITHUB_ENV
+          & $binary sandbox status
+          if ($LASTEXITCODE -ne 0) { throw 'Guard status failed' }
+      - name: Verify Windows guard namespace removal and rollback
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked guard_owned_namespace_removal -- --ignored
       - name: Run tests
         # Retain success output so each Node assertion branch has a receipt.
         run: cargo test --workspace --all-features --locked -- --show-output
@@ -205,6 +255,15 @@ jobs:
           if (Test-Path -LiteralPath $binary) { throw 'Tapid was not uninstalled' }
           Write-Host 'Windows developer install and uninstall passed.'
 
+      - name: Remove Windows network guard after native tests
+        if: always() && runner.os == 'Windows' && env.TAPID_CI_GUARD_CLI != ''
+        shell: pwsh
+        run: |
+          & $env:TAPID_CI_GUARD_CLI sandbox status
+          if ($LASTEXITCODE -ne 0) { throw 'Final guard status failed' }
+          & $env:TAPID_CI_GUARD_CLI sandbox uninstall
+          if ($LASTEXITCODE -ne 0) { throw 'Idle guard removal failed; inspect retained filters' }
+
   windows-msvc-cross-check:
     name: Windows MSVC compile-only check
     runs-on: ubuntu-latest
@@ -220,6 +279,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Compile tapid-runner and Windows tests for MSVC
+        env:
+          TAPID_WINDOWS_COMPAT_COMPILE_ONLY: '1'
         run: cargo check -p tapid-runner --tests --target x86_64-pc-windows-msvc --locked
 
   nextest:
@@ -324,6 +385,8 @@ jobs:
   platform-consumer-validation:
     name: Consumer validation (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    outputs:
+      windows-image-version: ${{ steps.windows-cli-provenance.outputs.image-version }}
     env:
       TAPID_FIXTURE: '1'
     strategy:
@@ -353,6 +416,14 @@ jobs:
           node-version: 22
       - name: Build Tapid binary
         run: cargo build --bin tapid --locked
+      - name: Install Windows network guard for consumer validation
+        if: runner.os == 'Windows'
+        id: consumer-guard
+        run: |
+          & target/debug/tapid.exe sandbox install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & target/debug/tapid.exe sandbox status
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Create dynamic Node fixture project
         run: |
           node tests/fixtures/create_consumer_project.js
@@ -368,7 +439,11 @@ jobs:
         run: node tests/fixtures/validate_consumer_project.js
       - name: Prepare same-run Windows CLI handoff
         if: runner.os == 'Windows'
-        run: node --experimental-strip-types tools/release/ci_binary.ts prepare --directory "$env:RUNNER_TEMP/tapid-ci-cli" --binary target/debug/tapid.exe
+        id: windows-cli-provenance
+        run: |
+          node --experimental-strip-types tools/release/ci_binary.ts prepare --directory "$env:RUNNER_TEMP/tapid-ci-cli" --binary target/debug/tapid.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "image-version=$env:ImageVersion" >> $env:GITHUB_OUTPUT
       - name: Retain same-run Windows CLI
         if: runner.os == 'Windows'
         id: windows-cli
@@ -386,6 +461,11 @@ jobs:
           ARTIFACT_ID: ${{ steps.windows-cli.outputs.artifact-id }}
           ARTIFACT_DIGEST: ${{ steps.windows-cli.outputs.artifact-digest }}
         run: Write-Host "Windows CLI artifact $env:ARTIFACT_ID digest $env:ARTIFACT_DIGEST"
+      - name: Remove Windows network guard after consumer validation
+        if: always() && runner.os == 'Windows' && steps.consumer-guard.outcome != 'skipped'
+        run: |
+          & target/debug/tapid.exe sandbox uninstall
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   pr-published-binary-smoke:
     # Exact PR runner + immutable published binary: pre-merge regression evidence only.
@@ -554,6 +634,8 @@ jobs:
           digest-mismatch: error
       - name: Verify same-run native verifier
         shell: pwsh
+        env:
+          TAPID_CI_PRODUCER_IMAGE_VERSION: ${{ needs.platform-consumer-validation.outputs.windows-image-version }}
         run: |
           node --experimental-strip-types tools/release/ci_binary.ts verify --directory "$env:RUNNER_TEMP/tapid-ci-cli-download" --destination target/debug/tapid.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

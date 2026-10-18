@@ -32,6 +32,25 @@ pub(crate) fn activate_node_modules_with_lock(
     })
 }
 
+/// Preflight member trees without changing them. Activation rechecks the marker by name.
+pub(crate) fn validate_managed_node_modules(project: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(project.join("node_modules")) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Err("refusing to replace non-directory or symlink node_modules".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    }
+    let marker = project.join(".tapid-managed");
+    if read_marker_backup(&marker).map_err(|e| format!("cannot read member .tapid-managed: {e}"))?
+        != MANAGED_MARKER
+    {
+        return Err(
+            "refusing to replace node_modules with an invalid .tapid-managed marker".into(),
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn activate_node_modules_with_preflight(
     project: &Path,
     stage: &Path,
@@ -458,7 +477,7 @@ impl Drop for ActivationLock {
     }
 }
 
-fn open_lock_file(path: &Path) -> Result<fs::File, String> {
+pub(crate) fn open_lock_file(path: &Path) -> Result<fs::File, String> {
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -487,7 +506,7 @@ fn open_lock_file(path: &Path) -> Result<fs::File, String> {
     Ok(file)
 }
 
-fn sync_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     let sync = {
         use std::os::windows::fs::OpenOptionsExt;

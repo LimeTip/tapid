@@ -1,16 +1,20 @@
+use crate::filesystem::read::{ReadError, read_bounded_file};
 use clap::Args as ClapArgs;
+mod permissions;
+mod result;
+use result::RunFailure;
 use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     path::PathBuf,
     process::ExitCode,
 };
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
-    /// Script name from package.json. Requires a matching [run.scripts.<name>] profile in tapid.toml.
+    /// Script name from package.json. Use a configured profile or explicit invocation permission flags.
     pub(crate) script: String,
     /// Project directory containing package.json.
     #[arg(long, default_value = ".")]
@@ -24,9 +28,14 @@ pub(crate) struct Args {
     /// Emit the versioned receipt as one JSON line on stderr after child output.
     #[arg(long)]
     pub(crate) receipt_json: bool,
+    /// Write a trusted JSON result to a new file outside the project; preserves child streams.
+    #[arg(long, value_name = "PATH", conflicts_with = "receipt_json")]
+    pub(crate) result_file: Option<PathBuf>,
     /// Allow process-memory statistics in required Linux sandbox mode by creating a private PID/mount namespace with read-only procfs.
     #[arg(long, visible_aliases = ["allow-procfs", "allow-memory-read"])]
     pub(crate) allow_process_memory_stats: bool,
+    #[command(flatten)]
+    pub(crate) permissions: permissions::InvocationPermissions,
     /// Arguments forwarded after `--` to the script.
     #[arg(last = true)]
     pub(crate) arguments: Vec<OsString>,
@@ -45,6 +54,40 @@ fn config_error_category(category: tapid_runner::ConfigErrorCategory) -> &'stati
 }
 
 pub(crate) fn run(args: Args) -> ExitCode {
+    let mut result_file = match args.result_file.as_deref() {
+        Some(path) => match result::create_file(path, &args.project_dir) {
+            Ok(file) => Some(file),
+            Err(error) => {
+                eprintln!("error: cannot create run result file: {error}");
+                return ExitCode::from(1);
+            }
+        },
+        None => None,
+    };
+    let mut policy_inputs = None;
+    let outcome = execute(&args, &mut policy_inputs);
+    if let Some(file) = &mut result_file
+        && let Err(error) = result::write(file, &outcome, policy_inputs.as_ref())
+    {
+        eprintln!("error: cannot write run result file: {error}");
+    }
+    match outcome {
+        Ok(outcome) => render_outcome(
+            &outcome,
+            result_file.is_none().then_some(args.receipt_json),
+            args.permissions
+                .enabled()
+                .then_some(policy_inputs)
+                .flatten(),
+        ),
+        Err(_) => ExitCode::from(1),
+    }
+}
+
+fn execute(
+    args: &Args,
+    policy_inputs: &mut Option<serde_json::Value>,
+) -> Result<tapid_runner::ExecutionOutcome, RunFailure> {
     let project_dir = match fs::canonicalize(&args.project_dir) {
         Ok(path) if path.is_dir() => path,
         Ok(path) => {
@@ -52,14 +95,14 @@ pub(crate) fn run(args: Args) -> ExitCode {
                 "error: project directory is not a directory: {}",
                 path.display()
             );
-            return ExitCode::from(1);
+            return Err(RunFailure::ProjectUnavailable);
         }
         Err(error) => {
             eprintln!(
                 "error: cannot access project directory '{}': {error}",
                 args.project_dir.display()
             );
-            return ExitCode::from(1);
+            return Err(RunFailure::ProjectUnavailable);
         }
     };
     let (manifest, working_directory) = if let Some(workspace_name) = args.workspace.as_deref() {
@@ -67,26 +110,26 @@ pub(crate) fn run(args: Args) -> ExitCode {
             Ok(workspace) => workspace,
             Err(error) => {
                 eprintln!("error: {error}");
-                return ExitCode::from(1);
+                return Err(RunFailure::WorkspaceInvalid);
             }
         };
         let manifest = match workspace.select(Some(workspace_name)) {
             Ok(manifest) => manifest.clone(),
             Err(error) => {
                 eprintln!("error: {error}");
-                return ExitCode::from(1);
+                return Err(RunFailure::WorkspaceInvalid);
             }
         };
         let member_manifest = match workspace.select_path(Some(workspace_name)) {
             Ok(path) => path,
             Err(error) => {
                 eprintln!("error: {error}");
-                return ExitCode::from(1);
+                return Err(RunFailure::WorkspaceInvalid);
             }
         };
         let Some(working_directory) = member_manifest.parent() else {
             eprintln!("error: workspace member manifest has no parent");
-            return ExitCode::from(1);
+            return Err(RunFailure::WorkspaceInvalid);
         };
         (manifest, working_directory.to_owned())
     } else {
@@ -94,7 +137,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("error: {error}");
-                return ExitCode::from(1);
+                return Err(RunFailure::ManifestInvalid);
             }
         };
         (manifest, project_dir.clone())
@@ -107,22 +150,27 @@ pub(crate) fn run(args: Args) -> ExitCode {
             ),
             None => eprintln!("error: root package script is missing: {}", args.script),
         }
-        return ExitCode::from(1);
+        return Err(RunFailure::ScriptMissing);
     };
     let config_path = project_dir.join("tapid.toml");
+    let invocation_mode = args.permissions.enabled();
     let config_bytes = match read_run_config(&config_path) {
         Ok(bytes) => bytes,
-        Err(ConfigReadError::CapacityExceeded) => {
+        Err(ReadError::CapacityExceeded) => {
             eprintln!("error: invalid run configuration (capacity-exceeded)");
-            return ExitCode::from(1);
+            return Err(RunFailure::ConfigInvalid);
         }
-        Err(ConfigReadError::Io(error)) => {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                eprintln!("error: required run configuration is missing: tapid.toml");
+        Err(ReadError::Io(error)) => {
+            if error.kind() == std::io::ErrorKind::NotFound && invocation_mode {
+                Vec::new()
             } else {
-                eprintln!("error: cannot read run configuration 'tapid.toml': {error}");
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    eprintln!("error: required run configuration is missing: tapid.toml");
+                } else {
+                    eprintln!("error: cannot read run configuration 'tapid.toml': {error}");
+                }
+                return Err(RunFailure::ConfigUnavailable);
             }
-            return ExitCode::from(1);
         }
     };
     let config = match tapid_runner::RunConfig::parse_toml_bytes(&config_bytes) {
@@ -132,45 +180,49 @@ pub(crate) fn run(args: Args) -> ExitCode {
                 "error: invalid run configuration ({})",
                 config_error_category(error.category())
             );
-            return ExitCode::from(1);
+            return Err(RunFailure::ConfigInvalid);
         }
     };
-    if config.exact_profile(&args.script).is_none() {
+    if !invocation_mode && config.exact_profile(&args.script).is_none() {
         eprintln!(
             "error: run policy profile is missing for script: {}",
             args.script
         );
-        return ExitCode::from(1);
+        return Err(RunFailure::ProfileMissing);
     }
+    let selection = match args.permissions.select(&config, &args.script) {
+        Ok(selection) => selection,
+        Err(error) => {
+            eprintln!(
+                "error: invalid invocation permissions ({})",
+                config_error_category(error.category())
+            );
+            return Err(RunFailure::PermissionsInvalid);
+        }
+    };
+    *policy_inputs = Some(selection.provenance(&args.permissions));
     let registry_config = match crate::registry::RegistryConfig::parse_toml_bytes(&config_bytes) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("error: {error}");
-            return ExitCode::from(1);
+            return Err(RunFailure::RegistryConfigurationInvalid);
         }
     };
     let registry_credential_names = registry_config.credential_environment_names();
-    if registry_config.allowlist_contains_registry_credentials(
-        config
-            .exact_profile(&args.script)
-            .expect("exact profile was checked")
-            .environment(),
-        cfg!(windows),
-    ) {
+    if registry_config
+        .allowlist_contains_registry_credentials(selection.policy.environment(), cfg!(windows))
+    {
         eprintln!("error: registry credential environment variables cannot be passed to scripts");
-        return ExitCode::from(1);
+        return Err(RunFailure::EnvironmentInvalid);
     }
     let ambient_environment = match crate::run::read_allowlisted_environment_with_denied(
-        config
-            .exact_profile(&args.script)
-            .expect("exact profile was checked")
-            .environment(),
+        selection.policy.environment(),
         &registry_credential_names,
     ) {
         Ok(environment) => environment,
         Err(error) => {
             eprintln!("error: {error}");
-            return ExitCode::from(1);
+            return Err(RunFailure::EnvironmentInvalid);
         }
     };
     let host_path = args
@@ -178,7 +230,23 @@ pub(crate) fn run(args: Args) -> ExitCode {
         .is_none()
         .then(|| env::var_os("PATH"))
         .flatten();
-    let prepared_result = if args.workspace.is_some() {
+    let host = crate::run::HostExecutionEnvironment {
+        node_runtime: args.node_runtime.as_deref(),
+        path: host_path.as_deref(),
+        allowlisted: &ambient_environment,
+        allow_process_memory_stats: args.allow_process_memory_stats,
+    };
+    let prepared_result = if invocation_mode {
+        crate::run::prepare_execution_request_with_policy(
+            &project_dir,
+            &working_directory,
+            &selection.policy,
+            selection.ceiling.as_ref(),
+            &script,
+            &args.arguments,
+            host,
+        )
+    } else if args.workspace.is_some() {
         crate::run::prepare_execution_request_with_working_directory(
             &project_dir,
             &working_directory,
@@ -186,12 +254,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
             &config,
             &script,
             &args.arguments,
-            crate::run::HostExecutionEnvironment {
-                node_runtime: args.node_runtime.as_deref(),
-                path: host_path.as_deref(),
-                allowlisted: &ambient_environment,
-                allow_process_memory_stats: args.allow_process_memory_stats,
-            },
+            host,
         )
     } else {
         crate::run::prepare_execution_request(
@@ -200,27 +263,22 @@ pub(crate) fn run(args: Args) -> ExitCode {
             &config,
             &script,
             &args.arguments,
-            crate::run::HostExecutionEnvironment {
-                node_runtime: args.node_runtime.as_deref(),
-                path: host_path.as_deref(),
-                allowlisted: &ambient_environment,
-                allow_process_memory_stats: args.allow_process_memory_stats,
-            },
+            host,
         )
     };
     let prepared = match prepared_result {
         Ok(prepared) => prepared,
         Err(error) => {
             eprintln!("error: {error}");
-            return ExitCode::from(1);
+            return Err(RunFailure::PreparationFailed);
         }
     };
     match crate::run::execute_checked(&prepared) {
-        Ok(outcome) => render_outcome(&outcome, args.receipt_json),
+        Ok(outcome) => Ok(outcome),
         Err(error) => {
             if error.category() == tapid_runner::ExecutionErrorCategory::UnsupportedContainment {
                 eprintln!(
-                    "error: sandbox execution failed (unsupported-containment): {error}; no process was started and no enforcement receipt was issued"
+                    "error: sandbox execution failed (unsupported-containment): {error}; no enforcement receipt was issued"
                 );
             } else {
                 eprintln!(
@@ -228,63 +286,13 @@ pub(crate) fn run(args: Args) -> ExitCode {
                     execution_error_category(error.category())
                 );
             }
-            ExitCode::from(1)
+            Err(RunFailure::Execution(error))
         }
     }
 }
 
-pub(crate) enum ConfigReadError {
-    CapacityExceeded,
-    Io(io::Error),
-}
-
-fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigReadError> {
-    read_bounded_config_file(path, tapid_runner::MAX_CONFIG_BYTES)
-}
-
-pub(crate) fn read_bounded_config_file(
-    path: &std::path::Path,
-    max_bytes: usize,
-) -> Result<Vec<u8>, ConfigReadError> {
-    let max_bytes = u64::try_from(max_bytes).map_err(|_| ConfigReadError::CapacityExceeded)?;
-    let read_limit = max_bytes
-        .checked_add(1)
-        .ok_or(ConfigReadError::CapacityExceeded)?;
-    let metadata = fs::symlink_metadata(path).map_err(ConfigReadError::Io)?;
-    if !metadata.file_type().is_file() {
-        return Err(ConfigReadError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "configuration is not a regular file",
-        )));
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // A replaced FIFO must not block the open, nor may a replaced symlink
-        // redirect the read after the initial metadata check.
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = options.open(path).map_err(ConfigReadError::Io)?;
-    let metadata = file.metadata().map_err(ConfigReadError::Io)?;
-    if !metadata.is_file() {
-        return Err(ConfigReadError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "configuration is not a regular file",
-        )));
-    }
-    if metadata.len() > max_bytes {
-        return Err(ConfigReadError::CapacityExceeded);
-    }
-    let mut bytes = Vec::new();
-    file.take(read_limit)
-        .read_to_end(&mut bytes)
-        .map_err(ConfigReadError::Io)?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(ConfigReadError::CapacityExceeded);
-    }
-    Ok(bytes)
+fn read_run_config(path: &std::path::Path) -> Result<Vec<u8>, ReadError> {
+    read_bounded_file(path, tapid_runner::MAX_CONFIG_BYTES)
 }
 
 fn execution_error_category(category: tapid_runner::ExecutionErrorCategory) -> &'static str {
@@ -303,15 +311,24 @@ fn execution_error_category(category: tapid_runner::ExecutionErrorCategory) -> &
     }
 }
 
+fn evidence_value(items: &[tapid_runner::DimensionEvidence]) -> Vec<serde_json::Value> {
+    items.iter().map(|item| serde_json::json!({
+        "dimension": format!("{:?}", item.dimension()), "scope": format!("{:?}", item.scope()),
+        "mechanism": item.mechanism(), "limitations": item.limitations(),
+    })).collect()
+}
+
+fn completion_value(completion: &tapid_runner::CompletionEvidence) -> serde_json::Value {
+    serde_json::json!({
+        "confirmed": completion.confirmed(),
+        "evidence": evidence_value(completion.evidence()),
+        "cleanup_confidence": format!("{:?}", completion.cleanup_confidence()),
+    })
+}
+
 fn receipt_value(outcome: &tapid_runner::ExecutionOutcome) -> serde_json::Value {
     use serde_json::json;
     let receipt = outcome.enforcement();
-    let evidence = |items: &[tapid_runner::DimensionEvidence]| {
-        items.iter().map(|item| json!({
-        "dimension": format!("{:?}", item.dimension()), "scope": format!("{:?}", item.scope()),
-        "mechanism": item.mechanism(), "limitations": item.limitations(),
-    })).collect::<Vec<_>>()
-    };
     let grants = receipt.resolved_filesystem().grants().iter().map(|grant| {
         #[cfg(unix)]
         let native_path = { use std::os::unix::ffi::OsStrExt; json!({"encoding": "unix-bytes", "units": grant.path().as_os_str().as_bytes()}) };
@@ -329,13 +346,13 @@ fn receipt_value(outcome: &tapid_runner::ExecutionOutcome) -> serde_json::Value 
         "schema_version": 1, "assurance": format!("{:?}", receipt.assurance()),
         "backend": {"name": receipt.backend().name(), "version": receipt.backend().version(), "deprecation": receipt.backend().deprecation()},
         "requested": receipt.requested(), "declared": receipt.declared(), "observed": receipt.observed(), "enforced": receipt.enforced(),
-        "declared_evidence": evidence(receipt.support().declared_evidence()),
-        "observed_evidence": evidence(receipt.support().observed_evidence()),
-        "established_evidence": evidence(receipt.established_evidence()),
+        "declared_evidence": evidence_value(receipt.support().declared_evidence()),
+        "observed_evidence": evidence_value(receipt.support().observed_evidence()),
+        "established_evidence": evidence_value(receipt.established_evidence()),
         "effective_filesystem": grants,
         "configured_limits": {"timeout_seconds": limits.timeout_seconds(), "max_output_bytes": limits.max_output_bytes(), "max_processes": limits.max_processes(), "max_memory_bytes": limits.max_memory_bytes()},
         "termination": format!("{:?}", outcome.termination()),
-        "completion": {"confirmed": outcome.completion().confirmed(), "evidence": evidence(outcome.completion().evidence()), "cleanup_confidence": format!("{:?}", outcome.completion().cleanup_confidence())}
+        "completion": completion_value(outcome.completion())
     })
 }
 
@@ -379,7 +396,11 @@ fn forward_child_output_for_cli(
     }
 }
 
-fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> ExitCode {
+fn render_outcome(
+    outcome: &tapid_runner::ExecutionOutcome,
+    machine: Option<bool>,
+    provenance: Option<serde_json::Value>,
+) -> ExitCode {
     let output_error = forward_child_output_for_cli(
         outcome.stdout(),
         outcome.stderr(),
@@ -387,10 +408,13 @@ fn render_outcome(outcome: &tapid_runner::ExecutionOutcome, machine: bool) -> Ex
         &mut io::stderr(),
     )
     .err();
-    let value = receipt_value(outcome);
-    if machine {
+    let mut value = receipt_value(outcome);
+    if let Some(provenance) = provenance {
+        value["policy_inputs"] = provenance;
+    }
+    if machine == Some(true) {
         eprintln!("\n{value}");
-    } else {
+    } else if machine == Some(false) {
         eprintln!(
             "\nsandbox receipt: {}",
             serde_json::to_string_pretty(&value).expect("receipt JSON values are serializable")

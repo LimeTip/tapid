@@ -31,6 +31,8 @@ The wrapper selects `<git-common-dir>/target/dev` using Git's canonical common d
 
 An explicit `CARGO_TARGET_DIR` takes precedence. Direct `cargo` commands use the root worktree's `target` directory for both workspaces through `.cargo/config.toml`, but do not share it across worktrees. Commands and documentation that need a binary should obtain the target path from `node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked` rather than assume `target/debug/tapid` after a wrapper build.
 
+Windows native no-network execution tests require the administrator-installed guard. Install it once with `tapid sandbox install` from an administrator terminal, then run tests as the ordinary user; missing setup fails closed. Explicit network grants use the standard-user broker independently. The Windows CI test job installs the guard before native tests and uninstalls it afterward. Its separate `guard_owned_namespace_removal` control runs with `--ignored` under administrator rights against unique metadata-only WFP GUIDs, testing rollback and idempotent removal without creating filters or touching the production namespace.
+
 ## Focused development lane
 
 Use strict red-green-refactor for production behavior. Add one observable failing test, confirm its expected failure, implement the smallest change, then rerun that test. Pure refactors use existing behavior tests before and after the move. Run Cargo commands sequentially to avoid build-lock contention.
@@ -67,6 +69,7 @@ Add checks for the files changed:
 - Release tooling: `node --experimental-strip-types --test tools/release/*_test.ts`.
 - Documentation runner: `node --experimental-strip-types --test tests/doc_examples_test.ts` and the affected examples in `scripts/check-doc-examples.ts`.
 - Development wrapper: `node --experimental-strip-types --test tests/dev_test.ts`.
+- Bundled agent skills: `node --experimental-strip-types scripts/sync-agent-skills.ts --check` and `node --experimental-strip-types --test tests/agent_skills_test.ts`.
 - All TypeScript helpers and release tooling: `node --experimental-strip-types --test tests/*_test.ts tools/release/*_test.ts`.
 - News-site native-resolution fixture: set `TAPID_NEWS_FIXTURE_BINARY` to a source-built CLI and run `node --experimental-strip-types --test tests/news_site_fixture_test.ts`. CI requires the binary; without it, only that native probe skips locally.
 - Dependency or publication metadata: `node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked` and `node --experimental-strip-types scripts/dev.ts package --workspace --locked`.
@@ -108,7 +111,7 @@ node --experimental-strip-types scripts/dev.ts fmt --all --check
 
 Formatting uses the stable Rust toolchain's rustfmt component, with no repository-specific rustfmt configuration or pinned rustfmt version. Its CI input is the Ubuntu checkout of the same source revision; this assumes the tracked source text is canonical there, rather than validating foreign-OS checkout line-ending conversions. Formatting and JavaScript oracle environment checks on macOS/Windows are intentionally retired. Rust resolver/semver compatibility tests still run within the native workspace suite on every platform, as do Clippy, TypeScript development-cache tests, and the nested integration workspace. Documentation process-supervision tests remain on both Unix platforms. Node.js 22 setup remains unconditional on all three native platforms for the CLI assertions and sandbox tests, not just for the Ubuntu oracle.
 
-The main native `test` job runs `cargo test --workspace --all-features --locked -- --show-output` from the repository root on all three platforms, including the CLI command-description tests. The Windows leg also owns `native_windows_shim_materialization_rejects_collisions_before_writes`: its source remains `#[cfg(windows)]`, `#[test]`, and not ignored; there is no separate filtered invocation. Node.js 22 is installed before testing and `TAPID_REQUIRE_NODE_ASSERTIONS=1` makes the CLI Node probes fail closed, with successful assertion receipts in the logs. The nested integration workspace remains a separate invocation.
+The main native `test` job runs `cargo test --workspace --all-features --locked -- --show-output` from the repository root on all three platforms, including the CLI command-description tests. The Windows leg also owns `native_windows_shim_materialization_rejects_collisions_before_writes`: its source remains `#[cfg(windows)]`, `#[test]`, and not ignored; there is no separate filtered invocation. Node.js 22 is installed before testing and `TAPID_REQUIRE_NODE_ASSERTIONS=1` makes the CLI Node probes fail closed, with successful assertion receipts in the logs. Windows also validates the absolute executable resolved from PATH and exports `TAPID_TEST_NODE` before the workspace suite, which owns the nonignored ordinary-project mutation and write-only native contracts; missing or unexecutable Node fails the prerequisite rather than skipping them. The nested integration workspace remains a separate invocation.
 
 The `news-site-consumer` job also runs the CLI `workspace_acceptance` filter on
 the same Ubuntu 24.04 and Node 22 reference environment as the news-site fixture.
@@ -119,4 +122,26 @@ that focused check with
 
 The main `release-contract` job owns Unix installer syntax (`sh -n`) and offline `--help`, plus PowerShell tokenization with a nonzero exit on parser errors. Its release-helper suite also exercises that exact PowerShell validator against the real installer and deterministic malformed input, without executing either input or adding a workflow lane. The regression can skip only when `pwsh` is missing locally; CI must execute it. Standalone CLI documentation and website installer validation workflows are no longer needed; no replacement duplicate or manual runner is introduced. Release automation requires successful exact-SHA main-push CI and CodeQL analysis for Actions, Rust, and JavaScript/TypeScript; the obsolete standalone command-help check is not a separate prerequisite. Other release identity, candidate, publication, and smoke gates remain unchanged.
 
+The Windows installer contract consumes the Windows CLI from the same workflow run and attempt. The producer exports its validated image revision through a job output; verification binds the artifact's recorded image revision to that upstream value, rather than to the separate verifier runner's image revision. Hosted image rollouts can give these jobs different revisions of the same Windows image. Both revisions are logged, while the image OS, architecture, source SHA, run/attempt, build settings, compiler receipts, binary digest, and size checks remain enforced. A missing or mismatched producer image output fails before materializing the executable.
+
 The security and package jobs use runner-provided workspaces and do not rely on local absolute paths. A local command may be unavailable on a developer machine, but CI treats the corresponding gate as required.
+
+## Deterministic agent workflows
+
+`agent_workflows` executes the compact [agent guide v1](agent-guide.md) against
+local npm-import fixtures and isolated projects/homes. Run it with:
+
+```sh
+node --experimental-strip-types scripts/dev.ts test -p tapid --test agent_workflows --locked -- --show-output
+```
+
+Each scenario asserts its task result and emits measured command calls, output
+bytes, and unnecessary repeated failures. Calls have an 8 KiB result budget.
+The scenarios check unchanged locked bytes on replay, unselected package records
+across add/remove, preserved npm locks, failure mutations, missing credentials,
+peer conflicts, unsupported declarations, cold and shared caches, project-lock
+contention, and recovery after a lost commit response. Separate temporary
+checkouts model worktree consumers of the same cache; they do not invoke Git.
+These are deterministic contract tests, not measurements of an external agent's
+reasoning or model tool selection. Existing transaction and containment tests
+remain responsible for their broader platform and attack-path coverage.

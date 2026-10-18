@@ -1,0 +1,1022 @@
+//! Embedded stock-Node compatibility. AppContainer and kernel handle rights enforce
+//! authority independently of these hooks; bypassing them cannot grant host access.
+#[cfg(not(test))]
+mod imports;
+mod lookup;
+#[cfg(not(test))]
+mod lookup_protocol;
+#[cfg(not(test))]
+mod native;
+mod network;
+#[cfg(test)]
+use super::lookup_protocol;
+#[cfg(not(test))]
+mod network_protocol;
+#[cfg(not(test))]
+mod protocol;
+#[cfg(test)]
+use super::{import_tests as imports, native, network_protocol, protocol};
+use native::*;
+use protocol::*;
+use std::{
+    ffi::{CString, c_void},
+    ptr,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicIsize, AtomicUsize, Ordering},
+    },
+};
+
+static IMPORT_LOCK: Mutex<()> = Mutex::new(());
+static SELF: AtomicIsize = AtomicIsize::new(0);
+static SETUP: OnceLock<Setup> = OnceLock::new();
+static PIPE: AtomicUsize = AtomicUsize::new(0);
+static FILE: AtomicUsize = AtomicUsize::new(0);
+static WFILE: AtomicUsize = AtomicUsize::new(0);
+static PROCESS: AtomicUsize = AtomicUsize::new(0);
+static LOAD_EX_W: AtomicUsize = AtomicUsize::new(0);
+static LOAD_W: AtomicUsize = AtomicUsize::new(0);
+static LOAD_A: AtomicUsize = AtomicUsize::new(0);
+static LOAD_EX_A: AtomicUsize = AtomicUsize::new(0);
+static LOOKUP: AtomicUsize = AtomicUsize::new(0);
+static FREE_LOOKUP: AtomicUsize = AtomicUsize::new(0);
+static SOCKET_W: AtomicUsize = AtomicUsize::new(0);
+static SOCKET_A: AtomicUsize = AtomicUsize::new(0);
+static SOCKET: AtomicUsize = AtomicUsize::new(0);
+static FINAL: AtomicUsize = AtomicUsize::new(0);
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn ReOpenFile(file: Handle, access: u32, share: u32, flags: u32) -> Handle;
+}
+
+fn read_memory(base: usize, offset: usize, length: usize) -> Option<Vec<u8>> {
+    let start = base.checked_add(offset)?;
+    let end = start.checked_add(length)?;
+    let mut at = start;
+    while at < end {
+        let mut information: MemoryInfo = unsafe { std::mem::zeroed() };
+        if unsafe {
+            VirtualQuery(
+                at as *const c_void,
+                &mut information,
+                std::mem::size_of::<MemoryInfo>(),
+            )
+        } == 0
+            || information.allocation as usize != base
+            || information.state != 0x1000
+            || information.protect & 0x101 != 0
+            || information.protect & 0xff == 0x10
+        {
+            return None;
+        }
+        let limit = (information.base as usize).checked_add(information.size)?;
+        if limit <= at {
+            return None;
+        }
+        at = limit.min(end);
+    }
+    // SAFETY: all bytes are within committed readable regions of this loaded module.
+    Some(unsafe { std::slice::from_raw_parts(start as *const u8, length) }.to_vec())
+}
+
+struct SystemExport {
+    name: &'static [u8],
+    wrapper: usize,
+    direct: usize,
+}
+
+fn system_exports() -> Result<Vec<SystemExport>, u32> {
+    let kernel: Vec<_> = "kernel32.dll\0".encode_utf16().collect();
+    let kernel = unsafe { GetModuleHandleW(kernel.as_ptr()) };
+    let direct: Vec<_> = "kernelbase.dll\0".encode_utf16().collect();
+    let direct = unsafe { GetModuleHandleW(direct.as_ptr()) };
+    if kernel == 0 || direct == 0 {
+        return Err(193);
+    }
+    [
+        b"CreateProcessW".as_slice(),
+        b"CreateNamedPipeA",
+        b"CreateFileA",
+        b"CreateFileW",
+        b"GetFinalPathNameByHandleW",
+        b"LoadLibraryExW",
+        b"LoadLibraryW",
+        b"LoadLibraryA",
+        b"LoadLibraryExA",
+        b"GetAddrInfoW",
+        b"FreeAddrInfoW",
+        b"WSASocketW",
+        b"WSASocketA",
+        b"socket",
+    ]
+    .into_iter()
+    .map(|name| {
+        let symbol = CString::new(name).map_err(|_| 193u32)?;
+        let sockets = name == b"socket"
+            || name.starts_with(b"WSASocket")
+            || name == b"GetAddrInfoW"
+            || name == b"FreeAddrInfoW";
+        let module = if sockets {
+            let name: Vec<_> = "ws2_32.dll\0".encode_utf16().collect();
+            unsafe { GetModuleHandleW(name.as_ptr()) }
+        } else {
+            kernel
+        };
+        let wrapper = unsafe { GetProcAddress(module, symbol.as_ptr().cast()) } as usize;
+        let direct = if sockets {
+            wrapper
+        } else {
+            (unsafe { GetProcAddress(direct, symbol.as_ptr().cast()) }) as usize
+        };
+        if wrapper == 0 {
+            return Err(193);
+        }
+        Ok(SystemExport {
+            name,
+            wrapper,
+            direct,
+        })
+    })
+    .collect()
+}
+
+fn patch_module(base: usize, node: bool, exports: &[SystemExport]) -> Result<(), u32> {
+    let entries =
+        imports::imports(|offset, length| read_memory(base, offset, length)).ok_or(193u32)?;
+    let mut patches = Vec::new();
+    let mut kinds = 0;
+    for entry in entries {
+        let sockets = SETUP.get().is_some_and(|setup| setup.network_request != 0);
+        let (replacement, original, kind) = match entry.name.as_slice() {
+            b"GetAddrInfoW" if sockets => (lookup::lookup as *const () as usize, &LOOKUP, 0),
+            b"FreeAddrInfoW" if sockets => (lookup::free as *const () as usize, &FREE_LOOKUP, 0),
+            b"WSASocketW" if sockets => (network::socket_w as *const () as usize, &SOCKET_W, 0),
+            b"WSASocketA" if sockets => (network::socket_a as *const () as usize, &SOCKET_A, 0),
+            b"socket" if sockets => (network::socket as *const () as usize, &SOCKET, 0),
+            b"CreateProcessW" => (create_process as *const () as usize, &PROCESS, 1),
+            b"CreateNamedPipeA" if node => (create_pipe as *const () as usize, &PIPE, 2),
+            b"CreateFileA" if node => (create_file as *const () as usize, &FILE, 4),
+            b"CreateFileW" if node => (create_wfile as *const () as usize, &WFILE, 8),
+            b"GetFinalPathNameByHandleW" if node => (final_path as *const () as usize, &FINAL, 16),
+            b"LoadLibraryExW" => (load_ex_w as *const () as usize, &LOAD_EX_W, 0),
+            b"LoadLibraryW" => (load_w as *const () as usize, &LOAD_W, 0),
+            b"LoadLibraryA" => (load_a as *const () as usize, &LOAD_A, 0),
+            b"LoadLibraryExA" => (load_ex_a as *const () as usize, &LOAD_EX_A, 0),
+            _ => continue,
+        };
+        // API-set imports may resolve directly to KernelBase rather than Kernel32's
+        // public wrapper. Both must name the verified system export for this symbol.
+        let export = exports
+            .iter()
+            .find(|export| export.name == entry.name)
+            .ok_or(193u32)?;
+        let expected = export.wrapper;
+        let direct = export.direct;
+        if expected == 0
+            || (entry.address != expected
+                && entry.address != direct
+                && entry.address != replacement)
+        {
+            return Err(193);
+        }
+        original.store(expected, Ordering::Release);
+        kinds |= kind;
+        if entry.address == replacement {
+            continue;
+        }
+        let address = base.checked_add(entry.offset).ok_or(193u32)?;
+        if address % std::mem::align_of::<AtomicUsize>() != 0 {
+            return Err(193);
+        }
+        patches.push((address, replacement));
+    }
+    if node && kinds != 31 {
+        return Err(193);
+    }
+    // Validate the complete plan before changing any IAT slot. Initialization failure
+    // retains the DLL mapping and the launcher kills the suspended target.
+    for (address, replacement) in patches {
+        let mut old = 0;
+        if unsafe { VirtualProtect(address as *mut c_void, 8, 4, &mut old) } == 0 {
+            return Err(unsafe { GetLastError() });
+        }
+        unsafe { &*(address as *const AtomicUsize) }.store(replacement, Ordering::Release);
+        let mut ignored = 0;
+        if unsafe { VirtualProtect(address as *mut c_void, 8, old, &mut ignored) } == 0 {
+            return Err(unsafe { GetLastError() });
+        }
+    }
+    Ok(())
+}
+
+struct ModulePin(Handle);
+impl Drop for ModulePin {
+    fn drop(&mut self) {
+        unsafe { FreeLibrary(self.0) };
+    }
+}
+
+fn install_imports() -> Result<(), u32> {
+    // Acquire every loader reference and resolve exports before IMPORT_LOCK. DllMain
+    // callbacks may reenter a hooked load while Windows owns the loader lock.
+    let main = unsafe { GetModuleHandleW(ptr::null()) } as usize;
+    let image = module_path(0)?;
+    let name = image
+        .rsplit(|unit| *unit == 92 || *unit == 47)
+        .next()
+        .ok_or(193u32)?;
+    let node = same_path(name, &"node.exe".encode_utf16().collect::<Vec<_>>());
+    let exports = system_exports()?;
+    let mut system = [0u16; 32768];
+    let length =
+        unsafe { GetSystemWindowsDirectoryW(system.as_mut_ptr(), system.len() as u32) } as usize;
+    if length == 0 || length + 1 >= system.len() {
+        return Err(193);
+    }
+    system[length] = 92;
+    let system = &system[..length + 1];
+    let mut modules = Vec::new();
+    for base in loaded_modules()? {
+        if base == SELF.load(Ordering::Acquire) as usize {
+            continue;
+        }
+        let mut pinned = 0;
+        if unsafe { GetModuleHandleExW(4, base as *const u16, &mut pinned) } == 0 {
+            return Err(unsafe { GetLastError() });
+        }
+        let pinned = ModulePin(pinned);
+        let path = module_path(pinned.0)?;
+        let path = path.strip_prefix(&[92, 92, 63, 92]).unwrap_or(&path);
+        if base != main && path.len() >= system.len() && same_path(&path[..system.len()], system) {
+            continue;
+        }
+        modules.push(pinned);
+    }
+    let result = {
+        let _guard = IMPORT_LOCK.lock().map_err(|_| 193u32)?;
+        modules.iter().try_for_each(|module| {
+            patch_module(
+                module.0 as usize,
+                node && module.0 as usize == main,
+                &exports,
+            )
+        })
+    };
+    // Drop references after unlocking: FreeLibrary may execute DLL detach callbacks.
+    drop(modules);
+    result
+}
+fn after_load(module: Handle, flags: u32, error: u32) -> Handle {
+    // Data/resource mappings cannot execute imports. Normal imports are patched before
+    // returning to the caller, including Node's subsequent N-API registration.
+    if module != 0 && flags & 0x63 == 0 && install_imports().is_err() {
+        report_failure("loaded module imports", 193);
+        unsafe { TerminateProcess(GetCurrentProcess(), 127) };
+        return 0;
+    }
+    unsafe { SetLastError(error) };
+    module
+}
+unsafe extern "system" fn load_ex_w(name: *const u16, file: Handle, flags: u32) -> Handle {
+    let original: unsafe extern "system" fn(*const u16, Handle, u32) -> Handle =
+        unsafe { std::mem::transmute(LOAD_EX_W.load(Ordering::Acquire)) };
+    let module = unsafe { original(name, file, flags) };
+    after_load(module, flags, unsafe { GetLastError() })
+}
+unsafe extern "system" fn load_w(name: *const u16) -> Handle {
+    let original: unsafe extern "system" fn(*const u16) -> Handle =
+        unsafe { std::mem::transmute(LOAD_W.load(Ordering::Acquire)) };
+    let module = unsafe { original(name) };
+    after_load(module, 0, unsafe { GetLastError() })
+}
+unsafe extern "system" fn load_ex_a(name: *const u8, file: Handle, flags: u32) -> Handle {
+    let original: unsafe extern "system" fn(*const u8, Handle, u32) -> Handle =
+        unsafe { std::mem::transmute(LOAD_EX_A.load(Ordering::Acquire)) };
+    let module = unsafe { original(name, file, flags) };
+    after_load(module, flags, unsafe { GetLastError() })
+}
+unsafe extern "system" fn load_a(name: *const u8) -> Handle {
+    let original: unsafe extern "system" fn(*const u8) -> Handle =
+        unsafe { std::mem::transmute(LOAD_A.load(Ordering::Acquire)) };
+    let module = unsafe { original(name) };
+    after_load(module, 0, unsafe { GetLastError() })
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn TapidInitialize(parameter: *mut c_void) -> u32 {
+    if parameter.is_null() {
+        return 0;
+    }
+    // SAFETY: the launcher supplies a fully written fixed-size allocation in this process.
+    let setup = unsafe { &*parameter.cast::<Setup>() };
+    if !setup.valid() {
+        return 0;
+    }
+    let mut setup = setup.clone();
+    let input = if setup.stdin_eof == 0 {
+        unsafe { GetStdHandle((-10i32) as u32) }
+    } else {
+        setup.stdin_eof
+    };
+    // The runner closes the stdin pipe writer before launch. Pin only a verified EOF
+    // pipe; a live input stream or character device cannot become ignored stdin.
+    if !closed_stdin(input) {
+        return 0;
+    }
+    if setup.stdin_eof == 0
+        && unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                input,
+                GetCurrentProcess(),
+                &mut setup.stdin_eof,
+                0,
+                0,
+                2,
+            )
+        } == 0
+    {
+        return 0;
+    }
+    // Verify the kernel capability boundary, independently of import hooks. A file
+    // metadata handle must not duplicate into listing/data, execution, mutation,
+    // deletion, ownership or DACL editing authority in the contained recipient.
+    for entry in &setup.entries[..setup.count as usize] {
+        for access in [1, 2, 4, 0x20, 0x10000, 0x40000, 0x80000] {
+            let mut duplicate = 0;
+            if unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    entry.handle,
+                    GetCurrentProcess(),
+                    &mut duplicate,
+                    access,
+                    0,
+                    0,
+                )
+            } != 0
+            {
+                unsafe { CloseHandle(duplicate) };
+                return 0;
+            }
+        }
+    }
+    if has_undeclared_reopen(&setup, |handle, access| {
+        let reopened = unsafe { ReOpenFile(handle, access, 7, 0x02200000) };
+        if reopened == -1 {
+            false
+        } else {
+            unsafe { CloseHandle(reopened) };
+            true
+        }
+    }) {
+        return 0;
+    }
+    if SETUP.set(setup).is_err() {
+        return 0;
+    }
+    u32::from(install_imports().is_ok())
+}
+
+fn has_undeclared_reopen(setup: &Setup, mut reopen: impl FnMut(Handle, u32) -> bool) -> bool {
+    setup.entries[..setup.count as usize].iter().any(|entry| {
+        [1, 2, 4, 8, 0x10, 0x20, 0x100, 0x10000, 0x40000, 0x80000]
+            .into_iter()
+            .any(|access| entry.allowed_reopen & access == 0 && reopen(entry.handle, access))
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn non_root_reopen_is_checked_against_resolved_authority() {
+    let mut setup = Setup::empty();
+    setup.count = 2;
+    setup.entries[0].handle = 10;
+    setup.entries[1].handle = 20;
+    assert!(has_undeclared_reopen(&setup, |handle, access| handle == 20 && access == 1));
+    setup.entries[1].allowed_reopen = 1;
+    assert!(!has_undeclared_reopen(&setup, |handle, access| handle
+        == 20
+        && access == 1));
+    assert!(has_undeclared_reopen(&setup, |handle, access| handle == 20 && access == 2));
+    assert!(has_undeclared_reopen(&setup, |handle, access| handle == 20 && access == 0x40000));
+}
+fn closed_stdin(input: Handle) -> bool {
+    input != 0
+        && input != -1
+        && unsafe { GetFileType(input) } == 3
+        && unsafe {
+            PeekNamedPipe(
+                input,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        } == 0
+        && unsafe { GetLastError() } == 109
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn DllMain(module: Handle, reason: u32, _reserved: *mut c_void) -> i32 {
+    // No allocation, import patching, remote operations or lock acquisition under loader lock.
+    if reason == 1 {
+        SELF.store(module, Ordering::Release);
+    }
+    1
+}
+
+fn translated_pipe(bytes: &[u8]) -> Option<CString> {
+    const OLD: &[u8] = b"\\\\?\\pipe\\uv\\";
+    if bytes.len() > 1024 || !bytes.starts_with(OLD) {
+        return None;
+    }
+    let mut name = b"\\\\?\\pipe\\LOCAL\\uv\\".to_vec();
+    name.extend_from_slice(&bytes[OLD.len()..]);
+    CString::new(name).ok()
+}
+unsafe fn pipe_name(name: *const u8) -> Option<CString> {
+    if name.is_null() {
+        return None;
+    }
+    // Native API callers provide a readable NUL-terminated string. Limit inspection to
+    // libuv's bounded generated names rather than accepting arbitrary pipe namespaces.
+    let mut bytes = Vec::new();
+    for index in 0..1025 {
+        let byte = unsafe { *name.add(index) };
+        if byte == 0 {
+            return translated_pipe(&bytes);
+        }
+        bytes.push(byte);
+    }
+    None
+}
+type PipeFn =
+    unsafe extern "system" fn(*const u8, u32, u32, u32, u32, u32, u32, *const c_void) -> Handle;
+type FileFn =
+    unsafe extern "system" fn(*const u8, u32, u32, *const c_void, u32, u32, Handle) -> Handle;
+type WFileFn =
+    unsafe extern "system" fn(*const u16, u32, u32, *const c_void, u32, u32, Handle) -> Handle;
+
+#[repr(C)]
+struct StdioAttributes {
+    length: u32,
+    descriptor: *const c_void,
+    inherit: i32,
+}
+
+fn ignored_stdin_request(
+    path: &[u16],
+    access: u32,
+    share: u32,
+    creation: u32,
+    flags: u32,
+    template: Handle,
+    attributes: &StdioAttributes,
+) -> bool {
+    same_path(path, &[78, 85, 76])
+        && access == 0x120089
+        && share == 3
+        && creation == 3
+        && flags == 0
+        && template == 0
+        && attributes.length as usize == std::mem::size_of::<StdioAttributes>()
+        && attributes.descriptor.is_null()
+        && attributes.inherit == 1
+}
+unsafe extern "system" fn create_pipe(
+    name: *const u8,
+    a: u32,
+    b: u32,
+    c: u32,
+    d: u32,
+    e: u32,
+    f: u32,
+    g: *const c_void,
+) -> Handle {
+    let original: PipeFn = unsafe { std::mem::transmute(PIPE.load(Ordering::Acquire)) };
+    let translated = unsafe { pipe_name(name) };
+    let result = unsafe {
+        original(
+            translated
+                .as_ref()
+                .map_or(name, |value| value.as_ptr().cast()),
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+        )
+    };
+    let error = unsafe { GetLastError() };
+    if result == -1 && translated.is_some() {
+        report_failure("create IPC pipe", error);
+    }
+    drop(translated);
+    unsafe { SetLastError(error) };
+    result
+}
+unsafe extern "system" fn create_file(
+    name: *const u8,
+    a: u32,
+    b: u32,
+    c: *const c_void,
+    d: u32,
+    e: u32,
+    f: Handle,
+) -> Handle {
+    let original: FileFn = unsafe { std::mem::transmute(FILE.load(Ordering::Acquire)) };
+    let translated = unsafe { pipe_name(name) };
+    let result = unsafe {
+        original(
+            translated
+                .as_ref()
+                .map_or(name, |value| value.as_ptr().cast()),
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+        )
+    };
+    let error = unsafe { GetLastError() };
+    if result == -1 && translated.is_some() {
+        report_failure("open IPC pipe", error);
+    }
+    drop(translated);
+    unsafe { SetLastError(error) };
+    result
+}
+fn ordinary_path(path: &[u16]) -> &[u16] {
+    let path = path.strip_prefix(&[92, 92, 63, 92]).unwrap_or(path);
+    if path.len() > 3 && path.last() == Some(&92) {
+        &path[..path.len() - 1]
+    } else {
+        path
+    }
+}
+fn same_path(a: &[u16], b: &[u16]) -> bool {
+    let a = ordinary_path(a);
+    let b = ordinary_path(b);
+    (unsafe { CompareStringOrdinal(a.as_ptr(), a.len() as i32, b.as_ptr(), b.len() as i32, 1) })
+        == 2
+}
+unsafe extern "system" fn create_wfile(
+    name: *const u16,
+    access: u32,
+    share: u32,
+    attributes: *const c_void,
+    creation: u32,
+    flags: u32,
+    template: Handle,
+) -> Handle {
+    let original: WFileFn = unsafe { std::mem::transmute(WFILE.load(Ordering::Acquire)) };
+    if !name.is_null()
+        && access == METADATA_ACCESS
+        && share == 7
+        && creation == 3
+        && attributes.is_null()
+        && template == 0
+        && flags & !0x02200080 == 0
+    {
+        let mut path = Vec::new();
+        for index in 0..MAX_PATH_UNITS {
+            let unit = unsafe { *name.add(index) };
+            if unit == 0 {
+                break;
+            }
+            path.push(unit);
+        }
+        if path.len() < MAX_PATH_UNITS
+            && let Some(setup) = SETUP.get()
+            && let Some(entry) = setup.entries[..setup.count as usize]
+                .iter()
+                .find(|entry| same_path(&path, &entry.path[..entry.length as usize]))
+        {
+            let mut duplicate = 0;
+            // SAME_ACCESS cannot convert this FILE_READ_ATTRIBUTES-only capability into
+            // directory listing, file contents, image mapping, write or ACL-edit authority.
+            let succeeded = unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    entry.handle,
+                    GetCurrentProcess(),
+                    &mut duplicate,
+                    0,
+                    0,
+                    2,
+                )
+            };
+            let error = unsafe { GetLastError() };
+            drop(path);
+            unsafe { SetLastError(error) };
+            return if succeeded != 0 { duplicate } else { -1 };
+        }
+    }
+    let result = unsafe { original(name, access, share, attributes, creation, flags, template) };
+    let error = unsafe { GetLastError() };
+    if result == -1 && !name.is_null() {
+        let mut path = Vec::new();
+        for index in 0..4 {
+            let unit = unsafe { *name.add(index) };
+            if unit == 0 {
+                break;
+            }
+            path.push(unit);
+        }
+        if same_path(&path, &[78, 85, 76]) {
+            if error == 5
+                && !attributes.is_null()
+                && ignored_stdin_request(&path, access, share, creation, flags, template, unsafe {
+                    &*attributes.cast::<StdioAttributes>()
+                })
+                && let Some(setup) = SETUP.get()
+            {
+                let mut duplicate = 0;
+                if unsafe {
+                    DuplicateHandle(
+                        GetCurrentProcess(),
+                        setup.stdin_eof,
+                        GetCurrentProcess(),
+                        &mut duplicate,
+                        0,
+                        1,
+                        2,
+                    )
+                } != 0
+                {
+                    unsafe { SetLastError(0) };
+                    return duplicate;
+                }
+            }
+            report_failure("open null stdio", error);
+        }
+    }
+    unsafe { SetLastError(error) };
+    result
+}
+
+type FinalFn = unsafe extern "system" fn(Handle, *mut u16, u32, u32) -> u32;
+unsafe extern "system" fn final_path(
+    handle: Handle,
+    buffer: *mut u16,
+    length: u32,
+    flags: u32,
+) -> u32 {
+    let original: FinalFn = unsafe { std::mem::transmute(FINAL.load(Ordering::Acquire)) };
+    let result = unsafe { original(handle, buffer, length, flags) };
+    if result != 0 || flags != 0 {
+        return result;
+    }
+    let error = unsafe { GetLastError() };
+    if error != 5 {
+        return 0;
+    }
+    let adapted = (|| {
+        let setup = SETUP.get()?;
+        let mut path = vec![0u16; 32768];
+        let path_length =
+            unsafe { original(handle, path.as_mut_ptr(), path.len() as u32, 2) } as usize;
+        if path_length == 0 || path_length >= path.len() {
+            return None;
+        }
+        for entry in &setup.entries[..setup.count as usize] {
+            let drive = ordinary_path(&entry.path[..entry.length as usize]);
+            if drive.len() != 3 || drive[1..] != [58, 92] {
+                continue;
+            }
+            let mut root = [0u16; 1024];
+            let root_length =
+                unsafe { original(entry.handle, root.as_mut_ptr(), root.len() as u32, 2) } as usize;
+            if root_length == 0
+                || root_length >= root.len()
+                || !path[..path_length].starts_with(&root[..root_length])
+            {
+                continue;
+            }
+            let mut translated = vec![92, 92, 63, 92, drive[0], 58, 92];
+            translated.extend_from_slice(&path[root_length..path_length]);
+            if buffer.is_null() || length as usize <= translated.len() {
+                return Some((translated.len() + 1) as u32);
+            }
+            unsafe {
+                ptr::copy_nonoverlapping(translated.as_ptr(), buffer, translated.len());
+                *buffer.add(translated.len()) = 0;
+            }
+            return Some(translated.len() as u32);
+        }
+        None
+    })();
+    unsafe { SetLastError(error) };
+    adapted.unwrap_or(0)
+}
+
+fn initialize_child(child: &ProcessInfo) -> Result<(), u32> {
+    let module = SELF.load(Ordering::Acquire);
+    let path = module_path(module)?;
+    let (base, size) = load_component(child.process, &path)?;
+    let offset = export_offset(module, c"TapidInitialize", size)?;
+    let mut setup = SETUP.get().ok_or(87u32)?.clone();
+    if unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            setup.stdin_eof,
+            child.process,
+            &mut setup.stdin_eof,
+            0,
+            0,
+            2,
+        )
+    } == 0
+    {
+        return Err(unsafe { GetLastError() });
+    }
+    for entry in &mut setup.entries[..setup.count as usize] {
+        let mut handle = 0;
+        if unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                entry.handle,
+                child.process,
+                &mut handle,
+                METADATA_ACCESS,
+                0,
+                0,
+            )
+        } == 0
+        {
+            let error = unsafe { GetLastError() };
+            report_failure("duplicate metadata", error);
+            return Err(error);
+        }
+        entry.handle = handle;
+    }
+    let (request, response) = network::register_child(child.process)?;
+    setup.network_request = request;
+    setup.network_response = response;
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&setup as *const Setup).cast(),
+            std::mem::size_of::<Setup>(),
+        )
+    };
+    if remote_call(child.process, base + offset, bytes)? != 1 {
+        report_failure("initialize component", 193);
+        return Err(193);
+    }
+    Ok(())
+}
+type ProcessFn = unsafe extern "system" fn(
+    *const u16,
+    *mut u16,
+    *const c_void,
+    *const c_void,
+    i32,
+    u32,
+    *const c_void,
+    *const u16,
+    *const c_void,
+    *mut ProcessInfo,
+) -> i32;
+unsafe extern "system" fn create_process(
+    application: *const u16,
+    command: *mut u16,
+    process_attributes: *const c_void,
+    thread_attributes: *const c_void,
+    inherit: i32,
+    flags: u32,
+    environment: *const c_void,
+    cwd: *const u16,
+    startup: *const c_void,
+    info: *mut ProcessInfo,
+) -> i32 {
+    let original: ProcessFn = unsafe { std::mem::transmute(PROCESS.load(Ordering::Acquire)) };
+    let result = unsafe {
+        original(
+            application,
+            command,
+            process_attributes,
+            thread_attributes,
+            inherit,
+            flags | 4,
+            environment,
+            cwd,
+            startup,
+            info,
+        )
+    };
+    let error = unsafe { GetLastError() };
+    if result == 0 {
+        report_failure("create child", error);
+        unsafe { SetLastError(error) };
+        return result;
+    }
+    let child = unsafe { &*info };
+    if let Err(failure) = initialize_child(child).and_then(|()| {
+        if flags & 4 == 0 && unsafe { ResumeThread(child.thread) } == u32::MAX {
+            Err(unsafe { GetLastError() })
+        } else {
+            Ok(())
+        }
+    }) {
+        report_failure("prepare child", failure);
+        unsafe {
+            TerminateProcess(child.process, 127);
+            WaitForSingleObject(child.process, 5000);
+            CloseHandle(child.thread);
+            CloseHandle(child.process);
+            *info = ProcessInfo {
+                process: 0,
+                thread: 0,
+                pid: 0,
+                tid: 0,
+            };
+            SetLastError(failure);
+        }
+        return 0;
+    }
+    unsafe { SetLastError(error) };
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ignored_stdin_requires_exact_libuv_request() {
+        let attributes = StdioAttributes {
+            length: std::mem::size_of::<StdioAttributes>() as u32,
+            descriptor: ptr::null(),
+            inherit: 1,
+        };
+        let nul = [78, 85, 76];
+        assert!(ignored_stdin_request(
+            &nul,
+            0x120089,
+            3,
+            3,
+            0,
+            0,
+            &attributes
+        ));
+        for access in [0, 0x120196, 0x1f01ff] {
+            assert!(!ignored_stdin_request(
+                &nul,
+                access,
+                3,
+                3,
+                0,
+                0,
+                &attributes
+            ));
+        }
+        assert!(!ignored_stdin_request(
+            &[67, 58, 92],
+            0x120089,
+            3,
+            3,
+            0,
+            0,
+            &attributes
+        ));
+        assert!(!ignored_stdin_request(
+            &nul,
+            0x120089,
+            3,
+            3,
+            0x02000000,
+            0,
+            &attributes
+        ));
+        let noninherit = StdioAttributes {
+            inherit: 0,
+            ..attributes
+        };
+        assert!(!ignored_stdin_request(
+            &nul,
+            0x120089,
+            3,
+            3,
+            0,
+            0,
+            &noninherit
+        ));
+    }
+
+    #[test]
+    fn denied_null_input_reuses_eof_without_device_or_write_authority() {
+        // The unoptimized test build moves the fixed capability frame through OnceLock.
+        // Production builds compile this component with optimization enabled.
+        std::thread::Builder::new()
+            .stack_size(4 * 1024 * 1024)
+            .spawn(|| {
+                use windows_sys::Win32::{Foundation::CloseHandle, System::Pipes::CreatePipe};
+                unsafe extern "system" fn denied(
+                    _: *const u16,
+                    _: u32,
+                    _: u32,
+                    _: *const c_void,
+                    _: u32,
+                    _: u32,
+                    _: Handle,
+                ) -> Handle {
+                    unsafe { SetLastError(5) };
+                    -1
+                }
+                let (mut reader, mut writer) = (0, 0);
+                assert_ne!(
+                    unsafe { CreatePipe(&mut reader, &mut writer, ptr::null(), 0) },
+                    0
+                );
+                unsafe { CloseHandle(writer) };
+                let mut setup = Setup::empty();
+                setup.stdin_eof = reader;
+                assert!(SETUP.set(setup).is_ok());
+                let original = WFILE.swap(denied as *const () as usize, Ordering::AcqRel);
+                let attributes = StdioAttributes {
+                    length: std::mem::size_of::<StdioAttributes>() as u32,
+                    descriptor: ptr::null(),
+                    inherit: 1,
+                };
+                let nul = [78, 85, 76, 0];
+                let duplicate = unsafe {
+                    create_wfile(
+                        nul.as_ptr(),
+                        0x120089,
+                        3,
+                        (&attributes as *const StdioAttributes).cast(),
+                        3,
+                        0,
+                        0,
+                    )
+                };
+                assert_ne!(duplicate, -1);
+                assert!(closed_stdin(duplicate));
+                assert_eq!(
+                    unsafe {
+                        create_wfile(
+                            nul.as_ptr(),
+                            0x120196,
+                            3,
+                            (&attributes as *const StdioAttributes).cast(),
+                            3,
+                            0,
+                            0,
+                        )
+                    },
+                    -1
+                );
+                assert_eq!(
+                    unsafe { create_wfile(nul.as_ptr(), 0x120089, 3, ptr::null(), 3, 0, 0) },
+                    -1
+                );
+                WFILE.store(original, Ordering::Release);
+                unsafe {
+                    CloseHandle(duplicate);
+                    CloseHandle(reader);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn only_closed_pipe_can_supply_ignored_stdin() {
+        use windows_sys::Win32::{Foundation::CloseHandle, System::Pipes::CreatePipe};
+        let (mut reader, mut writer) = (0, 0);
+        assert_ne!(
+            unsafe { CreatePipe(&mut reader, &mut writer, ptr::null(), 0) },
+            0
+        );
+        assert!(!closed_stdin(reader));
+        unsafe { CloseHandle(writer) };
+        assert!(closed_stdin(reader));
+        unsafe { CloseHandle(reader) };
+        assert!(!closed_stdin(0));
+        assert!(!closed_stdin(-1));
+    }
+    #[test]
+    fn only_generated_uv_prefix_is_translated() {
+        assert_eq!(
+            translated_pipe(br"\\?\pipe\uv\123-abcd")
+                .unwrap()
+                .to_bytes(),
+            br"\\?\pipe\LOCAL\uv\123-abcd"
+        );
+        for path in [
+            br"\\?\pipe\LOCAL\uv\123".as_slice(),
+            br"\\?\pipe\host-private",
+            br"\\server\pipe\uv\123",
+        ] {
+            assert!(translated_pipe(path).is_none());
+        }
+        let mut too_long = br"\\?\pipe\uv\".to_vec();
+        too_long.extend([b'a'; 1024]);
+        assert!(translated_pipe(&too_long).is_none());
+    }
+}

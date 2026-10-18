@@ -89,8 +89,9 @@ export async function verify(directory: string, destination: string, context: Co
   const provenance = JSON.parse(await readFile(resolve(directory, 'provenance.json'), 'utf8'));
   check(provenance && typeof provenance === 'object' && !Array.isArray(provenance), 'invalid provenance object');
   check(JSON.stringify(Object.keys(provenance).sort()) === JSON.stringify([...Object.keys(record), 'cargo', 'rustc', 'toolchain', 'size', 'sha256'].sort()), 'invalid provenance fields');
-  // Compare the declared producer contract, not the toolchain-free consumer's absent build-only setting.
-  const producerRecord = { ...record, settings: { ...record.settings, CARGO_INCREMENTAL: '0' } };
+  // Bind the image revision to the upstream job output, not another runner in a hosted rollout.
+  const producerRecord = { ...record, imageVersion: (context.env ?? process.env).TAPID_CI_PRODUCER_IMAGE_VERSION, settings: { ...record.settings, CARGO_INCREMENTAL: '0' } };
+  validateIdentity(producerRecord, 'producer');
   for (const [key, value] of Object.entries(producerRecord)) check(JSON.stringify(provenance[key]) === JSON.stringify(value), `provenance mismatch: ${key}`);
   validateCompiler(provenance);
   const bytes = await readFile(resolve(directory, 'tapid.exe'));
@@ -101,7 +102,7 @@ export async function verify(directory: string, destination: string, context: Co
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   await mkdir(dirname(resolve(destination)), { recursive: true });
   await writeFile(destination, bytes);
-  console.log(`Verified Windows CLI ${record.sourceSha} run ${record.runId} attempt ${record.runAttempt}: ${hash(bytes)} (${bytes.length} bytes)`);
+  console.log(`Verified Windows CLI ${record.sourceSha} run ${record.runId} attempt ${record.runAttempt}: ${hash(bytes)} (${bytes.length} bytes); producer image ${provenance.imageOS}/${provenance.imageVersion}, verifier image ${record.imageOS}/${record.imageVersion}`);
   return record.version;
 }
 

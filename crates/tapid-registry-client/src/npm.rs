@@ -1,3 +1,4 @@
+use crate::metadata::{json_object, json_response};
 use crate::{
     HttpResponse, HttpTransport, MetadataError, PackagePlatform, RegistryArtifact,
     RegistryClientError, RegistryKind, RegistryPackageId, artifact::download_artifact,
@@ -51,22 +52,19 @@ impl<T: HttpTransport> NpmRegistry<T> {
             // decides whether the missing package is relevant.
             return Ok(Vec::new());
         }
-        let abbreviated_body = json_response(&response)?;
-        if !needs_full_libc_metadata(abbreviated_body, &name)? {
-            return parse_npm(
-                &self.origin,
-                &name,
-                abbreviated_body,
-                allow_missing_integrity,
-            );
+        let abbreviated =
+            json_object(json_response(&response)?).map_err(RegistryClientError::Metadata)?;
+        if !needs_full_libc_metadata(&abbreviated, &name)? {
+            return parse_npm_object(&self.origin, &name, abbreviated, allow_missing_integrity);
         }
         let full_response = self
             .transport
             .get_with_accept(&url, NPM_FULL_METADATA_ACCEPT)
             .map_err(RegistryClientError::Transport)?;
-        let full_body = json_response(&full_response)?;
-        let enriched_body = merge_full_libc_metadata(abbreviated_body, full_body, &name)?;
-        parse_npm(&self.origin, &name, &enriched_body, allow_missing_integrity)
+        let full =
+            json_object(json_response(&full_response)?).map_err(RegistryClientError::Metadata)?;
+        let enriched_body = merge_full_libc_metadata(abbreviated, full, &name)?;
+        parse_npm_object(&self.origin, &name, enriched_body, allow_missing_integrity)
     }
     /// Downloads one validated artifact URL through this registry's transport policy.
     pub fn download_artifact(
@@ -77,31 +75,10 @@ impl<T: HttpTransport> NpmRegistry<T> {
     }
 }
 
-fn json_response(response: &HttpResponse) -> Result<&[u8], RegistryClientError> {
-    if response.status != 200 {
-        return Err(RegistryClientError::Metadata(MetadataError::HttpStatus(
-            response.status,
-        )));
-    }
-    let Some(content_type) = response.content_type.as_deref() else {
-        return Err(RegistryClientError::Metadata(
-            MetadataError::UnsupportedContentType("missing content type".into()),
-        ));
-    };
-    let media_type = content_type.split(';').next().unwrap_or_default().trim();
-    if media_type != "application/json" && !media_type.ends_with("+json") {
-        return Err(RegistryClientError::Metadata(
-            MetadataError::UnsupportedContentType(content_type.into()),
-        ));
-    }
-    Ok(&response.body)
-}
-
 fn needs_full_libc_metadata(
-    body: &[u8],
+    root: &serde_json::Map<String, serde_json::Value>,
     expected_name: &PackageName,
 ) -> Result<bool, RegistryClientError> {
-    let root = json_object(body).map_err(RegistryClientError::Metadata)?;
     if root
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -139,12 +116,10 @@ fn needs_full_libc_metadata(
 }
 
 fn merge_full_libc_metadata(
-    abbreviated_body: &[u8],
-    full_body: &[u8],
+    mut abbreviated: serde_json::Map<String, serde_json::Value>,
+    full: serde_json::Map<String, serde_json::Value>,
     expected_name: &PackageName,
-) -> Result<Vec<u8>, RegistryClientError> {
-    let mut abbreviated = json_object(abbreviated_body).map_err(RegistryClientError::Metadata)?;
-    let full = json_object(full_body).map_err(RegistryClientError::Metadata)?;
+) -> Result<serde_json::Map<String, serde_json::Value>, RegistryClientError> {
     let expected_name = expected_name.to_string();
     for root in [&abbreviated, &full] {
         if root
@@ -238,18 +213,7 @@ fn merge_full_libc_metadata(
             entry.insert("libc".into(), libc.clone());
         }
     }
-    serde_json::to_vec(&abbreviated).map_err(|error| {
-        RegistryClientError::Metadata(MetadataError::InvalidJson(error.to_string()))
-    })
-}
-
-fn json_object(body: &[u8]) -> Result<serde_json::Map<String, serde_json::Value>, MetadataError> {
-    let value: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|error| MetadataError::InvalidJson(error.to_string()))?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| MetadataError::InvalidJson("metadata must be an object".into()))
+    Ok(abbreviated)
 }
 
 fn required_str<'a>(
@@ -263,6 +227,7 @@ fn required_str<'a>(
         .ok_or_else(|| MetadataError::MissingField(key.into()))
 }
 
+#[cfg(test)]
 fn parse_npm(
     origin: &RegistryOrigin,
     name: &PackageName,
@@ -270,6 +235,15 @@ fn parse_npm(
     allow_missing_integrity: bool,
 ) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
     let root = json_object(body).map_err(RegistryClientError::Metadata)?;
+    parse_npm_object(origin, name, root, allow_missing_integrity)
+}
+
+fn parse_npm_object(
+    origin: &RegistryOrigin,
+    name: &PackageName,
+    root: serde_json::Map<String, serde_json::Value>,
+    allow_missing_integrity: bool,
+) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
     if let Some(metadata_name) = root.get("name").and_then(|value| value.as_str())
         && metadata_name != name.to_string()
     {
@@ -277,6 +251,26 @@ fn parse_npm(
             MetadataError::ConflictingField("name".into()),
         ));
     }
+    let tags = root
+        .get("dist-tags")
+        .map(|value| {
+            let object = value
+                .as_object()
+                .ok_or_else(|| MetadataError::InvalidJson("dist-tags must be an object".into()))?;
+            Ok::<_, MetadataError>(
+                object
+                    .iter()
+                    .filter_map(|(tag, value)| {
+                        // Match version-key handling: unusable targets are not candidates.
+                        let version = value.as_str()?.parse::<PackageVersion>().ok()?;
+                        Some((tag.clone(), version))
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+            )
+        })
+        .transpose()
+        .map_err(RegistryClientError::Metadata)?
+        .unwrap_or_default();
     let Some(versions) = root.get("versions") else {
         let metadata_name_matches =
             root.get("name").and_then(|value| value.as_str()) == Some(name.to_string().as_str());
@@ -392,7 +386,12 @@ fn parse_npm(
             _ => continue,
         };
         artifacts.push(RegistryArtifact {
-            identity: RegistryPackageId::new(origin.clone(), name.clone(), version),
+            dist_tags: tags
+                .iter()
+                .filter(|(_, target)| *target == &version)
+                .map(|(tag, _)| tag.clone())
+                .collect(),
+            identity: RegistryPackageId::from_source(origin.clone().into(), name.clone(), version),
             artifact_url,
             integrity,
             dependencies,
@@ -511,6 +510,60 @@ fn parse_optional_peer_dependencies(
 mod tests {
     use super::*;
     use crate::TransportError;
+
+    #[test]
+    fn dist_tags_preserve_exact_targets_and_skip_unusable_targets() {
+        let origin = "https://registry.npmjs.org".parse().unwrap();
+        let name = "pkg".parse().unwrap();
+        let body = serde_json::json!({"name":"pkg", "dist-tags":{"next":"2.0.0-beta.1", "latest":"1.0.0", "missing":"3.0.0"}, "versions": {
+            "1.0.0": {"name":"pkg", "version":"1.0.0", "dist":{"tarball":"https://registry.npmjs.org/pkg/-/pkg-1.tgz"}},
+            "2.0.0-beta.1": {"name":"pkg", "version":"2.0.0-beta.1", "dist":{"tarball":"https://registry.npmjs.org/pkg/-/pkg-2.tgz"}}
+        }});
+        let artifacts =
+            parse_npm(&origin, &name, &serde_json::to_vec(&body).unwrap(), true).unwrap();
+        assert_eq!(artifacts.len(), 2);
+        for artifact in artifacts {
+            let expected = if artifact.identity.version.to_string() == "1.0.0" {
+                "latest"
+            } else {
+                "next"
+            };
+            assert_eq!(artifact.dist_tags, BTreeSet::from([expected.into()]));
+        }
+        for target in [
+            serde_json::json!(123),
+            serde_json::json!(null),
+            serde_json::json!("^1"),
+            serde_json::json!("1.0.0+build"),
+        ] {
+            let mut mixed = body.clone();
+            mixed["dist-tags"]["latest"] = target;
+            let artifacts =
+                parse_npm(&origin, &name, &serde_json::to_vec(&mixed).unwrap(), true).unwrap();
+            assert_eq!(artifacts.len(), 2);
+            assert!(
+                artifacts
+                    .iter()
+                    .all(|artifact| !artifact.dist_tags.contains("latest"))
+            );
+            assert!(
+                artifacts
+                    .iter()
+                    .any(|artifact| artifact.dist_tags.contains("next"))
+            );
+        }
+        for tags in [
+            serde_json::json!([]),
+            serde_json::json!(null),
+            serde_json::json!("latest"),
+        ] {
+            let mut invalid = body.clone();
+            invalid["dist-tags"] = tags;
+            assert!(
+                parse_npm(&origin, &name, &serde_json::to_vec(&invalid).unwrap(), true).is_err()
+            );
+        }
+    }
 
     pub(super) struct Fake {
         body: Vec<u8>,

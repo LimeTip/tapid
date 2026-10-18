@@ -1,3 +1,0 @@
-# Lossless native receipts: preserve mixed Win32/libtest line endings and spacing.
-# Treat as binary evidence in Git diffs, not as source subject to whitespace cleanup.
-*.txt -text -diff

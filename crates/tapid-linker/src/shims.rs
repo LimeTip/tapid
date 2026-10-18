@@ -1,4 +1,7 @@
-use std::path::{Component, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Component, PathBuf},
+};
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -31,12 +34,73 @@ pub enum ShimStrategy {
     WindowsCmdAndPowerShell,
 }
 
+impl ShimStrategy {
+    /// Validate generated output identities without reading bin targets or
+    /// selecting interpreters. Uses the same collision rules as shim planning.
+    pub fn validate_targets<'a>(
+        self,
+        targets: impl IntoIterator<Item = &'a std::path::Path>,
+    ) -> Result<(), PlanError> {
+        let mut outputs = BTreeSet::new();
+        for target in targets {
+            reserve_shim_outputs(&mut outputs, target, self)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShimInterpreter {
+    Direct,
+    Node,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShimEntry {
     pub command: String,
     pub source: PathBuf,
     pub target: PathBuf,
     pub strategy: ShimStrategy,
+    pub interpreter: ShimInterpreter,
+}
+
+fn shim_interpreter(
+    source: &std::path::Path,
+    platform: Platform,
+) -> Result<ShimInterpreter, PlanError> {
+    use std::io::Read;
+    if platform != Platform::Windows {
+        return Ok(ShimInterpreter::Direct);
+    }
+    let mut prefix = Vec::new();
+    std::fs::File::open(source)
+        .and_then(|file| file.take(512).read_to_end(&mut prefix))
+        .map_err(|_| PlanError::BinTargetMissing(source.to_owned()))?;
+    if !prefix.starts_with(b"#!") {
+        return Ok(ShimInterpreter::Direct);
+    }
+    if prefix.len() == 512 && !prefix.contains(&b'\n') {
+        return Err(PlanError::InvalidPackageMetadata(format!(
+            "Windows bin shebang exceeds the inspection limit: {}",
+            source.display()
+        )));
+    }
+    let line = prefix
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    let words = std::str::from_utf8(&line[2..])
+        .unwrap_or_default()
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>();
+    match words.as_slice() {
+        ["node" | "node.exe" | "/usr/bin/node" | "/usr/bin/node.exe"]
+        | ["/usr/bin/env", "node" | "node.exe"] => Ok(ShimInterpreter::Node),
+        _ => Err(PlanError::InvalidPackageMetadata(format!(
+            "unsupported Windows bin interpreter: {}",
+            source.display()
+        ))),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,6 +126,7 @@ pub fn plan_shims(
         Platform::Other => return Err(PlanError::UnsupportedPlatform(platform)),
     };
     let mut entries = Vec::new();
+    let mut outputs = BTreeSet::new();
     for package in packages {
         if !package.tree_root.is_absolute()
             || package
@@ -100,13 +165,9 @@ pub fn plan_shims(
             if !managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(target_path));
             }
-            let collision = entries
-                .iter()
-                .any(|entry: &ShimEntry| shim_paths_collide(&entry.target, &target_path, strategy));
-            if collision {
-                return Err(PlanError::ShimCollision(target_path));
-            }
+            reserve_shim_outputs(&mut outputs, &target_path, strategy)?;
             entries.push(ShimEntry {
+                interpreter: shim_interpreter(&source, platform)?,
                 command: target.command.clone(),
                 source,
                 target: target_path,
@@ -146,6 +207,11 @@ pub fn plan_shims_with_workspace_packages(
         Platform::Windows => ShimStrategy::WindowsCmdAndPowerShell,
         Platform::Other => return Err(PlanError::UnsupportedPlatform(platform)),
     };
+    let mut outputs = plan
+        .entries
+        .iter()
+        .flat_map(|entry| shim_output_keys(&entry.target, strategy))
+        .collect::<BTreeSet<_>>();
     for package in workspace_packages {
         if !package.tree_root.is_absolute()
             || package
@@ -210,14 +276,9 @@ pub fn plan_shims_with_workspace_packages(
             if !plan.managed_root.contains(&source) || !plan.managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(source));
             }
-            if plan
-                .entries
-                .iter()
-                .any(|entry| shim_paths_collide(&entry.target, &target_path, strategy))
-            {
-                return Err(PlanError::ShimCollision(target_path));
-            }
+            reserve_shim_outputs(&mut outputs, &target_path, strategy)?;
             plan.entries.push(ShimEntry {
+                interpreter: shim_interpreter(&validated_source, platform)?,
                 command: target.command.clone(),
                 source,
                 target: target_path,
@@ -230,26 +291,24 @@ pub fn plan_shims_with_workspace_packages(
     Ok(plan)
 }
 
-fn shim_paths_collide(
-    first: &std::path::Path,
-    second: &std::path::Path,
-    strategy: ShimStrategy,
-) -> bool {
-    match strategy {
-        ShimStrategy::UnixSymlink => first == second,
-        ShimStrategy::WindowsCmdAndPowerShell => {
-            let first_keys = shim_output_keys(first, strategy);
-            shim_output_keys(second, strategy)
-                .iter()
-                .any(|key| first_keys.iter().any(|first_key| first_key == key))
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum ShimKey {
     Bytes(Vec<u8>),
     Utf16(Vec<u16>),
+}
+
+fn reserve_shim_outputs(
+    outputs: &mut BTreeSet<ShimKey>,
+    target: &std::path::Path,
+    strategy: ShimStrategy,
+) -> Result<(), PlanError> {
+    if shim_output_keys(target, strategy)
+        .into_iter()
+        .any(|key| !outputs.insert(key))
+    {
+        return Err(PlanError::ShimCollision(target.to_owned()));
+    }
+    Ok(())
 }
 
 fn shim_output_keys(path: &std::path::Path, strategy: ShimStrategy) -> Vec<ShimKey> {
@@ -332,6 +391,83 @@ mod tests {
             package_json: format!(r#"{{"name":"{name}","version":"1.0.0","bin":{bin}}}"#),
             bin_dir: root.join("node_modules"),
         }
+    }
+
+    #[test]
+    fn windows_bin_interpreters_are_bounded_and_do_not_execute_shebang_arguments() {
+        let root = test_root("interpreters");
+        std::fs::create_dir_all(&root).unwrap();
+        let package = shim_package(&root, "tool", r#""cli.js""#, "package");
+        for (prefix, expected) in [
+            (
+                b"#!/usr/bin/env node\n".as_slice(),
+                Some(ShimInterpreter::Node),
+            ),
+            (
+                b"#! /usr/bin/node\r\n".as_slice(),
+                Some(ShimInterpreter::Node),
+            ),
+            (
+                b"MZ native executable".as_slice(),
+                Some(ShimInterpreter::Direct),
+            ),
+            (b"#!/usr/bin/env node --inspect\n".as_slice(), None),
+            (b"#!/usr/bin/env node&evil\n".as_slice(), None),
+            (b"#!/bin/sh\n".as_slice(), None),
+        ] {
+            std::fs::write(package.tree_root.join("cli.js"), prefix).unwrap();
+            let result = plan_shims(
+                ManagedRoot::new(&root).unwrap(),
+                vec![package.clone()],
+                Platform::Windows,
+            );
+            match expected {
+                Some(interpreter) => {
+                    assert_eq!(result.unwrap().entries[0].interpreter, interpreter)
+                }
+                None => assert!(matches!(result, Err(PlanError::InvalidPackageMetadata(_)))),
+            }
+            assert!(!package.bin_dir.join(".bin").exists());
+        }
+        std::fs::write(
+            package.tree_root.join("cli.js"),
+            [b"#!".as_slice(), &vec![b' '; 1024], b"node\n"].concat(),
+        )
+        .unwrap();
+        assert!(
+            plan_shims(
+                ManagedRoot::new(&root).unwrap(),
+                vec![package.clone()],
+                Platform::Windows
+            )
+            .is_err()
+        );
+        std::fs::write(
+            package.tree_root.join("cli.js"),
+            [b"#!node".as_slice(), &vec![b' '; 1024], b"--inspect\n"].concat(),
+        )
+        .unwrap();
+        assert!(
+            plan_shims(
+                ManagedRoot::new(&root).unwrap(),
+                vec![package.clone()],
+                Platform::Windows
+            )
+            .is_err(),
+            "arguments beyond the bounded prefix must not be accepted"
+        );
+        assert_eq!(
+            plan_shims(
+                ManagedRoot::new(&root).unwrap(),
+                vec![package],
+                Platform::Unix
+            )
+            .unwrap()
+            .entries[0]
+                .interpreter,
+            ShimInterpreter::Direct
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -534,11 +670,10 @@ mod tests {
 
         let first = PathBuf::from(OsString::from_vec(b"node-\xff/.bin/tool".to_vec()));
         let second = PathBuf::from(OsString::from_vec(b"node-\xfe/.bin/tool".to_vec()));
-        assert!(!shim_paths_collide(
-            &first,
-            &second,
-            ShimStrategy::UnixSymlink
-        ));
+        assert_ne!(
+            shim_output_keys(&first, ShimStrategy::UnixSymlink),
+            shim_output_keys(&second, ShimStrategy::UnixSymlink),
+        );
     }
 
     #[cfg(unix)]

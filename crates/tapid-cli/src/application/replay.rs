@@ -1,35 +1,17 @@
 use super::outcome::{ErrorKind, OperationalError};
-use crate::context;
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use crate::online;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 use tapid_core::PackageInstanceId;
 use tapid_linker::{
     InstanceKey, NamedDependency, NamedDependencyEdge, NamedLayoutInput, PackageInstance, Platform,
     VerifiedTreeReference,
 };
 use tapid_lockfile::Lockfile;
-use tapid_manifest::PackageManifest;
+use tapid_manifest::{DependencyKind, PackageManifest};
 use tapid_store::Store;
-
-struct ReplaySnapshotGuard {
-    paths: Vec<PathBuf>,
-    keep: bool,
-}
-
-pub(crate) fn cleanup_replay_snapshots(trees: &BTreeMap<String, PathBuf>) {
-    for tree in trees.values() {
-        let _ = fs::remove_dir_all(tree);
-    }
-}
-
-impl Drop for ReplaySnapshotGuard {
-    fn drop(&mut self) {
-        if !self.keep {
-            for path in &self.paths {
-                let _ = fs::remove_dir_all(path);
-            }
-        }
-    }
-}
 
 fn replay_progress_checkpoint(completed: usize, total: usize) -> bool {
     total > 0 && (completed == 1 || completed == total || completed.is_multiple_of(50))
@@ -68,6 +50,144 @@ pub(crate) fn validate_root_bindings(
         .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))
 }
 
+/// Validate current workspace edges against the locked source-qualified graph.
+pub(super) fn validate_workspace_dependency_edges(
+    workspace: &online::WorkspaceMaterialization,
+    registry_dependencies: &[online::WorkspaceRegistryDependency],
+    lock: &Lockfile,
+) -> Result<(), String> {
+    for current in &workspace.locked {
+        let key = current.key();
+        let locked = lock
+            .workspace_packages()
+            .get(&key)
+            .ok_or_else(|| format!("lockfile is missing workspace package {key}"))?;
+        let mut expected_names = std::collections::BTreeSet::new();
+        for (name, target) in current.dependencies() {
+            expected_names.insert(name.clone());
+            if locked.dependencies().get(name) != Some(target) {
+                return Err(format!(
+                    "lockfile workspace dependency '{name}' for {key} does not match the current local workspace graph"
+                ));
+            }
+            let target_key = target
+                .parse::<tapid_lockfile::LockfilePackageKey>()
+                .map_err(|error| error.to_string())?;
+            if target_key.source.workspace().is_none()
+                || !lock.workspace_packages().contains_key(target)
+            {
+                return Err(format!(
+                    "lockfile workspace dependency '{name}' for {key} does not target a workspace package"
+                ));
+            }
+        }
+        for dependency in registry_dependencies
+            .iter()
+            .filter(|dependency| dependency.member_key == key)
+        {
+            let name = dependency.manifest_name.clone();
+            expected_names.insert(name.clone());
+            let target = locked.dependencies().get(&name).ok_or_else(|| {
+                format!(
+                    "lockfile omits workspace member dependency '{}' from {key}",
+                    dependency.manifest_name
+                )
+            })?;
+            let target_key = target
+                .parse::<tapid_lockfile::LockfilePackageKey>()
+                .map_err(|error| error.to_string())?;
+            if target_key.source.package_source().as_ref() != Some(&dependency.registry)
+                || target_key.name != dependency.package
+                || !dependency
+                    .requirement
+                    .matches_locked_version(&target_key.version)
+                || !lock.packages().contains_key(target)
+            {
+                return Err(format!(
+                    "lockfile target for workspace member dependency '{}' does not satisfy its registry, name, and version requirement",
+                    dependency.manifest_name
+                ));
+            }
+        }
+        let actual_names = locked
+            .dependencies()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if actual_names != expected_names {
+            return Err(format!(
+                "lockfile workspace dependency edges for {key} do not match the current member manifest"
+            ));
+        }
+    }
+    for peer in &workspace.peer_dependencies {
+        let provider_found = match &peer.provider {
+            online::WorkspacePeerProvider::Workspace { key, version } => {
+                let target_key = key
+                    .parse::<tapid_lockfile::LockfilePackageKey>()
+                    .map_err(|error| error.to_string())?;
+                target_key.version == *version
+                    && lock.workspace_packages().contains_key(key)
+                    && workspace.locked.iter().any(|member| member.key() == *key)
+            }
+            online::WorkspacePeerProvider::Registry { registry, package } => {
+                lock.roots().iter().any(|key| {
+                    key.parse::<tapid_lockfile::LockfilePackageKey>()
+                        .ok()
+                        .is_some_and(|target| {
+                            target.source.package_source().as_ref() == Some(registry)
+                                && target.name == *package
+                                && peer.requirement.matches_locked_version(&target.version)
+                                && lock.packages().contains_key(key)
+                        })
+                })
+            }
+        };
+        if !provider_found {
+            return Err(format!(
+                "lockfile has no provider satisfying workspace member peer dependency '{}' from {}",
+                peer.manifest_name, peer.member_key
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Observe whether current graph inputs and lifecycle policy permit the online fast path.
+/// Reads routes/platform, then the root digest, copied files when that digest matches,
+/// and workspace state in that order. Invalid inputs return errors; a valid mismatch
+/// or lifecycle work returns false. This does not inspect cache availability or
+/// attest artifact integrity. Install calls it after locking and recovery; preview
+/// calls it on an advisory observation after rejecting pending recovery. Neither
+/// caller may retain this result as authorization for later activation.
+pub(super) fn can_replay_online(
+    project: &Path,
+    lock: &Lockfile,
+    config: &crate::registry::RegistryConfig,
+    policy: &tapid_runner::DependencyLifecyclePolicy,
+) -> Result<bool, OperationalError> {
+    let routes_match = online::validate_locked_routes(lock, config)?;
+    let digest_matches = lock.root_manifest_digest() == online::root_digest(project)?;
+    if digest_matches {
+        online::validate_locked_files(project, lock)?;
+    }
+    let workspace = online::workspace_materialization(project, config)?;
+    Ok(routes_match
+        && policy.approvals().is_empty()
+        && lock
+            .packages()
+            .values()
+            .all(|p| p.derived_hooks().is_empty())
+        && digest_matches
+        && online::workspace_matches_lock(&workspace, lock))
+}
+
+pub(crate) struct ReplayInput {
+    pub input: NamedLayoutInput,
+    pub trees: BTreeMap<String, PathBuf>,
+    pub snapshots: Vec<tapid_store::VerifiedTreeSnapshot>,
+}
+
 pub(crate) fn replay_input_with_publication(
     lock: &Lockfile,
     manifest: &PackageManifest,
@@ -75,28 +195,36 @@ pub(crate) fn replay_input_with_publication(
     registry_config: &crate::registry::RegistryConfig,
     report_progress: impl FnMut(usize, usize),
     publication: Option<&tapid_store::StorePublication>,
-) -> Result<(NamedLayoutInput, BTreeMap<String, PathBuf>), OperationalError> {
+) -> Result<ReplayInput, OperationalError> {
     store.cleanup_stale_replay_snapshots().map_err(|error| {
         OperationalError::from(error).context("cannot recover stale replay snapshots")
     })?;
-    replay_input_with_tree_source(
+    let mut snapshots = Vec::new();
+    let (input, trees) = replay_input_with_tree_source(
         lock,
         manifest,
         registry_config,
         report_progress,
-        true,
         |_, package| {
             let digest = package
                 .tree_digest()
                 .parse()
                 .map_err(|error: tapid_core::DomainError| error.to_string())?;
-            match publication {
+            let snapshot = match publication {
                 Some(publication) => publication.verified_tree_snapshot(&digest),
                 None => store.verified_tree_snapshot(&digest),
             }
-            .map_err(OperationalError::from)
+            .map_err(OperationalError::from)?;
+            let path = snapshot.path().to_owned();
+            snapshots.push(snapshot);
+            Ok(path)
         },
-    )
+    )?;
+    Ok(ReplayInput {
+        input,
+        trees,
+        snapshots,
+    })
 }
 
 /// Build the locked layout using either owned replay snapshots or transaction-owned trees.
@@ -105,7 +233,6 @@ pub(crate) fn replay_input_with_tree_source(
     manifest: &PackageManifest,
     registry_config: &crate::registry::RegistryConfig,
     mut report_progress: impl FnMut(usize, usize),
-    owns_snapshots: bool,
     mut tree_source: impl FnMut(
         &tapid_lockfile::LockfilePackageKey,
         &tapid_lockfile::LockedPackage,
@@ -114,10 +241,6 @@ pub(crate) fn replay_input_with_tree_source(
     let mut instances = Vec::new();
     let mut keys = BTreeMap::new();
     let mut trees = BTreeMap::new();
-    let mut snapshots = ReplaySnapshotGuard {
-        paths: Vec::new(),
-        keep: false,
-    };
     let typed_packages = lock.packages_typed().map_err(OperationalError::from)?;
     let mut typed_keys = typed_packages
         .iter()
@@ -142,20 +265,15 @@ pub(crate) fn replay_input_with_tree_source(
             &mut report_progress,
         )
         .map_err(|e| e.context(format!("package {encoded} tree unavailable")))?;
-        if owns_snapshots {
-            snapshots.paths.push(tree.clone());
-        }
-        let peer = context::parse_peer(&key.peer_context)
-            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
-        let platform = context::parse_platform(&key.platform_context)
-            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
-        let registry = key.source.registry().cloned().ok_or_else(|| {
+        let peer = key.peer_context()?;
+        let platform = key.platform_context()?;
+        let registry = key.source.package_source().ok_or_else(|| {
             OperationalError::new(
                 ErrorKind::Lockfile,
                 format!("workspace source unexpectedly appeared as a registry artifact: {encoded}"),
             )
         })?;
-        let id = PackageInstanceId::new(registry, key.name.clone(), key.version.clone());
+        let id = PackageInstanceId::from_source(registry, key.name.clone(), key.version.clone());
         let instance = PackageInstance {
             id,
             peer_context: peer,
@@ -172,7 +290,7 @@ pub(crate) fn replay_input_with_tree_source(
             .iter()
             .filter(|root| {
                 root.parse::<tapid_lockfile::LockfilePackageKey>()
-                    .is_ok_and(|key| key.source.registry().is_some())
+                    .is_ok_and(|key| key.source.package_source().is_some())
             })
             .map(|root| {
                 let key: tapid_lockfile::LockfilePackageKey = root
@@ -209,7 +327,7 @@ pub(crate) fn replay_input_with_tree_source(
             let target_key = target
                 .parse::<tapid_lockfile::LockfilePackageKey>()
                 .map_err(|error| error.to_string())?;
-            if target_key.source.registry().is_some() {
+            if target_key.source.package_source().is_some() {
                 roots.push(NamedDependency {
                     name: name
                         .parse()
@@ -240,7 +358,6 @@ pub(crate) fn replay_input_with_tree_source(
             });
         }
     }
-    snapshots.keep = true;
     Ok((
         NamedLayoutInput {
             instances,
@@ -312,6 +429,16 @@ pub(crate) fn replay_root_keys_with_config(
             let name = name
                 .parse::<tapid_core::PackageName>()
                 .map_err(|error| error.to_string())?;
+            let key = typed_by_key
+                .get(target)
+                .ok_or_else(|| format!("missing root package target {target}"))?;
+            if crate::online::validate_copied_root_binding(
+                manifest,
+                name.as_str(),
+                key.source.copied(),
+            )? {
+                continue;
+            }
             let expected = declarations.get(&name).ok_or_else(|| {
                 format!("lockfile root binding {name} is not a direct manifest dependency")
             })?;
@@ -323,16 +450,27 @@ pub(crate) fn replay_root_keys_with_config(
                 let registry = if dependency.registry.as_str() == "https://jsr.io" {
                     dependency.registry.clone()
                 } else {
-                    registry_config.origin_for_name(actual)?
+                    registry_config.origin_for_name(actual)?.into()
                 };
-                if key.source.registry() != Some(&registry)
+                if key.source.package_source().as_ref() != Some(&registry)
                     || &key.name != actual
-                    || !dependency.requirement.matches(&key.version)
+                    || !dependency.requirement.matches_locked_version(&key.version)
                 {
                     return Err(format!(
                         "lockfile root binding {name} does not satisfy the manifest declaration"
                     ));
                 }
+            }
+        }
+        for name in crate::online::copied_root_names(manifest)? {
+            if required_names
+                .iter()
+                .any(|required| required.as_str() == name)
+                && !lock.root_bindings().contains_key(&name)
+            {
+                return Err(format!(
+                    "lockfile is missing copied root binding for {name}"
+                ));
             }
         }
         for name in declarations.keys() {
@@ -343,12 +481,17 @@ pub(crate) fn replay_root_keys_with_config(
         }
         return Ok(lock.roots().to_vec());
     }
+    if !crate::online::copied_root_names(manifest)?.is_empty() {
+        return Err("copied dependencies require explicit lockfile root bindings".into());
+    }
     if crate::online::manifest_roots(manifest)?
         .iter()
-        .any(|dependency| dependency.requirement.is_alias())
+        .any(|dependency| {
+            dependency.requirement.is_alias() || dependency.requirement.dist_tag().is_some()
+        })
     {
         return Err(
-            "npm aliases require lockfile root bindings; regenerate tapid.lock online".into(),
+            "npm aliases and dist-tags require lockfile root bindings; regenerate tapid.lock online".into(),
         );
     }
     let root_identities = replay_root_identities_with_config(manifest, registry_config)?;
@@ -501,11 +644,10 @@ fn replay_root_identities_with_config(
     String,
 > {
     let mut identities = std::collections::BTreeMap::new();
-    for map in [
-        manifest.dependencies(),
-        manifest.dev_dependencies(),
-        manifest.optional_dependencies(),
-    ] {
+    for (kind, map) in manifest.dependency_sections() {
+        if kind == DependencyKind::PeerDependencies {
+            continue;
+        }
         for (name, requirement) in map {
             let (registry, package) = registry_config.identity_for_spec(name)?;
             if requirement.starts_with("workspace:") {
@@ -533,7 +675,7 @@ pub(crate) fn replay_root_matches(
         .is_some_and(|requirements| {
             requirements
                 .iter()
-                .all(|requirement| requirement.matches(&key.version))
+                .all(|requirement| requirement.matches_locked_version(&key.version))
         })
 }
 

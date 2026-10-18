@@ -6,6 +6,7 @@ use tapid_core::{ArtifactDigest, PackageIntegrity, PackageName, PackageVersion};
 
 mod json;
 mod parse;
+mod workspace;
 pub use parse::NpmImportError;
 
 /// Imported locks retain npm placement and constraints until and after verification.
@@ -16,6 +17,10 @@ pub struct ImportedNpmLockfile {
     lockfile_version: u32,
     root_manifest_digest: String,
     npm_lock: Value,
+    #[serde(skip)]
+    graph: std::sync::OnceLock<std::sync::Arc<ImportedNpmGraph>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workspace_manifest_digests: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     verified_trees: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -50,17 +55,31 @@ pub struct ImportedNpmPackage {
     pub libc: Vec<String>,
 }
 
+/// Registry entry points for one project manifest, with npm optional overrides.
+#[derive(Debug)]
+pub struct ImportedNpmEntryPoints {
+    pub dependencies: BTreeMap<String, String>,
+    pub optional_dependencies: BTreeSet<String>,
+}
+
 /// Validated npm placement graph; edges target paths, never newly resolved versions.
+#[derive(Debug)]
 pub struct ImportedNpmGraph {
+    /// Root-relative local targets and their selected npm manifest fields.
+    pub workspaces: BTreeMap<String, Value>,
+    /// Physical root or member-level links to contained workspace sources.
+    pub workspace_links: BTreeMap<String, String>,
     pub packages: BTreeMap<String, ImportedNpmPackage>,
     pub roots: BTreeMap<String, String>,
     pub optional_roots: BTreeSet<String>,
+    /// Member-relative registry entry points, preserving conflicting local selections.
+    pub member_roots: BTreeMap<String, ImportedNpmEntryPoints>,
 }
 
 impl ImportedNpmLockfile {
     pub fn import(input: &str, manifest: &str, digest: &str) -> Result<Self, NpmImportError> {
         let npm_lock = parse::json(input)?;
-        parse::graph(&npm_lock)?;
+        let graph = parse::graph(&npm_lock)?;
         validate_manifest_fields(&npm_lock, manifest)?;
         let digest = digest
             .parse::<ArtifactDigest>()
@@ -69,6 +88,8 @@ impl ImportedNpmLockfile {
             lockfile_version: 8,
             root_manifest_digest: digest.to_string(),
             npm_lock,
+            graph: std::sync::OnceLock::from(std::sync::Arc::new(graph)),
+            workspace_manifest_digests: BTreeMap::new(),
             verified_trees: BTreeMap::new(),
             verified_artifacts: BTreeMap::new(),
         })
@@ -89,6 +110,19 @@ impl ImportedNpmLockfile {
             .parse::<ArtifactDigest>()
             .map_err(|e| parse::error("/rootManifestDigest", "root", "digest", &e.to_string()))?;
         let graph = lock.graph()?;
+        for (path, digest) in &lock.workspace_manifest_digests {
+            if !graph.workspaces.contains_key(path) {
+                return Err(parse::error(
+                    "/workspaceManifestDigests",
+                    path,
+                    "path",
+                    "unknown workspace source",
+                ));
+            }
+            digest.parse::<ArtifactDigest>().map_err(|e| {
+                parse::error("/workspaceManifestDigests", path, "digest", &e.to_string())
+            })?;
+        }
         for (path, digest) in &lock.verified_trees {
             if !graph.packages.contains_key(path) {
                 return Err(parse::error(
@@ -150,8 +184,43 @@ impl ImportedNpmLockfile {
         validate_manifest_fields(&self.npm_lock, manifest)
     }
 
-    pub fn graph(&self) -> Result<ImportedNpmGraph, NpmImportError> {
-        parse::graph(&self.npm_lock)
+    /// Bind contained member manifests after offline discovery and selection validation.
+    pub fn bind_workspace_manifests(
+        &mut self,
+        manifests: &BTreeMap<String, (String, String)>,
+    ) -> Result<(), NpmImportError> {
+        self.workspace_manifest_digests =
+            workspace::validate_manifests(self.graph()?.as_ref(), manifests)?;
+        Ok(())
+    }
+
+    pub fn validate_workspace_manifests(
+        &self,
+        manifests: &BTreeMap<String, (String, String)>,
+    ) -> Result<(), NpmImportError> {
+        let current = workspace::validate_manifests(self.graph()?.as_ref(), manifests)?;
+        if current != self.workspace_manifest_digests {
+            return Err(parse::error(
+                "/workspaceManifestDigests",
+                "root",
+                "workspaces",
+                "member manifest changed or has no import receipt; import the matching npm lock again",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn graph(&self) -> Result<std::sync::Arc<ImportedNpmGraph>, NpmImportError> {
+        if let Some(graph) = self.graph.get() {
+            return Ok(graph.clone());
+        }
+        let graph = parse::graph(&self.npm_lock)?;
+        let _ = self.graph.set(std::sync::Arc::new(graph));
+        Ok(self
+            .graph
+            .get()
+            .expect("validated graph was initialized")
+            .clone())
     }
     pub fn root_manifest_digest(&self) -> &str {
         &self.root_manifest_digest
@@ -234,25 +303,6 @@ impl ImportedNpmGraph {
         cpu: &str,
         libc: Option<&str>,
     ) -> Result<BTreeSet<String>, NpmImportError> {
-        let os = match os {
-            "macos" => "darwin",
-            "windows" => "win32",
-            value => value,
-        };
-        let cpu = match cpu {
-            "x86_64" => "x64",
-            "aarch64" => "arm64",
-            "x86" => "ia32",
-            value => value,
-        };
-        fn matches(values: &[String], current: Option<&str>) -> bool {
-            values.is_empty()
-                || current.is_some_and(|current| {
-                    !values.iter().any(|v| v.strip_prefix('!') == Some(current))
-                        && (values.iter().all(|v| v.starts_with('!'))
-                            || values.iter().any(|v| v == current))
-                })
-        }
         let mut selected = BTreeSet::new();
         let mut visited = BTreeSet::new();
         let mut pending: Vec<_> = self
@@ -260,17 +310,26 @@ impl ImportedNpmGraph {
             .iter()
             .map(|(name, path)| (path.clone(), self.optional_roots.contains(name)))
             .collect();
+        for member in self.member_roots.values() {
+            let roots = &member.dependencies;
+            let optional = &member.optional_dependencies;
+            pending.extend(
+                roots
+                    .iter()
+                    .map(|(name, path)| (path.clone(), optional.contains(name))),
+            );
+        }
         while let Some((path, optional)) = pending.pop() {
             if !visited.insert((path.clone(), optional)) {
                 continue;
             }
             let package = &self.packages[&path];
-            if !matches(&package.os, Some(os))
-                || !matches(&package.cpu, Some(cpu))
-                || os == "linux"
-                    && !(libc.is_none() && package.libc.iter().all(|value| value.starts_with('!')))
-                    && !matches(&package.libc, libc)
-            {
+            let constraints = tapid_core::PackagePlatform {
+                os: package.os.clone(),
+                cpu: package.cpu.clone(),
+                libc: package.libc.clone(),
+            };
+            if !constraints.matches(os, cpu, libc) {
                 if optional {
                     continue;
                 }
@@ -314,14 +373,31 @@ fn validate_manifest_fields(npm_lock: &Value, manifest: &str) -> Result<(), NpmI
         .as_object()
         .expect("validated root");
     let manifest = parse::object(&manifest, "/package.json", "root")?;
-    for field in [
-        "dependencies",
-        "devDependencies",
-        "optionalDependencies",
-        "peerDependencies",
-        "peerDependenciesMeta",
-    ] {
-        if root
+    validate_manifest_entry(
+        root,
+        manifest,
+        &[
+            "dependencies",
+            "devDependencies",
+            "optionalDependencies",
+            "peerDependencies",
+            "peerDependenciesMeta",
+            "workspaces",
+        ],
+        "/packages/",
+        "root",
+    )
+}
+
+fn validate_manifest_entry(
+    selected: &Map<String, Value>,
+    manifest: &Map<String, Value>,
+    fields: &[&str],
+    at: &str,
+    identity: &str,
+) -> Result<(), NpmImportError> {
+    for &field in fields {
+        if selected
             .get(field)
             .filter(|v| !v.as_object().is_some_and(Map::is_empty))
             != manifest
@@ -329,20 +405,12 @@ fn validate_manifest_fields(npm_lock: &Value, manifest: &str) -> Result<(), NpmI
                 .filter(|v| !v.as_object().is_some_and(Map::is_empty))
         {
             return Err(parse::error(
-                "/packages/",
-                "root",
+                at,
+                identity,
                 field,
                 "does not match package.json; regenerate package-lock.json with npm before importing",
             ));
         }
-    }
-    if manifest.contains_key("workspaces") {
-        return Err(parse::error(
-            "/package.json",
-            "root",
-            "workspaces",
-            "workspace import is unsupported; linked entries require workspace conversion",
-        ));
     }
     Ok(())
 }
