@@ -428,7 +428,9 @@ function assertWindowsHandoff(ci: string) {
   assert(verify.includes('if ($actual -cne "tapid $expected") { throw "Unexpected native version: $actual" }'));
   assert(verifier.indexOf(download) < verifier.indexOf(verify));
   assert(verifier.indexOf(verify) < verifier.indexOf('      - name: Install and reject archive fixtures'));
-  for (const s of [producer, verifier]) assert.doesNotMatch(s, /continue-on-error:|: write|github-token:|run-id:|repository:|pattern:|merge-multiple:|\|\| true|if: (?:false|always\(\)|success\(\))/);
+  // Guard cleanup must run after failures; the handoff itself remains success-only.
+  const producerHandoff = producer.replace(step(producer, 'Remove Windows network guard after consumer validation'), '');
+  for (const s of [producerHandoff, verifier]) assert.doesNotMatch(s, /continue-on-error:|: write|github-token:|run-id:|repository:|pattern:|merge-multiple:|\|\| true|if: (?:false|always\(\)|success\(\))/);
   assert.doesNotMatch(verifier, /cargo build|rust-toolchain@|rust-cache@/);
   assert.doesNotMatch(download + verify, /\n        if:/);
   const fixture = verifier.slice(verifier.indexOf('      - name: Install and reject archive fixtures'));
