@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { cargoEnvironment } from "../scripts/dev.ts";
+// Include skill packaging in the existing cross-platform developer CI lane.
+import "./agent_skills_test.ts";
 
 const temporary = (body: (root: string) => void) => {
   const root = mkdtempSync(join(tmpdir(), "tapid-dev-test-"));

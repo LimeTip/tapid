@@ -69,6 +69,7 @@ Add checks for the files changed:
 - Release tooling: `node --experimental-strip-types --test tools/release/*_test.ts`.
 - Documentation runner: `node --experimental-strip-types --test tests/doc_examples_test.ts` and the affected examples in `scripts/check-doc-examples.ts`.
 - Development wrapper: `node --experimental-strip-types --test tests/dev_test.ts`.
+- Bundled agent skills: `node --experimental-strip-types scripts/sync-agent-skills.ts --check` and `node --experimental-strip-types --test tests/agent_skills_test.ts`.
 - All TypeScript helpers and release tooling: `node --experimental-strip-types --test tests/*_test.ts tools/release/*_test.ts`.
 - News-site native-resolution fixture: set `TAPID_NEWS_FIXTURE_BINARY` to a source-built CLI and run `node --experimental-strip-types --test tests/news_site_fixture_test.ts`. CI requires the binary; without it, only that native probe skips locally.
 - Dependency or publication metadata: `node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked` and `node --experimental-strip-types scripts/dev.ts package --workspace --locked`.
