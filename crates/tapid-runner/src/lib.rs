@@ -62,6 +62,8 @@ static TEST_LAUNCHER_INIT_LINUX: extern "C" fn() = {
 pub mod config;
 mod lifecycle;
 pub use execution::dependency_toolchain_identity;
+#[cfg(windows)]
+pub use execution::prepare_private_dependency_write_tree;
 pub use lifecycle::{DependencyLifecycleApproval, DependencyLifecyclePolicy, LifecycleTool};
 pub mod execution;
 
@@ -79,7 +81,7 @@ pub use execution::{
     MAX_BACKEND_IDENTITY_BYTES, MAX_ENVIRONMENT_BLOCK_UNITS, MAX_ENVIRONMENT_VALUE_UNITS,
     MAX_EXECUTABLE_SEARCH_PATH_COUNT, MAX_EXECUTABLE_SEARCH_PATH_UNITS,
     MAX_EXECUTABLE_SEARCH_PATHS_UNITS, MAX_PROGRAM_UNITS, MAX_PROJECT_ROOT_UNITS,
-    ResolvedFilesystemGrant, ResolvedFilesystemGrants, Termination, execute,
+    ResolvedFilesystemGrant, ResolvedFilesystemGrants, Termination, execute, execute_uncontained,
 };
 
 use sha2::{Digest, Sha256};

@@ -126,9 +126,43 @@ Issue 155 adds a separate managed backend. Local uncommitted-tree tests use Linu
 On a Linux host with the documented namespace privileges and cgroup delegation, require the native assertions with:
 
 ```text
-TAPID_REQUIRE_MANAGED_ASSERTIONS=1 python3 scripts/dev.py test -p tapid-runner --lib --locked
-TAPID_REQUIRE_MANAGED_ASSERTIONS=1 python3 scripts/dev.py test -p tapid --test cli --locked approved_dependency_lifecycle_builds_native_output_and_replays_exactly
+TAPID_REQUIRE_MANAGED_ASSERTIONS=1 node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked
+TAPID_REQUIRE_MANAGED_ASSERTIONS=1 node --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked approved_dependency_lifecycle_builds_native_output_and_replays_exactly
 ```
+
+## Dependency execution override development validation
+
+The uncommitted override implementation has native macOS arm64 Darwin 27.0.0
+development coverage. Five CLI lifecycle regressions pass, including independent
+approval/containment overrides, real shell-generated output, JSON risk warnings,
+exclusion from the authenticated cache, source-only reconstruction on a later
+normal install, required implicit native-build rejection, and failed-hook
+rollback. Two runner regressions verify controlled environment/PATH, null stdin,
+root timeout and root output checks without enforcement receipts. These checks
+do not establish ManagedTree containment or descendant cleanup for the unsafe
+path. See [ADR 0009](adr/0009-explicit-dependency-execution-overrides.md).
+
+The runner cross-compiles for `x86_64-pc-windows-msvc`. Full Windows CLI
+cross-compilation is blocked locally by missing Windows C headers required by
+`ring`. Native Windows execution remains an acceptance gate; the unignored CLI
+regressions run in the existing Windows workspace test matrix. Neither
+cross-compilation nor uncontained shell execution establishes contained Windows
+dependency support. Native private-copy write containment and owner-only Windows lifecycle keys
+now have focused acceptance evidence below. Integrated authenticated Windows
+dependency builds remain gated on toolchain identity and CLI acceptance.
+
+```text
+node --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked dependency_lifecycle_
+node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked uncontained
+```
+
+## Private Windows dependency write and key validation
+
+The issue #155 branch adds protected owner-only Windows lifecycle keys and validates low-integrity write targets. The CLI labels only its private dependency copies. General execution also supports existing ordinary declared write targets through the main branch topology and effective-access checks. Native regressions require overwrite and reopen of an existing file, creation and reopen in the requested working directory, denied reads/writes outside authority, exact DACL restoration, hard-link rejection, and key/attestation forgery rejection. Cross-compilation and local Unix tests are development evidence. The focused Windows acceptance step and full native workspace suite must pass at the claimed commit. Toolchain identity and integrated contained dependency acceptance remain outstanding. See [ADR 0010](adr/0010-private-windows-dependency-write-trees.md).
+
+Native Windows CI run [38094689980](https://github.com/LimeTip/tapid/actions/runs/38094689980) on code commit `6c30fc20d462c6295ed5808705e5686f42d1e76e` passed all three lifecycle-key probes and all 25 containment tests with Node explicitly configured, followed by the complete Windows workspace, integration, and installer job. The hard-link regression exposed label propagation changing external inheritance metadata before rejection; preparation now validates the entire tree before changing any label. The junction and creation/reopen probes pass, including outside-path denial and exact DACL restoration. This is targeted component acceptance, not completion of the common assurance matrix or support for default authenticated Windows dependency builds.
+
+An additional negative control at commit `15c82f428ab742b00a177c2101861897abef016a` exposed ambient All Application Packages access. In [CI run 38126867693](https://github.com/LimeTip/tapid/actions/runs/38126867693), the hook read an undeclared fixture file granted only to that package group. The other 25 containment tests passed. This failure prevents treating the regular AppContainer's explicit grants as a complete input boundary. The correction opts into Less-Privileged AppContainer launch, checks the actual suspended child token with paired native access controls, and grants only the registryRead runtime capability needed for socket-provider initialization, with no network capabilities. Native dependency acceptance passed on code commit `606ff9bdc62e7d3335acb3621bd843f8804a7748` in [CI run 38129112216](https://github.com/LimeTip/tapid/actions/runs/38129112216). All 28 containment tests and all three lifecycle-key probes passed. The root and descendant controls use a private copy of the Rust test executable, require successful approved reads, and require permission-denied reads of the undeclared AAP fixture. The full Windows workspace, integration, and installer validation steps also passed. LPAC alone does not establish complete toolchain identity. Track the remaining authority/identity work in [#273](https://github.com/LimeTip/tapid/issues/273), integrated Windows install acceptance in [#274](https://github.com/LimeTip/tapid/issues/274), macOS feasibility in [#275](https://github.com/LimeTip/tapid/issues/275), and the resulting platform-contract decision in [#276](https://github.com/LimeTip/tapid/issues/276).
 
 The post-8cf2c84 Windows implementation embeds a Cargo-built stock-Node compatibility DLL and delegates finite exact read-attributes-only ancestor handles without shared ACL mutation. Integrated Node 22/24 IPC, native realpath, default test isolation and grandchild controls pass on Home build 26200; the real news-site CLI build/test pass. Receipts now disclose component identity and delegated metadata grants. Broader Windows and exact-head CI acceptance remain separate; see the updated Windows scope and standard-Node design.
 

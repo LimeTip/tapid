@@ -756,8 +756,8 @@ fn verify_effective_filesystem_access(
         .map(std::path::PathBuf::from)
         .ok_or_else(|| unsupported_acl("locate runtime access-check executable", 2))?;
     let application = runtime_path_wide(&system_root.join("System32/cmd.exe"));
-    // This verified AppContainer process is never resumed. It supplies the same no-capability
-    // token construction as the real launch, including traditional and restricted principals.
+    // This verified LPAC process is never resumed. It supplies the same runtime-capability
+    // token as the real launch, including traditional and restricted principals.
     // Its owner terminates/reaps it on every exit. No root or SystemRoot DACL is modified.
     let environment =
         crate::execution::windows_environment_block_units(&std::collections::BTreeMap::new())?;
@@ -1389,15 +1389,20 @@ mod tests {
 
     #[test]
     fn runtime_preexisting_access_does_not_require_write_dac() {
-        immutable_runtime_access_case(false, true);
+        immutable_runtime_access_case("*S-1-15-2-2", false, true);
     }
 
     #[test]
     fn runtime_preexisting_allow_ace_does_not_override_execute_deny() {
-        immutable_runtime_access_case(true, false);
+        immutable_runtime_access_case("*S-1-15-2-2", true, false);
     }
 
-    fn immutable_runtime_access_case(deny_execute: bool, expected_acceptance: bool) {
+    #[test]
+    fn runtime_ambient_application_packages_access_is_not_accepted() {
+        immutable_runtime_access_case("*S-1-15-2-1", false, false);
+    }
+
+    fn immutable_runtime_access_case(trustee: &str, deny_execute: bool, expected_acceptance: bool) {
         use super::windows_acl::read_acl;
         use crate::execution::{
             FilesystemAccess, FilesystemBindingMode, FilesystemGrantKind, FilesystemGrantSource,
@@ -1423,11 +1428,11 @@ mod tests {
             "/grant:r",
             "*S-1-1-0:RX",
             "*S-1-3-4:R",
-            "*S-1-15-2-1:RX",
+            &format!("{trustee}:RX"),
             "/deny",
         ]);
         if deny_execute {
-            acl_command.arg("*S-1-15-2-1:(X)");
+            acl_command.arg(format!("{trustee}:(X)"));
         }
         let output = acl_command.arg("*S-1-1-0:(WDAC)").output().unwrap();
         assert!(

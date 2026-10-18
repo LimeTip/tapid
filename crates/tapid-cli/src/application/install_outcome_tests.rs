@@ -59,7 +59,14 @@ fn install_reclassifies_the_lock_after_recovery() {
     use crate::filesystem::lifecycle_journal::LifecycleJournal;
     use tapid_lockfile::ImportedNpmLockfile;
 
-    for (restore_imported, ci) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (restore_imported, ci, overrides) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+    ] {
         let (project, fixture) = project_with_fixture("recovered-lock-format", INTEGRITY);
         let manifest_path = project.path().join("package.json");
         let manifest = fs::read_to_string(&manifest_path).unwrap();
@@ -91,13 +98,15 @@ fn install_reclassifies_the_lock_after_recovery() {
         std::mem::forget(journal);
         drop(activation);
 
-        let result = run(
+        let result = run_with_execution(
             InstallRequest {
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::None,
                 store_root: Some(&project.path().join("store")),
-                mode: if ci {
+                mode: if overrides {
+                    InstallMode::Online
+                } else if ci {
                     InstallMode::Ci
                 } else {
                     InstallMode::Frozen
@@ -105,11 +114,23 @@ fn install_reclassifies_the_lock_after_recovery() {
                 registry_fixture: Some(&fixture),
                 allow_unverified_registry_artifacts: false,
             },
+            super::super::dependency_scripts::ExecutionOverrides {
+                without_containment: overrides,
+                ..Default::default()
+            },
             |_| {},
         );
-        let outcome = if restore_imported && ci {
-            let failure = result.expect_err("CI must reject the recovered imported lock");
-            assert_eq!(failure.error.kind, ErrorKind::Lockfile);
+        let outcome = if restore_imported && (ci || overrides) {
+            let failure = result
+                .expect_err("CI and execution overrides must reject the recovered imported lock");
+            assert_eq!(
+                failure.error.kind,
+                if overrides {
+                    ErrorKind::InvalidRequest
+                } else {
+                    ErrorKind::Lockfile
+                }
+            );
             assert!(!project.path().join("node_modules").exists());
             *failure.outcome
         } else {
