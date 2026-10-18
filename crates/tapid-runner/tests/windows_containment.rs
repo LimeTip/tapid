@@ -133,7 +133,23 @@ fn command_request_with_policy(
 }
 
 #[test]
-fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants() {
+fn windows_denies_ambient_all_application_packages_inputs_in_root_and_descendants() {
+    ambient_package_inputs("S-1-15-2-1", false);
+}
+
+#[test]
+fn windows_lpac_records_unbound_restricted_package_inputs_and_keeps_identity_gated() {
+    // Characterization, not a containment acceptance claim. LPAC still permits
+    // ARAP-only inputs. These bytes must not receive an authenticated recipe.
+    ambient_package_inputs("S-1-15-2-2", true);
+    let error = tapid_runner::dependency_toolchain_identity().unwrap_err();
+    assert_eq!(
+        error.category(),
+        ExecutionErrorCategory::UnsupportedContainment
+    );
+}
+
+fn ambient_package_inputs(package_sid: &str, accessible: bool) {
     let project = tapid_test_support::TempProject::new("windows-lpac-project").unwrap();
     let outside = tapid_test_support::TempProject::new("windows-lpac-outside").unwrap();
     project.write("approved.txt", b"approved-input").unwrap();
@@ -143,9 +159,26 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
     let system32 =
         fs::canonicalize(PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32"))
             .unwrap();
+    let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    fs::copy(&executable, outside.path().join("undeclared.exe")).unwrap();
+    // Distinct basenames prevent concurrently running host controls from reusing
+    // one another's already loaded image.
+    let outside_image = outside.path().join(format!("tapid-{package_sid}.dll"));
+    for destination in [
+        outside_image.clone(),
+        project.path().join("tapid-approved.dll"),
+    ] {
+        fs::copy(system32.join("version.dll"), destination).unwrap();
+    }
+    // Host controls distinguish a valid executable/image from an invalid fixture.
+    ambient_image(&outside_image).unwrap();
+    let control = ambient_executable(&outside.path().join("undeclared.exe")).unwrap();
+    assert!(control.status.success());
+    assert!(String::from_utf8_lossy(&control.stdout).contains("AMBIENT_EXECUTED"));
     let grant = Command::new(system32.join("icacls.exe"))
         .arg(outside.path())
-        .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)"])
+        .arg("/grant")
+        .arg(format!("*{package_sid}:(OI)(CI)(RX)"))
         .output()
         .unwrap();
     assert!(
@@ -153,16 +186,38 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
         "{}",
         String::from_utf8_lossy(&grant.stderr)
     );
-    // The host can read the fixture. Its only package-side grant is ambient AAP;
+    // The host can read the fixture. Its only added package-side grant is ambient;
     // neither this file nor its directory appears in the execution policy.
     assert_eq!(fs::read(&secret).unwrap(), b"ambient-input");
-    let baseline = project_dacl(outside.path());
+    let baseline: Vec<_> = [
+        outside.path().to_owned(),
+        secret.clone(),
+        outside.path().join("undeclared.exe"),
+        outside_image.clone(),
+    ]
+    .into_iter()
+    .map(|path| {
+        let acl = project_dacl(&path);
+        (path, acl)
+    })
+    .collect();
     let root = fs::canonicalize(project.path()).unwrap();
-    let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     let child = root.join("probe.exe");
     fs::copy(&executable, &child).unwrap();
     project
         .write("outside-path.txt", secret.to_str().unwrap().as_bytes())
+        .unwrap();
+    project
+        .write(
+            "outside-image.txt",
+            outside_image.to_str().unwrap().as_bytes(),
+        )
+        .unwrap();
+    project
+        .write(
+            "ambient-access.txt",
+            if accessible { b"allowed" } else { b"denied" },
+        )
         .unwrap();
     let request = ExecutionRequest::builder(child.as_os_str())
         .args([
@@ -199,9 +254,72 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
     );
     assert!(
         !stdout.contains("ambient-input"),
-        "undeclared AAP input was readable: {stdout}"
+        "probe must not print input contents: {stdout}"
     );
-    assert_eq!(project_dacl(outside.path()), baseline);
+    for operation in ["read", "execute", "load"] {
+        let verdict = if accessible { "allowed" } else { "denied" };
+        assert_eq!(
+            stdout
+                .matches(&format!("AMBIENT_{operation}_{verdict}"))
+                .count(),
+            2,
+            "root and descendant must report {operation}: {stdout}"
+        );
+    }
+    assert_eq!(
+        outcome.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+    for (path, acl) in baseline {
+        assert_eq!(project_dacl(&path), acl, "outside input changed: {path:?}");
+    }
+}
+
+fn ambient_executable(path: &std::path::Path) -> std::io::Result<std::process::Output> {
+    Command::new(path)
+        .args([
+            "--exact",
+            "windows_ambient_executable_probe_helper",
+            "--nocapture",
+        ])
+        .env("TAPID_TEST_MARKER", "ambient-executable")
+        .output()
+}
+
+#[test]
+fn windows_ambient_executable_probe_helper() {
+    if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("ambient-executable") {
+        println!("AMBIENT_EXECUTED");
+    }
+}
+
+fn ambient_image(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LoadLibraryExW(name: *const u16, file: isize, flags: u32) -> isize;
+        fn GetModuleFileNameW(module: isize, name: *mut u16, length: u32) -> u32;
+        fn FreeLibrary(module: isize) -> i32;
+    }
+    let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: terminated private fixture path; normal load includes initialization.
+    let module = unsafe { LoadLibraryExW(wide.as_ptr(), 0, 0) };
+    if module == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut loaded = vec![0; 32768];
+    // SAFETY: live owned module and writable buffer of the declared length.
+    let length = unsafe { GetModuleFileNameW(module, loaded.as_mut_ptr(), loaded.len() as u32) };
+    // SAFETY: release exactly the module reference returned by LoadLibraryExW.
+    assert_ne!(unsafe { FreeLibrary(module) }, 0);
+    assert!(length > 0 && (length as usize) < loaded.len());
+    let loaded = PathBuf::from(OsString::from_wide(&loaded[..length as usize]));
+    assert_eq!(
+        fs::canonicalize(loaded).unwrap(),
+        fs::canonicalize(path).unwrap(),
+        "loader must map the fixture, not reuse an already loaded system image"
+    );
+    Ok(())
 }
 
 #[test]
@@ -212,8 +330,33 @@ fn windows_ambient_read_probe_helper() {
     }
     assert_eq!(fs::read("approved.txt").unwrap(), b"approved-input");
     let outside = fs::read_to_string("outside-path.txt").unwrap();
-    let denied = fs::read(outside).expect_err("undeclared AAP file must be denied");
-    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    let outside = PathBuf::from(outside);
+    let outside_image = PathBuf::from(fs::read_to_string("outside-image.txt").unwrap());
+    let accessible = fs::read("ambient-access.txt").unwrap() == b"allowed";
+    ambient_image(&fs::canonicalize("tapid-approved.dll").unwrap()).unwrap();
+    if accessible {
+        assert_eq!(fs::read(&outside).unwrap(), b"ambient-input");
+        let output = ambient_executable(&outside.with_file_name("undeclared.exe")).unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("AMBIENT_EXECUTED"));
+        ambient_image(&outside_image).unwrap();
+    } else {
+        let denied = fs::read(&outside).expect_err("undeclared AAP file must be denied");
+        assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+        let denied = ambient_executable(&outside.with_file_name("undeclared.exe"))
+            .expect_err("undeclared AAP executable must not start");
+        assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+        let denied = ambient_image(&outside_image).expect_err("undeclared AAP DLL must not load");
+        // The loader can report inaccessible images as module-not-found. Paired
+        // host and approved-image controls exclude invalid DLL/provider failures.
+        assert!(matches!(denied.raw_os_error(), Some(5 | 126)), "{denied}");
+    }
+    for operation in ["read", "execute", "load"] {
+        println!(
+            "AMBIENT_{operation}_{}",
+            if accessible { "allowed" } else { "denied" }
+        );
+    }
     if mode == "ambient-root" {
         println!("approved-root");
         let status = Command::new(std::env::current_exe().unwrap())
@@ -227,7 +370,7 @@ fn windows_ambient_read_probe_helper() {
             .unwrap();
         assert!(
             status.success(),
-            "descendant denied-read probe failed: {status}"
+            "descendant ambient-input probe failed: {status}"
         );
     } else {
         println!("approved-child");
