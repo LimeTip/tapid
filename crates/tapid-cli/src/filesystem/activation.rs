@@ -479,7 +479,7 @@ impl Drop for ActivationLock {
     }
 }
 
-fn open_lock_file(path: &Path) -> Result<fs::File, String> {
+pub(crate) fn open_lock_file(path: &Path) -> Result<fs::File, String> {
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -508,7 +508,7 @@ fn open_lock_file(path: &Path) -> Result<fs::File, String> {
     Ok(file)
 }
 
-fn sync_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     let sync = {
         use std::os::windows::fs::OpenOptionsExt;

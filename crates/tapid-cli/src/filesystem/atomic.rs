@@ -170,6 +170,7 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .create_new(true)
         .open(path)
         .map_err(|error| error.to_string())?;
+    crate::filesystem::activation::test_crash_at("lockfile_writing");
     let result = io::Write::write_all(&mut file, bytes).and_then(|_| file.sync_all());
     if let Err(error) = result {
         drop(file);
@@ -202,11 +203,23 @@ pub(crate) fn publish_lockfile(path: &Path, contents: &str) -> Result<(), String
         std::process::id(),
         unique_nonce()
     ));
-    write_synced_file(&temp, contents.as_bytes())?;
-    if let Err(error) = rename_lockfile(&temp, path) {
-        let _ = fs::remove_file(&temp);
+    publish_lockfile_with_temp(path, contents, &temp)
+}
+
+/// Publish using a caller-owned staging path that its recovery journal can identify.
+/// The caller must keep it in the destination directory and handle crash leftovers.
+pub(crate) fn publish_lockfile_with_temp(
+    path: &Path,
+    contents: &str,
+    temp: &Path,
+) -> Result<(), String> {
+    write_synced_file(temp, contents.as_bytes())?;
+    crate::filesystem::activation::test_crash_at("lockfile_staged");
+    if let Err(error) = rename_lockfile(temp, path) {
+        let _ = fs::remove_file(temp);
         return Err(error.to_string());
     }
+    crate::filesystem::activation::test_crash_at("lockfile_published");
     Ok(())
 }
 
