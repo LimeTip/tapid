@@ -199,10 +199,8 @@ test('Windows native write owner binds a validated absolute Node before workspac
 });
 
 test('Windows Node binding executes the first of two spaced PATH candidates in PowerShell', async (context) => {
-  let powershell: string;
   try {
-    const result = await execFileAsync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '(Get-Process -Id $PID).Path'], { timeout: 30_000 });
-    powershell = result.stdout.trim();
+    await execFileAsync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$null'], { timeout: 30_000 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || process.env.CI === 'true') throw error;
     context.skip('PowerShell is unavailable locally; CI must execute this regression');
@@ -221,8 +219,10 @@ test('Windows Node binding executes the first of two spaced PATH candidates in P
     }
     const environment = join(directory, 'github-env');
     const harness = join(directory, 'bind.ps1');
-    const env = { ...process.env, PATH: candidates.join(delimiter), GITHUB_ENV: environment };
-    const run = () => execFileAsync(powershell, ['-NoProfile', '-NonInteractive', '-File', harness], {
+    const env = { ...process.env, TAPID_TEST_NODE_PATH: candidates.join(delimiter), TAPID_TEST_NODE_HARNESS: harness, GITHUB_ENV: environment };
+    // Start through the installed launcher before restricting PATH. A launcher
+    // may set runtime variables that its process image alone does not preserve.
+    const run = () => execFileAsync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$env:PATH = $env:TAPID_TEST_NODE_PATH; & $env:TAPID_TEST_NODE_HARNESS'], {
       env, timeout: 30_000,
     });
     // This assertion proves real Get-Command discovery returns both applications,
