@@ -347,12 +347,8 @@ fn workspace_matches(
     let dependencies =
         crate::online::resolved_workspace_registry_dependencies(manifest, &workspace, config)
             .map_err(|_| "WORKSPACE_COMPATIBILITY_BLOCKER")?;
-    crate::application::install::validate_workspace_dependency_edges(
-        &workspace,
-        &dependencies,
-        lock,
-    )
-    .map_err(|_| "LOCK_WORKSPACE_MISMATCH")
+    crate::application::replay::validate_workspace_dependency_edges(&workspace, &dependencies, lock)
+        .map_err(|_| "LOCK_WORKSPACE_MISMATCH")
 }
 
 fn inspect_imported_lock(

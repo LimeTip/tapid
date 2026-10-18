@@ -1,22 +1,23 @@
-use super::*;
-use tapid_test_support::TempProject;
+use super::{command_support::CliFixture, lock_for_manifest};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::fs;
 
 #[test]
 fn dependency_dry_run_resolves_transitives_without_writing_or_fetching_artifacts() {
-    let project = TempProject::new("dependency-preview").unwrap();
+    let scenario = CliFixture::new("dependency-preview");
     let manifest = br#"{"name":"app","version":"1.0.0","description":"preserve"}"#;
-    project.write("package.json", manifest).unwrap();
+    scenario.project.write("package.json", manifest).unwrap();
     let integrity = format!("sha512-{}", STANDARD.encode([1; 64]));
     let fixture = serde_json::json!({"packages":[
         {"registry":"https://registry.npmjs.org", "name":"parent", "version":"1.0.0", "integrity":integrity, "artifact":"never-download", "dependencies":{"child":"^1.0.0"}},
         {"registry":"https://registry.npmjs.org", "name":"child", "version":"1.2.0", "integrity":integrity, "artifact":"never-download"}
     ]});
-    project
+    scenario
+        .project
         .write("registry.json", fixture.to_string().as_bytes())
         .unwrap();
-    let output = isolated_command(
-        project.path(),
-        &[
+    let output = scenario
+        .command(&[
             "--json",
             "add",
             "parent@^1.0.0",
@@ -25,11 +26,9 @@ fn dependency_dry_run_resolves_transitives_without_writing_or_fetching_artifacts
             "registry.json",
             "--store-dir",
             "store",
-        ],
-        true,
-    )
-    .output()
-    .unwrap();
+        ])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -49,7 +48,7 @@ fn dependency_dry_run_resolves_transitives_without_writing_or_fetching_artifacts
     assert_eq!(value["data"]["effects"]["cache_writes"], false);
     assert_eq!(value["data"]["effects"]["network_allowed"], false);
     assert_eq!(
-        fs::read(project.path().join("package.json")).unwrap(),
+        fs::read(scenario.project.path().join("package.json")).unwrap(),
         manifest
     );
     for path in [
@@ -58,15 +57,18 @@ fn dependency_dry_run_resolves_transitives_without_writing_or_fetching_artifacts
         "store",
         ".tapid-activation.lock",
     ] {
-        assert!(!project.path().join(path).exists(), "{path}");
+        assert!(!scenario.project.path().join(path).exists(), "{path}");
     }
 }
 
-fn preview_project(label: &str) -> TempProject {
+fn preview_project(label: &str) -> CliFixture {
     use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
-    let project = TempProject::new(label).unwrap();
+    let scenario = CliFixture::new(label);
     let manifest = r#"{"name":"app","version":"1.0.0","dependencies":{"parent":"^1.0.0"}}"#;
-    project.write("package.json", manifest.as_bytes()).unwrap();
+    scenario
+        .project
+        .write("package.json", manifest.as_bytes())
+        .unwrap();
     let integrity = format!("sha512-{}", STANDARD.encode([1; 64]));
     let mut lock = lock_for_manifest(manifest);
     let child = LockedPackage::new_with_provenance(
@@ -94,39 +96,38 @@ fn preview_project(label: &str) -> TempProject {
     lock.set_roots([root.clone()]).unwrap();
     lock.set_root_bindings(std::collections::BTreeMap::from([("parent".into(), root)]))
         .unwrap();
-    project
+    scenario
+        .project
         .write("tapid.lock", lock.to_json().unwrap().as_bytes())
         .unwrap();
     let fixture = serde_json::json!({"packages":[
         {"registry":"https://registry.npmjs.org", "name":"parent", "version":"1.1.0", "integrity":integrity, "artifact":"never-download", "dependencies":{"child":"^2.0.0"}},
         {"registry":"https://registry.npmjs.org", "name":"child", "version":"2.0.0", "integrity":integrity, "artifact":"never-download"}
     ]});
-    project
+    scenario
+        .project
         .write("registry.json", fixture.to_string().as_bytes())
         .unwrap();
-    project
+    scenario
 }
 
 #[test]
 fn dependency_dry_run_update_and_remove_explain_transitive_changes() {
     for operation in ["update", "remove"] {
-        let project = preview_project(operation);
-        let before = fs::read(project.path().join("tapid.lock")).unwrap();
-        let manifest = fs::read(project.path().join("package.json")).unwrap();
-        let output = isolated_command(
-            project.path(),
-            &[
+        let scenario = preview_project(operation);
+        let before = fs::read(scenario.project.path().join("tapid.lock")).unwrap();
+        let manifest = fs::read(scenario.project.path().join("package.json")).unwrap();
+        let output = scenario
+            .command(&[
                 "--json",
                 operation,
                 "parent",
                 "--dry-run",
                 "--registry-fixture",
                 "registry.json",
-            ],
-            true,
-        )
-        .output()
-        .unwrap();
+            ])
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "{}",
@@ -148,32 +149,38 @@ fn dependency_dry_run_update_and_remove_explain_transitive_changes() {
             assert!(value["data"]["declarations"][0]["after"].is_null());
             assert_eq!(packages.len(), 2);
         }
-        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
         assert_eq!(
-            fs::read(project.path().join("package.json")).unwrap(),
+            fs::read(scenario.project.path().join("tapid.lock")).unwrap(),
+            before
+        );
+        assert_eq!(
+            fs::read(scenario.project.path().join("package.json")).unwrap(),
             manifest
         );
-        assert!(!project.path().join(".tapid-activation.lock").exists());
+        assert!(
+            !scenario
+                .project
+                .path()
+                .join(".tapid-activation.lock")
+                .exists()
+        );
     }
 }
 
 #[test]
 fn dependency_dry_run_offline_install_uses_lock_without_inspecting_store() {
-    let project = preview_project("offline-preview");
-    let output = isolated_command(
-        project.path(),
-        &[
+    let scenario = preview_project("offline-preview");
+    let output = scenario
+        .command(&[
             "--json",
             "install",
             "--dry-run",
             "--offline",
             "--store-dir",
             "missing-store",
-        ],
-        true,
-    )
-    .output()
-    .unwrap();
+        ])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -189,57 +196,68 @@ fn dependency_dry_run_offline_install_uses_lock_without_inspecting_store() {
             .iter()
             .all(|p| p["change"] == "unchanged")
     );
-    assert!(!project.path().join("missing-store").exists());
-    assert!(!project.path().join("node_modules").exists());
+    assert!(!scenario.project.path().join("missing-store").exists());
+    assert!(!scenario.project.path().join("node_modules").exists());
 }
 
 #[test]
 fn dependency_dry_run_refuses_pending_recovery_without_changing_it() {
-    let project = preview_project("pending-preview");
+    let scenario = preview_project("pending-preview");
     let journal = b"incomplete journal retained";
-    project
+    scenario
+        .project
         .write(".tapid-lifecycle-journal.json", journal)
         .unwrap();
-    let output = isolated_command(
-        project.path(),
-        &[
+    let output = scenario
+        .command(&[
             "--json",
             "update",
             "--dry-run",
             "--registry-fixture",
             "registry.json",
-        ],
-        true,
-    )
-    .output()
-    .unwrap();
+        ])
+        .output()
+        .unwrap();
     assert!(!output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["errors"][0]["code"], "RECOVERY_FAILED");
     assert_eq!(
-        fs::read(project.path().join(".tapid-lifecycle-journal.json")).unwrap(),
+        fs::read(
+            scenario
+                .project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+        )
+        .unwrap(),
         journal
     );
-    assert!(!project.path().join(".tapid-activation.lock").exists());
+    assert!(
+        !scenario
+            .project
+            .path()
+            .join(".tapid-activation.lock")
+            .exists()
+    );
 }
 
 #[test]
 fn dependency_dry_run_workspace_edits_resolve_the_member_graph_in_memory() {
-    let project = preview_project("workspace-preview");
-    project
+    let scenario = preview_project("workspace-preview");
+    scenario
+        .project
         .write(
             "package.json",
             br#"{"name":"app","version":"1.0.0","workspaces":["packages/*"]}"#,
         )
         .unwrap();
     let member = br#"{"name":"member","version":"1.0.0","scripts":{"prepare":"must not execute"}}"#;
-    project
+    scenario
+        .project
         .write("packages/member/package.json", member)
         .unwrap();
-    fs::remove_file(project.path().join("tapid.lock")).unwrap();
-    let output = isolated_command(
-        project.path(),
-        &[
+    fs::remove_file(scenario.project.path().join("tapid.lock")).unwrap();
+    let output = scenario
+        .command(&[
             "--json",
             "add",
             "parent@^1.0.0",
@@ -248,11 +266,9 @@ fn dependency_dry_run_workspace_edits_resolve_the_member_graph_in_memory() {
             "--dry-run",
             "--registry-fixture",
             "registry.json",
-        ],
-        true,
-    )
-    .output()
-    .unwrap();
+        ])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -271,29 +287,32 @@ fn dependency_dry_run_workspace_edits_resolve_the_member_graph_in_memory() {
     let child = packages.iter().find(|p| p["name"] == "child").unwrap();
     assert_eq!(child["version"], "2.0.0");
     assert_eq!(
-        fs::read(project.path().join("packages/member/package.json")).unwrap(),
+        fs::read(scenario.project.path().join("packages/member/package.json")).unwrap(),
         member
     );
-    assert!(!project.path().join("tapid.lock").exists());
-    assert!(!project.path().join("packages/member/node_modules").exists());
+    assert!(!scenario.project.path().join("tapid.lock").exists());
+    assert!(
+        !scenario
+            .project
+            .path()
+            .join("packages/member/node_modules")
+            .exists()
+    );
 }
 
 #[test]
 fn dependency_dry_run_install_preserves_matching_lock_and_reports_no_metadata_lookups() {
-    let project = preview_project("preserve-preview");
-    let output = isolated_command(
-        project.path(),
-        &[
+    let scenario = preview_project("preserve-preview");
+    let output = scenario
+        .command(&[
             "--json",
             "install",
             "--dry-run",
             "--registry-fixture",
             "registry.json",
-        ],
-        true,
-    )
-    .output()
-    .unwrap();
+        ])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -314,16 +333,19 @@ fn dependency_dry_run_install_preserves_matching_lock_and_reports_no_metadata_lo
 
 #[test]
 fn dependency_dry_run_resolution_failure_preserves_existing_project_and_store() {
-    let project = preview_project("failed-preview");
-    let manifest = fs::read(project.path().join("package.json")).unwrap();
-    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
-    project.write("store/unchanged", b"cached content").unwrap();
-    project
+    let scenario = preview_project("failed-preview");
+    let manifest = fs::read(scenario.project.path().join("package.json")).unwrap();
+    let lock = fs::read(scenario.project.path().join("tapid.lock")).unwrap();
+    scenario
+        .project
+        .write("store/unchanged", b"cached content")
+        .unwrap();
+    scenario
+        .project
         .write("node_modules/user-content", b"installed content")
         .unwrap();
-    let output = isolated_command(
-        project.path(),
-        &[
+    let output = scenario
+        .command(&[
             "--json",
             "add",
             "missing@1.0.0",
@@ -332,56 +354,68 @@ fn dependency_dry_run_resolution_failure_preserves_existing_project_and_store() 
             "registry.json",
             "--store-dir",
             "store",
-        ],
-        true,
-    )
-    .output()
-    .unwrap();
+        ])
+        .output()
+        .unwrap();
     assert!(!output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["errors"][0]["code"], "RESOLUTION_FAILED");
     assert_eq!(value["changes"]["state"], "unchanged");
     assert_eq!(
-        fs::read(project.path().join("package.json")).unwrap(),
+        fs::read(scenario.project.path().join("package.json")).unwrap(),
         manifest
     );
-    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
     assert_eq!(
-        fs::read(project.path().join("store/unchanged")).unwrap(),
+        fs::read(scenario.project.path().join("tapid.lock")).unwrap(),
+        lock
+    );
+    assert_eq!(
+        fs::read(scenario.project.path().join("store/unchanged")).unwrap(),
         b"cached content"
     );
     assert_eq!(
-        fs::read(project.path().join("node_modules/user-content")).unwrap(),
+        fs::read(scenario.project.path().join("node_modules/user-content")).unwrap(),
         b"installed content"
     );
     assert_eq!(
-        fs::read_dir(project.path().join("store")).unwrap().count(),
+        fs::read_dir(scenario.project.path().join("store"))
+            .unwrap()
+            .count(),
         1
     );
-    assert!(!project.path().join(".tapid-activation.lock").exists());
+    assert!(
+        !scenario
+            .project
+            .path()
+            .join(".tapid-activation.lock")
+            .exists()
+    );
 }
 
 #[test]
 fn dependency_dry_run_rejects_copied_sources_before_replay_or_artifact_access() {
-    let project = TempProject::new("copied-preview").unwrap();
+    let scenario = CliFixture::new("copied-preview");
     let manifest =
         br#"{"name":"app","version":"1.0.0","dependencies":{"local":"file:missing.tgz"}}"#;
-    project.write("package.json", manifest).unwrap();
-    let output = isolated_command(
-        project.path(),
-        &["--json", "install", "--offline", "--dry-run"],
-        true,
-    )
-    .output()
-    .unwrap();
+    scenario.project.write("package.json", manifest).unwrap();
+    let output = scenario
+        .command(&["--json", "install", "--offline", "--dry-run"])
+        .output()
+        .unwrap();
     assert!(!output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["errors"][0]["code"], "INVALID_REQUEST");
     assert_eq!(
-        fs::read(project.path().join("package.json")).unwrap(),
+        fs::read(scenario.project.path().join("package.json")).unwrap(),
         manifest
     );
-    assert!(!project.path().join(".tapid-activation.lock").exists());
+    assert!(
+        !scenario
+            .project
+            .path()
+            .join(".tapid-activation.lock")
+            .exists()
+    );
 }
 
 #[test]
@@ -390,14 +424,12 @@ fn dependency_dry_run_install_package_and_latest_show_declaration_edits() {
         vec!["install", "child@^2.0.0"],
         vec!["update", "parent", "--latest"],
     ] {
-        let project = preview_project("declaration-preview");
-        let manifest = fs::read(project.path().join("package.json")).unwrap();
+        let scenario = preview_project("declaration-preview");
+        let manifest = fs::read(scenario.project.path().join("package.json")).unwrap();
         let mut command_args = vec!["--json"];
         command_args.extend(args.iter().copied());
         command_args.extend(["--dry-run", "--registry-fixture", "registry.json"]);
-        let output = isolated_command(project.path(), &command_args, true)
-            .output()
-            .unwrap();
+        let output = scenario.command(&command_args).output().unwrap();
         assert!(
             output.status.success(),
             "{}",
@@ -411,7 +443,7 @@ fn dependency_dry_run_install_package_and_latest_show_declaration_edits() {
         };
         assert_eq!(value["data"]["declarations"][0]["after"], after);
         assert_eq!(
-            fs::read(project.path().join("package.json")).unwrap(),
+            fs::read(scenario.project.path().join("package.json")).unwrap(),
             manifest
         );
     }
@@ -419,29 +451,28 @@ fn dependency_dry_run_install_package_and_latest_show_declaration_edits() {
 
 #[test]
 fn dependency_dry_run_compatibility_install_resolves_unverified_pins_again() {
-    let project = preview_project("unverified-preview");
+    let scenario = preview_project("unverified-preview");
     let mut lock: serde_json::Value =
-        serde_json::from_slice(&fs::read(project.path().join("tapid.lock")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(scenario.project.path().join("tapid.lock")).unwrap())
+            .unwrap();
     for package in lock["packages"].as_object_mut().unwrap().values_mut() {
         package["registryIntegrityDeclared"] = false.into();
     }
-    project
+    scenario
+        .project
         .write("tapid.lock", lock.to_string().as_bytes())
         .unwrap();
-    let output = isolated_command(
-        project.path(),
-        &[
+    let output = scenario
+        .command(&[
             "--json",
             "install",
             "--dry-run",
             "--allow-unverified-registry-artifacts",
             "--registry-fixture",
             "registry.json",
-        ],
-        true,
-    )
-    .output()
-    .unwrap();
+        ])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -464,10 +495,9 @@ fn dependency_dry_run_compatibility_install_resolves_unverified_pins_again() {
 
 #[test]
 fn dependency_dry_run_does_not_present_locked_pins_as_declared_transitive_ranges() {
-    let project = preview_project("locked-reasons-preview");
-    let output = isolated_command(
-        project.path(),
-        &[
+    let scenario = preview_project("locked-reasons-preview");
+    let output = scenario
+        .command(&[
             "--json",
             "add",
             "react@^18.0.0",
@@ -475,11 +505,9 @@ fn dependency_dry_run_does_not_present_locked_pins_as_declared_transitive_ranges
             "--dry-run",
             "--registry-fixture",
             "registry.json",
-        ],
-        true,
-    )
-    .output()
-    .unwrap();
+        ])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -507,21 +535,18 @@ fn dependency_dry_run_does_not_present_locked_pins_as_declared_transitive_ranges
 
 #[test]
 fn dependency_dry_run_reports_new_root_binding_for_an_existing_transitive_package() {
-    let project = preview_project("root-binding-preview");
-    let output = isolated_command(
-        project.path(),
-        &[
+    let scenario = preview_project("root-binding-preview");
+    let output = scenario
+        .command(&[
             "--json",
             "add",
             "child@1.0.0",
             "--dry-run",
             "--registry-fixture",
             "registry.json",
-        ],
-        true,
-    )
-    .output()
-    .unwrap();
+        ])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -543,18 +568,19 @@ fn dependency_dry_run_reports_new_root_binding_for_an_existing_transitive_packag
 
 #[test]
 fn dependency_dry_run_truncation_pointers_are_sorted_and_unique() {
-    let project = preview_project("preview-truncation-order");
-    let path = project.path().join("package.json");
+    let scenario = preview_project("preview-truncation-order");
+    let path = scenario.project.path().join("package.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     let requirement = format!("^1.0.0{}", " ".repeat(5000));
     for index in 0..12 {
         manifest["peerDependencies"][format!("peer-{index:02}")] = requirement.clone().into();
     }
-    project
+    scenario
+        .project
         .write("package.json", manifest.to_string().as_bytes())
         .unwrap();
-    let fixture_path = project.path().join("registry.json");
+    let fixture_path = scenario.project.path().join("registry.json");
     let mut fixture: serde_json::Value =
         serde_json::from_slice(&fs::read(&fixture_path).unwrap()).unwrap();
     for index in 0..12 {
@@ -569,23 +595,21 @@ fn dependency_dry_run_truncation_pointers_are_sorted_and_unique() {
                 "artifact":"never-download"
             }));
     }
-    project
+    scenario
+        .project
         .write("registry.json", fixture.to_string().as_bytes())
         .unwrap();
-    let output = isolated_command(
-        project.path(),
-        &[
+    let output = scenario
+        .command(&[
             "--json",
             "update",
             "--latest",
             "--dry-run",
             "--registry-fixture",
             "registry.json",
-        ],
-        true,
-    )
-    .output()
-    .unwrap();
+        ])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -613,11 +637,14 @@ fn dependency_dry_run_named_update_preserves_alias_pin_and_reports_save_policy()
         ("--save-caret", "^1.1.0"),
         ("--save-tilde", "~1.1.0"),
     ] {
-        let project = preview_project("named-update-save-preview");
+        let scenario = preview_project("named-update-save-preview");
         let manifest = r#"{"name":"app","version":"1.0.0","dependencies":{"parent":"^1.0.0","unrelated":"npm:parent@*"}} "#;
-        project.write("package.json", manifest.as_bytes()).unwrap();
+        scenario
+            .project
+            .write("package.json", manifest.as_bytes())
+            .unwrap();
         let mut lock = tapid_lockfile::Lockfile::from_json(
-            &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            &fs::read_to_string(scenario.project.path().join("tapid.lock")).unwrap(),
         )
         .unwrap();
         // Rebind the fixture lock to the expanded manifest and retain both aliases.
@@ -635,10 +662,12 @@ fn dependency_dry_run_named_update_preserves_alias_pin_and_reports_save_policy()
             .unwrap();
         lock = expanded;
         let lock_bytes = lock.to_json().unwrap();
-        project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
-        let output = isolated_command(
-            project.path(),
-            &[
+        scenario
+            .project
+            .write("tapid.lock", lock_bytes.as_bytes())
+            .unwrap();
+        let output = scenario
+            .command(&[
                 "--json",
                 "update",
                 "parent",
@@ -647,11 +676,9 @@ fn dependency_dry_run_named_update_preserves_alias_pin_and_reports_save_policy()
                 "--dry-run",
                 "--registry-fixture",
                 "registry.json",
-            ],
-            true,
-        )
-        .output()
-        .unwrap();
+            ])
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "{}",
@@ -666,15 +693,15 @@ fn dependency_dry_run_named_update_preserves_alias_pin_and_reports_save_policy()
         assert_eq!(value["data"]["effects"]["project_writes"], false);
         assert_eq!(value["data"]["effects"]["cache_writes"], false);
         assert_eq!(
-            fs::read_to_string(project.path().join("package.json")).unwrap(),
+            fs::read_to_string(scenario.project.path().join("package.json")).unwrap(),
             manifest
         );
         assert_eq!(
-            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            fs::read_to_string(scenario.project.path().join("tapid.lock")).unwrap(),
             lock_bytes
         );
         for path in ["node_modules", ".tapid-activation.lock", ".tapid"] {
-            assert!(!project.path().join(path).exists(), "{path}");
+            assert!(!scenario.project.path().join(path).exists(), "{path}");
         }
     }
 }

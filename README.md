@@ -54,6 +54,8 @@ tapid install --offline --frozen
 
 See the [CLI guide](crates/tapid-cli/README.md) for adding, removing, updating, and inspecting dependencies.
 
+Standalone commands can use `tapid tool install <package>` without a project. Each tool has an isolated lock and dependency environment, with managed commands exposed from the reported bin directory. See the [tool workflow](crates/tapid-cli/README.md#standalone-cli-tools) for PATH setup, runtime requirements, and update/removal behavior.
+
 ## Development status
 
 Tapid is under active development. Releases are available for evaluation and compatibility testing; production support is not yet available. The current target is a bounded subset of the Node.js/npm ecosystem. Deno and Bun compatibility remains a future goal.
