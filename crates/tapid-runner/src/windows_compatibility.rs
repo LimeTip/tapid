@@ -27,6 +27,16 @@ mod native;
 #[path = "windows_compat/protocol.rs"]
 mod protocol;
 
+#[allow(dead_code)] // Query encoding is used by the embedded client and codec tests.
+#[path = "windows_compat/lookup_protocol.rs"]
+mod lookup_protocol;
+#[path = "windows_network.rs"]
+mod network_broker;
+#[allow(dead_code)] // The same codec is also compiled into the contained component.
+#[path = "windows_compat/network_protocol.rs"]
+mod network_protocol;
+pub(super) use network_broker::Broker;
+
 const COMPONENT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tapid-node-compat.dll"));
 
 #[derive(Debug)]
@@ -242,7 +252,11 @@ impl Binding {
         Ok(additions)
     }
 
-    pub(super) fn install(&self, process: isize) -> Result<(), ExecutionError> {
+    pub(super) fn install(
+        &self,
+        process: isize,
+        network: Option<(isize, isize)>,
+    ) -> Result<(), ExecutionError> {
         use native::*;
         let path = wide(self.path.as_os_str());
         let (base, size) = load_component(process, &path[..path.len() - 1])
@@ -261,6 +275,10 @@ impl Binding {
         let mut setup = protocol::Setup::empty();
         setup.version = protocol::VERSION;
         setup.count = self.metadata.len() as u32;
+        if let Some((request, response)) = network {
+            setup.network_request = request;
+            setup.network_response = response;
+        }
         for (source, target) in self.metadata.iter().zip(&mut setup.entries) {
             let identity = crate::execution::request::windows_handle_identity(
                 source.file.as_raw_handle() as isize,
