@@ -192,6 +192,18 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked guard_owned_namespace_removal -- --ignored
+      - name: Run native Windows dependency acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:TAPID_TEST_NODE = (Get-Command node -ErrorAction Stop).Source
+          cargo test -p tapid-store --lib --locked lifecycle_authentication_ -- --show-output
+          $keyStatus = $LASTEXITCODE
+          cargo test -p tapid-runner --test windows_containment --locked -- --show-output
+          $writeStatus = $LASTEXITCODE
+          if ($keyStatus -ne 0 -or $writeStatus -ne 0) {
+            throw "Native dependency acceptance failed: key=$keyStatus write=$writeStatus"
+          }
       - name: Run tests
         # Retain success output so each Node assertion branch has a receipt.
         run: cargo test --workspace --all-features --locked -- --show-output
