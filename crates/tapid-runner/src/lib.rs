@@ -1,3 +1,5 @@
+#[cfg(windows)]
+pub use execution::{WindowsNetworkGuardAction, WindowsNetworkGuardStatus, windows_network_guard};
 /// Proof that this executable installed private launcher dispatch before application work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrivateLauncher {
@@ -10,6 +12,8 @@ static LAUNCHER: std::sync::OnceLock<PrivateLauncher> = std::sync::OnceLock::new
 /// Call as the first operation in main. Private invocations dispatch and never return.
 /// Subsequent requests retain this opaque token; missing integration fails before spawn.
 pub fn initialize_or_dispatch_private_launcher() -> PrivateLauncher {
+    #[cfg(windows)]
+    execution::dispatch_private_service();
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     execution::dispatch_private_launcher();
     LAUNCHER

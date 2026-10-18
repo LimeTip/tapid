@@ -1804,3 +1804,13 @@ pub(crate) use platform_backend::dispatch_private_launcher;
 #[cfg(test)]
 #[path = "execution/tests.rs"]
 mod tests;
+
+#[cfg(windows)]
+#[path = "windows_guard/mod.rs"]
+mod windows_guard;
+#[cfg(windows)]
+pub(crate) use windows_guard::dispatch_private_service;
+#[cfg(windows)]
+pub use windows_guard::{
+    WindowsNetworkGuardAction, WindowsNetworkGuardStatus, windows_network_guard,
+};

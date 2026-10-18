@@ -1,7 +1,7 @@
 [run.defaults]
 assurance = "restricted"
 read = ["."]
-environment = ["HOME", "NEXT_TELEMETRY_DISABLED", "TMPDIR"]
+environment = ["HOME", "NEXT_TELEMETRY_DISABLED", "TMPDIR", "SystemRoot"]
 subprocess = true
 network = false
 
