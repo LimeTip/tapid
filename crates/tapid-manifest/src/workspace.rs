@@ -81,14 +81,20 @@ impl Workspace {
             .into());
         }
         let root_manifest_path = project_dir.join("package.json");
-        let root_metadata = fs::symlink_metadata(&root_manifest_path)
-            .map_err(|error| format!("cannot inspect workspace root manifest: {error}"))?;
+        let root_read_error = |message| crate::WorkspaceError::ManifestRead {
+            path: root_manifest_path.clone(),
+            message,
+        };
+        let root_metadata = fs::symlink_metadata(&root_manifest_path).map_err(|error| {
+            root_read_error(format!("cannot inspect workspace root manifest: {error}"))
+        })?;
         if !root_metadata.file_type().is_file() {
-            return Err("workspace root package.json must be a regular file"
-                .to_owned()
-                .into());
+            return Err(root_read_error(
+                "workspace root package.json must be a regular file".to_owned(),
+            ));
         }
-        let root_path = contained_path(&project_dir, &root_manifest_path)?;
+        let root_path =
+            contained_path(&project_dir, &root_manifest_path).map_err(root_read_error)?;
         let root_text = read_file(&root_path)?;
         let root = PackageManifest::parse(&root_text).map_err(|error| {
             crate::WorkspaceError::Manifest {
@@ -111,20 +117,24 @@ impl Workspace {
         paths = paths
             .into_iter()
             .map(|path| {
+                let read_error = |message| crate::WorkspaceError::ManifestRead {
+                    path: path.clone(),
+                    message,
+                };
                 // Inspect the declared manifest before canonicalization loses symlink identity.
                 let metadata = fs::symlink_metadata(&path).map_err(|error| {
-                    format!(
+                    read_error(format!(
                         "cannot inspect workspace manifest {}: {error}",
                         path.display()
-                    )
+                    ))
                 })?;
                 if !metadata.file_type().is_file() {
-                    return Err(format!(
+                    return Err(read_error(format!(
                         "workspace manifest must be a regular file, not a symlink: {}",
                         path.display()
-                    ));
+                    )));
                 }
-                contained_path(&project_dir, &path)
+                contained_path(&project_dir, &path).map_err(read_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
         paths.sort();
@@ -132,12 +142,14 @@ impl Workspace {
         let mut members = Vec::new();
         let mut names = BTreeSet::from([root.name().to_string()]);
         for path in paths {
-            let canonical = fs::canonicalize(&path).map_err(|error| {
-                format!(
-                    "cannot resolve workspace manifest {}: {error}",
-                    path.display()
-                )
-            })?;
+            let canonical =
+                fs::canonicalize(&path).map_err(|error| crate::WorkspaceError::ManifestRead {
+                    path: path.clone(),
+                    message: format!(
+                        "cannot resolve workspace manifest {}: {error}",
+                        path.display()
+                    ),
+                })?;
             if !canonical.starts_with(&project_dir) {
                 return Err(format!(
                     "workspace member escapes workspace root: {}",
@@ -244,7 +256,11 @@ fn contained_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn read_file(path: &Path) -> Result<String, String> {
+fn read_file(path: &Path) -> Result<String, crate::WorkspaceError> {
+    let at_path = |message| crate::WorkspaceError::ManifestRead {
+        path: path.to_path_buf(),
+        message,
+    };
     #[cfg(all(test, unix))]
     read_race_tests::before_open(path);
     let mut options = fs::OpenOptions::new();
@@ -259,29 +275,30 @@ fn read_file(path: &Path) -> Result<String, String> {
     }
     let file = options
         .open(path)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        .map_err(|error| at_path(format!("cannot read {}: {error}", path.display())))?;
     let metadata = file
         .metadata()
-        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+        .map_err(|error| at_path(format!("cannot inspect {}: {error}", path.display())))?;
     if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES as u64 {
-        return Err(format!(
+        return Err(at_path(format!(
             "workspace manifest must be a regular file no larger than 32 MiB: {}",
             path.display()
-        ));
+        )));
     }
     // Bound the read itself as well as metadata, so growth after inspection cannot
     // allocate the whole replacement content.
     let mut bytes = Vec::new();
     file.take(MAX_MANIFEST_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        .map_err(|error| at_path(format!("cannot read {}: {error}", path.display())))?;
     if bytes.len() > MAX_MANIFEST_BYTES {
-        return Err(format!(
+        return Err(at_path(format!(
             "workspace manifest exceeds 32 MiB: {}",
             path.display()
-        ));
+        )));
     }
-    String::from_utf8(bytes).map_err(|error| format!("cannot read {}: {error}", path.display()))
+    String::from_utf8(bytes)
+        .map_err(|error| at_path(format!("cannot read {}: {error}", path.display())))
 }
 
 #[cfg(all(test, unix))]
@@ -545,11 +562,13 @@ fn expand_pattern_bounded(
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(format!(
-                    "cannot inspect workspace manifest {}: {error}",
-                    manifest.display()
-                )
-                .into());
+                return Err(crate::WorkspaceError::ManifestRead {
+                    message: format!(
+                        "cannot inspect workspace manifest {}: {error}",
+                        manifest.display()
+                    ),
+                    path: manifest,
+                });
             }
         }
     }

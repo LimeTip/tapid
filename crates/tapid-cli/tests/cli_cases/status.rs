@@ -13,6 +13,37 @@ fn status(project: &Path, extra: &[&str]) -> (std::process::Output, serde_json::
 }
 
 #[test]
+fn status_reports_member_file_access_failures_at_the_member_path() {
+    for directory in [false, true] {
+        let project = tapid_test_support::TempProject::new("status-member-access").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["member"]}"#,
+            )
+            .unwrap();
+        let member = project.write("member/package.json", &[0xff]).unwrap();
+        if directory {
+            fs::remove_file(&member).unwrap();
+            fs::create_dir(&member).unwrap();
+        }
+        let (output, value) = status(project.path(), &[]);
+        assert!(!output.status.success(), "{value}");
+        assert!(
+            value["data"]["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| {
+                    b["code"] == "WORKSPACE_INVALID"
+                        && b["location"] == member.canonicalize().unwrap().display().to_string()
+                }),
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn status_reports_the_malformed_workspace_member_path() {
     let project = tapid_test_support::TempProject::new("status-invalid-member").unwrap();
     project
@@ -634,7 +665,8 @@ fn status_blocks_oversized_members_before_workspace_parsing() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|b| b["code"] == "WORKSPACE_INVALID"),
+            .any(|b| b["code"] == "WORKSPACE_INVALID"
+                && b["location"] == path.canonicalize().unwrap().display().to_string()),
         "{value}"
     );
     assert!(output.stdout.len() < 16 * 1024);

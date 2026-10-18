@@ -17,7 +17,9 @@ The crate validates required `name` and `version`, optional `private`, `descript
 map key, expected constraint, and observed JSON type. It does not copy arbitrary
 field values. `Workspace::discover_typed` preserves this evidence and the
 manifest path in `WorkspaceError::Manifest`; `discover` retains its string-error
-interface for existing callers.
+interface for existing callers. `WorkspaceError::ManifestRead` retains the path
+for manifest metadata, file-type, read, UTF-8, and size-limit failures while
+preserving the existing error text.
 
 `with_dependency_kind` adds a dependency to one section and removes declarations of that name from other sections. `update_dependency_kind` changes an existing declaration only in the selected section, preserving overlapping declarations and unrelated fields. It returns an error when that section does not declare the name.
 

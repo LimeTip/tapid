@@ -9,11 +9,15 @@ pub struct ManifestDiagnostic {
     pub observed: &'static str,
 }
 
-/// Workspace discovery retains parse evidence while legacy callers can use Display.
+/// Workspace discovery retains manifest failure paths and parse evidence for callers.
 #[derive(Debug)]
 pub enum WorkspaceError {
     Discovery(String),
     DiscoveryLimitExceeded,
+    ManifestRead {
+        path: std::path::PathBuf,
+        message: String,
+    },
     Manifest {
         path: std::path::PathBuf,
         diagnostic: Box<ManifestDiagnostic>,
@@ -30,6 +34,7 @@ impl fmt::Display for WorkspaceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Discovery(message) => f.write_str(message),
+            Self::ManifestRead { message, .. } => f.write_str(message),
             Self::DiscoveryLimitExceeded => f.write_str("workspace discovery limit exceeded"),
             Self::Manifest { path, error, .. } => {
                 write!(f, "invalid workspace manifest {}: {error}", path.display())
@@ -41,7 +46,7 @@ impl std::error::Error for WorkspaceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Manifest { error, .. } => Some(error.as_ref()),
-            Self::Discovery(_) | Self::DiscoveryLimitExceeded => None,
+            Self::Discovery(_) | Self::DiscoveryLimitExceeded | Self::ManifestRead { .. } => None,
         }
     }
 }
