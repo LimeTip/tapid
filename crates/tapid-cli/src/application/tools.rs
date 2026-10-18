@@ -397,6 +397,27 @@ pub(crate) fn execute(
     } else {
         Command::new(&target)
     };
+    #[cfg(unix)]
+    {
+        use std::os::{fd::AsRawFd, unix::process::CommandExt};
+        let descriptor = lease.as_raw_fd();
+        // The child must retain the flock if a terminal signal kills this
+        // wrapper first. Change inheritance only in the forked child, keeping
+        // the parent's descriptor close-on-exec for unrelated spawns.
+        // SAFETY: the lease stays open through status(); the callback uses only
+        // async-signal-safe fcntl calls and propagates errors before exec.
+        unsafe {
+            process.pre_exec(move || {
+                let flags = libc::fcntl(descriptor, libc::F_GETFD);
+                if flags == -1
+                    || libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     let status = process.args(arguments).status().map_err(error)?;
     drop(lease);
     #[cfg(unix)]
