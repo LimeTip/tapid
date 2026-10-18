@@ -24,3 +24,10 @@ interface for existing callers.
 `Workspace::discover` reads root and member manifests, checks canonical path containment, and selects members by exact package name. It accepts string, array, and `workspaces.packages` declarations with literal directory paths and `*` as a whole component for one directory level. Unsupported glob syntax fails with a diagnostic. Overlapping patterns are deduplicated, duplicate names are rejected, and manifests must be regular files. Discovery rejects root and member manifests larger than `MAX_MANIFEST_BYTES`, 32 MiB, before parsing and bounds the read itself if a file grows. See the [workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces) for the exact supported subset.
 
 `dependency_lifecycle_commands` preserves exact script bytes in lifecycle order. It includes the implicit `node-gyp rebuild` install hook when `binding.gyp` exists and neither `preinstall` nor `install` is declared. The CLI supplies that filesystem fact; parsing grants no execution permission.
+
+`Workspace::discover_bounded` uses the same discovery rules with limits on candidate
+manifests and expansion steps. Patterns, components, directory entries, literal
+path expansions, and candidate probes consume steps. Candidate manifests count
+before deduplication. Exceeding either budget returns
+`WorkspaceError::DiscoveryLimitExceeded` before member parsing. Existing discovery
+entry points retain their unrestricted enumeration behavior.

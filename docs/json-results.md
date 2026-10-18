@@ -299,6 +299,9 @@ agreement is `match`, `mismatch`, or `unknown`. Installation states are `absent`
 when registry configuration or workspace discovery fails. Root binding checks
 require valid registry configuration; workspace checks also require discovery.
 A confirmed mismatch remains conclusive when other checks cannot run.
+Imported npm schema-8 locks use their own parser and root/workspace receipt
+validators. Their registry routing, platform selection, and ancestor installation
+layout checks are listed as unperformed.
 The shared store is not inspected. Blockers contain stable `code`
 and bounded `location` fields, using JSON pointers for dependency declarations.
 A selected member does not limit full-workspace checks. Registry data includes
@@ -315,14 +318,19 @@ supported lock/spec forms in the experimental `capabilities` summary. Use
 `tapid --json status --help` for arguments and defaults from Clap definitions.
 
 The report includes at most 128 blockers, 128 workspace members, and 128
-declarations from each dependency section. Workspace discovery and planning bound root/member manifest reads to 32 MiB
+declarations from each dependency section. Discovery stops before parsing members
+if it exceeds 128 candidate manifests or 4,096 expansion steps. Each pattern,
+component, directory entry, literal path expansion, and candidate manifest probe
+consumes a step; overlapping patterns count before deduplication. Exceeding either
+limit reports `WORKSPACE_DISCOVERY_LIMIT` and marks the inspection truncated.
+Workspace discovery and planning bound root/member manifest reads to 32 MiB
 before parsing or hashing. File digests are bounded to 32 MiB, registry configuration to 64 KiB,
 and marker reads to 1 KiB. A truncated inspection exits 1. Display locations are
 sanitized and bounded to 4 KiB; they are descriptive and must not be used for
 automatic recovery. Use the envelope's lossless `project_path` to identify the
 project. Status never advises deleting recovery data or bypassing verification.
 
-Status blocker codes are `MANIFEST_INVALID_OR_MISSING`, `WORKSPACE_INVALID`,
+Status blocker codes are `MANIFEST_INVALID_OR_MISSING`, `WORKSPACE_INVALID`, `WORKSPACE_DISCOVERY_LIMIT`,
 `WORKSPACE_SELECTION_INVALID`, `UNSUPPORTED_SPEC`, `UNSUPPORTED_OVERRIDE`,
 `MANIFEST_COMPATIBILITY_BLOCKER`, `WORKSPACE_COMPATIBILITY_BLOCKER`,
 `REGISTRY_CONFIGURATION_INVALID`, `LOCKFILE_MISSING`, `LOCKFILE_UNREADABLE`,

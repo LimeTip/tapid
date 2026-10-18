@@ -15,7 +15,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tapid_lockfile::{Lockfile, LockfileError};
+use tapid_lockfile::{ImportedNpmLockfile, Lockfile, LockfileError};
 use tapid_manifest::{PackageManifest, Workspace};
 
 const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
@@ -122,7 +122,7 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         ],
         capabilities: json!({
             "experimental": true,
-            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION],
+            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION],
             "spec_forms": ["semver", "npm_dist_tag", "npm_alias", "jsr_semver", "workspace:*", "workspace:^", "workspace:~", "file_tarball", "git+https"],
             "package_manager": "local_preflight_only", "runner": "not_assessed",
             "workspace_selection": "exact_member_name", "workspace_linking": "supported_not_verified",
@@ -190,8 +190,13 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         }
     };
     let workspace = if manifest.is_some() {
-        match Workspace::discover(&project) {
+        match Workspace::discover_bounded(&project, MAX_ENTRIES, 4096) {
             Ok(workspace) => Some(workspace),
+            Err(tapid_manifest::WorkspaceError::DiscoveryLimitExceeded) => {
+                report.truncated = true;
+                report.block("WORKSPACE_DISCOVERY_LIMIT", &manifest_path);
+                None
+            }
             Err(_) => {
                 report.block("WORKSPACE_INVALID", &manifest_path);
                 None
@@ -230,6 +235,12 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     }
     let lock_path = project.join("tapid.lock");
     match read(&lock_path, MAX_FILE_BYTES) {
+        Ok(bytes)
+            if serde_json::from_slice::<Value>(&bytes)
+                .is_ok_and(|value| value["lockfileVersion"] == 8) =>
+        {
+            inspect_imported_lock(&bytes, &manifest_bytes, workspace.as_ref(), &mut report);
+        }
         Ok(bytes) => match std::str::from_utf8(&bytes)
             .ok()
             .and_then(|text| Lockfile::from_json(text).ok())
@@ -257,8 +268,8 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
                             report.manifest_lock_agreement = "mismatch";
                             report.block("LOCK_ROOT_BINDINGS_INVALID", &lock_path);
                         }
-                        if workspace.is_some() {
-                            match workspace_matches(&project, manifest, config, &lock) {
+                        if let Some(workspace) = &workspace {
+                            match workspace_matches(&project, manifest, config, &lock, workspace) {
                                 Ok(()) if bindings_match => {
                                     report.manifest_lock_agreement = "match"
                                 }
@@ -325,9 +336,11 @@ fn workspace_matches(
     manifest: &PackageManifest,
     config: &RegistryConfig,
     lock: &Lockfile,
+    discovered: &Workspace,
 ) -> Result<(), &'static str> {
-    let workspace = crate::online::workspace_materialization(project, config)
-        .map_err(|_| "WORKSPACE_COMPATIBILITY_BLOCKER")?;
+    let workspace =
+        crate::online::workspace_materialization_from_discovered(project, config, None, discovered)
+            .map_err(|_| "WORKSPACE_COMPATIBILITY_BLOCKER")?;
     if !crate::online::workspace_matches_lock(&workspace, lock) {
         return Err("LOCK_WORKSPACE_MISMATCH");
     }
@@ -340,6 +353,78 @@ fn workspace_matches(
         lock,
     )
     .map_err(|_| "LOCK_WORKSPACE_MISMATCH")
+}
+
+fn inspect_imported_lock(
+    bytes: &[u8],
+    manifest_bytes: &Result<Vec<u8>, &'static str>,
+    workspace: Option<&Workspace>,
+    report: &mut StatusReport,
+) {
+    let lock_path = report.project.join("tapid.lock");
+    let Some(lock) = std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|text| ImportedNpmLockfile::from_json(text).ok())
+    else {
+        report.block("LOCKFILE_INVALID", &lock_path);
+        return;
+    };
+    report
+        .checks_not_performed
+        .push("imported_npm_registry_routing_and_platform_selection");
+    report
+        .checks_not_performed
+        .push("imported_npm_ancestor_installation_layout");
+    let Ok(manifest) = manifest_bytes
+        .as_ref()
+        .map_err(|_| ())
+        .and_then(|bytes| std::str::from_utf8(bytes).map_err(|_| ()))
+    else {
+        return;
+    };
+    if lock
+        .validate_replay(manifest, &digest_bytes(manifest.as_bytes()))
+        .is_err()
+    {
+        report.manifest_lock_agreement = "mismatch";
+        report.block("LOCK_MANIFEST_MISMATCH", &lock_path);
+    }
+    let Some(workspace) = workspace else {
+        return;
+    };
+    // Use bounded reads from the discovered members. Import/replay's collection also
+    // enforces install layout rules and uses unbounded reads, so it is not a preflight reader.
+    let manifests = workspace
+        .members()
+        .iter()
+        .map(|member| {
+            let relative = member
+                .path()
+                .parent()
+                .and_then(|path| path.strip_prefix(&report.project).ok())
+                .ok_or(())?;
+            let key = relative
+                .components()
+                .map(|part| part.as_os_str().to_str().ok_or(()))
+                .collect::<Result<Vec<_>, _>>()?
+                .join("/");
+            let bytes = read(member.path(), MAX_FILE_BYTES).map_err(|_| ())?;
+            let digest = digest_bytes(&bytes);
+            let text = String::from_utf8(bytes).map_err(|_| ())?;
+            Ok((key, (text, digest)))
+        })
+        .collect::<Result<BTreeMap<_, _>, ()>>();
+    match manifests {
+        Ok(manifests) if lock.validate_workspace_manifests(&manifests).is_ok() => {
+            if report.manifest_lock_agreement != "mismatch" {
+                report.manifest_lock_agreement = "match";
+            }
+        }
+        _ => {
+            report.manifest_lock_agreement = "mismatch";
+            report.block("LOCK_WORKSPACE_MISMATCH", &lock_path);
+        }
+    }
 }
 
 fn inspect_manifest(

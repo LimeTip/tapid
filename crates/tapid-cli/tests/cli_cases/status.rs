@@ -13,6 +13,128 @@ fn status(project: &Path, extra: &[&str]) -> (std::process::Output, serde_json::
 }
 
 #[test]
+fn status_checks_imported_npm_manifest_and_workspace_receipts() {
+    for change in ["none", "root", "member", "missing_receipt", "invalid"] {
+        let project = tapid_test_support::TempProject::new("status-imported-lock").unwrap();
+        let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"]})
+            .to_string();
+        let member = r#"{"name":"member","version":"1.0.0"}"#;
+        project.write("package.json", root.as_bytes()).unwrap();
+        project
+            .write("packages/member/package.json", member.as_bytes())
+            .unwrap();
+        let npm = serde_json::json!({"lockfileVersion":3,"packages":{
+            "":serde_json::from_str::<serde_json::Value>(&root).unwrap(),
+            "packages/member":{"name":"member","version":"1.0.0"},
+            "node_modules/member":{"resolved":"packages/member","link":true}
+        }});
+        let mut lock = tapid_lockfile::ImportedNpmLockfile::import(
+            &npm.to_string(),
+            &root,
+            &format!("sha256-{:x}", Sha256::digest(root.as_bytes())),
+        )
+        .unwrap();
+        if change != "missing_receipt" {
+            lock.bind_workspace_manifests(&std::collections::BTreeMap::from([(
+                "packages/member".into(),
+                (
+                    member.into(),
+                    format!("sha256-{:x}", Sha256::digest(member.as_bytes())),
+                ),
+            )]))
+            .unwrap();
+        }
+        let lock_bytes = if change == "invalid" {
+            r#"{"lockfileVersion":8}"#.into()
+        } else {
+            lock.to_json().unwrap()
+        };
+        project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+        if change == "root" {
+            project
+                .write("package.json", root.replace("1.0.0", "1.0.1").as_bytes())
+                .unwrap();
+        }
+        if change == "member" {
+            project
+                .write(
+                    "packages/member/package.json",
+                    member.replace("1.0.0", "1.0.1").as_bytes(),
+                )
+                .unwrap();
+        }
+        let (output, value) = status(project.path(), &[]);
+        assert_eq!(
+            output.status.success(),
+            change == "none",
+            "{change}: {value}"
+        );
+        assert_eq!(
+            value["data"]["manifest_lock_agreement"],
+            if change == "none" {
+                "match"
+            } else if change == "invalid" {
+                "unknown"
+            } else {
+                "mismatch"
+            },
+            "{change}: {value}"
+        );
+        if change != "none" {
+            let expected = match change {
+                "invalid" => "LOCKFILE_INVALID",
+                "root" => "LOCK_MANIFEST_MISMATCH",
+                _ => "LOCK_WORKSPACE_MISMATCH",
+            };
+            assert!(
+                value["data"]["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| b["code"] == expected),
+                "{change}: {value}"
+            );
+        }
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes.as_bytes()
+        );
+        assert!(!project.path().join("node_modules").exists());
+    }
+}
+
+#[test]
+fn status_bounds_workspace_discovery_before_parsing_members() {
+    let project = tapid_test_support::TempProject::new("status-member-limit").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    for i in 0..129 {
+        project
+            .write(
+                format!("packages/member-{i}/package.json"),
+                b"invalid: must not be parsed",
+            )
+            .unwrap();
+    }
+    let (output, value) = status(project.path(), &[]);
+    assert!(!output.status.success());
+    assert_eq!(value["data"]["truncated"], true, "{value}");
+    assert!(
+        value["data"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["code"] == "WORKSPACE_DISCOVERY_LIMIT"),
+        "{value}"
+    );
+    assert!(output.stdout.len() < 16 * 1024);
+}
+
+#[test]
 fn status_reports_missing_files_without_creating_anything() {
     let project = tapid_test_support::TempProject::new("status-missing").unwrap();
     let (output, value) = status(project.path(), &[]);

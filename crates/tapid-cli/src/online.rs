@@ -293,6 +293,15 @@ pub(super) fn workspace_materialization_with_manifest(
 ) -> Result<WorkspaceMaterialization, OperationalError> {
     let workspace = Workspace::discover_typed(project)
         .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))?;
+    workspace_materialization_from_discovered(project, registry_config, replacement, &workspace)
+}
+
+pub(crate) fn workspace_materialization_from_discovered(
+    project: &Path,
+    registry_config: &crate::registry::RegistryConfig,
+    replacement: Option<(&Path, &PackageManifest)>,
+    workspace: &Workspace,
+) -> Result<WorkspaceMaterialization, OperationalError> {
     let root = workspace
         .root_path()
         .parent()

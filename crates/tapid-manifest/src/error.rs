@@ -13,6 +13,7 @@ pub struct ManifestDiagnostic {
 #[derive(Debug)]
 pub enum WorkspaceError {
     Discovery(String),
+    DiscoveryLimitExceeded,
     Manifest {
         path: std::path::PathBuf,
         diagnostic: Box<ManifestDiagnostic>,
@@ -29,6 +30,7 @@ impl fmt::Display for WorkspaceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Discovery(message) => f.write_str(message),
+            Self::DiscoveryLimitExceeded => f.write_str("workspace discovery limit exceeded"),
             Self::Manifest { path, error, .. } => {
                 write!(f, "invalid workspace manifest {}: {error}", path.display())
             }
@@ -39,7 +41,7 @@ impl std::error::Error for WorkspaceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Manifest { error, .. } => Some(error.as_ref()),
-            Self::Discovery(_) => None,
+            Self::Discovery(_) | Self::DiscoveryLimitExceeded => None,
         }
     }
 }

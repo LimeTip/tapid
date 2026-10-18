@@ -40,6 +40,16 @@ impl Workspace {
 
     /// Discover members without discarding the location of a manifest parse failure.
     pub fn discover_typed(project_dir: &Path) -> Result<Self, crate::WorkspaceError> {
+        Self::discover_bounded(project_dir, usize::MAX, usize::MAX)
+    }
+
+    /// Bound candidate manifests and filesystem expansion work before parsing members.
+    /// Overlapping patterns count toward the candidate limit before deduplication.
+    pub fn discover_bounded(
+        project_dir: &Path,
+        max_candidates: usize,
+        max_expansion_steps: usize,
+    ) -> Result<Self, crate::WorkspaceError> {
         let project_dir = fs::canonicalize(project_dir).map_err(|error| {
             format!(
                 "cannot resolve workspace root {}: {error}",
@@ -72,8 +82,14 @@ impl Workspace {
         })?;
         let patterns = workspace_patterns(root.extra.get("workspaces"))?;
         let mut paths = Vec::new();
+        let mut remaining = max_expansion_steps;
         for pattern in patterns {
-            paths.extend(expand_pattern(&project_dir, &pattern)?);
+            paths.extend(expand_pattern_bounded(
+                &project_dir,
+                &pattern,
+                max_candidates - paths.len(),
+                &mut remaining,
+            )?);
         }
         paths = paths
             .into_iter()
@@ -264,14 +280,34 @@ fn workspace_patterns(workspaces: Option<&Value>) -> Result<Vec<String>, String>
         .collect()
 }
 
+#[cfg(test)]
 fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
+    let mut remaining = usize::MAX;
+    expand_pattern_bounded(root, pattern, usize::MAX, &mut remaining)
+        .map_err(|error| error.to_string())
+}
+
+fn expansion_step(remaining: &mut usize) -> Result<(), crate::WorkspaceError> {
+    *remaining = remaining
+        .checked_sub(1)
+        .ok_or(crate::WorkspaceError::DiscoveryLimitExceeded)?;
+    Ok(())
+}
+
+fn expand_pattern_bounded(
+    root: &Path,
+    pattern: &str,
+    max_candidates: usize,
+    remaining: &mut usize,
+) -> Result<Vec<PathBuf>, crate::WorkspaceError> {
+    expansion_step(remaining)?;
     let relative = Path::new(pattern);
     if relative.is_absolute()
         || relative
             .components()
             .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        return Err(format!("workspace pattern is outside project: {pattern}"));
+        return Err(format!("workspace pattern is outside project: {pattern}").into());
     }
     if !relative
         .components()
@@ -285,10 +321,11 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
     {
         return Err(format!(
             "unsupported workspace pattern '{pattern}'; use a relative directory path or a whole path component '*' for one directory level"
-        ));
+        ).into());
     }
     let mut paths = vec![root.to_path_buf()];
     for component in relative.components() {
+        expansion_step(remaining)?;
         let name = component.as_os_str();
         if name == "*" {
             let mut next = Vec::new();
@@ -301,6 +338,7 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
                     )
                 })?;
                 for entry in entries {
+                    expansion_step(remaining)?;
                     let entry = entry
                         .map_err(|error| format!("cannot inspect workspace directory: {error}"))?;
                     let file_type = entry
@@ -321,7 +359,8 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
                             return Err(format!(
                                 "workspace glob encountered an unsupported symlink target: {}",
                                 candidate.display()
-                            ));
+                            )
+                            .into());
                         }
                     } else if !file_type.is_dir() {
                         continue;
@@ -332,23 +371,31 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
             paths = next;
         } else {
             for path in &mut paths {
+                expansion_step(remaining)?;
                 path.push(name);
             }
         }
     }
     let mut manifests = Vec::new();
     for path in paths {
+        expansion_step(remaining)?;
         let manifest = path.join("package.json");
         match fs::symlink_metadata(&manifest) {
             // Keep every existing entry for the regular-file validation in discovery.
             // Following the final component here would hide dangling symlinks.
-            Ok(_) => manifests.push(manifest),
+            Ok(_) => {
+                if manifests.len() == max_candidates {
+                    return Err(crate::WorkspaceError::DiscoveryLimitExceeded);
+                }
+                manifests.push(manifest);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(format!(
                     "cannot inspect workspace manifest {}: {error}",
                     manifest.display()
-                ));
+                )
+                .into());
             }
         }
     }
@@ -362,6 +409,63 @@ mod tests {
     use proptest::prelude::*;
     use std::{fs, path::Path};
     use tapid_test_support::TempProject;
+
+    #[test]
+    fn bounded_discovery_counts_entries_without_manifests_and_across_patterns() {
+        let project = TempProject::new("workspace-discovery-work-limit").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        for i in 0..8 {
+            project
+                .write(format!("packages/file-{i}"), b"not a workspace")
+                .unwrap();
+        }
+        assert!(matches!(
+            Workspace::discover_bounded(project.path(), 1, 6),
+            Err(crate::WorkspaceError::DiscoveryLimitExceeded)
+        ));
+        assert!(
+            Workspace::discover(project.path())
+                .unwrap()
+                .members()
+                .is_empty()
+        );
+        project.write("package.json", br#"{"name":"root","version":"1.0.0","workspaces":["missing","missing","missing"]}"#).unwrap();
+        assert!(matches!(
+            Workspace::discover_bounded(project.path(), 1, 8),
+            Err(crate::WorkspaceError::DiscoveryLimitExceeded)
+        ));
+    }
+
+    #[test]
+    fn bounded_discovery_preserves_selection_at_the_candidate_limit() {
+        let project = TempProject::new("workspace-discovery-candidate-limit").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        for name in ["a", "b"] {
+            project
+                .write(
+                    format!("packages/{name}/package.json"),
+                    format!(r#"{{"name":"{name}","version":"1.0.0"}}"#).as_bytes(),
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            Workspace::discover_bounded(project.path(), 1, 100),
+            Err(crate::WorkspaceError::DiscoveryLimitExceeded)
+        ));
+        let workspace = Workspace::discover_bounded(project.path(), 2, 100).unwrap();
+        assert_eq!(workspace, Workspace::discover(project.path()).unwrap());
+        assert_eq!(workspace.select(Some("b")).unwrap().name().as_str(), "b");
+    }
 
     #[test]
     fn unsupported_workspace_patterns_fail_instead_of_silently_dropping_members() {

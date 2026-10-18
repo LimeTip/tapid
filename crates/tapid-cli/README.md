@@ -346,6 +346,11 @@ tree integrity, shared-store recovery, lifecycle approvals, and runner assurance
 remain unchecked. A managed marker establishes ownership only. An invalid existing marker blocks
 operation even when node_modules is absent. Root and member manifest discovery
 and workspace planning reads are limited to 32 MiB per manifest.
+Discovery also stops before parsing members when it exceeds 128 candidate manifests
+or 4,096 expansion steps, and reports a blocked, truncated inspection. Imported
+npm schema-8 locks use their root and workspace receipt validators; imported
+registry routing, platform selection, and ancestor installation layout remain
+explicitly unchecked.
 
 Snapshot entries identify inspected metadata using SHA-256 or explicit missing
 and unreadable states. Directory and journal entries use metadata identities;
