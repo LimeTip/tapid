@@ -31,3 +31,7 @@ path expansions, and candidate probes consume steps. Candidate manifests count
 before deduplication. Exceeding either budget returns
 `WorkspaceError::DiscoveryLimitExceeded` before member parsing. Existing discovery
 entry points retain their unrestricted enumeration behavior.
+
+`WorkspaceMember::manifest_text` returns the exact bounded UTF-8 text parsed during
+discovery. Snapshot consumers can fingerprint those bytes without a later read
+silently becoming the baseline for an older parsed manifest.

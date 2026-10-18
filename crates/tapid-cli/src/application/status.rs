@@ -147,21 +147,16 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         let path = project.join(name);
         snapshots.insert(path.clone(), (0, fingerprint(&path, 0)));
     }
-    match lifecycle_journal::has_pending(&project) {
+    let (recovery_path, pending) = lifecycle_journal::inspect_pending(&project);
+    match pending {
         Ok(false) => report.recovery = "none_detected",
         Ok(true) => {
             report.recovery = "pending";
-            report.block(
-                "RECOVERY_REQUIRED",
-                project.join(".tapid-lifecycle-journal.json"),
-            );
+            report.block("RECOVERY_REQUIRED", &recovery_path);
         }
         Err(_) => {
             report.recovery = "unknown";
-            report.block(
-                "RECOVERY_STATE_INVALID",
-                project.join(".tapid-lifecycle-journal.json"),
-            );
+            report.block("RECOVERY_STATE_INVALID", &recovery_path);
         }
     }
     if report.recovery != "none_detected" {
@@ -205,6 +200,8 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     } else {
         None
     };
+    #[cfg(test)]
+    tests::after_workspace_discovery();
     if let Some(workspace) = &workspace {
         match workspace.select_path(selector) {
             Ok(path) => report.workspace["manifest"] = json!(path.display().to_string()),
@@ -225,7 +222,10 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         for member in workspace.members().iter().take(MAX_ENTRIES) {
             snapshots.insert(
                 member.path().to_path_buf(),
-                (MAX_FILE_BYTES, fingerprint(member.path(), MAX_FILE_BYTES)),
+                (
+                    MAX_FILE_BYTES,
+                    digest_bytes(member.manifest_text().as_bytes()),
+                ),
             );
             inspect_manifest(member.manifest(), member.path(), workspace, &mut report);
             if let Some(dir) = member.path().parent() {
@@ -432,6 +432,10 @@ fn inspect_manifest(
     report: &mut StatusReport,
 ) {
     for (kind, dependencies) in manifest.dependency_sections() {
+        if kind == tapid_manifest::DependencyKind::PeerDependencies && path == workspace.root_path()
+        {
+            continue;
+        }
         let section = kind.field_name();
         for (name, raw) in dependencies.iter().take(MAX_ENTRIES) {
             let location = format!(
@@ -480,7 +484,7 @@ fn inspect_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use tapid_test_support::TempProject;
 
     #[derive(Clone, Copy)]
@@ -492,13 +496,62 @@ mod tests {
 
     thread_local! {
         static MARKER_CHANGE: Cell<Option<MarkerChange>> = const { Cell::new(None) };
+        static MANIFEST_REPLACEMENT: RefCell<Option<(PathBuf, Vec<u8>)>> = const { RefCell::new(None) };
     }
 
     struct FaultGuard;
     impl Drop for FaultGuard {
         fn drop(&mut self) {
             MARKER_CHANGE.set(None);
+            MANIFEST_REPLACEMENT.with(|replacement| replacement.borrow_mut().take());
         }
+    }
+
+    pub(super) fn after_workspace_discovery() {
+        let replacement = MANIFEST_REPLACEMENT.with(|replacement| replacement.borrow_mut().take());
+        if let Some((path, bytes)) = replacement {
+            fs::write(path, bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn status_blocks_member_replacement_after_discovery_even_when_lock_matches_replacement() {
+        let project = TempProject::new("status-member-change").unwrap();
+        let root = br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#;
+        let original = br#"{"name":"member","version":"1.0.0"}"#;
+        let replacement =
+            br#"{"name":"member","version":"1.0.0","overrides":{"jsr:@std/path":"1"}}"#;
+        project.write("package.json", root).unwrap();
+        let path = project
+            .write("packages/member/package.json", original)
+            .unwrap();
+        let mut lock = Lockfile::new(&digest_bytes(root)).unwrap();
+        let source =
+            tapid_lockfile::LocalWorkspaceSource::new("packages/member", "member", "1.0.0")
+                .unwrap();
+        let package =
+            tapid_lockfile::LockedWorkspacePackage::new(source, &digest_bytes(replacement))
+                .unwrap();
+        lock.insert_workspace_package(package).unwrap();
+        lock.set_roots(
+            lock.workspace_packages()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        project
+            .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+            .unwrap();
+        MANIFEST_REPLACEMENT
+            .with(|pending| *pending.borrow_mut() = Some((path.clone(), replacement.to_vec())));
+        let _guard = FaultGuard;
+        let report = inspect(project.path(), None);
+        assert_eq!(report.assessment, "blocked");
+        assert!(report.blockers.iter().any(|b| b.code == "SNAPSHOT_CHANGED"));
+        assert_eq!(report.snapshot["changes_detected"], true);
+        assert_eq!(report.manifest_lock_agreement, "unknown");
+        assert_eq!(fs::read(path).unwrap(), replacement);
     }
 
     // Mutate only this thread's temporary fixture after the real ownership read.

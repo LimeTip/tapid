@@ -13,6 +13,79 @@ fn status(project: &Path, extra: &[&str]) -> (std::process::Output, serde_json::
 }
 
 #[test]
+fn status_treats_root_peers_as_declarations_but_validates_member_peers() {
+    for member in [false, true] {
+        let project = tapid_test_support::TempProject::new("status-peer-declarations").unwrap();
+        let peer = serde_json::json!({"name":"app","version":"1.0.0","peerDependencies":{"react":"workspace:*"}}).to_string();
+        let root = if member {
+            project
+                .write("member/package.json", peer.as_bytes())
+                .unwrap();
+            r#"{"name":"root","version":"1.0.0","workspaces":["member"]}"#.to_owned()
+        } else {
+            peer
+        };
+        project.write("package.json", root.as_bytes()).unwrap();
+        let lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(root.as_bytes()))).unwrap();
+        project
+            .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+            .unwrap();
+        let (output, value) = status(project.path(), &[]);
+        assert_eq!(output.status.success(), !member, "{value}");
+        let unsupported = value["data"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| {
+                b["code"] == "UNSUPPORTED_SPEC"
+                    && b["location"]
+                        .as_str()
+                        .unwrap()
+                        .contains("#/peerDependencies/react")
+            });
+        assert_eq!(unsupported, member, "{value}");
+    }
+}
+
+#[test]
+fn status_points_recovery_blockers_at_backup_only_journals() {
+    for invalid in [false, true] {
+        let project = tapid_test_support::TempProject::new("status-backup-journal").unwrap();
+        let backup = project
+            .path()
+            .join(".tapid-lifecycle-journal.lifecycle.bak");
+        if invalid {
+            fs::create_dir(&backup).unwrap();
+        } else {
+            fs::write(&backup, b"interrupted").unwrap();
+        }
+        let (_, value) = status(project.path(), &[]);
+        let code = if invalid {
+            "RECOVERY_STATE_INVALID"
+        } else {
+            "RECOVERY_REQUIRED"
+        };
+        let blocker = value["data"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["code"] == code)
+            .unwrap();
+        assert_eq!(
+            blocker["location"],
+            backup.canonicalize().unwrap().display().to_string()
+        );
+        assert!(
+            !project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
+        assert!(fs::symlink_metadata(&backup).is_ok());
+    }
+}
+
+#[test]
 fn status_checks_imported_npm_manifest_and_workspace_receipts() {
     for change in ["none", "root", "member", "missing_receipt", "invalid"] {
         let project = tapid_test_support::TempProject::new("status-imported-lock").unwrap();

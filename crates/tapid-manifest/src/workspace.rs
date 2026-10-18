@@ -12,6 +12,7 @@ pub struct WorkspaceMember {
     name: String,
     path: PathBuf,
     manifest: PackageManifest,
+    manifest_text: String,
 }
 
 impl WorkspaceMember {
@@ -23,6 +24,10 @@ impl WorkspaceMember {
     }
     pub fn manifest(&self) -> &PackageManifest {
         &self.manifest
+    }
+    /// Exact bounded UTF-8 text parsed during discovery, before later filesystem reads.
+    pub fn manifest_text(&self) -> &str {
+        &self.manifest_text
     }
 }
 
@@ -163,6 +168,7 @@ impl Workspace {
                 name: manifest.name().to_string(),
                 path: canonical,
                 manifest,
+                manifest_text: text,
             });
         }
         members.sort_by(|a, b| a.name.cmp(&b.name).then(a.path.cmp(&b.path)));

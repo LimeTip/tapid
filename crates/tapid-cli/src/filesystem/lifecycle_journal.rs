@@ -277,33 +277,32 @@ pub(crate) struct RecoveryDecision {
 }
 
 pub(crate) fn has_pending(project: &Path) -> Result<bool, String> {
+    inspect_pending(project).1
+}
+
+/// Inspect metadata only, retaining the selected artifact's path even on failure.
+pub(crate) fn inspect_pending(project: &Path) -> (std::path::PathBuf, Result<bool, String>) {
     let path = project.join(JOURNAL);
     let backup = journal_backup_path(&path);
-    match fs::symlink_metadata(&path) {
+    let (path, metadata, label) = match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let metadata = fs::symlink_metadata(&backup);
+            (backup, metadata, "lifecycle journal backup")
+        }
+        metadata => (path, metadata, "lifecycle journal"),
+    };
+    let state = match metadata {
         Ok(metadata) if metadata.file_type().is_file() && metadata.len() <= MAX_JOURNAL_BYTES => {
             Ok(true)
         }
         Ok(metadata) if metadata.file_type().is_file() => {
-            Err("refusing to inspect an oversized lifecycle journal".into())
+            Err(format!("refusing to inspect an oversized {label}"))
         }
-        Ok(_) => Err("refusing to inspect a non-regular lifecycle journal".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match fs::symlink_metadata(&backup) {
-                Ok(metadata)
-                    if metadata.file_type().is_file() && metadata.len() <= MAX_JOURNAL_BYTES =>
-                {
-                    Ok(true)
-                }
-                Ok(metadata) if metadata.file_type().is_file() => {
-                    Err("refusing to inspect an oversized lifecycle journal backup".into())
-                }
-                Ok(_) => Err("refusing to inspect a non-regular lifecycle journal backup".into()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(error) => Err(format!("cannot inspect lifecycle journal backup: {error}")),
-            }
-        }
-        Err(error) => Err(format!("cannot inspect lifecycle journal: {error}")),
-    }
+        Ok(_) => Err(format!("refusing to inspect a non-regular {label}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("cannot inspect {label}: {error}")),
+    };
+    (path, state)
 }
 
 pub(crate) fn recover(

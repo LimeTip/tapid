@@ -307,9 +307,14 @@ The shared store is not inspected. Blockers contain stable `code`
 and bounded `location` fields, using JSON pointers for dependency declarations.
 A selected member does not limit full-workspace checks. Registry data includes
 origins, credential variable names, and `credentials: "not_read"`.
+Root peer dependencies remain declarations rather than installable specs; member
+peer declarations still undergo compatibility checks. Recovery blocker locations
+identify the primary or backup journal whose metadata was inspected.
 
 `snapshot.consistency` is always `not_atomic`. Its `files` identify metadata
 reads by digest, explicit absence/read failure, or directory/journal metadata.
+Member manifest identities use the exact bounded bytes parsed during discovery,
+so a later persistent replacement cannot become the baseline for stale parsed data.
 `changes_detected` and each `changed_on_recheck` flag describe the second pass;
 false does not prove that no concurrent change occurred. Workspace discovery
 and other readers may observe different moments. Node_modules contents and
