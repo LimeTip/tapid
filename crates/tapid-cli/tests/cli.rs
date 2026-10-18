@@ -6513,6 +6513,175 @@ fn dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations() 
 }
 
 #[test]
+fn dependency_lifecycle_sandbox_only_override_skips_hooks_with_a_dependency_cycle() {
+    let fixture = command_support::CliFixture::new("sandbox-only-cycle");
+    let project = &fixture.project;
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"a":"1.0.0","b":"2.0.0","native-demo":"1.0.0"}}"#).unwrap();
+    write_dependency_script_fixture(
+        project,
+        "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=",
+    );
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/aliased-root-cycle.json")).unwrap();
+    let hook_registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("registry.json")).unwrap()).unwrap();
+    registry["packages"].as_array_mut().unwrap().extend(
+        hook_registry["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    project
+        .write("registry.json", &serde_json::to_vec(&registry).unwrap())
+        .unwrap();
+    let output = fixture
+        .command(&[
+            "install",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    for hook in ["preinstall", "install", "postinstall", "prepare"] {
+        assert!(
+            stderr.contains(&format!(
+                "skipped dependency lifecycle hook {hook} for native-demo@1.0.0"
+            )),
+            "{stderr}"
+        );
+    }
+    assert!(
+        !project
+            .path()
+            .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+            .exists()
+    );
+    let lock = Lockfile::from_json(&fs::read_to_string(project.path().join("tapid.lock")).unwrap())
+        .unwrap();
+    assert!(
+        lock.packages()
+            .values()
+            .all(|package| package.derived_hooks().is_empty())
+    );
+    assert!(project.path().join("node_modules/a/package.json").is_file());
+    assert!(
+        project
+            .path()
+            .join("node_modules/a/node_modules/b/package.json")
+            .is_file()
+    );
+    let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let output = fixture
+        .command(&[
+            "install",
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "authorized cyclic lifecycle graphs must still be rejected"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("approved dependency lifecycle graphs must be acyclic")
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_before
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+            .exists()
+    );
+}
+
+#[test]
+fn dependency_lifecycle_sandbox_only_override_warns_on_discovery_failure() {
+    let fixture = command_support::CliFixture::new("sandbox-only-discovery");
+    let project = &fixture.project;
+    project
+        .write(
+            "package.json",
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"broken":"1.0.0"}}"#,
+        )
+        .unwrap();
+    // The verified manifest is valid but exceeds the 1 MiB lifecycle discovery bound.
+    // Skipping hooks must still allow installation; authorization retains that bound.
+    project
+        .write(
+            "registry.json",
+            include_bytes!("fixtures/dependency-discovery-oversized.json"),
+        )
+        .unwrap();
+    let output = fixture
+        .command(&[
+            "install",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("could not discover dependency lifecycle hooks for broken@1.0.0"),
+        "{stderr}"
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/broken/SHOULD_NOT_EXIST")
+            .exists()
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/broken/package.json")
+            .is_file()
+    );
+    let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let output = fixture
+        .command(&[
+            "install",
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "discovery limits must fail closed when execution is authorized"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("dependency package.json must be a regular file no larger than 1 MiB")
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/broken/SHOULD_NOT_EXIST")
+            .exists()
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_before
+    );
+}
+
+#[test]
 fn dependency_lifecycle_hooks_are_reported_and_never_run_by_default() {
     let project = tapid_test_support::TempProject::new("dependency-hooks-denied").unwrap();
     let home = tapid_test_support::TempHome::new("dependency-hooks-denied").unwrap();

@@ -105,7 +105,7 @@ pub(super) fn apply(
         }
     }
     let mut completed = BTreeMap::<String, Vec<DerivedHookOutput>>::new();
-    let order = if policy.approvals().is_empty() && !overrides.enabled() {
+    let order = if policy.approvals().is_empty() && !overrides.allow_unapproved {
         lock.packages().keys().cloned().collect()
     } else {
         dependency_order(lock)?
@@ -140,7 +140,7 @@ pub(super) fn apply(
                     .approvals()
                     .iter()
                     .any(|approval| approval.package() == package.name())
-                    || overrides.enabled()
+                    || overrides.allow_unapproved
                 {
                     return Err(discovery_error);
                 }
