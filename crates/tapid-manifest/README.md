@@ -32,6 +32,8 @@ before deduplication. Exceeding either budget returns
 `WorkspaceError::DiscoveryLimitExceeded` before member parsing. Existing discovery
 entry points retain their unrestricted enumeration behavior.
 
-`WorkspaceMember::manifest_text` returns the exact bounded UTF-8 text parsed during
-discovery. Snapshot consumers can fingerprint those bytes without a later read
-silently becoming the baseline for an older parsed manifest.
+`Workspace::discover_bounded_with_member_source` passes each member's exact parsed
+UTF-8 source to a borrowed callback. Snapshot consumers can fingerprint those bytes
+before a later filesystem read. Discovery discards the source after each member;
+the shared workspace model retains only parsed manifests. Callback observations
+are partial if discovery fails.

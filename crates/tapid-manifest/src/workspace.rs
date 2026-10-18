@@ -12,7 +12,6 @@ pub struct WorkspaceMember {
     name: String,
     path: PathBuf,
     manifest: PackageManifest,
-    manifest_text: String,
 }
 
 impl WorkspaceMember {
@@ -24,10 +23,6 @@ impl WorkspaceMember {
     }
     pub fn manifest(&self) -> &PackageManifest {
         &self.manifest
-    }
-    /// Exact bounded UTF-8 text parsed during discovery, before later filesystem reads.
-    pub fn manifest_text(&self) -> &str {
-        &self.manifest_text
     }
 }
 
@@ -54,6 +49,23 @@ impl Workspace {
         project_dir: &Path,
         max_candidates: usize,
         max_expansion_steps: usize,
+    ) -> Result<Self, crate::WorkspaceError> {
+        Self::discover_bounded_with_member_source(
+            project_dir,
+            max_candidates,
+            max_expansion_steps,
+            |_, _| {},
+        )
+    }
+
+    /// Observe the exact member source parsed during bounded discovery.
+    /// The borrowed source is discarded after each member; it is not retained in
+    /// the workspace. Observations before a discovery error are partial.
+    pub fn discover_bounded_with_member_source(
+        project_dir: &Path,
+        max_candidates: usize,
+        max_expansion_steps: usize,
+        mut observe: impl FnMut(&Path, &str),
     ) -> Result<Self, crate::WorkspaceError> {
         let project_dir = fs::canonicalize(project_dir).map_err(|error| {
             format!(
@@ -164,11 +176,11 @@ impl Workspace {
                     format!("duplicate workspace package name '{}'", manifest.name()).into(),
                 );
             }
+            observe(&canonical, &text);
             members.push(WorkspaceMember {
                 name: manifest.name().to_string(),
                 path: canonical,
                 manifest,
-                manifest_text: text,
             });
         }
         members.sort_by(|a, b| a.name.cmp(&b.name).then(a.path.cmp(&b.path)));

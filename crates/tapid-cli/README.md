@@ -431,8 +431,10 @@ of selection. Workspace linking is reported separately and is not verified.
 The report includes root and member manifest/lock agreement, node_modules
 ownership, pending project recovery, dependency-spec blockers with manifest
 locations, registry origins and credential variable names, supported forms, and
-checks not performed. Credentials are never read. Missing or invalid files and
-pending transactions remain report data. Status never installs, runs scripts,
+checks not performed. Override checks use only root declarations, matching install
+and replay; member dependency specs are checked independently. Credentials are
+never read. Missing or invalid files and pending transactions remain report data.
+Status never installs, runs scripts,
 opens the shared store, acquires transaction locks, or attempts recovery.
 
 Exit 0 means no local blockers were found. It does not establish complete

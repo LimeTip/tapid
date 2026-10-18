@@ -185,7 +185,17 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         }
     };
     let workspace = if manifest.is_some() {
-        match Workspace::discover_bounded(&project, MAX_ENTRIES, 4096) {
+        match Workspace::discover_bounded_with_member_source(
+            &project,
+            MAX_ENTRIES,
+            4096,
+            |path, text| {
+                snapshots.insert(
+                    path.to_path_buf(),
+                    (MAX_FILE_BYTES, digest_bytes(text.as_bytes())),
+                );
+            },
+        ) {
             Ok(workspace) => Some(workspace),
             Err(tapid_manifest::WorkspaceError::DiscoveryLimitExceeded) => {
                 report.truncated = true;
@@ -220,13 +230,6 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         );
         inspect_manifest(workspace.root(), &manifest_path, workspace, &mut report);
         for member in workspace.members().iter().take(MAX_ENTRIES) {
-            snapshots.insert(
-                member.path().to_path_buf(),
-                (
-                    MAX_FILE_BYTES,
-                    digest_bytes(member.manifest_text().as_bytes()),
-                ),
-            );
             inspect_manifest(member.manifest(), member.path(), workspace, &mut report);
             if let Some(dir) = member.path().parent() {
                 inspect_installation(dir, &mut report, &mut snapshots);
@@ -471,6 +474,11 @@ fn inspect_manifest(
             report.truncated = true;
         }
     }
+    // Only the root contributes overrides to install and replay. Member specs
+    // have already been checked independently above.
+    if path != workspace.root_path() {
+        return;
+    }
     if crate::online::manifest_overrides(manifest).is_err() {
         report.block(
             "UNSUPPORTED_OVERRIDE",
@@ -520,7 +528,7 @@ mod tests {
         let root = br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#;
         let original = br#"{"name":"member","version":"1.0.0"}"#;
         let replacement =
-            br#"{"name":"member","version":"1.0.0","overrides":{"jsr:@std/path":"1"}}"#;
+            br#"{"name":"member","version":"1.0.0","dependencies":{"bad":"https://example.invalid/pkg.tgz"}}"#;
         project.write("package.json", root).unwrap();
         let path = project
             .write("packages/member/package.json", original)

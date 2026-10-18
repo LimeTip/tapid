@@ -13,6 +13,66 @@ fn status(project: &Path, extra: &[&str]) -> (std::process::Output, serde_json::
 }
 
 #[test]
+fn status_ignores_member_overrides_but_checks_root_overrides_and_member_specs() {
+    for (root_override, invalid_spec) in [(false, false), (true, false), (false, true)] {
+        let project = tapid_test_support::TempProject::new("status-member-overrides").unwrap();
+        let overrides = serde_json::json!({"jsr:@std/path":"1"});
+        let mut root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["member"]});
+        if root_override {
+            root["overrides"] = overrides.clone();
+        }
+        let mut member =
+            serde_json::json!({"name":"member","version":"1.0.0","overrides":overrides});
+        if invalid_spec {
+            member["dependencies"] = serde_json::json!({"bad":"https://example.invalid/pkg.tgz"});
+        }
+        let root = root.to_string();
+        let member = member.to_string();
+        project.write("package.json", root.as_bytes()).unwrap();
+        project
+            .write("member/package.json", member.as_bytes())
+            .unwrap();
+        let digest = |text: &str| format!("sha256-{:x}", Sha256::digest(text.as_bytes()));
+        let mut lock = Lockfile::new(&digest(&root)).unwrap();
+        lock.insert_workspace_package(
+            tapid_lockfile::LockedWorkspacePackage::new(
+                tapid_lockfile::LocalWorkspaceSource::new("member", "member", "1.0.0").unwrap(),
+                &digest(&member),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        lock.set_roots(
+            lock.workspace_packages()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        project
+            .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+            .unwrap();
+        let (output, value) = status(project.path(), &[]);
+        let blockers = value["data"]["blockers"].as_array().unwrap();
+        assert_eq!(
+            output.status.success(),
+            !root_override && !invalid_spec,
+            "{value}"
+        );
+        assert_eq!(
+            blockers.iter().any(|b| b["code"] == "UNSUPPORTED_OVERRIDE"),
+            root_override,
+            "{value}"
+        );
+        assert_eq!(
+            blockers.iter().any(|b| b["code"] == "UNSUPPORTED_SPEC"),
+            invalid_spec,
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn status_treats_root_peers_as_declarations_but_validates_member_peers() {
     for member in [false, true] {
         let project = tapid_test_support::TempProject::new("status-peer-declarations").unwrap();
