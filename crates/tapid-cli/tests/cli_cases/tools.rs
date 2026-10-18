@@ -474,6 +474,107 @@ fn tool_cleanup_defers_an_environment_with_a_live_invocation_lease() {
     assert!(!environment.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn tool_child_keeps_environment_lease_after_wrapper_is_interrupted() {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::{Child, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct ProcessGroup(Child);
+    impl Drop for ProcessGroup {
+        fn drop(&mut self) {
+            // SAFETY: the child was started in its own process group. Terminate
+            // the test tool on assertion failures as well as normal completion.
+            unsafe { libc::kill(-(self.0.id() as i32), libc::SIGKILL) };
+            let _ = self.0.wait();
+        }
+    }
+
+    let project = TempProject::new("tool-child-lease").unwrap();
+    let home = TempHome::new("tool-child-lease").unwrap();
+    assert_success(&install(&project, &home));
+    let listed = list(&project, &home);
+    let environment = Path::new(listed["data"]["tools"][0]["environment"].as_str().unwrap());
+    let catalog: Value = serde_json::from_slice(
+        &fs::read(home.path().join("tools with spaces/catalog.json")).unwrap(),
+    )
+    .unwrap();
+    let target = environment.join(
+        catalog["tools"]["hello-tool"]["commands"]["hello-tool"]["target"]
+            .as_str()
+            .unwrap(),
+    );
+    fs::write(
+        target,
+        r#"
+const fs = require('node:fs');
+process.on('SIGINT', () => {});
+fs.writeFileSync(process.argv[2], 'ready');
+const timer = setInterval(() => {
+    if (fs.existsSync(process.argv[3])) { clearInterval(timer); }
+}, 10);
+"#,
+    )
+    .unwrap();
+    let ready = home.path().join("ready");
+    let release = home.path().join("release");
+    let mut process = command(&project, &home, &["__tool-exec", "--command", "hello-tool"]);
+    process
+        .arg("--")
+        .arg(&ready)
+        .arg(&release)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut group = ProcessGroup(process.spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "tool never became ready");
+        assert!(
+            group.0.try_wait().unwrap().is_none(),
+            "wrapper exited before readiness"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // SAFETY: this dedicated process group contains only the wrapper and tool.
+    assert_eq!(
+        unsafe { libc::kill(-(group.0.id() as i32), libc::SIGINT) },
+        0
+    );
+    let status = loop {
+        if let Some(status) = group.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "wrapper did not exit on SIGINT");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.signal(), Some(libc::SIGINT));
+    let removed = command(&project, &home, &["--json", "tool", "remove", "hello-tool"])
+        .output()
+        .unwrap();
+    assert_success(&removed);
+    let result: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(result["changes"]["state"], "committed_cleanup_pending");
+    assert!(
+        environment.exists(),
+        "running child's environment was removed"
+    );
+    fs::write(release, b"exit").unwrap();
+    loop {
+        let cleaned = list(&project, &home);
+        if cleaned["changes"]["state"] != "committed_cleanup_pending" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child lease was not released on exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!environment.exists());
+}
+
 #[test]
 fn tool_scoped_package_exports_its_declared_command() {
     let project = TempProject::new("tool-scoped").unwrap();
