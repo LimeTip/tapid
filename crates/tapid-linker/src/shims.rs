@@ -34,6 +34,21 @@ pub enum ShimStrategy {
     WindowsCmdAndPowerShell,
 }
 
+impl ShimStrategy {
+    /// Validate generated output identities without reading bin targets or
+    /// selecting interpreters. Uses the same collision rules as shim planning.
+    pub fn validate_targets<'a>(
+        self,
+        targets: impl IntoIterator<Item = &'a std::path::Path>,
+    ) -> Result<(), PlanError> {
+        let mut outputs = BTreeSet::new();
+        for target in targets {
+            reserve_shim_outputs(&mut outputs, target, self)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShimInterpreter {
     Direct,
@@ -150,12 +165,7 @@ pub fn plan_shims(
             if !managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(target_path));
             }
-            if shim_output_keys(&target_path, strategy)
-                .into_iter()
-                .any(|key| !outputs.insert(key))
-            {
-                return Err(PlanError::ShimCollision(target_path));
-            }
+            reserve_shim_outputs(&mut outputs, &target_path, strategy)?;
             entries.push(ShimEntry {
                 interpreter: shim_interpreter(&source, platform)?,
                 command: target.command.clone(),
@@ -266,12 +276,7 @@ pub fn plan_shims_with_workspace_packages(
             if !plan.managed_root.contains(&source) || !plan.managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(source));
             }
-            if shim_output_keys(&target_path, strategy)
-                .into_iter()
-                .any(|key| !outputs.insert(key))
-            {
-                return Err(PlanError::ShimCollision(target_path));
-            }
+            reserve_shim_outputs(&mut outputs, &target_path, strategy)?;
             plan.entries.push(ShimEntry {
                 interpreter: shim_interpreter(&validated_source, platform)?,
                 command: target.command.clone(),
@@ -290,6 +295,20 @@ pub fn plan_shims_with_workspace_packages(
 enum ShimKey {
     Bytes(Vec<u8>),
     Utf16(Vec<u16>),
+}
+
+fn reserve_shim_outputs(
+    outputs: &mut BTreeSet<ShimKey>,
+    target: &std::path::Path,
+    strategy: ShimStrategy,
+) -> Result<(), PlanError> {
+    if shim_output_keys(target, strategy)
+        .into_iter()
+        .any(|key| !outputs.insert(key))
+    {
+        return Err(PlanError::ShimCollision(target.to_owned()));
+    }
+    Ok(())
 }
 
 fn shim_output_keys(path: &std::path::Path, strategy: ShimStrategy) -> Vec<ShimKey> {
