@@ -1,13 +1,20 @@
 //! Windows launch metadata shared by support checks and enforcement receipts.
 use sha2::{Digest, Sha256};
 
-pub(super) fn launch_mechanism(component: Option<&[u8]>) -> String {
+pub(super) fn launch_mechanism(component: Option<&[u8]>, network: bool) -> String {
+    let network = if network {
+        "unrestricted IP: private user socket broker, DNS"
+    } else {
+        "persistent exact-SID WFP v4/v6 bind guard"
+    };
     match component {
         Some(component) => format!(
-            "LPAC, registryRead, no net caps; Job; ACLs; bounded stdio; DLL sha256:{:x}; app-IAT children; exact ancestor READ_ATTRIBUTES handles, not inherited; EOF stdin; NT realpath; no ancestor ACL writes",
+            "LPAC/Job; registryRead; zero network SIDs; ACLs; stdio; DLL sha256:{:x}; app-IAT; exact READ_ATTRIBUTES ancestors; EOF stdin; {network}",
             Sha256::digest(component)
         ),
-        None => "verified Less-Privileged AppContainer token with registryRead runtime capability and no network capabilities, explicit path ACL grants with validated existing write targets, suspended Job Object assignment, and bounded standard-handle capture".into(),
+        None => format!(
+            "verified LPAC token; registryRead; zero network SIDs; explicit ACLs; suspended Job assignment; bounded stdio; {network}"
+        ),
     }
 }
 
@@ -34,16 +41,25 @@ mod tests {
             .unwrap();
             let dimensions = EnforcementDimensions::requested_by(&policy);
             for component in [None, Some(b"test compatibility DLL".as_slice())] {
-                let mechanism = launch_mechanism(component);
-                let evidence = evidence_for_dimensions(&dimensions, &mechanism, &[]);
-                validate_dimension_evidence(&dimensions, &evidence).unwrap_or_else(|error| {
-                    panic!(
-                        "{}-byte Windows mechanism rejected: {error}",
-                        mechanism.len()
-                    )
-                });
-                if let Some(component) = component {
-                    assert!(mechanism.contains(&format!("sha256:{:x}", Sha256::digest(component))));
+                for network in [false, true] {
+                    let mechanism = launch_mechanism(component, network);
+                    let evidence = evidence_for_dimensions(&dimensions, &mechanism, &[]);
+                    validate_dimension_evidence(&dimensions, &evidence).unwrap_or_else(|error| {
+                        panic!(
+                            "{}-byte Windows mechanism rejected: {error}",
+                            mechanism.len()
+                        )
+                    });
+                    if let Some(component) = component {
+                        assert!(
+                            mechanism.contains(&format!("sha256:{:x}", Sha256::digest(component)))
+                        );
+                    }
+                    assert!(mechanism.contains(if network {
+                        "socket broker"
+                    } else {
+                        "WFP v4/v6 bind guard"
+                    }));
                 }
             }
         }

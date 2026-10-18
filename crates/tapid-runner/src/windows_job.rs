@@ -177,6 +177,10 @@ impl WindowsJob {
         Ok(())
     }
 
+    pub(super) fn handle(&self) -> HANDLE {
+        self.handle
+    }
+
     pub(super) fn active_process_count(&self) -> Result<u32, ExecutionError> {
         // SAFETY: zeroed is a valid writable destination; the declared output length matches.
         let mut information: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
@@ -452,6 +456,7 @@ mod token;
 pub(super) use process::{
     WindowsChildTermination, WindowsOutputCapture, WindowsStdioPipes, WindowsSuspendedChild,
 };
+pub(super) use token::validate_runtime_capabilities;
 
 fn unsupported_hresult(operation: &str, hresult: i32) -> ExecutionError {
     ExecutionError::new(
@@ -476,3 +481,17 @@ fn unsupported_job(operation: &str) -> ExecutionError {
 #[cfg(test)]
 #[path = "windows_job_tests.rs"]
 mod tests;
+pub(super) fn token_information(token: isize, class: i32) -> Result<Vec<usize>, u32> {
+    let mut length = 0;
+    unsafe { GetTokenInformation(token, class, null_mut(), 0, &mut length) };
+    if length == 0 || length > 65536 {
+        return Err(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED);
+    }
+    let mut bytes = vec![0usize; (length as usize).div_ceil(size_of::<usize>())];
+    if unsafe { GetTokenInformation(token, class, bytes.as_mut_ptr().cast(), length, &mut length) }
+        == 0
+    {
+        return Err(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED);
+    }
+    Ok(bytes)
+}

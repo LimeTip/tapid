@@ -1,5 +1,5 @@
 //! Fixed-size preparation data shared by the host and its embedded native component.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const REOPEN_POLICY_MASK: u32 = 1 | 2 | 4 | 8 | 0x10 | 0x20 | 0x100 | 0x10000;
 pub const MAX_ANCESTORS: usize = 64;
 pub const MAX_PATH_UNITS: usize = 1024;
@@ -27,6 +27,21 @@ mod tests {
         setup.entries[0].length = 3;
         setup.entries[0].path[..3].copy_from_slice(&[67, 58, 92]);
         assert!(setup.valid());
+        // The no-network plan has no broker handles. A grant needs two distinct valid ends.
+        for (request, response, valid) in [
+            (0, 0, true),
+            (123, 124, true),
+            (0, 124, false),
+            (123, 0, false),
+            (-1, 124, false),
+            (123, -1, false),
+            (123, 123, false),
+        ] {
+            let mut channels = setup.clone();
+            channels.network_request = request;
+            channels.network_response = response;
+            assert_eq!(channels.valid(), valid);
+        }
         for count in [0, MAX_ANCESTORS as u32 + 1, u32::MAX] {
             let mut invalid = setup.clone();
             invalid.count = count;
@@ -48,7 +63,7 @@ mod tests {
         assert!(!invalid.valid());
         if cfg!(target_pointer_width = "64") {
             assert_eq!(std::mem::size_of::<MetadataEntry>(), 2064);
-            assert_eq!(std::mem::size_of::<Setup>(), 16 + MAX_ANCESTORS * 2064);
+            assert_eq!(std::mem::size_of::<Setup>(), 32 + MAX_ANCESTORS * 2064);
         }
     }
 }
@@ -59,6 +74,8 @@ pub struct Setup {
     pub version: u32,
     pub count: u32,
     pub stdin_eof: isize,
+    pub network_request: isize,
+    pub network_response: isize,
     pub entries: [MetadataEntry; MAX_ANCESTORS],
 }
 
@@ -72,6 +89,12 @@ impl Setup {
     pub fn valid(&self) -> bool {
         self.version == VERSION
             && self.stdin_eof != -1
+            && ((self.network_request == 0 && self.network_response == 0)
+                || (self.network_request != 0
+                    && self.network_request != -1
+                    && self.network_response != 0
+                    && self.network_response != -1
+                    && self.network_request != self.network_response))
             && self.count > 0
             && self.count as usize <= MAX_ANCESTORS
             && self.entries[..self.count as usize].iter().all(|entry| {

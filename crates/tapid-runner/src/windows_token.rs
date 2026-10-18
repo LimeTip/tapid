@@ -104,6 +104,54 @@ impl Drop for RegistryReadCapability {
     }
 }
 
+/// Accept no ambient capabilities except the exact enabled registry-read runtime SID.
+pub(in crate::execution) fn validate_runtime_capabilities(token: HANDLE) -> Result<(), u32> {
+    use windows_sys::Win32::{
+        Foundation::ERROR_ACCESS_DENIED,
+        Security::{TOKEN_GROUPS, TokenCapabilities},
+    };
+    let buffer = super::token_information(token, TokenCapabilities)?;
+    if buffer.is_empty() {
+        return Err(ERROR_ACCESS_DENIED);
+    }
+    // SAFETY: token_information returns aligned native storage containing at least
+    // the count. A zero-entry token need not include the first SID_AND_ATTRIBUTES.
+    let count = unsafe { *buffer.as_ptr().cast::<u32>() };
+    match count {
+        0 => Ok(()),
+        1 if buffer.len() * size_of::<usize>() >= size_of::<TOKEN_GROUPS>() => {
+            // SAFETY: the complete single-entry TOKEN_GROUPS fits in native storage.
+            let groups = unsafe { &*buffer.as_ptr().cast::<TOKEN_GROUPS>() };
+            validate_capability_entries(&groups.Groups)
+        }
+        _ => Err(ERROR_ACCESS_DENIED),
+    }
+}
+
+fn validate_capability_entries(
+    entries: &[windows_sys::Win32::Security::SID_AND_ATTRIBUTES],
+) -> Result<(), u32> {
+    use windows_sys::Win32::{
+        Foundation::ERROR_ACCESS_DENIED,
+        Security::{EqualSid, IsValidSid},
+    };
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let registry = RegistryReadCapability::new().map_err(|_| ERROR_ACCESS_DENIED)?;
+    // SAFETY: registry owns the derived SID throughout this comparison; entries
+    // come from the queried token, or native SID allocations in the tests.
+    if entries.len() != 1
+        || entries[0].Sid.is_null()
+        || unsafe { IsValidSid(entries[0].Sid) } == 0
+        || unsafe { EqualSid(entries[0].Sid, (*registry.entry()).Sid) } == 0
+        || entries[0].Attributes != unsafe { (*registry.entry()).Attributes }
+    {
+        return Err(ERROR_ACCESS_DENIED);
+    }
+    Ok(())
+}
+
 struct Token(HANDLE);
 impl Drop for Token {
     fn drop(&mut self) {
@@ -231,6 +279,42 @@ mod tests {
         Security::TOKEN_DUPLICATE,
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
+
+    #[test]
+    fn runtime_capabilities_accept_only_enabled_registry_read() {
+        use windows_sys::Win32::Security::{
+            Authorization::ConvertStringSidToSidW, SID_AND_ATTRIBUTES,
+        };
+        let registry = RegistryReadCapability::new().unwrap();
+        // SAFETY: the capability owns this initialized entry for the entire test.
+        let entry = unsafe { *registry.entry() };
+        assert!(validate_capability_entries(&[]).is_ok());
+        assert!(validate_capability_entries(&[entry]).is_ok());
+        assert!(validate_capability_entries(&[entry, entry]).is_err());
+        assert!(
+            validate_capability_entries(&[SID_AND_ATTRIBUTES {
+                Attributes: 0,
+                ..entry
+            }])
+            .is_err()
+        );
+        for text in ["S-1-15-3-1", "S-1-15-3-2", "S-1-15-3-3", "S-1-15-3-4"] {
+            let text = text.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+            let mut sid = null_mut();
+            // SAFETY: terminated fixed SID text and writable output pointer.
+            assert_ne!(
+                unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) },
+                0
+            );
+            let sid = Allocation(NonNull::new(sid).unwrap());
+            let other = SID_AND_ATTRIBUTES {
+                Sid: sid.0.as_ptr(),
+                ..entry
+            };
+            assert!(validate_capability_entries(&[other]).is_err());
+            assert!(validate_capability_entries(&[entry, other]).is_err());
+        }
+    }
 
     #[test]
     fn package_access_controls_reject_an_ordinary_host_token() {
