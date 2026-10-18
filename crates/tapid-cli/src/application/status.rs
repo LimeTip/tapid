@@ -315,7 +315,11 @@ fn inspect_installation(
 ) {
     let path = project.join("node_modules");
     snapshots.insert(path.clone(), (0, fingerprint(&path, 0)));
+    let marker = project.join(".tapid-managed");
+    snapshots.insert(marker.clone(), (1024, fingerprint(&marker, 1024)));
     let valid = validate_managed_node_modules(project).is_ok();
+    #[cfg(test)]
+    tests::after_ownership_validation(project);
     let state = match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && valid => "absent",
         Ok(_) if valid => "managed",
@@ -327,8 +331,6 @@ fn inspect_installation(
     report
         .installation
         .push(json!({"path": path.display().to_string(), "state": state}));
-    let marker = project.join(".tapid-managed");
-    snapshots.insert(marker.clone(), (1024, fingerprint(&marker, 1024)));
 }
 
 fn workspace_matches(
@@ -472,5 +474,76 @@ fn inspect_manifest(
         );
     } else if crate::online::manifest_roots(manifest).is_err() {
         report.block("MANIFEST_COMPATIBILITY_BLOCKER", path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use tapid_test_support::TempProject;
+
+    #[derive(Clone, Copy)]
+    enum MarkerChange {
+        Invalid,
+        Missing,
+        Directory,
+    }
+
+    thread_local! {
+        static MARKER_CHANGE: Cell<Option<MarkerChange>> = const { Cell::new(None) };
+    }
+
+    struct FaultGuard;
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            MARKER_CHANGE.set(None);
+        }
+    }
+
+    // Mutate only this thread's temporary fixture after the real ownership read.
+    pub(super) fn after_ownership_validation(project: &Path) {
+        let Some(change) = MARKER_CHANGE.replace(None) else {
+            return;
+        };
+        let marker = project.join(".tapid-managed");
+        fs::remove_file(&marker).unwrap();
+        match change {
+            MarkerChange::Invalid => fs::write(marker, b"invalid replacement\n").unwrap(),
+            MarkerChange::Missing => {}
+            MarkerChange::Directory => fs::create_dir(marker).unwrap(),
+        }
+    }
+
+    #[test]
+    fn status_blocks_persistent_marker_changes_after_ownership_validation() {
+        for change in [
+            MarkerChange::Invalid,
+            MarkerChange::Missing,
+            MarkerChange::Directory,
+        ] {
+            let project = TempProject::new("status-marker-change").unwrap();
+            let manifest = br#"{"name":"app","version":"1.0.0"}"#;
+            project.write("package.json", manifest).unwrap();
+            let lock = Lockfile::new(&digest_bytes(manifest)).unwrap();
+            project
+                .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+                .unwrap();
+            project
+                .write(".tapid-managed", b"tapid-managed-v1\n")
+                .unwrap();
+            project.write("node_modules/keep", b"untouched").unwrap();
+            MARKER_CHANGE.set(Some(change));
+            let _guard = FaultGuard;
+            let report = inspect(project.path(), None);
+            assert_eq!(report.assessment, "blocked");
+            assert!(report.blockers.iter().any(|b| b.code == "SNAPSHOT_CHANGED"));
+            assert_eq!(report.snapshot["changes_detected"], true);
+            assert_eq!(report.manifest_lock_agreement, "unknown");
+            assert_eq!(
+                fs::read(project.path().join("node_modules/keep")).unwrap(),
+                b"untouched"
+            );
+        }
     }
 }
