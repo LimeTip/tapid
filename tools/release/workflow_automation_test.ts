@@ -23,6 +23,18 @@ const step = (section: string, name: string) => {
 };
 
 const assertStandaloneTestOwners = (ci: string) => {
+  const failureCapture = step(job(ci, 'coverage'), 'Upload failed coverage profiles');
+  assert.equal(failureCapture.trimEnd(), `      - name: Upload failed coverage profiles
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: failed-coverage-profiles
+          path: |
+            target/llvm-cov-target/*.profraw
+            target/llvm-cov-target/*-profraw-list
+          if-no-files-found: warn
+          retention-days: 1`);
+  ci = ci.replace(failureCapture, '');
   assert.doesNotMatch(ci, /nextest-coverage-pilot|stage5-|cargo llvm-cov nextest|cargo nextest list|cargo llvm-cov report|cargo llvm-cov show-env|--no-report|-- --list|\.profraw|tee /);
   for (const [id, name, command, tool] of [
     ['nextest', 'Run tests with nextest', 'cargo nextest run --workspace --all-features --locked', 'cargo-nextest'],
@@ -51,6 +63,18 @@ test('standalone nextest and Cargo coverage remain mandatory without comparison 
   await assert.rejects(source('tools/release/nextest_coverage_pilot_test.ts'), { code: 'ENOENT' });
 });
 
+test('failed coverage preserves raw profiles without changing the mandatory generation command', async () => {
+  const coverage = job(await workflow('ci'), 'coverage');
+  assert.equal(step(coverage, 'Generate LCOV coverage report').trimEnd(), '      - name: Generate LCOV coverage report\n        run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info');
+  const capture = step(coverage, 'Upload failed coverage profiles');
+  assert.match(capture, /\n        if: failure\(\)\n/);
+  assert.match(capture, /uses: actions\/upload-artifact@[a-f0-9]{40} # v7/);
+  assert.match(capture, /target\/llvm-cov-target\/\*\.profraw/);
+  assert.match(capture, /target\/llvm-cov-target\/\*-profraw-list/);
+  assert.match(capture, /retention-days: 1/);
+  assert.doesNotMatch(capture, /run:|continue-on-error|always\(\)/);
+});
+
 test('standalone contracts reject missing gates, assertion bypass and comparison work', async () => {
   const ci = await workflow('ci');
   assertStandaloneTestOwners(ci);
@@ -67,11 +91,14 @@ test('standalone contracts reject missing gates, assertion bypass and comparison
       owner.replace('    steps:', '    steps:\n      - name: Discover comparison tests\n        run: cargo nextest list --workspace --all-features --locked\n'),
     ]) assert.throws(() => assertStandaloneTestOwners(ci.replace(owner, replacement)), undefined, id);
   }
+  const coverageUpload = step(job(ci, 'coverage'), 'Upload LCOV coverage report');
   for (const broken of [
+    ci.replace('if: failure()', 'if: always()'),
+    ci.replace('retention-days: 1\n', 'retention-days: 30\n'),
     ci + '\n  nextest-coverage-pilot:\n    runs-on: ubuntu-latest\n',
     ci.replace('cargo llvm-cov --workspace', 'cargo llvm-cov nextest --workspace'),
     ci.replace('name: lcov-coverage', 'name: comparison-coverage'),
-    ci.replace('retention-days: 30\n\n  release-platform-build:', 'retention-days: 14\n\n  release-platform-build:'),
+    ci.replace(coverageUpload, coverageUpload.replace('retention-days: 30', 'retention-days: 14')),
     ci.replace('cargo nextest run --workspace', 'cargo nextest run --workspace --no-fail-fast'),
     ci.replace('    steps:', '    steps:\n      - name: Export comparison\n        run: cargo llvm-cov report --json\n'),
   ]) assert.throws(() => assertStandaloneTestOwners(broken));
