@@ -140,6 +140,9 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
     })
 }
 
+/// Emit an unchanged-project status envelope with bounded, sanitized report strings.
+/// Output truncation changes the assessment and exit status to failure, so shortening
+/// untrusted metadata cannot silently produce a successful preflight result.
 pub(crate) fn status_result(report: &crate::application::status::StatusReport) -> ExitCode {
     let outcome = crate::application::outcome::OperationOutcome::unchanged(&report.project);
     let blocked = report.assessment == "blocked";
@@ -182,6 +185,7 @@ pub(crate) fn status_result(report: &crate::application::status::StatusReport) -
     emit(result, u8::from(blocked || shortened))
 }
 
+/// Sanitize every report string and record shortened fields by escaped JSON pointer.
 fn status_text(value: &mut Value, pointer: &str, truncated: &mut Vec<String>) {
     match value {
         Value::String(text) => *text = recorded_text(&*text, pointer, truncated),

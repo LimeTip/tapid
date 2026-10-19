@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// A validated member whose parsed manifest is retained without its source text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceMember {
     name: String,
@@ -15,17 +16,21 @@ pub struct WorkspaceMember {
 }
 
 impl WorkspaceMember {
+    /// Return the package name validated as unique across the root and members.
     pub fn name(&self) -> &str {
         &self.name
     }
+    /// Return the canonical path to the member's `package.json`, not its directory.
     pub fn path(&self) -> &Path {
         &self.path
     }
+    /// Return the parsed discovery result; later file changes do not refresh it.
     pub fn manifest(&self) -> &PackageManifest {
         &self.manifest
     }
 }
 
+/// Root and member manifests discovered without excluding concurrent filesystem writers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Workspace {
     root: PackageManifest,
@@ -34,17 +39,23 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Discover the workspace with string errors for callers that need only display text.
+    /// Each manifest is limited to 32 MiB; enumeration is unrestricted. Unsupported
+    /// patterns, duplicate names, non-regular manifests, and path escapes are rejected.
     pub fn discover(project_dir: &Path) -> Result<Self, String> {
         Self::discover_typed(project_dir).map_err(|error| error.to_string())
     }
 
-    /// Discover members without discarding the location of a manifest parse failure.
+    /// Discover with file-access paths and parse diagnostics preserved in typed errors.
+    /// Candidate enumeration is unrestricted; use `Self::discover_bounded` to cap it.
     pub fn discover_typed(project_dir: &Path) -> Result<Self, crate::WorkspaceError> {
         Self::discover_bounded(project_dir, usize::MAX, usize::MAX)
     }
 
     /// Bound candidate manifests and filesystem expansion work before parsing members.
     /// Overlapping patterns count toward the candidate limit before deduplication.
+    /// Exhausting either budget returns `WorkspaceError::DiscoveryLimitExceeded`;
+    /// successful discovery otherwise follows the same rules as `Self::discover_typed`.
     pub fn discover_bounded(
         project_dir: &Path,
         max_candidates: usize,
@@ -61,6 +72,8 @@ impl Workspace {
     /// Observe the exact member source parsed during bounded discovery.
     /// The borrowed source is discarded after each member; it is not retained in
     /// the workspace. Observations before a discovery error are partial.
+    /// The callback receives member manifests only, after parsing and before return;
+    /// it does not observe the root or establish a filesystem snapshot.
     pub fn discover_bounded_with_member_source(
         project_dir: &Path,
         max_candidates: usize,
@@ -203,16 +216,21 @@ impl Workspace {
         })
     }
 
+    /// Return the root manifest that declares workspace membership.
     pub fn root(&self) -> &PackageManifest {
         &self.root
     }
+    /// Return the canonical root `package.json` path, not the workspace directory.
     pub fn root_path(&self) -> &Path {
         &self.root_path
     }
+    /// Return members sorted by package name and then path, excluding the root.
     pub fn members(&self) -> &[WorkspaceMember] {
         &self.members
     }
 
+    /// Select the root with `None`, or a member by its exact package name.
+    /// Empty selectors and names absent from this discovery result are errors.
     pub fn select(&self, name: Option<&str>) -> Result<&PackageManifest, String> {
         match name {
             None => Ok(&self.root),
@@ -226,6 +244,7 @@ impl Workspace {
         }
     }
 
+    /// Apply `Self::select` selection rules and return the selected manifest's canonical path.
     pub fn select_path(&self, name: Option<&str>) -> Result<&Path, String> {
         match name {
             None => Ok(&self.root_path),
@@ -240,6 +259,8 @@ impl Workspace {
     }
 }
 
+/// Resolve an existing path and reject canonical targets outside the workspace root.
+/// This is a pathname containment check, not protection against later replacement.
 fn contained_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
     let canonical = fs::canonicalize(path).map_err(|error| {
         format!(
@@ -256,6 +277,9 @@ fn contained_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+/// Read at most 32 MiB of UTF-8 from an opened regular file, retaining its error path.
+/// Both metadata and actual byte count enforce the limit. Unix no-follow and
+/// nonblocking opens reject replacement symlinks and avoid waiting on FIFOs.
 fn read_file(path: &Path) -> Result<String, crate::WorkspaceError> {
     let at_path = |message| crate::WorkspaceError::ManifestRead {
         path: path.to_path_buf(),
@@ -424,6 +448,8 @@ mod read_race_tests {
     }
 }
 
+/// Decode supported `workspaces` and `workspaces.packages` string/array forms.
+/// Pattern syntax and containment are validated during expansion rather than here.
 fn workspace_patterns(workspaces: Option<&Value>) -> Result<Vec<String>, String> {
     let value = match workspaces {
         None => return Ok(Vec::new()),
@@ -451,6 +477,7 @@ fn workspace_patterns(workspaces: Option<&Value>) -> Result<Vec<String>, String>
         .collect()
 }
 
+/// Exercise production pattern rules with unrestricted budgets and display-only errors.
 #[cfg(test)]
 fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
     let mut remaining = usize::MAX;
@@ -458,6 +485,7 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Charge one expansion operation, failing before the counter could underflow.
 fn expansion_step(remaining: &mut usize) -> Result<(), crate::WorkspaceError> {
     *remaining = remaining
         .checked_sub(1)
@@ -465,6 +493,9 @@ fn expansion_step(remaining: &mut usize) -> Result<(), crate::WorkspaceError> {
     Ok(())
 }
 
+/// Expand literal components and single-directory `*` components inside the root.
+/// Charge filesystem probes and directory entries even when they yield no manifest;
+/// return candidate paths for subsequent file-type validation and deduplication.
 fn expand_pattern_bounded(
     root: &Path,
     pattern: &str,

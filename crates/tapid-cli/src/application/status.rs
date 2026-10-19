@@ -21,12 +21,15 @@ use tapid_manifest::{PackageManifest, Workspace};
 const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ENTRIES: usize = 128;
 
+/// A stable blocker code and the file or manifest field that needs attention.
 #[derive(Serialize)]
 pub(crate) struct Blocker {
     pub(crate) code: &'static str,
     pub(crate) location: String,
 }
 
+/// Local preflight evidence, including explicit verification gaps and snapshot limits.
+/// A report without blockers does not establish that installation or execution will succeed.
 #[derive(Serialize)]
 pub(crate) struct StatusReport {
     pub(crate) assessment: &'static str,
@@ -47,6 +50,7 @@ pub(crate) struct StatusReport {
 }
 
 impl StatusReport {
+    /// Retain at most `MAX_ENTRIES` blockers and mark omitted findings as truncation.
     fn block(&mut self, code: &'static str, location: impl AsRef<Path>) {
         if self.blockers.len() == MAX_ENTRIES {
             self.truncated = true;
@@ -59,8 +63,8 @@ impl StatusReport {
     }
 }
 
-// Absence, rejected file types and read failures retain distinct snapshot identities.
-// Never read journal contents or enumerate installed trees.
+/// Read bounded regular-file bytes, retaining distinct absence, size, and access failures.
+/// Callers use those states as snapshot identities without exposing error contents.
 fn read(path: &Path, limit: usize) -> Result<Vec<u8>, &'static str> {
     read_bounded_file(path, limit).map_err(|error| match error {
         ReadError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
@@ -69,6 +73,8 @@ fn read(path: &Path, limit: usize) -> Result<Vec<u8>, &'static str> {
     })
 }
 
+/// Identify file bytes by SHA-256, or inspect metadata only when `limit` is zero.
+/// Metadata-only entries never read journals or enumerate installed trees.
 fn fingerprint(path: &Path, limit: usize) -> String {
     if limit == 0 {
         return match fs::symlink_metadata(path) {
@@ -88,6 +94,13 @@ fn fingerprint(path: &Path, limit: usize) -> String {
     }
 }
 
+/// Inspect an explicit workspace root offline, optionally selecting an exact member name.
+///
+/// Read failures, incompatible metadata, pending recovery, and exhausted budgets
+/// become blockers rather than triggering repair. This function never opens the
+/// store, acquires transaction locks, resolves credentials, or starts installation.
+/// Rechecking identities catches persistent replacements, but does not exclude
+/// writers or detect every change followed by restoration.
 pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     let project = fs::canonicalize(project).unwrap_or_else(|_| {
         if project.is_absolute() {
@@ -318,6 +331,9 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     report
 }
 
+/// Record ownership evidence after fingerprinting the tree and marker before validation.
+/// An absent tree still requires a valid marker when one exists; managed ownership
+/// does not verify installed bytes, links, or correspondence with the lockfile.
 fn inspect_installation(
     project: &Path,
     report: &mut StatusReport,
@@ -343,6 +359,9 @@ fn inspect_installation(
         .push(json!({"path": path.display().to_string(), "state": state}));
 }
 
+/// Reuse install/replay planning to check workspace identities and dependency edges.
+/// No registry lookup or materialization occurs; failures distinguish unsupported
+/// workspace declarations from a lock that disagrees with supported declarations.
 fn workspace_matches(
     project: &Path,
     manifest: &PackageManifest,
@@ -363,6 +382,9 @@ fn workspace_matches(
         .map_err(|_| "LOCK_WORKSPACE_MISMATCH")
 }
 
+/// Validate schema-8 root and workspace receipts with bounded manifest reads.
+/// Routing, platform selection, and ancestor layout remain explicitly unchecked;
+/// a workspace match cannot erase an already established root mismatch.
 fn inspect_imported_lock(
     bytes: &[u8],
     manifest_bytes: &Result<Vec<u8>, &'static str>,
@@ -435,6 +457,9 @@ fn inspect_imported_lock(
     }
 }
 
+/// Check dependency specs independently, then apply override-aware checks only to the root.
+/// Root peers are declarations; member peers participate in workspace validation.
+/// Blocker locations identify manifest fields using escaped JSON pointer keys.
 fn inspect_manifest(
     manifest: &PackageManifest,
     path: &Path,

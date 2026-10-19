@@ -276,11 +276,15 @@ pub(crate) struct RecoveryDecision {
     pub(crate) node_modules_existed: bool,
 }
 
+/// Check for primary or backup journal metadata without reading or recovering it.
+/// Invalid file types, oversized journals, and inspection failures remain errors.
 pub(crate) fn has_pending(project: &Path) -> Result<bool, String> {
     inspect_pending(project).1
 }
 
 /// Inspect metadata only, retaining the selected artifact's path even on failure.
+/// Prefer the primary journal; inspect the backup only when the primary is absent.
+/// A present valid artifact means recovery is pending, not that its contents are valid.
 pub(crate) fn inspect_pending(project: &Path) -> (std::path::PathBuf, Result<bool, String>) {
     let path = project.join(JOURNAL);
     let backup = journal_backup_path(&path);

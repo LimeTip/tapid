@@ -11,6 +11,8 @@ pub(crate) struct Args {
     pub(crate) workspace: Option<String>,
 }
 
+/// Render the offline report as sanitized human text or a single JSON envelope.
+/// Return failure for blockers or truncation without installing or attempting recovery.
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     let report = crate::application::status::inspect(&args.project_dir, args.workspace.as_deref());
     if json {

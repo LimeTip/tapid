@@ -296,6 +296,10 @@ pub(super) fn workspace_materialization_with_manifest(
     workspace_materialization_from_discovered(project, registry_config, replacement, &workspace)
 }
 
+/// Plan local links, lock receipts, and member declarations from an existing discovery.
+/// `replacement` substitutes one selected manifest for lifecycle planning. This
+/// checks root identity and reads bounded member bytes, but does not fetch packages,
+/// write links, or repeat workspace enumeration.
 pub(crate) fn workspace_materialization_from_discovered(
     project: &Path,
     registry_config: &crate::registry::RegistryConfig,

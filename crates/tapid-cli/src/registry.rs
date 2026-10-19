@@ -193,6 +193,8 @@ impl RegistryConfig {
     }
 
     /// Credential-free configuration for local project inspection. Never reads the environment.
+    /// Origins and token variable names describe configuration only; no credential
+    /// values, network reachability, or authentication success are established.
     pub(crate) fn inspection(&self) -> serde_json::Value {
         let routes = self.routes.iter().map(|(scope, entry)| serde_json::json!({
             "scope": scope, "origin": entry.url, "credential_environment_name": entry.token_env
@@ -207,6 +209,7 @@ impl RegistryConfig {
         })
     }
 
+    /// Return configured origins in route order, retaining repeated origins.
     pub(crate) fn configured_origins(&self) -> Vec<String> {
         self.routes
             .values()
@@ -232,6 +235,7 @@ impl RegistryConfig {
         Ok(credentials.into_iter().collect())
     }
 
+    /// Return configured token variable names without reading their values.
     pub(crate) fn credential_environment_names(&self) -> Vec<String> {
         self.routes
             .values()
