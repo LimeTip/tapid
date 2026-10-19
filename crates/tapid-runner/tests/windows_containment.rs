@@ -170,6 +170,10 @@ fn ambient_package_inputs(package_sid: &str, accessible: bool) {
     ] {
         fs::copy(system32.join("version.dll"), destination).unwrap();
     }
+    // Resolve fixture paths on the host. Canonicalization inside LPAC may need
+    // ancestor metadata that the declared project read grant does not include.
+    let outside_image = fs::canonicalize(outside_image).unwrap();
+    let approved_image = fs::canonicalize(project.path().join("tapid-approved.dll")).unwrap();
     // Host controls distinguish a valid executable/image from an invalid fixture.
     ambient_image(&outside_image).unwrap();
     let control = ambient_executable(&outside.path().join("undeclared.exe")).unwrap();
@@ -211,6 +215,12 @@ fn ambient_package_inputs(package_sid: &str, accessible: bool) {
         .write(
             "outside-image.txt",
             outside_image.to_str().unwrap().as_bytes(),
+        )
+        .unwrap();
+    project
+        .write(
+            "approved-image.txt",
+            approved_image.to_str().unwrap().as_bytes(),
         )
         .unwrap();
     project
@@ -294,12 +304,19 @@ fn windows_ambient_executable_probe_helper() {
 }
 
 fn ambient_image(path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn LoadLibraryExW(name: *const u16, file: isize, flags: u32) -> isize;
         fn GetModuleFileNameW(module: isize, name: *mut u16, length: u32) -> u32;
         fn FreeLibrary(module: isize) -> i32;
+        fn CompareStringOrdinal(
+            left: *const u16,
+            left_length: i32,
+            right: *const u16,
+            right_length: i32,
+            ignore_case: i32,
+        ) -> i32;
     }
     let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: terminated private fixture path; normal load includes initialization.
@@ -313,10 +330,22 @@ fn ambient_image(path: &std::path::Path) -> std::io::Result<()> {
     // SAFETY: release exactly the module reference returned by LoadLibraryExW.
     assert_ne!(unsafe { FreeLibrary(module) }, 0);
     assert!(length > 0 && (length as usize) < loaded.len());
-    let loaded = PathBuf::from(OsString::from_wide(&loaded[..length as usize]));
+    // GetModuleFileNameW preserves the path format supplied at load time. Compare
+    // that path directly with Windows ordinal case folding, without opening it
+    // again or requiring undeclared ancestor metadata inside the contained child.
+    // SAFETY: both slices contain the stated UTF-16 lengths and remain live.
+    let comparison = unsafe {
+        CompareStringOrdinal(
+            loaded.as_ptr(),
+            i32::try_from(length).unwrap(),
+            wide.as_ptr(),
+            i32::try_from(wide.len() - 1).unwrap(),
+            1,
+        )
+    };
     assert_eq!(
-        fs::canonicalize(loaded).unwrap(),
-        fs::canonicalize(path).unwrap(),
+        comparison,
+        2, // CSTR_EQUAL; zero is an API failure, never a successful match.
         "loader must map the fixture, not reuse an already loaded system image"
     );
     Ok(())
@@ -333,7 +362,8 @@ fn windows_ambient_read_probe_helper() {
     let outside = PathBuf::from(outside);
     let outside_image = PathBuf::from(fs::read_to_string("outside-image.txt").unwrap());
     let accessible = fs::read("ambient-access.txt").unwrap() == b"allowed";
-    ambient_image(&fs::canonicalize("tapid-approved.dll").unwrap()).unwrap();
+    let approved_image = PathBuf::from(fs::read_to_string("approved-image.txt").unwrap());
+    ambient_image(&approved_image).unwrap();
     if accessible {
         assert_eq!(fs::read(&outside).unwrap(), b"ambient-input");
         let output = ambient_executable(&outside.with_file_name("undeclared.exe")).unwrap();
