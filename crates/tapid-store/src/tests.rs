@@ -349,6 +349,254 @@ fn existing_wrong_bytes_are_rejected() {
 }
 
 #[test]
+fn racing_wrong_artifact_is_rejected_and_preserved() {
+    let root = root();
+    let store = Store::new(&root);
+    let expected_bytes = b"expected artifact";
+    let expected = digest(expected_bytes);
+    let destination = store.artifact_path(&expected);
+    struct CompetingReader {
+        destination: PathBuf,
+        bytes: &'static [u8],
+        inserted: bool,
+    }
+    impl Read for CompetingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.inserted {
+                fs::create_dir_all(self.destination.parent().unwrap())?;
+                fs::write(&self.destination, b"attacker bytes")?;
+                self.inserted = true;
+            }
+            let count = self.bytes.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&self.bytes[..count]);
+            self.bytes = &self.bytes[count..];
+            Ok(count)
+        }
+    }
+
+    let result = store.ingest(
+        &expected,
+        CompetingReader {
+            destination: destination.clone(),
+            bytes: expected_bytes,
+            inserted: false,
+        },
+    );
+
+    assert!(matches!(result, Err(IngestError::DigestMismatch { .. })));
+    assert_eq!(fs::read(&destination).unwrap(), b"attacker bytes");
+    assert!(
+        !root
+            .join(".staging")
+            .read_dir()
+            .unwrap()
+            .any(|entry| entry.is_ok())
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn racing_matching_artifact_is_accepted_and_preserved() {
+    let root = root();
+    let store = Store::new(&root);
+    let bytes = b"expected artifact";
+    let expected = digest(bytes);
+    let destination = store.artifact_path(&expected);
+    struct CompetingReader {
+        destination: PathBuf,
+        bytes: &'static [u8],
+        inserted: bool,
+    }
+    impl Read for CompetingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.inserted {
+                fs::create_dir_all(self.destination.parent().unwrap())?;
+                fs::write(&self.destination, self.bytes)?;
+                self.inserted = true;
+            }
+            let count = self.bytes.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&self.bytes[..count]);
+            self.bytes = &self.bytes[count..];
+            Ok(count)
+        }
+    }
+    let result = store.ingest(
+        &expected,
+        CompetingReader {
+            destination: destination.clone(),
+            bytes,
+            inserted: false,
+        },
+    );
+    assert!(matches!(result, Ok(IngestResult::AlreadyPresent(_))));
+    assert_eq!(fs::read(&destination).unwrap(), bytes);
+    assert!(
+        !root
+            .join(".staging")
+            .read_dir()
+            .unwrap()
+            .any(|entry| entry.is_ok())
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+fn symlink_creation_unavailable(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+    ) || error.raw_os_error() == Some(1314)
+}
+
+#[test]
+fn windows_symlink_privilege_error_is_unavailable() {
+    let error = io::Error::from_raw_os_error(1314);
+    assert!(symlink_creation_unavailable(&error));
+}
+
+#[test]
+fn racing_symlink_artifact_is_rejected_and_preserved() {
+    let root = root();
+    let store = Store::new(&root);
+    let bytes = b"expected artifact";
+    let expected = digest(bytes);
+    let destination = store.artifact_path(&expected);
+    fs::create_dir_all(&root).unwrap();
+    let target = root.join("target");
+    fs::write(&target, bytes).unwrap();
+    #[cfg(windows)]
+    {
+        let probe = root.join("symlink-probe");
+        match std::os::windows::fs::symlink_file(&target, &probe) {
+            Ok(()) => fs::remove_file(probe).unwrap(),
+            Err(error) if symlink_creation_unavailable(&error) => {
+                eprintln!("skipping symlink race case: symlink creation unavailable: {error}");
+                let _ = fs::remove_dir_all(root);
+                return;
+            }
+            Err(error) => panic!("failed to probe Windows symlink support: {error}"),
+        }
+    }
+    struct CompetingReader {
+        destination: PathBuf,
+        target: PathBuf,
+        bytes: &'static [u8],
+        inserted: bool,
+    }
+    impl Read for CompetingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.inserted {
+                fs::create_dir_all(self.destination.parent().unwrap())?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&self.target, &self.destination)?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_file(&self.target, &self.destination)?;
+                self.inserted = true;
+            }
+            let count = self.bytes.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&self.bytes[..count]);
+            self.bytes = &self.bytes[count..];
+            Ok(count)
+        }
+    }
+    let result = store.ingest(
+        &expected,
+        CompetingReader {
+            destination: destination.clone(),
+            target: target.clone(),
+            bytes,
+            inserted: false,
+        },
+    );
+    #[cfg(unix)]
+    assert!(matches!(
+        result,
+        Err(IngestError::Io(error)) if error.raw_os_error() == Some(libc::ELOOP)
+    ));
+    #[cfg(windows)]
+    assert!(matches!(
+        result,
+        Err(IngestError::Io(error))
+            if error.kind() == io::ErrorKind::AlreadyExists
+                && error.to_string() == "artifact path is not a regular file"
+    ));
+    assert!(
+        fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(target).unwrap(), bytes);
+    assert!(
+        !root
+            .join(".staging")
+            .read_dir()
+            .unwrap()
+            .any(|entry| entry.is_ok())
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn no_follow_artifact_open_rejects_symlink() {
+    let root = root();
+    fs::create_dir_all(&root).unwrap();
+    let target = root.join("target");
+    let link = root.join("link");
+    fs::write(&target, b"artifact").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let result = open_artifact_without_following_links(&link);
+
+    assert!(result.is_err());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn fifo_artifact_open_does_not_block() {
+    use std::os::unix::ffi::OsStrExt;
+
+    if let Some(path) = std::env::var_os("TAPID_TEST_FIFO_PATH") {
+        let expected = digest(b"artifact");
+        let result = verify_existing_artifact(Path::new(&path), &expected);
+        assert!(
+            matches!(result, Err(IngestError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists)
+        );
+        return;
+    }
+
+    let root = root();
+    fs::create_dir_all(&root).unwrap();
+    let fifo = root.join("artifact-fifo");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("tests::fifo_artifact_open_does_not_block")
+        .env("TAPID_TEST_FIFO_PATH", &fifo)
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "FIFO verification subprocess failed: {status}"
+            );
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("opening a FIFO artifact blocked instead of rejecting it");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn transaction_stages_tree_without_publishing_it_and_rolls_back_on_drop() {
     let root = root();
     let _ = fs::remove_dir_all(&root);
