@@ -293,6 +293,9 @@ fn ambient_executable(path: &std::path::Path) -> std::io::Result<std::process::O
             "--nocapture",
         ])
         .env("TAPID_TEST_MARKER", "ambient-executable")
+        // output() otherwise opens NUL for stdin, which LPAC can deny before
+        // CreateProcess reaches the executable access check under test.
+        .stdin(std::process::Stdio::piped())
         .output()
 }
 
@@ -364,6 +367,11 @@ fn windows_ambient_read_probe_helper() {
     let accessible = fs::read("ambient-access.txt").unwrap() == b"allowed";
     let approved_image = PathBuf::from(fs::read_to_string("approved-image.txt").unwrap());
     ambient_image(&approved_image).unwrap();
+    // Exercise the same stdio/process setup with an approved executable in each
+    // contained process before interpreting an outside executable's denial.
+    let control = ambient_executable(&std::env::current_exe().unwrap()).unwrap();
+    assert!(control.status.success(), "{control:?}");
+    assert!(String::from_utf8_lossy(&control.stdout).contains("AMBIENT_EXECUTED"));
     if accessible {
         assert_eq!(fs::read(&outside).unwrap(), b"ambient-input");
         let output = ambient_executable(&outside.with_file_name("undeclared.exe")).unwrap();
@@ -376,6 +384,7 @@ fn windows_ambient_read_probe_helper() {
         let denied = ambient_executable(&outside.with_file_name("undeclared.exe"))
             .expect_err("undeclared AAP executable must not start");
         assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(denied.raw_os_error(), Some(5), "{denied}");
         let denied = ambient_image(&outside_image).expect_err("undeclared AAP DLL must not load");
         // The loader can report inaccessible images as module-not-found. Paired
         // host and approved-image controls exclude invalid DLL/provider failures.
