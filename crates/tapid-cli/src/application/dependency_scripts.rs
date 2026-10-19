@@ -1,3 +1,6 @@
+#[path = "dependency_node_gyp.rs"]
+mod node_gyp;
+
 use super::outcome::{ErrorKind, OperationalError, Warning};
 use sha2::{Digest, Sha256};
 use std::{
@@ -10,16 +13,37 @@ use tapid_linker::NamedLayoutInput;
 use tapid_lockfile::{DerivedHookOutput, Lockfile};
 use tapid_runner::{DependencyLifecycleApproval, DependencyLifecyclePolicy};
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ExecutionOverrides {
+    pub(crate) allow_unapproved: bool,
+    pub(crate) without_containment: bool,
+}
+impl ExecutionOverrides {
+    pub(crate) fn enabled(self) -> bool {
+        self.allow_unapproved || self.without_containment
+    }
+    pub(crate) fn warnings(self) -> Vec<Warning> {
+        let mut warnings = Vec::new();
+        if self.allow_unapproved {
+            warnings.push(Warning::UnapprovedDependencyScriptsAllowed);
+        }
+        if self.without_containment {
+            warnings.push(Warning::DependencyScriptsWithoutContainment);
+        }
+        warnings
+    }
+}
+
 fn error(message: impl std::fmt::Display) -> OperationalError {
     OperationalError::new(ErrorKind::InvalidRequest, message)
 }
 pub(super) fn load_policy(project: &Path) -> Result<DependencyLifecyclePolicy, OperationalError> {
-    match crate::commands::run::read_bounded_config_file(
+    match crate::filesystem::read::read_bounded_file(
         &project.join("tapid.lifecycle.toml"),
         tapid_runner::config::MAX_CONFIG_BYTES,
     ) {
         Ok(bytes) => DependencyLifecyclePolicy::parse(&bytes).map_err(error),
-        Err(crate::commands::run::ConfigReadError::Io(e))
+        Err(crate::filesystem::read::ReadError::Io(e))
             if e.kind() == std::io::ErrorKind::NotFound =>
         {
             Ok(DependencyLifecyclePolicy::denied())
@@ -29,29 +53,21 @@ pub(super) fn load_policy(project: &Path) -> Result<DependencyLifecyclePolicy, O
         )),
     }
 }
-fn commands(tree: &Path) -> Result<Vec<(String, String)>, OperationalError> {
+fn commands(tree: &Path) -> Result<tapid_manifest::DependencyLifecyclePlan, OperationalError> {
     let root = crate::filesystem::tree::package_content_root(tree).map_err(error)?;
     let path = root.join("package.json");
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(value) => value,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+    // Only an initially absent manifest is optional. A later disappearance is an error.
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
         Err(e) => return Err(error(e)),
-    };
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024 {
-        return Err(error(
-            "dependency package.json must be a regular file no larger than 1 MiB",
-        ));
     }
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .and_then(|file| file.take(1024 * 1024 + 1).read_to_end(&mut bytes))
-        .map_err(error)?;
-    if bytes.len() > 1024 * 1024 {
-        return Err(error("dependency package.json exceeds 1 MiB"));
-    }
+    let bytes = crate::filesystem::read::read_bounded_file(&path, 1024 * 1024).map_err(|_| {
+        error("dependency package.json must be a regular file no larger than 1 MiB")
+    })?;
     let text = std::str::from_utf8(&bytes).map_err(error)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    tapid_manifest::dependency_lifecycle_commands(text, root.join("binding.gyp").is_file())
+    tapid_manifest::dependency_lifecycle_plan(text, root.join("binding.gyp").is_file())
         .map_err(error)
 }
 
@@ -61,12 +77,15 @@ fn commands(tree: &Path) -> Result<Vec<(String, String)>, OperationalError> {
 pub(super) fn apply(
     project: &Path,
     policy: &DependencyLifecyclePolicy,
+    overrides: ExecutionOverrides,
+    retained_stages: &mut Vec<BuildStage>,
     lock: &mut Lockfile,
     input: &mut NamedLayoutInput,
     trees: &mut BTreeMap<String, PathBuf>,
     store: &tapid_store::Store,
     mut transaction: Option<&mut tapid_store::StoreTransaction>,
     activation: &crate::filesystem::activation::ActivationLock,
+    snapshots: &mut Vec<tapid_store::VerifiedTreeSnapshot>,
 ) -> Result<Vec<Warning>, OperationalError> {
     let source_graph = lock.source_graph().to_json().map_err(error)?;
     let online = transaction.is_some();
@@ -78,30 +97,40 @@ pub(super) fn apply(
         Some(lock.clone())
     };
     let mut warnings = Vec::new();
+    let mut instance_indices = BTreeMap::new();
+    for (index, instance) in input.instances.iter().enumerate() {
+        let key = tapid_linker::InstanceKey::from(instance);
+        if instance_indices.insert(key, index).is_some() {
+            return Err(error("duplicate lifecycle package instance"));
+        }
+    }
     let mut completed = BTreeMap::<String, Vec<DerivedHookOutput>>::new();
-    let order = if policy.approvals().is_empty() {
+    let order = if policy.approvals().is_empty() && !overrides.allow_unapproved {
         lock.packages().keys().cloned().collect()
     } else {
         dependency_order(lock)?
     };
-    let mut snapshots = SnapshotGuard {
-        paths: Vec::new(),
-        retained: BTreeSet::new(),
-    };
-    // The caller owns source snapshots and transaction staging trees.
-    // This guard owns only snapshots acquired while selecting derived outputs.
     let mut system_identity = None;
     for key in order {
         let package = lock.packages()[&key].clone();
-        let index = input
-            .instances
-            .iter()
-            .position(|i| {
-                i.id.name.as_str() == package.name()
-                    && i.id.version.to_string() == package.version()
-                    && i.id.registry.as_str() == package.registry()
-                    && trees.get(&key) == Some(&i.tree.root)
-            })
+        let typed: tapid_lockfile::LockfilePackageKey = key.parse().map_err(error)?;
+        let peer_context = typed.peer_context().map_err(error)?;
+        let platform_context = typed.platform_context().map_err(error)?;
+        let identity = tapid_linker::InstanceKey {
+            id: tapid_core::PackageInstanceId::from_source(
+                typed
+                    .source
+                    .package_source()
+                    .ok_or_else(|| error("lifecycle package has no artifact source"))?,
+                typed.name,
+                typed.version,
+            ),
+            peer_context,
+            platform_context,
+        };
+        let index = *instance_indices
+            .get(&identity)
+            .filter(|&&index| trees.get(&key) == Some(&input.instances[index].tree.root))
             .ok_or_else(|| error("lifecycle package mapping lost"))?;
         let source = input.instances[index].tree.root.clone();
         let hooks = match commands(&source) {
@@ -111,29 +140,55 @@ pub(super) fn apply(
                     .approvals()
                     .iter()
                     .any(|approval| approval.package() == package.name())
+                    || overrides.allow_unapproved
                 {
                     return Err(discovery_error);
                 }
                 warnings.push(Warning::DependencyLifecycleDiscoveryFailed {
                     package: format!("{}@{}", package.name(), package.version()),
                 });
-                Vec::new()
+                Default::default()
             }
         };
         let mut outputs = Vec::new();
         let mut current = source.clone();
         let mut private = None;
-        for (hook, script) in hooks {
-            let Some(approval) = policy
-                .approval_for(
-                    package.name(),
-                    package.version(),
-                    package.artifact_integrity(),
+        let mut bypassed = false;
+        let requires_install = hooks.requires_install();
+        for (hook, script) in hooks.into_commands() {
+            let selected = policy.approval_for(
+                package.name(),
+                package.version(),
+                package.artifact_integrity(),
+                &hook,
+                &script,
+            );
+            let selected = if overrides.allow_unapproved {
+                selected.ok().flatten()
+            } else {
+                selected.map_err(error)?
+            };
+            let invocation_policy;
+            let approval = if let Some(approval) = selected {
+                approval
+            } else if overrides.allow_unapproved
+                && matches!(hook.as_str(), "preinstall" | "install" | "postinstall")
+            {
+                invocation_policy = invocation_approval(
+                    &package,
                     &hook,
                     &script,
-                )
-                .map_err(error)?
-            else {
+                    lock.workspace_packages().is_empty(),
+                )?;
+                &invocation_policy.approvals()[0]
+            } else {
+                if requires_install && hook == "install" {
+                    return Err(error(format!(
+                        "required dependency lifecycle hook install for {}@{} is not approved; approve its exact bytes in tapid.lifecycle.toml or explicitly accept the risk with --allow-unapproved-dependency-scripts; containment remains required unless --unsafe-no-dependency-sandbox is also explicitly selected",
+                        package.name(),
+                        package.version()
+                    )));
+                }
                 warnings.push(Warning::DependencyLifecycleHookSkipped {
                     package: format!("{}@{}", package.name(), package.version()),
                     hook,
@@ -145,9 +200,37 @@ pub(super) fn apply(
                     "approved dependency scripts require registry-declared archive integrity",
                 ));
             }
+            if overrides.enabled() {
+                if !online {
+                    return Err(error(
+                        "dependency execution overrides cannot execute during frozen or offline replay",
+                    ));
+                }
+                if private.is_none() {
+                    private = Some(BuildStage::new(project, activation)?);
+                }
+                let stage = private.as_ref().unwrap();
+                if !bypassed {
+                    copy_build_source(&current, &stage.0.join("package"))?;
+                }
+                run_hook(
+                    stage,
+                    approval,
+                    &script,
+                    input,
+                    trees,
+                    lock,
+                    overrides.without_containment,
+                    selected.is_none() && requires_install && hook == "install",
+                )?;
+                validate_output(&stage.0.join("package"))?;
+                current = stage.0.join("package");
+                bypassed = true;
+                continue;
+            }
             if system_identity.is_none() {
                 system_identity =
-                    Some(tapid_runner::dependency_toolchain_identity().map_err(error)?);
+                    Some(tapid_runner::dependency_toolchain_identity().map_err(containment_error)?);
             }
             let toolchain = tool_identity(approval, system_identity.as_ref().unwrap())?;
             let graph =
@@ -168,7 +251,6 @@ pub(super) fn apply(
                     previous.attestation(),
                 )
             {
-                snapshots.paths.push(snapshot.clone());
                 current = if let Some(transaction) = transaction.as_deref_mut() {
                     transaction
                         .stage_verified_tree(
@@ -177,8 +259,9 @@ pub(super) fn apply(
                         )
                         .map_err(error)?
                 } else {
-                    snapshot
+                    snapshot.path().to_owned()
                 };
+                snapshots.push(snapshot);
                 outputs.push(previous.clone());
                 continue;
             }
@@ -194,16 +277,8 @@ pub(super) fn apply(
             }
             let stage = private.as_ref().unwrap();
             let build = stage.0.join("package");
-            if build.exists() {
-                fs::remove_dir_all(&build).map_err(error)?;
-            }
-            let content = crate::filesystem::tree::package_content_root(&current).map_err(error)?;
-            crate::filesystem::tree::copy_tree_contents(&content, &build).map_err(error)?;
-            let marker = build.join(".tapid-tree");
-            if marker.exists() {
-                fs::remove_file(marker).map_err(error)?;
-            }
-            run_hook(stage, approval, &script, input, trees, lock)?;
+            copy_build_source(&current, &build)?;
+            run_hook(stage, approval, &script, input, trees, lock, false, false)?;
             validate_output(&build)?;
             let digest = tapid_archive::canonical_tree_digest(&build).map_err(error)?;
             let staged = transaction
@@ -227,7 +302,13 @@ pub(super) fn apply(
                 "lifecycle approval was removed or changed for {key}; regenerate tapid.lock online"
             )));
         }
-        if let Some(output) = outputs.last() {
+        if bypassed {
+            let digest = tapid_archive::canonical_tree_digest(&current).map_err(error)?;
+            input.instances[index].tree =
+                tapid_linker::VerifiedTreeReference::new(&digest, &current).map_err(error)?;
+            trees.insert(key.clone(), current);
+            retained_stages.push(private.take().unwrap());
+        } else if let Some(output) = outputs.last() {
             input.instances[index].tree =
                 tapid_linker::VerifiedTreeReference::new(output.tree_digest(), &current)
                     .map_err(error)?;
@@ -236,9 +317,6 @@ pub(super) fn apply(
         lock.set_derived_hooks(&key, outputs.clone())
             .map_err(error)?;
         completed.insert(key, outputs);
-    }
-    if !online {
-        snapshots.retained.extend(trees.values().cloned());
     }
     Ok(warnings)
 }
@@ -277,20 +355,7 @@ fn dependency_order(lock: &Lockfile) -> Result<Vec<String>, OperationalError> {
     }
     Ok(order)
 }
-struct SnapshotGuard {
-    paths: Vec<PathBuf>,
-    retained: BTreeSet<PathBuf>,
-}
-impl Drop for SnapshotGuard {
-    fn drop(&mut self) {
-        for path in &self.paths {
-            if !self.retained.contains(path) {
-                let _ = fs::remove_dir_all(path);
-            }
-        }
-    }
-}
-struct BuildStage(PathBuf);
+pub(super) struct BuildStage(PathBuf);
 impl BuildStage {
     fn new(
         project: &Path,
@@ -311,24 +376,38 @@ impl Drop for BuildStage {
     }
 }
 fn tool_bytes(tool: &tapid_runner::LifecycleTool) -> Result<Vec<u8>, OperationalError> {
+    Ok(verified_tool(tool)?.2)
+}
+fn verified_tool(
+    tool: &tapid_runner::LifecycleTool,
+) -> Result<(PathBuf, fs::File, Vec<u8>), OperationalError> {
     let path = fs::canonicalize(tool.path()).map_err(error)?;
-    let metadata = fs::metadata(&path).map_err(error)?;
+    let mut file = fs::File::open(&path).map_err(error)?;
+    let bytes = read_executable(&mut file)?;
+    if format!("sha256-{:x}", Sha256::digest(&bytes)) != tool.digest() {
+        return Err(error(format!(
+            "lifecycle tool digest mismatch for {}",
+            tool.name()
+        )));
+    }
+    Ok((path, file, bytes))
+}
+fn executable_bytes(path: &Path) -> Result<Vec<u8>, OperationalError> {
+    read_executable(&mut fs::File::open(path).map_err(error)?)
+}
+fn read_executable(file: &mut fs::File) -> Result<Vec<u8>, OperationalError> {
+    let metadata = file.metadata().map_err(error)?;
     if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
         return Err(error(
             "lifecycle tool must be a regular executable no larger than 512 MiB",
         ));
     }
     let mut bytes = Vec::new();
-    fs::File::open(path)
-        .and_then(|f| f.take(512 * 1024 * 1024 + 1).read_to_end(&mut bytes))
+    file.take(512 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
         .map_err(error)?;
-    if bytes.len() > 512 * 1024 * 1024
-        || format!("sha256-{:x}", Sha256::digest(&bytes)) != tool.digest()
-    {
-        return Err(error(format!(
-            "lifecycle tool digest mismatch for {}",
-            tool.name()
-        )));
+    if bytes.len() > 512 * 1024 * 1024 {
+        return Err(error("lifecycle tool exceeds 512 MiB"));
     }
     Ok(bytes)
 }
@@ -347,6 +426,55 @@ fn tool_identity(
     }
     Ok(format!("sha256-{:x}", hash.finalize()))
 }
+fn copy_build_source(source: &Path, build: &Path) -> Result<(), OperationalError> {
+    if build.exists() {
+        fs::remove_dir_all(build).map_err(error)?;
+    }
+    let content = crate::filesystem::tree::package_content_root(source).map_err(error)?;
+    crate::filesystem::tree::copy_tree_contents(&content, build).map_err(error)?;
+    let marker = build.join(".tapid-tree");
+    if marker.exists() {
+        fs::remove_file(marker).map_err(error)?;
+    }
+    Ok(())
+}
+
+// Reuse the checked policy parser for invocation-local authorization. No policy
+// is written to the project, and these outputs never receive cache attestations.
+fn invocation_approval(
+    package: &tapid_lockfile::LockedPackage,
+    hook: &str,
+    script: &str,
+    dependencies: bool,
+) -> Result<DependencyLifecyclePolicy, OperationalError> {
+    #[cfg(unix)]
+    let (shell_name, shell_path) = ("sh", fs::canonicalize("/bin/sh").map_err(error)?);
+    #[cfg(windows)]
+    let (shell_name, shell_path) = (
+        "cmd",
+        crate::run::windows_system_directory()
+            .map_err(error)?
+            .join("cmd.exe"),
+    );
+    let mut paths = vec![(shell_name, shell_path)];
+    if let Ok(node) = crate::run::discover_node_runtime(std::env::var_os("PATH").as_deref()) {
+        paths.push(("node", node));
+    }
+    let mut tools = Vec::new();
+    for (name, path) in paths {
+        let bytes = executable_bytes(&path)?;
+        tools.push(serde_json::json!({"name":name, "path":path.to_str().ok_or_else(|| error("lifecycle tool path must be UTF-8"))?, "digest":format!("sha256-{:x}", Sha256::digest(&bytes))}));
+    }
+    let document = serde_json::json!({"schema":1,"approvals":[{
+        "package":package.name(),"version":package.version(),"archive-digest":package.artifact_integrity(),
+        "hook":hook,"script-digest":format!("sha256-{:x}", Sha256::digest(script.as_bytes())),
+        "system-toolchain":true,"dependencies":dependencies,"read":["."],"write":["."],"network":false,"environment":{},
+        "timeout-seconds":60,"max-output-bytes":16777216,"max-processes":128,"max-memory-bytes":536870912,"tools":tools
+    }]});
+    let document = toml::to_string(&document).map_err(error)?;
+    DependencyLifecyclePolicy::parse(document.as_bytes()).map_err(error)
+}
+#[allow(clippy::too_many_arguments)]
 fn run_hook(
     stage: &BuildStage,
     approval: &DependencyLifecycleApproval,
@@ -354,21 +482,28 @@ fn run_hook(
     input: &NamedLayoutInput,
     trees: &BTreeMap<String, PathBuf>,
     lock: &Lockfile,
+    without_containment: bool,
+    implicit_node_gyp: bool,
 ) -> Result<(), OperationalError> {
     let tools = stage.0.join(".tools");
     if tools.exists() {
         fs::remove_dir_all(&tools).map_err(error)?;
     }
     fs::create_dir(&tools).map_err(error)?;
-    for tool in approval.tools() {
-        let path = tools.join(tool.name());
-        fs::write(&path, tool_bytes(tool)?).map_err(error)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o500)).map_err(error)?;
-        }
-    }
+    let prepared_tools = prepare_tools(&tools, approval.tools(), without_containment)?;
+    let script = if implicit_node_gyp {
+        let node = approval
+            .tools()
+            .iter()
+            .find(|tool| tool.name() == "node")
+            .ok_or_else(|| {
+                error("implicit node-gyp builds require an executable Node runtime on PATH")
+            })?;
+        node_gyp::prepare(&tools, Path::new(node.path()))?;
+        node_gyp::COMMAND
+    } else {
+        script
+    };
     let prefix = |s: &str| {
         if s == "." {
             "package".into()
@@ -393,7 +528,11 @@ fn run_hook(
     for path in &write {
         let path = stage.0.join(path);
         if !path.exists() {
-            fs::create_dir_all(path).map_err(error)?;
+            fs::create_dir_all(&path).map_err(error)?;
+        }
+        #[cfg(windows)]
+        if !without_containment {
+            tapid_runner::prepare_private_dependency_write_tree(&path).map_err(error)?;
         }
     }
     if approval.dependencies() {
@@ -437,23 +576,86 @@ fn run_hook(
         approval.policy().limits().clone(),
     )
     .map_err(error)?;
-    let mut builder = tapid_runner::ExecutionRequest::builder(tools.join("sh"))
-        .args(["-c", script, "tapid-lifecycle"])
+    let shell = if cfg!(windows) && approval.tools().iter().any(|t| t.name() == "cmd") {
+        "cmd"
+    } else {
+        "sh"
+    };
+    let shell_args = if shell == "cmd" {
+        vec![
+            "/D".to_owned(),
+            "/S".into(),
+            "/C".into(),
+            format!("\"{script}\""),
+        ]
+    } else {
+        vec!["-c".into(), script.into(), "tapid-lifecycle".into()]
+    };
+    let shell_tool = approval
+        .tools()
+        .iter()
+        .find(|tool| tool.name() == shell)
+        .ok_or_else(|| error("lifecycle policy does not pin a shell usable on this platform"))?;
+    let program = prepared_tools.get(shell_tool.name()).unwrap();
+    let mut builder = tapid_runner::ExecutionRequest::builder(program)
+        .args(shell_args)
+        .windows_verbatim_arguments(shell == "cmd")
         .project_root(&stage.0)
         .working_directory(stage.0.join("package"))
         .policy(policy)
-        .executable_search_path(&tools)
-        .allow_process_memory_stats(approval.process_memory_stats())
+        .allow_process_memory_stats(!without_containment && approval.process_memory_stats())
         .envs(approval.environment().iter());
-    if approval.dependencies() && stage.0.join("node_modules/.bin").is_dir() {
-        builder = builder.executable_search_path(stage.0.join("node_modules/.bin"));
+    let mut search_paths = Vec::new();
+    if without_containment {
+        search_paths = tool_search_paths(&prepared_tools)?;
+    } else {
+        search_paths.push(fs::canonicalize(&tools).map_err(error)?);
     }
-    builder = builder.executable_search_path("/usr/bin");
-    if tools.join("node").is_file() {
-        builder = builder.trusted_node_runtime(tools.join("node"));
+    if approval.dependencies() && stage.0.join("node_modules/.bin").is_dir() {
+        search_paths.push(stage.0.join("node_modules/.bin"));
+    }
+    #[cfg(unix)]
+    {
+        for path in ["/usr/bin", "/bin"] {
+            let path = fs::canonicalize(path).map_err(error)?;
+            if !search_paths.contains(&path) {
+                search_paths.push(path);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let path = crate::run::windows_system_directory().map_err(error)?;
+        if !search_paths.contains(&path) {
+            search_paths.push(path);
+        }
+    }
+    builder = builder.executable_search_paths(search_paths);
+    if let Some(node) = approval.tools().iter().find(|tool| tool.name() == "node") {
+        builder = builder.trusted_node_runtime(prepared_tools.get(node.name()).unwrap());
     }
     let request = builder.build().map_err(error)?;
-    let outcome = tapid_runner::execute(&request).map_err(error)?;
+    if without_containment {
+        let capture = stage.0.join(".capture");
+        if capture.exists() {
+            fs::remove_dir_all(&capture).map_err(error)?;
+        }
+        fs::create_dir(&capture).map_err(error)?;
+        let termination = tapid_runner::execute_uncontained(&request, &capture).map_err(error)?;
+        if termination != tapid_runner::Termination::Exited(0) {
+            let mut detail = Vec::new();
+            fs::File::open(capture.join("stderr"))
+                .and_then(|f| f.take(4096).read_to_end(&mut detail))
+                .map_err(error)?;
+            return Err(error(format!(
+                "dependency lifecycle hook {} failed without containment: {termination:?}: {}",
+                approval.hook(),
+                String::from_utf8_lossy(&detail)
+            )));
+        }
+        return Ok(());
+    }
+    let outcome = tapid_runner::execute(&request).map_err(containment_error)?;
     if outcome.termination() != &tapid_runner::Termination::Exited(0)
         || outcome.completion().cleanup_confidence()
             != tapid_runner::CleanupConfidence::KernelOwnedComplete
@@ -466,6 +668,92 @@ fn run_hook(
     }
     Ok(())
 }
+fn prepare_tools(
+    destination: &Path,
+    tools: &[tapid_runner::LifecycleTool],
+    without_containment: bool,
+) -> Result<BTreeMap<String, PathBuf>, OperationalError> {
+    let mut paths = BTreeMap::new();
+    for tool in tools {
+        let (source, file, bytes) = verified_tool(tool)?;
+        // macOS system executables cannot always be relocated without changing
+        // their signature. A canonical source on the kernel read-only root is
+        // immutable to the caller. Administrators remounting/replacing host
+        // volumes remain outside the documented trusted-host boundary.
+        #[cfg(target_os = "macos")]
+        let retain_source = without_containment && readonly_tool_volume(&file)?;
+        #[cfg(not(target_os = "macos"))]
+        let retain_source = {
+            let _ = (&file, without_containment);
+            false
+        };
+        let path = if retain_source {
+            source
+        } else {
+            let path = destination.join(tool.executable_name());
+            use std::io::Write;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut file| file.write_all(&bytes))
+                .map_err(error)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o500)).map_err(error)?;
+            }
+            path
+        };
+        paths.insert(tool.name().to_owned(), path);
+    }
+    Ok(paths)
+}
+#[cfg(target_os = "macos")]
+fn readonly_tool_volume(file: &fs::File) -> Result<bool, OperationalError> {
+    use std::os::fd::AsRawFd;
+    let mut status = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+    // SAFETY: the source file keeps the descriptor alive and status is writable.
+    if unsafe { libc::fstatfs(file.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(error(std::io::Error::last_os_error()));
+    }
+    // SAFETY: successful fstatfs initialized status.
+    Ok(immutable_system_tool_mount(
+        unsafe { status.assume_init() }.f_flags,
+    ))
+}
+#[cfg(target_os = "macos")]
+fn immutable_system_tool_mount(flags: u32) -> bool {
+    let required = (libc::MNT_RDONLY | libc::MNT_ROOTFS) as u32;
+    flags & required == required
+}
+fn tool_search_paths(tools: &BTreeMap<String, PathBuf>) -> Result<Vec<PathBuf>, OperationalError> {
+    let mut paths = Vec::new();
+    for tool in tools
+        .iter()
+        .filter(|(name, _)| *name == "node")
+        .chain(tools.iter().filter(|(name, _)| *name != "node"))
+    {
+        let parent = tool
+            .1
+            .parent()
+            .ok_or_else(|| error("lifecycle tool has no parent directory"))?;
+        let canonical = fs::canonicalize(parent).map_err(error)?;
+        if !paths.contains(&canonical) {
+            paths.push(canonical);
+        }
+    }
+    Ok(paths)
+}
+fn containment_error(cause: tapid_runner::ExecutionError) -> OperationalError {
+    if cause.category() == tapid_runner::ExecutionErrorCategory::UnsupportedContainment {
+        error(format!(
+            "{cause}; required dependency containment is unavailable; configure a supported host or explicitly accept host access with --unsafe-no-dependency-sandbox for this invocation; this flag does not grant hook approval"
+        ))
+    } else {
+        error(cause)
+    }
+}
 fn validate_output(root: &Path) -> Result<(), OperationalError> {
     tapid_archive::validate_tree(root, tapid_archive::ValidationLimits::default()).map_err(error)
 }
@@ -473,6 +761,187 @@ fn validate_output(root: &Path) -> Result<(), OperationalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_mapping_requires_the_exact_peer_and_platform_context() {
+        let project = tapid_test_support::TempProject::new("lifecycle-context").unwrap();
+        project
+            .write("package.json", br#"{"name":"plugin","version":"1.0.0"}"#)
+            .unwrap();
+        let digest = tapid_archive::canonical_tree_digest(project.path()).unwrap();
+        let peer = tapid_core::PeerContext::default()
+            .with("react".parse().unwrap(), "1.0.0".parse().unwrap());
+        let platform = tapid_core::PlatformContext::new(Some("linux"), Some("x64"), None).unwrap();
+        let package = tapid_lockfile::LockedPackage::new_with_context_and_provenance(
+            "https://registry.npmjs.org",
+            "plugin",
+            "1.0.0",
+            &format!("sha512-{}==", "A".repeat(86)),
+            &digest,
+            (&peer, &platform),
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        let key = package.key();
+        let mut lock = Lockfile::new(&digest).unwrap();
+        lock.insert_package(package).unwrap();
+        lock.set_roots([key.clone()]).unwrap();
+        let legacy_json = lock
+            .to_json()
+            .unwrap()
+            .replace("platform=os=linux;cpu=x64;libc=", "platform=-")
+            .replace("\"os=linux;cpu=x64;libc=\"", "\"\"");
+        for (actual_peer, actual_platform, accepted, legacy) in [
+            (
+                tapid_core::PeerContext::default(),
+                platform.clone(),
+                false,
+                false,
+            ),
+            (
+                peer.clone(),
+                tapid_core::PlatformContext::new(None, None, None).unwrap(),
+                false,
+                false,
+            ),
+            (peer.clone(), platform.clone(), true, false),
+            (
+                peer.clone(),
+                tapid_core::PlatformContext::new(None, None, None).unwrap(),
+                true,
+                true,
+            ),
+        ] {
+            let mut case_lock = if legacy {
+                Lockfile::from_json(&legacy_json).unwrap()
+            } else {
+                lock.clone()
+            };
+            let key = case_lock.packages().keys().next().unwrap().clone();
+            let mut input = NamedLayoutInput {
+                instances: vec![tapid_linker::PackageInstance {
+                    id: tapid_core::PackageInstanceId::new(
+                        "https://registry.npmjs.org".parse().unwrap(),
+                        "plugin".parse().unwrap(),
+                        "1.0.0".parse().unwrap(),
+                    ),
+                    peer_context: actual_peer,
+                    platform_context: actual_platform,
+                    tree: tapid_linker::VerifiedTreeReference::new(&digest, project.path())
+                        .unwrap(),
+                }],
+                root_dependencies: Vec::new(),
+                dependency_edges: Vec::new(),
+            };
+            let mut trees = [(key.clone(), project.path().to_path_buf())].into();
+            let guard =
+                crate::filesystem::activation::ActivationLock::acquire(project.path()).unwrap();
+            let result = apply(
+                project.path(),
+                &DependencyLifecyclePolicy::denied(),
+                ExecutionOverrides::default(),
+                &mut Vec::new(),
+                &mut case_lock,
+                &mut input,
+                &mut trees,
+                &tapid_store::Store::new(project.path().join("store")),
+                None,
+                &guard,
+                &mut Vec::new(),
+            );
+            if accepted {
+                assert!(result.unwrap().is_empty());
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("lifecycle package mapping lost")
+                );
+            }
+        }
+    }
+    #[test]
+    fn uncontained_search_reserves_node_before_the_shell_directory() {
+        let project = tapid_test_support::TempProject::new("uncontained-tool-search").unwrap();
+        project.write("shell/sh", b"shell").unwrap();
+        project.write("runtime/node", b"node").unwrap();
+        let digest = format!("sha256-{}", "0".repeat(64));
+        let document = toml::to_string(&serde_json::json!({"schema":1,"approvals":[{
+            "package":"demo","version":"1.0.0","archive-digest":format!("sha512-{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0u8; 64])),
+            "hook":"install","script-digest":digest,"system-toolchain":true,
+            "read":["."],"write":["."],"network":false,"environment":{},
+            "timeout-seconds":5,"max-output-bytes":1024,"max-processes":32,"max-memory-bytes":134217728,
+            "tools":[
+                {"name":"sh","path":project.path().join("shell/sh"),"digest":digest},
+                {"name":"node","path":project.path().join("runtime/node"),"digest":digest}
+            ]
+        }]})).unwrap();
+        let policy = DependencyLifecyclePolicy::parse(document.as_bytes()).unwrap();
+        assert_eq!(
+            tool_search_paths(
+                &policy.approvals()[0]
+                    .tools()
+                    .iter()
+                    .map(|tool| (tool.name().to_owned(), PathBuf::from(tool.path())))
+                    .collect()
+            )
+            .unwrap(),
+            vec![
+                fs::canonicalize(project.path().join("runtime")).unwrap(),
+                fs::canonicalize(project.path().join("shell")).unwrap(),
+            ]
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn uncontained_tools_execute_verified_bytes_after_source_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = tapid_test_support::TempProject::new("uncontained-tool-replacement").unwrap();
+        let bytes = b"#!/bin/sh\nprintf original";
+        project.write("sh", bytes).unwrap();
+        fs::set_permissions(project.path().join("sh"), fs::Permissions::from_mode(0o700)).unwrap();
+        let digest = format!("sha256-{:x}", Sha256::digest(bytes));
+        let document = toml::to_string(&serde_json::json!({"schema":1,"approvals":[{
+            "package":"demo","version":"1.0.0","archive-digest":format!("sha512-{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0u8; 64])),
+            "hook":"install","script-digest":digest,"system-toolchain":true,
+            "read":["."],"write":["."],"network":false,"environment":{},
+            "timeout-seconds":5,"max-output-bytes":1024,"max-processes":32,"max-memory-bytes":134217728,
+            "tools":[{"name":"sh","path":project.path().join("sh"),"digest":digest}]
+        }]})).unwrap();
+        let policy = DependencyLifecyclePolicy::parse(document.as_bytes()).unwrap();
+        let directory = project.path().join("private-tools");
+        fs::create_dir(&directory).unwrap();
+        let prepared = prepare_tools(&directory, policy.approvals()[0].tools(), true).unwrap();
+        fs::rename(project.path().join("sh"), project.path().join("old-sh")).unwrap();
+        project.write("sh", b"#!/bin/sh\nprintf replaced").unwrap();
+        fs::set_permissions(project.path().join("sh"), fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new(&prepared["sh"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"original");
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn readonly_removable_mount_does_not_qualify_as_an_immutable_system_tool() {
+        assert!(!immutable_system_tool_mount(libc::MNT_RDONLY as u32));
+        assert!(!immutable_system_tool_mount(libc::MNT_ROOTFS as u32));
+        assert!(immutable_system_tool_mount(
+            (libc::MNT_RDONLY | libc::MNT_ROOTFS) as u32
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_tool_source_must_be_on_a_readonly_volume() {
+        let shell = fs::File::open("/bin/sh").unwrap();
+        assert!(readonly_tool_volume(&shell).unwrap());
+        let project = tapid_test_support::TempProject::new("mutable-tool-volume").unwrap();
+        project.write("tool", b"mutable").unwrap();
+        assert!(
+            !readonly_tool_volume(&fs::File::open(project.path().join("tool")).unwrap()).unwrap()
+        );
+    }
     #[test]
     fn lifecycle_discovery_accepts_a_leading_bom_without_changing_script_bytes() {
         let project = tapid_test_support::TempProject::new("lifecycle-discovery-bom").unwrap();
@@ -483,7 +952,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            commands(project.path()).unwrap(),
+            commands(project.path()).unwrap().into_commands(),
             vec![("install".into(), "  exact\ncommand  ".into())]
         );
     }

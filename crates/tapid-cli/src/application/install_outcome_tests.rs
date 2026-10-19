@@ -9,12 +9,15 @@ fn missing_replay_lock_has_a_typed_unchanged_outcome() {
     let original = br#"{"name":"app","version":"1.0.0"}"#;
     project.write("package.json", original).unwrap();
     let failure = run(
-        project.path(),
-        None,
-        Some(&project.path().join("store")),
-        InstallMode::Frozen,
-        None,
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Frozen,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -52,16 +55,125 @@ fn project_with_fixture(label: &str, integrity: &str) -> (TempProject, PathBuf) 
 }
 
 #[test]
+fn install_reclassifies_the_lock_after_recovery() {
+    use crate::filesystem::lifecycle_journal::LifecycleJournal;
+    use tapid_lockfile::ImportedNpmLockfile;
+
+    for (restore_imported, ci, overrides) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+    ] {
+        let (project, fixture) = project_with_fixture("recovered-lock-format", INTEGRITY);
+        let manifest_path = project.path().join("package.json");
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        let digest = crate::online::root_digest(project.path()).unwrap();
+        let native = Lockfile::new(&digest).unwrap().to_json().unwrap();
+        let imported = ImportedNpmLockfile::import(
+            r#"{"lockfileVersion":3,"packages":{"":{"name":"app","version":"1.0.0"}}}"#,
+            &manifest,
+            &digest,
+        )
+        .unwrap()
+        .to_json()
+        .unwrap();
+        let (restored, interrupted) = if restore_imported {
+            (&imported, &native)
+        } else {
+            (&native, &imported)
+        };
+        let activation = ActivationLock::acquire(project.path()).unwrap();
+        let journal = LifecycleJournal::begin(
+            project.path(),
+            &manifest_path,
+            activation.owner_line(),
+            manifest.as_bytes(),
+            Some(restored.as_bytes()),
+        )
+        .unwrap();
+        project.write("tapid.lock", interrupted.as_bytes()).unwrap();
+        std::mem::forget(journal);
+        drop(activation);
+
+        let result = run_with_execution(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&project.path().join("store")),
+                mode: if overrides {
+                    InstallMode::Online
+                } else if ci {
+                    InstallMode::Ci
+                } else {
+                    InstallMode::Frozen
+                },
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
+            super::super::dependency_scripts::ExecutionOverrides {
+                without_containment: overrides,
+                ..Default::default()
+            },
+            |_| {},
+        );
+        let outcome = if restore_imported && (ci || overrides) {
+            let failure = result
+                .expect_err("CI and execution overrides must reject the recovered imported lock");
+            assert_eq!(
+                failure.error.kind,
+                if overrides {
+                    ErrorKind::InvalidRequest
+                } else {
+                    ErrorKind::Lockfile
+                }
+            );
+            assert!(!project.path().join("node_modules").exists());
+            *failure.outcome
+        } else {
+            let report = result.unwrap_or_else(|error| {
+                panic!("restore_imported={restore_imported}, ci={ci}: {error:?}")
+            });
+            assert_eq!(report.package_count, 0);
+            report.outcome
+        };
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| matches!(w, Warning::PreviousTransactionRecovered))
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            *restored
+        );
+        assert_eq!(fs::read_to_string(&manifest_path).unwrap(), manifest);
+        assert!(
+            !project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
+    }
+}
+
+#[test]
 fn failed_resolution_reports_rollback_and_preserves_its_category() {
     let (project, fixture) = project_with_fixture("typed-resolution", INTEGRITY);
     let original = fs::read(project.path().join("package.json")).unwrap();
     let failure = run(
-        project.path(),
-        Some("missing@1.0.0"),
-        Some(&project.path().join("store")),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("missing@1.0.0"),
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -87,12 +199,15 @@ fn integrity_failure_is_typed_and_rolls_back_the_manifest() {
     let (project, fixture) = project_with_fixture("typed-integrity", &bad);
     let original = fs::read(project.path().join("package.json")).unwrap();
     let failure = run(
-        project.path(),
-        Some("plugin@1.0.0"),
-        Some(&project.path().join("store")),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -111,6 +226,7 @@ enum Fault {
     AfterCommit,
     CleanupPending,
     RollbackPending,
+    PolicyChanged,
 }
 thread_local! { static FAULT: std::cell::Cell<Option<Fault>> = const { std::cell::Cell::new(None) }; }
 struct FaultGuard;
@@ -127,6 +243,10 @@ fn inject(fault: Fault) -> FaultGuard {
 // Mutate only this thread's temporary fixture at real filesystem boundaries.
 pub(super) fn checkpoint(point: &str, project: &Path, owner: &str) -> Result<(), OperationalError> {
     match (FAULT.get(), point) {
+        (Some(Fault::PolicyChanged), "before_acquire") => {
+            fs::write(project.join("tapid.lifecycle.toml"), b"schema = 2").unwrap();
+            Ok(())
+        }
         (Some(Fault::AfterCommit), "after_commit") => Err(OperationalError::new(
             ErrorKind::Transaction,
             "injected post-commit failure",
@@ -154,16 +274,45 @@ pub(super) fn checkpoint(point: &str, project: &Path, owner: &str) -> Result<(),
 }
 
 #[test]
+fn install_reads_lifecycle_policy_after_acquiring_the_project_lock() {
+    let (project, fixture) = project_with_fixture("policy-before-acquire", INTEGRITY);
+    project
+        .write("tapid.lifecycle.toml", b"schema = 1")
+        .unwrap();
+    let _fault = inject(Fault::PolicyChanged);
+    let result = run(
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    );
+    let failure = result
+        .expect_err("must reject the invalid current policy rather than use the earlier valid one");
+    assert_eq!(failure.error.kind, ErrorKind::InvalidRequest);
+    assert!(!project.path().join("node_modules").exists());
+    assert!(!project.path().join("tapid.lock").exists());
+}
+
+#[test]
 fn failure_after_commit_keeps_the_committed_manifest_lock_and_packages() {
     let (project, fixture) = project_with_fixture("typed-post-commit", INTEGRITY);
     let _fault = inject(Fault::AfterCommit);
     let failure = run(
-        project.path(),
-        Some("plugin@1.0.0"),
-        Some(&project.path().join("store")),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -208,12 +357,15 @@ fn committed_cleanup_failure_preserves_the_decision_and_requires_no_repeat() {
     let (project, fixture) = project_with_fixture("typed-cleanup-pending", INTEGRITY);
     let _fault = inject(Fault::CleanupPending);
     let failure = run(
-        project.path(),
-        Some("plugin@1.0.0"),
-        Some(&project.path().join("store")),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -247,12 +399,15 @@ fn obstructed_rollback_is_recovery_required_instead_of_rolled_back() {
     let (project, fixture) = project_with_fixture("typed-rollback-pending", INTEGRITY);
     let _fault = inject(Fault::RollbackPending);
     let failure = run(
-        project.path(),
-        Some("plugin@1.0.0"),
-        Some(&project.path().join("store")),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -275,12 +430,15 @@ fn replay_preserves_the_lock_mismatch_category() {
     let (project, fixture) = project_with_fixture("typed-lock-mismatch", INTEGRITY);
     let store = project.path().join("store");
     run(
-        project.path(),
-        Some("plugin@1.0.0"),
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -288,12 +446,15 @@ fn replay_preserves_the_lock_mismatch_category() {
     manifest.push(b' ');
     project.write("package.json", &manifest).unwrap();
     let failure = run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Frozen,
-        None,
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Frozen,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -319,12 +480,15 @@ fn competing_activation_returns_typed_contention_without_changes() {
         .unwrap();
     let _lock = ActivationLock::acquire(project.path()).unwrap();
     let failure = run(
-        project.path(),
-        None,
-        Some(&project.path().join("store")),
-        InstallMode::Frozen,
-        None,
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Frozen,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -338,23 +502,29 @@ fn missing_replay_tree_preserves_the_store_error_category() {
     let (project, fixture) = project_with_fixture("typed-store-missing", INTEGRITY);
     let store = project.path().join("store");
     run(
-        project.path(),
-        Some("plugin@1.0.0"),
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
     fs::remove_dir_all(store.join("trees")).unwrap();
     let failure = run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Offline,
-        None,
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Offline,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -379,12 +549,15 @@ fn materialization_failure_preserves_previous_project_and_store_state() {
     project.write("tapid.lock", prior_lock.as_bytes()).unwrap();
     project.write("node_modules/KEEP", b"user data").unwrap();
     let failure = run(
-        project.path(),
-        Some("plugin@1.0.0"),
-        Some(&project.path().join("store")),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -421,12 +594,15 @@ fn peer_failure_preserves_the_resolver_source() {
     metadata["packages"][0]["peerDependencies"] = serde_json::json!({"react": "^18"});
     fs::write(&fixture, metadata.to_string()).unwrap();
     let failure = run(
-        project.path(),
-        Some("plugin@1.0.0"),
-        Some(&project.path().join("store")),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -460,12 +636,15 @@ fn invalid_archive_is_typed_without_activating_any_packages() {
     .into();
     fs::write(&fixture, metadata.to_string()).unwrap();
     let failure = run(
-        project.path(),
-        Some("plugin@1.0.0"),
-        Some(&project.path().join("store")),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -480,12 +659,15 @@ fn successful_install_and_replay_report_effective_project_changes_and_warnings()
     let (project, fixture) = project_with_fixture("typed-success", INTEGRITY);
     let store = project.path().join("store");
     let report = run(
-        project.path(),
-        Some("plugin@1.0.0"),
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        true,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: true,
+        },
         |_| {},
     )
     .unwrap();
@@ -514,12 +696,15 @@ fn successful_install_and_replay_report_effective_project_changes_and_warnings()
     assert_eq!(changes.changed, 1);
     assert_eq!(changes.added + changes.reused + changes.removed, 0);
     let replay = run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Frozen,
-        None,
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Frozen,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -547,12 +732,15 @@ fn failed_previous_recovery_reports_project_outputs_for_install_and_outdated() {
             .unwrap();
         let failure = if command == "install" {
             run(
-                project.path(),
-                None,
-                Some(&project.path().join("store")),
-                InstallMode::Online,
-                None,
-                false,
+                InstallRequest {
+                    project_dir: project.path(),
+                    target_manifest_path: Path::new("package.json"),
+                    mutation: ManifestMutation::None,
+                    store_root: Some(&project.path().join("store")),
+                    mode: InstallMode::Online,
+                    registry_fixture: None,
+                    allow_unverified_registry_artifacts: false,
+                },
                 |_| {},
             )
             .unwrap_err()
@@ -599,12 +787,15 @@ fn invalid_fixture_package_fields_preserve_the_registry_metadata_category() {
         metadata["packages"][0][field] = invalid.into();
         fs::write(&fixture, serde_json::to_vec(&metadata).unwrap()).unwrap();
         let failure = run(
-            project.path(),
-            Some("plugin@1.0.0"),
-            Some(&project.path().join("store")),
-            InstallMode::Online,
-            Some(&fixture),
-            false,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+                store_root: Some(&project.path().join("store")),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
             |_| {},
         )
         .unwrap_err();
@@ -646,12 +837,15 @@ fn invalid_fixture_artifact_preserves_metadata_and_transport_categories() {
         metadata["packages"][0]["artifact"] = artifact.into();
         fs::write(&fixture, serde_json::to_vec(&metadata).unwrap()).unwrap();
         let failure = run(
-            project.path(),
-            Some("plugin@1.0.0"),
-            Some(&project.path().join("store")),
-            InstallMode::Online,
-            Some(&fixture),
-            false,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+                store_root: Some(&project.path().join("store")),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
             |_| {},
         )
         .unwrap_err();
@@ -683,12 +877,15 @@ fn online_platform_fallback_discards_only_incompatible_locked_selections() {
         fs::write(&fixture, metadata.to_string()).unwrap();
         let store = project.path().join("store");
         run(
-            project.path(),
-            None,
-            Some(&store),
-            InstallMode::Online,
-            Some(&fixture),
-            false,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&store),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
             |_| {},
         )
         .unwrap();
@@ -730,12 +927,15 @@ fn online_platform_fallback_discards_only_incompatible_locked_selections() {
         metadata["packages"].as_array_mut().unwrap().push(stable);
         fs::write(&fixture, metadata.to_string()).unwrap();
         let report = run(
-            project.path(),
-            None,
-            Some(&store),
-            InstallMode::Online,
-            Some(&fixture),
-            false,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&store),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
             |_| {},
         )
         .unwrap();
@@ -759,12 +959,15 @@ fn online_platform_fallback_discards_only_incompatible_locked_selections() {
             InstallMode::CiOffline,
         ] {
             let failure = run(
-                project.path(),
-                None,
-                Some(&store),
-                mode,
-                Some(&fixture),
-                false,
+                InstallRequest {
+                    project_dir: project.path(),
+                    target_manifest_path: Path::new("package.json"),
+                    mutation: ManifestMutation::None,
+                    store_root: Some(&store),
+                    mode,
+                    registry_fixture: Some(&fixture),
+                    allow_unverified_registry_artifacts: false,
+                },
                 |_| {},
             )
             .unwrap_err();
@@ -780,12 +983,15 @@ fn online_platform_fallback_discards_only_incompatible_locked_selections() {
             )
             .unwrap();
         let failure = run(
-            project.path(),
-            None,
-            Some(&store),
-            InstallMode::Online,
-            Some(&fixture),
-            false,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&store),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
             |_| {},
         )
         .unwrap_err();
@@ -805,12 +1011,15 @@ fn repeated_online_install_preserves_locked_selection() {
         .unwrap();
     let store = project.path().join("store");
     run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -822,12 +1031,15 @@ fn repeated_online_install_preserves_locked_selection() {
     metadata["packages"].as_array_mut().unwrap().push(newer);
     fs::write(&fixture, metadata.to_string()).unwrap();
     run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -837,12 +1049,15 @@ fn repeated_online_install_preserves_locked_selection() {
     );
     fs::remove_file(&fixture).unwrap();
     let replay = run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -864,12 +1079,15 @@ fn frozen_install_hydrates_exact_artifact_from_cold_store() {
         .unwrap();
     let store = project.path().join("store");
     run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -892,23 +1110,29 @@ fn frozen_install_hydrates_exact_artifact_from_cold_store() {
     fs::write(&fixture, metadata.to_string()).unwrap();
     let cold = project.path().join("cold-store");
     run(
-        project.path(),
-        None,
-        Some(&cold),
-        InstallMode::Frozen,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&cold),
+            mode: InstallMode::Frozen,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
     assert_eq!(fs::read(&lock_path).unwrap(), original_lock);
     run(
-        project.path(),
-        None,
-        Some(&cold),
-        InstallMode::Offline,
-        None,
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&cold),
+            mode: InstallMode::Offline,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -925,12 +1149,15 @@ fn changed_roots_keep_compatible_locked_versions() {
         .unwrap();
     let store = project.path().join("store");
     run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -944,12 +1171,15 @@ fn changed_roots_keep_compatible_locked_versions() {
     metadata["packages"].as_array_mut().unwrap().push(other);
     fs::write(&fixture, metadata.to_string()).unwrap();
     run(
-        project.path(),
-        Some("other@*"),
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("other@*"),
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -961,12 +1191,15 @@ fn changed_roots_keep_compatible_locked_versions() {
             .any(|(key, _)| key.name.as_str() == "plugin" && key.version.to_string() == "1.0.0")
     );
     run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Refresh,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Refresh,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -989,12 +1222,15 @@ fn pinned_fixture_project(label: &str) -> (TempProject, PathBuf, PathBuf) {
         .unwrap();
     let warm = project.path().join("warm-store");
     run(
-        project.path(),
-        None,
-        Some(&warm),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&warm),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -1074,12 +1310,15 @@ fn frozen_hydration_failures_preserve_lock_and_installed_tree() {
         let before = fs::read(&lock_path).unwrap();
         let installed = fs::read(project.path().join("node_modules/plugin/package.json")).unwrap();
         let failure = run(
-            project.path(),
-            None,
-            Some(&cold),
-            InstallMode::Frozen,
-            Some(&fixture),
-            false,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&cold),
+                mode: InstallMode::Frozen,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
             |_| {},
         )
         .unwrap_err();
@@ -1111,12 +1350,15 @@ fn frozen_hydration_rejects_missing_private_credentials_before_network() {
     fs::write(&lock_path, &bytes).unwrap();
     project.write("tapid.toml", b"[registries.default]\nurl='https://private.example'\ntoken-env='TAPID_FROZEN_TEST_MISSING_TOKEN_193'\n").unwrap();
     let failure = run(
-        project.path(),
-        None,
-        Some(&cold),
-        InstallMode::Frozen,
-        None,
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&cold),
+            mode: InstallMode::Frozen,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -1129,12 +1371,15 @@ fn frozen_hydration_rejects_missing_private_credentials_before_network() {
 fn offline_cold_store_never_uses_supplied_artifacts() {
     let (project, fixture, cold) = pinned_fixture_project("offline-cold");
     let failure = run(
-        project.path(),
-        None,
-        Some(&cold),
-        InstallMode::Offline,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&cold),
+            mode: InstallMode::Offline,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -1152,12 +1397,15 @@ fn frozen_hydration_rolls_back_publication_when_activation_fails() {
         .write("node_modules/KEEP", b"unmanaged tree")
         .unwrap();
     let failure = run(
-        project.path(),
-        None,
-        Some(&cold),
-        InstallMode::Frozen,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&cold),
+            mode: InstallMode::Frozen,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -1181,12 +1429,15 @@ fn adding_a_root_does_not_require_metadata_for_unchanged_locked_packages() {
     metadata["packages"][0]["name"] = "other".into();
     fs::write(&fixture, metadata.to_string()).unwrap();
     run(
-        project.path(),
-        Some("other@*"),
-        Some(&warm),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("other@*"),
+            store_root: Some(&warm),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -1221,12 +1472,15 @@ fn online_compatibility_refetches_unverified_locks_and_preserves_verified_select
             fs::write(&fixture, metadata.to_string()).unwrap();
             let store = project.path().join("store");
             run(
-                project.path(),
-                None,
-                Some(&store),
-                InstallMode::Online,
-                Some(&fixture),
-                true,
+                InstallRequest {
+                    project_dir: project.path(),
+                    target_manifest_path: Path::new("package.json"),
+                    mutation: ManifestMutation::None,
+                    store_root: Some(&store),
+                    mode: InstallMode::Online,
+                    registry_fixture: Some(&fixture),
+                    allow_unverified_registry_artifacts: true,
+                },
                 |_| {},
             )
             .unwrap();
@@ -1241,12 +1495,15 @@ fn online_compatibility_refetches_unverified_locks_and_preserves_verified_select
             ] {
                 assert!(
                     run(
-                        project.path(),
-                        None,
-                        Some(&store),
-                        strict_mode,
-                        Some(&fixture),
-                        false,
+                        InstallRequest {
+                            project_dir: project.path(),
+                            target_manifest_path: Path::new("package.json"),
+                            mutation: ManifestMutation::None,
+                            store_root: Some(&store),
+                            mode: strict_mode,
+                            registry_fixture: Some(&fixture),
+                            allow_unverified_registry_artifacts: false
+                        },
                         |_| {}
                     )
                     .is_err()
@@ -1269,12 +1526,15 @@ fn online_compatibility_refetches_unverified_locks_and_preserves_verified_select
                 project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*","verified":"*","fresh":"1.0.0"}}"#).unwrap();
             }
             let report = run(
-                project.path(),
-                None,
-                Some(&store),
-                mode,
-                Some(&fixture),
-                true,
+                InstallRequest {
+                    project_dir: project.path(),
+                    target_manifest_path: Path::new("package.json"),
+                    mutation: ManifestMutation::None,
+                    store_root: Some(&store),
+                    mode,
+                    registry_fixture: Some(&fixture),
+                    allow_unverified_registry_artifacts: true,
+                },
                 |_| {},
             )
             .unwrap();
@@ -1332,12 +1592,15 @@ fn compatibility_checks_fresh_integrity_before_promoting_an_existing_unverified_
         fs::write(&fixture, metadata.to_string()).unwrap();
         let store = project.path().join("store");
         run(
-            project.path(),
-            None,
-            Some(&store),
-            InstallMode::Online,
-            Some(&fixture),
-            true,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&store),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: true,
+            },
             |_| {},
         )
         .unwrap();
@@ -1349,12 +1612,15 @@ fn compatibility_checks_fresh_integrity_before_promoting_an_existing_unverified_
         }
         fs::write(&fixture, metadata.to_string()).unwrap();
         let result = run(
-            project.path(),
-            None,
-            Some(&store),
-            InstallMode::Online,
-            Some(&fixture),
-            true,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&store),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: true,
+            },
             |_| {},
         );
         if tampered {
@@ -1400,12 +1666,15 @@ fn fetching_another_version_preserves_locked_dependency_edges() {
     fs::write(&fixture, metadata.to_string()).unwrap();
     let store = project.path().join("store");
     run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -1432,12 +1701,15 @@ fn fetching_another_version_preserves_locked_dependency_edges() {
     fs::write(&fixture, metadata.to_string()).unwrap();
     project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0","plugin-next":"npm:plugin@2.0.0"}}"#).unwrap();
     run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -1486,23 +1758,29 @@ fn unrelated_root_changes_preserve_direct_and_transitive_versions_of_one_package
     fs::write(&fixture, metadata.to_string()).unwrap();
     let store = project.path().join("store");
     run(
-        project.path(),
-        None,
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
     // Broadening a requirement does not require changing its valid selection.
     run(
-        project.path(),
-        Some("plugin@*"),
-        Some(&store),
-        InstallMode::Online,
-        Some(&fixture),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::AddPackage("plugin@*"),
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap();
@@ -1527,12 +1805,15 @@ fn frozen_rejects_invalid_root_bindings_before_downloading() {
     lock["rootBindings"] = serde_json::json!({"unknown": target});
     fs::write(&lock_path, lock.to_string()).unwrap();
     let failure = run(
-        project.path(),
-        None,
-        Some(&cold),
-        InstallMode::Frozen,
-        Some(&project.path().join("absent-fixture.json")),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&cold),
+            mode: InstallMode::Frozen,
+            registry_fixture: Some(&project.path().join("absent-fixture.json")),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -1570,24 +1851,30 @@ fn changed_peer_roots_rebind_compatible_ranges_and_release_incompatible_pins() {
         fs::write(&fixture, metadata.to_string()).unwrap();
         let store = project.path().join("store");
         run(
-            project.path(),
-            None,
-            Some(&store),
-            InstallMode::Online,
-            Some(&fixture),
-            false,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&store),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
             |_| {},
         )
         .unwrap();
         metadata["packages"].as_array_mut().unwrap().push(newer);
         fs::write(&fixture, metadata.to_string()).unwrap();
         run(
-            project.path(),
-            Some(&format!("react@{provider}")),
-            Some(&store),
-            InstallMode::Online,
-            Some(&fixture),
-            false,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::AddPackage(&format!("react@{provider}")),
+                store_root: Some(&store),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
             |_| {},
         )
         .unwrap();
@@ -1596,10 +1883,7 @@ fn changed_peer_roots_rebind_compatible_ranges_and_release_incompatible_pins() {
             lock.root_bindings()["plugin"].parse().unwrap();
         assert_eq!(key.version.to_string(), plugin_version);
         assert_eq!(
-            crate::context::parse_peer(&key.peer_context)
-                .unwrap()
-                .entries()[&"react".parse().unwrap()]
-                .to_string(),
+            key.peer_context().unwrap().entries()[&"react".parse().unwrap()].to_string(),
             provider
         );
     }
@@ -1619,12 +1903,15 @@ fn frozen_refuses_corrupt_warm_content_without_redownloading() {
     )
     .unwrap();
     let failure = run(
-        project.path(),
-        None,
-        Some(&warm),
-        InstallMode::Frozen,
-        Some(&project.path().join("absent-fixture.json")),
-        false,
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&warm),
+            mode: InstallMode::Frozen,
+            registry_fixture: Some(&project.path().join("absent-fixture.json")),
+            allow_unverified_registry_artifacts: false,
+        },
         |_| {},
     )
     .unwrap_err();
@@ -1687,12 +1974,15 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
             .unwrap();
         for mode in [InstallMode::Online, InstallMode::Frozen] {
             let report = run(
-                project.path(),
-                None,
-                Some(&store),
-                mode,
-                Some(&fixture),
-                false,
+                InstallRequest {
+                    project_dir: project.path(),
+                    target_manifest_path: Path::new("package.json"),
+                    mutation: ManifestMutation::None,
+                    store_root: Some(&store),
+                    mode,
+                    registry_fixture: Some(&fixture),
+                    allow_unverified_registry_artifacts: false,
+                },
                 |_| {},
             )
             .unwrap();
@@ -1727,12 +2017,15 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
         .unwrap();
     for mode in [InstallMode::Online, InstallMode::Frozen] {
         let failure = run(
-            project.path(),
-            None,
-            Some(&store),
-            mode,
-            Some(&fixture),
-            false,
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&store),
+                mode,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
             |_| {},
         )
         .unwrap_err();

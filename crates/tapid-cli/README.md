@@ -25,6 +25,8 @@ iwr -useb https://tapid.dev/install.ps1 | iex
 
 The next-release installers, expected for 0.0.11, select archives through `https://tapid.dev/releases/v1/latest.tsv`, check their recorded size and SHA-256, and install Tapid without administrator privileges. GitHub remains the initial archive host. Explicit versions through 0.0.10 use their historical GitHub archives and `SHA256SUMS` unless `TAPID_RELEASE_RECORD_URL` is supplied. The new public routes and installer copies require the coordinated release cutover; this source README does not establish their deployed state. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
 
+Automation clients can use the compact [agent guide v1](../../docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
+
 ## Commands
 
 ```text
@@ -43,6 +45,10 @@ tapid outdated [OPTIONS]
 tapid prune [OPTIONS]
 tapid why <PACKAGE> [OPTIONS]
 tapid upgrade [OPTIONS]
+tapid tool install <PACKAGE> [--tools-dir <PATH>]
+tapid tool list [--tools-dir <PATH>]
+tapid tool update <PACKAGE> [--tools-dir <PATH>]
+tapid tool remove <PACKAGE> [--tools-dir <PATH>]
 tapid cache info [--store-dir <PATH>]
 tapid cache clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid clean [--dry-run | --yes] [--store-dir <PATH>]
@@ -81,6 +87,95 @@ intended content. `--json` emits the versioned evidence summary, including on a
 byte mismatch; see the [JSON protocol](../../docs/json-results.md).
 
 `tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
+
+Dependency hooks remain denied without exact checked-in approval. Online installs offer separate invocation-only `--allow-unapproved-dependency-scripts` and `--unsafe-no-dependency-sandbox` overrides. The first retains required containment; the second explicitly permits host access but does not authorize unapproved hooks by itself. Override outputs never enter the authenticated build cache. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md) for limits, warnings, and platform requirements. These flags do not change `tapid run`.
+
+## Standalone CLI tools
+
+Install a tool without creating a project:
+
+```text
+tapid tool install typescript@^5
+tapid tool list
+tapid tool update typescript
+tapid tool remove typescript
+```
+
+Each tool has its own generated private manifest, ordinary tapid.lock, and
+dependency environment. Tools share the verified package cache. Only the
+explicitly installed package's bin commands are exported; transitive commands
+stay inside that tool's environment. npm names, scoped names, and supported
+semver ranges are accepted. Dist-tags, npm aliases, and JSR tools are not
+supported by this interface.
+
+Update resolves within the requirement recorded at installation. To change that
+requirement, run tool install again with a new spec. List reports the exact
+version, requirement, command mappings, and environment/lock paths; --json uses
+the existing versioned result protocol.
+
+The default tool root is:
+- Windows: %LOCALAPPDATA%/tapid/tools
+- macOS: ~/Library/Application Support/tapid/tools
+- Linux: $XDG_DATA_HOME/tapid/tools, or ~/.local/share/tapid/tools when XDG_DATA_HOME is unset or empty
+
+Add the reported root's bin directory to PATH once using your shell's normal
+configuration. Tapid does not edit shell profiles or the persistent environment.
+For example, on Linux with the default location, the current shell can use
+export PATH="$HOME/.local/share/tapid/tools/bin:$PATH". On Windows, add the
+reported bin directory to your user Path and open a new terminal. --tools-dir
+must be absolute and selects a separate installation. Install/update also accept
+--store-dir and --registry-fixture for the same local fixture/cache seams as
+project installation. Tool commands do not load the caller project's tapid.toml.
+
+JavaScript entry points require an existing Node executable on PATH. Native
+executables are also supported. Windows launchers select Node explicitly for
+recognized Node shebangs; other script interpreters are rejected there. Unix
+entry points use their interpreter/shebang or native executable. Command names
+must contain only letters, numbers, dot, underscore, or hyphen. Launcher paths
+must be UTF-8 and cannot contain double quotes or line breaks. Windows commands
+are exposed through both .cmd and .ps1 files; shell execution policy still applies.
+
+Tool commands run with your user permissions and retain the caller's working
+directory. Dependency isolation does not sandbox execution, and does not change
+tapid run's containment policy. Lifecycle scripts never run during tool
+installation/update. Skipped hooks are reported; generated/native outputs may
+therefore be missing. Additional runtime setup remains a separate command:
+for example, after installing a compatible agent-browser package, explicitly
+invoke agent-browser install to request its browser download. Tapid neither
+performs that download implicitly nor claims the package is fully configured.
+
+A new environment is verified before activation. Cross-tool command collisions,
+Windows case/extension collisions, the reserved tapid command, the Unix node
+runtime command (including case variants), and unowned
+command files are rejected. Updates/removals verify recorded launcher bytes;
+user replacements and unrecognized files/directories are preserved. A durable
+journal selects the old catalog before commit and the new catalog after commit.
+The next tool operation or invocation settles interrupted publication. List can
+recover pending work and retire inactive owned environments.
+Older Unix tools exporting `node` remain listable and removable, but execution
+of that reserved command is rejected.
+
+Environments record the OS, CPU, and libc used during installation. Moving a
+tools directory to a different host platform requires update or reinstall before
+execution. Older environments without this identity also require update or
+reinstall; they remain listable and removable.
+Tools can be migrated individually while other foreign environments remain
+installed. Their recorded commands stay reserved against collisions, and execution
+remains blocked until replacement. Foreign command names reserved on the new host
+remain listable but do not receive launchers there.
+
+Installed commands can start while an install or update stages its environment.
+Catalog recovery, publication, and invocation lease acquisition share a short-held
+lock. Invocations wait up to 30 seconds for that lock before reporting contention.
+
+A running invocation leases its environment. Cleanup deferred by that lease or
+an open Windows file is reported as committed_cleanup_pending in JSON and retried
+by later tool operations. The lease covers the process waited for by the
+launcher, not detached descendants: finish daemon sessions before replacing
+their tool. Tool state and launchers must not be edited concurrently by other
+host processes. Link/reparse checks reject static redirection; these checks are
+not protection against a host process already allowed to replace managed paths.
+Unknown or inconsistent recovery state fails closed and preserves files.
 
 ## Inspect and clear the package cache
 
@@ -138,6 +233,8 @@ A dry run never writes project files, creates an activation lock, recovers trans
 `tapid --json add PACKAGE --dry-run` uses the version 1 command envelope with unchanged project state. `data.preview_kind` is `resolved_graph`; `data.declarations` lists section/name/before/after edits, `data.packages` lists package changes and reasons, `data.root_changes` lists root binding changes, and `data.effects` describes this preview's effects. This is an inspection result, not a saved executable plan. A later command reads current inputs and may resolve different metadata.
 
 Lifecycle edits validate the manifest they were planned against after acquiring the project lock. An intervening semantic manifest edit fails with `PROJECT_CHANGED` before writing the override. This protects the planning-to-lock interval for cooperating commands; it does not protect against an uncooperative writer changing files during the transaction.
+
+Install reads lifecycle policy and classifies the current lockfile after acquiring the project lock and completing recovery. If recovery restores a different lock format, replay and CI restrictions apply to that recovered lock.
 
 `install`, `ci`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
 
@@ -244,7 +341,7 @@ Supplying any of these permission flags enables invocation-only policy selection
 
 An exact script profile, or explicitly configured `[run.defaults]` when there is no exact profile, remains a ceiling. A supplied read/write/environment list replaces that dimension with the selected narrower grants; omitted dimensions keep the configured grants. Flags cannot exceed configured filesystem scope, enable denied network/subprocess authority, weaken assurance or remove resource ceilings. To authorize broader access, deliberately change the configuration. Empty explicit defaults still preserve the legacy ManagedTree default. With no invocation permission flags, exact-profile requirements and existing configuration behavior are unchanged.
 
-Names and policy selection are portable; enforcement availability still depends on the backend. For example, Windows currently rejects requested networking and missing/unsafe write targets before execution. Prepare writable directories such as `.next` and `.tmp` before a Windows run. No unsupported request falls back to unrestricted execution.
+Names and policy selection are portable; enforcement availability still depends on the backend. For example, Windows rejects networking without the selected Node compatibility component and missing/unsafe write targets before execution. Prepare writable directories such as `.next` and `.tmp` before a Windows run. No unsupported request falls back to unrestricted execution.
 
 Invocation-mode receipts add `policy_inputs` with the configuration source, invocation grants and effective project policy. These contain environment names, never values. `effective_filesystem` and established backend evidence describe resolved/runtime authority; input provenance alone is not enforcement evidence. The existing receipt channel and child exit/output behavior remain unchanged.
 
@@ -271,11 +368,13 @@ write = ["build"]
 network = false
 ```
 
-Paths are project-relative. Grant only the access the script needs: `network = false` denies network socket creation/traffic, while `network = true` allows unrestricted networking. The backend also constructs a limited child environment and closes unrelated inherited descriptors.
+Paths are project-relative. Grant only the access the script needs: `network = false` requests network denial, while `network = true` allows unrestricted networking. Consult the platform scope for acceptance limits, including the Windows local-bind limitation. The backend also constructs a limited child environment and closes unrelated inherited descriptors.
 
 Restricted is an authority boundary, **not** full process-tree management or a promise that arbitrary script code is safe. Tapid does not guarantee cleanup or termination of detached descendants. Configured tree-wide timeout, output, process-count, and memory limits require Linux ManagedTree. A requested restriction the backend cannot enforce causes the run to fail before the target starts; Tapid does not silently run it without containment. Linux Restricted uses Landlock and seccomp and requires kernel support; it has targeted Ubuntu 24.04.5 x86_64 validation. macOS Restricted is experimental and uses deprecated/private Seatbelt APIs.
 
 Without invocation permission flags, the command requires checked-in `tapid.toml` and an exact `[run.scripts.<name>]` profile; `[run.defaults]` is merged only into that explicitly selected profile. `assurance = "restricted"` explicitly requests ADR 0005 **Restricted** execution. Omitting `assurance` in configuration retains the legacy-safe **ManagedTree** contract, which additionally requires race-free descendant ownership, complete cleanup/kill, and configured tree-wide timeout, output, process, and memory semantics. Unsupported required dimensions fail before the shell starts.
+
+On Windows, explicit Node network grants use a private standard-user socket broker without administrator setup or firewall exemptions. Allowlist `SystemRoot` for Winsock provider initialization. The component adapts application socket imports and normal later addon loads; dynamically resolved APIs retain kernel containment without promised networking compatibility. Windows still has incomplete network-denial acceptance because the no-network AppContainer can bind locally. See [Windows scope](../../docs/windows-tapid-run-scope.md) for the tested configurations and remaining acceptance.
 
 The command constructs a minimal environment rather than preserving inherited variables: `PATH` is reserved and cannot be allowlisted, while other declared names are retrieved individually from the caller only when present. Windows environment-name matching is case-insensitive and case-equivalent allowlist duplicates are rejected. The current `network` field is boolean: `true` grants unrestricted networking. `--hostname`, `--port`, and other forwarded application arguments do not constrain authority; declared listen/connect scopes remain future work.
 
@@ -319,3 +418,5 @@ See [supported forms and limits](../../docs/compatibility.md#copied-file-tarball
 Npm aliases are supported in manifest dependencies and package arguments such as `tapid add 'h3-v2@npm:h3@2.0.1-rc.20'`. Scoped targets and supported semver ranges retain their actual registry identity and local import names during install and frozen/offline replay. See [alias behavior and limits](../../docs/compatibility.md#npm-aliases).
 
 Existing npm projects can use `tapid import-package-lock <path>` to preserve supported npm v3 selections without resolution. Import is offline; the first frozen install verifies pinned tarballs. See the [migration and rollback guide](../../docs/npm-lockfile-import.md). Tapid manages packages and lockfiles; Node.js, workerd, Wrangler, and deployment tools keep their existing roles.
+
+Windows contained runs with network access disabled require one administrator setup: `tapid sandbox install`. Later runs remain unattended as a standard user. Use `tapid sandbox status` to inspect the guard, or `tapid sandbox uninstall` from an administrator terminal when no executions or retained denial filters remain. The LocalSystem service is a persistent, exact-AppContainer-SID deny boundary; explicit network grants retain the existing standard-user broker. See [Windows execution scope](../../docs/windows-tapid-run-scope.md) for native acceptance status and limitations.

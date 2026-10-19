@@ -1,5 +1,6 @@
 //! Copied artifact declarations, immutable pins, and archive metadata preparation.
 use super::*;
+use crate::application::outcome::DiagnosticContext;
 use tapid_registry_client::GitDependency;
 
 #[derive(Clone, Debug)]
@@ -101,7 +102,7 @@ pub(super) fn file_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, Stri
     if !canonical.starts_with(&root) {
         return Err("file dependency escapes the project".into());
     }
-    crate::commands::run::read_bounded_config_file(
+    crate::filesystem::read::read_bounded_file(
         &canonical,
         crate::filesystem::atomic::MAX_ARTIFACT_BYTES,
     )
@@ -138,10 +139,15 @@ pub(super) fn archive_format(source: &PackageSource, bytes: &[u8]) -> ArchiveFor
 
 fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, OperationalError> {
     if source.artifact_digest() != Some(digest(&bytes).as_str()) {
-        return Err(OperationalError::new(
-            ErrorKind::Integrity,
-            "copied artifact digest mismatch",
-        ));
+        return Err(
+            OperationalError::new(ErrorKind::Integrity, "copied artifact digest mismatch")
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "artifact_digest",
+                    Some("sha256"),
+                    source.artifact_digest().unwrap_or("missing"),
+                    digest(&bytes),
+                )),
+        );
     }
     let staging = scratch()?;
     let tree = staging.0.join("tree");
@@ -154,7 +160,7 @@ fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, Operat
     .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
     let root = crate::filesystem::tree::package_content_root(&tree)?;
     let manifest_bytes =
-        crate::commands::run::read_bounded_config_file(&root.join("package.json"), 1024 * 1024)
+        crate::filesystem::read::read_bounded_file(&root.join("package.json"), 1024 * 1024)
             .map_err(|_| "copied package requires a regular package.json no larger than 1 MiB")?;
     let text =
         std::str::from_utf8(&manifest_bytes).map_err(|_| "copied package.json is not UTF-8")?;
@@ -361,7 +367,14 @@ pub(crate) fn validate_locked_files(
                 return Err(OperationalError::new(
                     ErrorKind::Integrity,
                     format!("file dependency '{}' digest mismatch", key.name),
-                ));
+                )
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "artifact_digest",
+                    Some("sha256"),
+                    expected,
+                    digest(&bytes),
+                ))
+                .for_package((&key).into()));
             }
         }
     }
@@ -394,7 +407,13 @@ pub(super) fn fetch_pinned(
                 return Err(OperationalError::new(
                     ErrorKind::Integrity,
                     "copied artifact digest mismatch",
-                ));
+                )
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "artifact_digest",
+                    Some("sha256"),
+                    source.artifact_digest().unwrap_or("missing"),
+                    digest(&bytes),
+                )));
             }
             return Ok(bytes);
         }
@@ -409,10 +428,15 @@ pub(super) fn fetch_pinned(
         return Err("expected copied artifact source".into());
     };
     if source.artifact_digest() != Some(digest(&bytes).as_str()) {
-        return Err(OperationalError::new(
-            ErrorKind::Integrity,
-            "copied artifact digest mismatch",
-        ));
+        return Err(
+            OperationalError::new(ErrorKind::Integrity, "copied artifact digest mismatch")
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "artifact_digest",
+                    Some("sha256"),
+                    source.artifact_digest().unwrap_or("missing"),
+                    digest(&bytes),
+                )),
+        );
     }
     Ok(bytes)
 }

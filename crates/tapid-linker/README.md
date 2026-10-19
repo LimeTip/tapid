@@ -1,5 +1,9 @@
 # tapid-linker
 
+`ShimStrategy::validate_targets` checks generated output identities using the same
+platform collision rules as shim planning, without inspecting bin targets or
+selecting interpreters. Callers remain responsible for path and execution policy.
+
 [![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/tapid-linker)](https://crates.io/crates/tapid-linker)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-linker)](https://crates.io/crates/tapid-linker)

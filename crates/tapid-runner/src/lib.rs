@@ -1,3 +1,5 @@
+#[cfg(windows)]
+pub use execution::{WindowsNetworkGuardAction, WindowsNetworkGuardStatus, windows_network_guard};
 /// Proof that this executable installed private launcher dispatch before application work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrivateLauncher {
@@ -10,6 +12,8 @@ static LAUNCHER: std::sync::OnceLock<PrivateLauncher> = std::sync::OnceLock::new
 /// Call as the first operation in main. Private invocations dispatch and never return.
 /// Subsequent requests retain this opaque token; missing integration fails before spawn.
 pub fn initialize_or_dispatch_private_launcher() -> PrivateLauncher {
+    #[cfg(windows)]
+    execution::dispatch_private_service();
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     execution::dispatch_private_launcher();
     LAUNCHER
@@ -58,6 +62,8 @@ static TEST_LAUNCHER_INIT_LINUX: extern "C" fn() = {
 pub mod config;
 mod lifecycle;
 pub use execution::dependency_toolchain_identity;
+#[cfg(windows)]
+pub use execution::prepare_private_dependency_write_tree;
 pub use lifecycle::{DependencyLifecycleApproval, DependencyLifecyclePolicy, LifecycleTool};
 pub mod execution;
 
@@ -75,7 +81,7 @@ pub use execution::{
     MAX_BACKEND_IDENTITY_BYTES, MAX_ENVIRONMENT_BLOCK_UNITS, MAX_ENVIRONMENT_VALUE_UNITS,
     MAX_EXECUTABLE_SEARCH_PATH_COUNT, MAX_EXECUTABLE_SEARCH_PATH_UNITS,
     MAX_EXECUTABLE_SEARCH_PATHS_UNITS, MAX_PROGRAM_UNITS, MAX_PROJECT_ROOT_UNITS,
-    ResolvedFilesystemGrant, ResolvedFilesystemGrants, Termination, execute,
+    ResolvedFilesystemGrant, ResolvedFilesystemGrants, Termination, execute, execute_uncontained,
 };
 
 use sha2::{Digest, Sha256};

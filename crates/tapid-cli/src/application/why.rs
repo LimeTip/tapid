@@ -99,7 +99,7 @@ pub(crate) fn explain(
     })?;
     let lock = Lockfile::from_json(&lock_bytes).map_err(OperationalError::from)?;
     lock.validate_replay(&root_digest)
-        .map_err(OperationalError::from)?;
+        .map_err(|error| OperationalError::from(error).at_manifest(&root_manifest_path))?;
 
     let roots = if selection.manifest_path == root_manifest_path {
         direct_roots(&lock, &selection.manifest, &selection.root_dir)?
@@ -113,13 +113,9 @@ pub(crate) fn explain(
         )?
     };
     let graph = graph(&lock)?;
-    let source_kinds = graph
-        .keys()
-        .map(|key| (key.clone(), source_kind(key)))
-        .collect::<BTreeMap<_, _>>();
     let mut state = SearchState::default();
     for root in roots {
-        let Some(source_kind) = source_kinds.get(&root.key).copied() else {
+        let Some(source_kind) = graph.nodes.get(&root.key).map(source_kind) else {
             continue;
         };
         let first = WhyStep {
@@ -134,7 +130,6 @@ pub(crate) fn explain(
             &root.key,
             &requested,
             &graph,
-            &source_kinds,
             &mut visited,
             &mut path,
             &mut state,
@@ -181,42 +176,6 @@ fn direct_roots(
     project_dir: &Path,
 ) -> Result<Vec<Root>, OperationalError> {
     let kinds = direct_dependency_kinds(manifest);
-    if !lock.root_bindings().is_empty() {
-        let typed_keys = lock
-            .packages_typed()
-            .map_err(OperationalError::from)?
-            .into_iter()
-            .map(|(key, _)| key)
-            .chain(
-                lock.workspace_packages_typed()
-                    .map_err(OperationalError::from)?
-                    .into_iter()
-                    .map(|(key, _)| key),
-            )
-            .collect::<Vec<_>>();
-        let config = crate::registry::RegistryConfig::load(project_dir)
-            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-        crate::application::replay::replay_root_keys_with_config(
-            lock,
-            manifest,
-            &typed_keys,
-            &config,
-        )
-        .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
-        return Ok(lock
-            .root_bindings()
-            .iter()
-            .filter_map(|(name, key)| {
-                let kind = kinds.get(name.as_str())?;
-                Some(Root {
-                    key: key.clone(),
-                    name: name.clone(),
-                    kind: kind.clone(),
-                })
-            })
-            .collect());
-    }
-
     let typed_keys = lock
         .packages_typed()
         .map_err(OperationalError::from)?
@@ -238,6 +197,21 @@ fn direct_roots(
         &config,
     )
     .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+    if !lock.root_bindings().is_empty() {
+        return Ok(lock
+            .root_bindings()
+            .iter()
+            .filter_map(|(name, key)| {
+                let kind = kinds.get(name.as_str())?;
+                Some(Root {
+                    key: key.clone(),
+                    name: name.clone(),
+                    kind: kind.clone(),
+                })
+            })
+            .collect());
+    }
+
     let mut result = Vec::new();
     for key in roots {
         let parsed = key
@@ -319,25 +293,21 @@ fn workspace_roots(
 }
 
 fn direct_dependency_kinds(manifest: &PackageManifest) -> BTreeMap<String, String> {
-    [
-        (manifest.dependencies(), "dependencies"),
-        (manifest.dev_dependencies(), "devDependencies"),
-        (manifest.optional_dependencies(), "optionalDependencies"),
-        (manifest.peer_dependencies(), "peerDependencies"),
-    ]
-    .into_iter()
-    .flat_map(|(entries, kind)| {
-        entries.keys().flat_map(move |name| {
-            let normalized = crate::online::dep_parts(name)
-                .map(|(_, package)| package.to_string())
-                .unwrap_or_else(|_| name.clone());
-            [
-                (name.clone(), kind.to_owned()),
-                (normalized, kind.to_owned()),
-            ]
+    manifest
+        .dependency_sections()
+        .flat_map(|(kind, entries)| {
+            let kind = kind.field_name();
+            entries.keys().flat_map(move |name| {
+                let normalized = crate::online::dep_parts(name)
+                    .map(|(_, package)| package.to_string())
+                    .unwrap_or_else(|_| name.clone());
+                [
+                    (name.clone(), kind.to_owned()),
+                    (normalized, kind.to_owned()),
+                ]
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 /// Explain immediate dependency and peer edges using the same graph as `why`.
@@ -345,7 +315,7 @@ pub(super) fn requiring_edges(
     lock: &Lockfile,
 ) -> Result<BTreeMap<String, Vec<String>>, OperationalError> {
     let mut reasons = BTreeMap::<String, Vec<String>>::new();
-    for (parent, edges) in graph(lock)? {
+    for (parent, edges) in graph(lock)?.edges {
         let parent = parent.replace('|', " ");
         for edge in edges {
             reasons
@@ -357,9 +327,16 @@ pub(super) fn requiring_edges(
     Ok(reasons)
 }
 
-fn graph(lock: &Lockfile) -> Result<BTreeMap<String, Vec<Edge>>, OperationalError> {
+struct WhyGraph {
+    edges: BTreeMap<String, Vec<Edge>>,
+    nodes: BTreeMap<String, LockfilePackageKey>,
+}
+
+fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
     let mut graph: BTreeMap<String, Vec<Edge>> = BTreeMap::new();
+    let mut nodes = BTreeMap::new();
     for (key, package) in lock.packages_typed().map_err(OperationalError::from)? {
+        nodes.insert(key.to_string(), key.clone());
         graph.insert(
             key.to_string(),
             package
@@ -377,6 +354,7 @@ fn graph(lock: &Lockfile) -> Result<BTreeMap<String, Vec<Edge>>, OperationalErro
         .workspace_packages_typed()
         .map_err(OperationalError::from)?
     {
+        nodes.insert(key.to_string(), key.clone());
         graph.insert(
             key.to_string(),
             package
@@ -390,43 +368,42 @@ fn graph(lock: &Lockfile) -> Result<BTreeMap<String, Vec<Edge>>, OperationalErro
                 .collect(),
         );
     }
-    let keys = graph
-        .keys()
-        .filter_map(|key| key.parse::<LockfilePackageKey>().ok())
-        .collect::<Vec<_>>();
-    for source in keys.clone() {
-        let peer_context = crate::context::parse_peer(&source.peer_context)
-            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+    let mut providers = BTreeMap::<_, Vec<&LockfilePackageKey>>::new();
+    for key in nodes.values() {
+        providers
+            .entry((&key.source, &key.name, &key.version))
+            .or_default()
+            .push(key);
+    }
+    for (encoded, source) in &nodes {
+        let peer_context = source.peer_context()?;
         for (name, version) in peer_context.entries() {
-            let Some(target) = keys.iter().find(|candidate| {
-                candidate.source == source.source
-                    && candidate.name == *name
-                    && candidate.version == *version
-            }) else {
-                continue;
-            };
-            if let Some(edges) = graph.get_mut(&source.to_string()) {
-                edges.push(Edge {
-                    name: name.to_string(),
-                    target: target.to_string(),
-                    kind: "peer",
-                });
+            for target in providers
+                .get(&(&source.source, name, version))
+                .into_iter()
+                .flatten()
+            {
+                graph
+                    .get_mut(encoded)
+                    .expect("indexed graph node")
+                    .push(Edge {
+                        name: name.to_string(),
+                        target: target.to_string(),
+                        kind: "peer",
+                    });
             }
         }
     }
-    Ok(graph)
+    Ok(WhyGraph {
+        edges: graph,
+        nodes,
+    })
 }
 
-fn source_kind(key: &str) -> &'static str {
-    match key.parse::<LockfilePackageKey>() {
-        Ok(LockfilePackageKey {
-            source: LockfilePackageSource::Workspace(_),
-            ..
-        }) => "workspace",
-        Ok(LockfilePackageKey {
-            source: LockfilePackageSource::Copied(_),
-            ..
-        }) => "copied",
+fn source_kind(key: &LockfilePackageKey) -> &'static str {
+    match &key.source {
+        LockfilePackageSource::Workspace(_) => "workspace",
+        LockfilePackageSource::Copied(_) => "copied",
         _ => "registry",
     }
 }
@@ -435,8 +412,7 @@ fn source_kind(key: &str) -> &'static str {
 fn search_paths(
     current: &str,
     requested: &tapid_core::PackageName,
-    graph: &BTreeMap<String, Vec<Edge>>,
-    source_kinds: &BTreeMap<String, &'static str>,
+    graph: &WhyGraph,
     visited: &mut BTreeSet<String>,
     path: &mut Vec<WhyStep>,
     state: &mut SearchState,
@@ -447,9 +423,8 @@ fn search_paths(
         return;
     }
     state.visits += 1;
-    let current_key = match current.parse::<LockfilePackageKey>() {
-        Ok(key) => key,
-        Err(_) => return,
+    let Some(current_key) = graph.nodes.get(current) else {
+        return;
     };
     if &current_key.name == requested {
         if state.paths.len() == MAX_PATHS {
@@ -461,19 +436,23 @@ fn search_paths(
         }
     }
     if depth >= MAX_DEPTH {
-        if graph.get(current).is_some_and(|edges| !edges.is_empty()) {
+        if graph
+            .edges
+            .get(current)
+            .is_some_and(|edges| !edges.is_empty())
+        {
             state.truncated = true;
         }
         return;
     }
-    for edge in graph.get(current).into_iter().flatten() {
+    for edge in graph.edges.get(current).into_iter().flatten() {
         if state.truncated {
             return;
         }
         if !visited.insert(edge.target.clone()) {
             continue;
         }
-        let Some(source_kind) = source_kinds.get(&edge.target).copied() else {
+        let Some(source_kind) = graph.nodes.get(&edge.target).map(source_kind) else {
             visited.remove(&edge.target);
             continue;
         };
@@ -487,7 +466,6 @@ fn search_paths(
             &edge.target,
             requested,
             graph,
-            source_kinds,
             visited,
             path,
             state,
@@ -501,6 +479,49 @@ fn search_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_edges_retain_all_matching_provider_contexts() {
+        use tapid_core::{PeerContext, PlatformContext};
+        use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+        let mut lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+        let empty = PeerContext::default();
+        let peers =
+            PeerContext::default().with("provider".parse().unwrap(), "1.0.0".parse().unwrap());
+        let generic = PlatformContext::new(None, None, None).unwrap();
+        let linux = PlatformContext::new(Some("linux"), None, None).unwrap();
+        let mut providers = BTreeSet::new();
+        let mut consumer = String::new();
+        for (name, peer, platform) in [
+            ("provider", &empty, &generic),
+            ("provider", &empty, &linux),
+            ("consumer", &peers, &generic),
+        ] {
+            let package = LockedPackage::new_with_context_and_provenance(
+                "https://registry.npmjs.org",
+                name,
+                "1.0.0",
+                &format!("sha512-{}==", "A".repeat(86)),
+                &format!("sha256-{}", "a".repeat(64)),
+                (peer, platform),
+                RegistryIntegrityProvenance::RegistryDeclared,
+            )
+            .unwrap();
+            if name == "provider" {
+                providers.insert(package.key());
+            } else {
+                consumer = package.key();
+            }
+            lock.insert_package(package).unwrap();
+        }
+        let graph = graph(&lock).unwrap();
+        let targets = graph.edges[&consumer]
+            .iter()
+            .filter(|edge| edge.kind == "peer")
+            .map(|edge| edge.target.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(targets, providers);
+    }
 
     fn package_key(name: &str, version: &str) -> String {
         tapid_lockfile::LockedPackage::new_with_provenance(
@@ -562,7 +583,13 @@ mod tests {
             ),
             (target_two.clone(), Vec::new()),
         ]);
-        let source_kinds = graph.keys().map(|key| (key.clone(), "registry")).collect();
+        let graph = WhyGraph {
+            nodes: graph
+                .keys()
+                .map(|key| (key.clone(), key.parse().unwrap()))
+                .collect(),
+            edges: graph,
+        };
         let requested: tapid_core::PackageName = "@scope/target".parse().unwrap();
         let mut state = SearchState::default();
         let mut path = vec![WhyStep {
@@ -575,7 +602,6 @@ mod tests {
             &root,
             &requested,
             &graph,
-            &source_kinds,
             &mut BTreeSet::from([root.clone()]),
             &mut path,
             &mut state,
@@ -612,14 +638,19 @@ mod tests {
             graph.insert(target, Vec::new());
         }
         graph.insert(root.clone(), edges);
-        let source_kinds = graph.keys().map(|key| (key.clone(), "registry")).collect();
+        let graph = WhyGraph {
+            nodes: graph
+                .keys()
+                .map(|key| (key.clone(), key.parse().unwrap()))
+                .collect(),
+            edges: graph,
+        };
         let requested: tapid_core::PackageName = "target".parse().unwrap();
         let mut state = SearchState::default();
         search_paths(
             &root,
             &requested,
             &graph,
-            &source_kinds,
             &mut BTreeSet::from([root.clone()]),
             &mut vec![WhyStep {
                 key: root.clone(),
@@ -690,7 +721,7 @@ mod tests {
         let source =
             tapid_lockfile::LocalWorkspaceSource::new("packages/lib", "lib", "1.0.0").unwrap();
         let key = tapid_lockfile::LockfilePackageKey::workspace(source).to_string();
-        assert_eq!(source_kind(&key), "workspace");
+        assert_eq!(source_kind(&key.parse().unwrap()), "workspace");
     }
 
     #[test]

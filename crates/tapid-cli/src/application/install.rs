@@ -73,6 +73,7 @@ impl PackageChanges {
 }
 
 struct InstallSession {
+    hook_stages: Vec<super::dependency_scripts::BuildStage>,
     journal: Option<crate::filesystem::lifecycle_journal::LifecycleJournal>,
     lock_backup: Option<PathBuf>,
     // Keep the lock through explicit settlement, including error paths.
@@ -85,6 +86,7 @@ struct InstallSession {
 impl InstallSession {
     fn new(project: &Path) -> Self {
         Self {
+            hook_stages: Vec::new(),
             journal: None,
             lock_backup: None,
             lock: None,
@@ -214,64 +216,46 @@ pub(crate) fn default_store_root() -> Result<PathBuf, String> {
     default_store_root_for(std::env::consts::OS, |name| std::env::var_os(name))
 }
 
+pub(crate) enum ManifestMutation<'a> {
+    None,
+    AddPackage(&'a str),
+    ReplaceManifest(ManifestEdit<'a>),
+}
+
+pub(crate) struct InstallRequest<'a> {
+    pub(crate) project_dir: &'a Path,
+    pub(crate) target_manifest_path: &'a Path,
+    pub(crate) mutation: ManifestMutation<'a>,
+    pub(crate) store_root: Option<&'a Path>,
+    pub(crate) mode: InstallMode<'a>,
+    pub(crate) registry_fixture: Option<&'a Path>,
+    pub(crate) allow_unverified_registry_artifacts: bool,
+}
+
 pub(crate) fn run(
-    project_dir: &Path,
-    package: Option<&str>,
-    store_root: Option<&Path>,
-    mode: InstallMode,
-    registry_fixture: Option<&Path>,
-    allow_unverified_registry_artifacts: bool,
+    request: InstallRequest<'_>,
     report_replay_progress: impl FnMut(Progress),
 ) -> Result<InstallReport, OperationFailure> {
-    run_with_manifest(
-        project_dir,
-        None,
-        package,
-        store_root,
-        mode,
-        registry_fixture,
-        allow_unverified_registry_artifacts,
+    run_with_execution(
+        request,
+        super::dependency_scripts::ExecutionOverrides::default(),
         report_replay_progress,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_with_manifest(
-    project_dir: &Path,
-    manifest_override: Option<ManifestEdit<'_>>,
-    package: Option<&str>,
-    store_root: Option<&Path>,
-    mode: InstallMode,
-    registry_fixture: Option<&Path>,
-    allow_unverified_registry_artifacts: bool,
+pub(crate) fn run_with_execution(
+    request: InstallRequest<'_>,
+    overrides: super::dependency_scripts::ExecutionOverrides,
     report_replay_progress: impl FnMut(Progress),
 ) -> Result<InstallReport, OperationFailure> {
-    run_with_manifest_target(
+    let InstallRequest {
         project_dir,
-        Path::new("package.json"),
-        manifest_override,
-        package,
-        store_root,
         mode,
-        registry_fixture,
         allow_unverified_registry_artifacts,
-        report_replay_progress,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_with_manifest_target(
-    project_dir: &Path,
-    target_manifest_path: &Path,
-    manifest_override: Option<ManifestEdit<'_>>,
-    package: Option<&str>,
-    store_root: Option<&Path>,
-    mode: InstallMode,
-    registry_fixture: Option<&Path>,
-    allow_unverified_registry_artifacts: bool,
-    report_replay_progress: impl FnMut(Progress),
-) -> Result<InstallReport, OperationFailure> {
+        ..
+    } = request;
     let mut session = InstallSession::new(project_dir);
+    session.outcome.warnings.extend(overrides.warnings());
     if allow_unverified_registry_artifacts
         && matches!(
             mode,
@@ -283,17 +267,7 @@ pub(crate) fn run_with_manifest_target(
             .warnings
             .push(Warning::UnverifiedRegistryArtifactsAllowed);
     }
-    match perform_install(
-        &mut session,
-        target_manifest_path,
-        manifest_override,
-        package,
-        store_root,
-        mode,
-        registry_fixture,
-        allow_unverified_registry_artifacts,
-        report_replay_progress,
-    ) {
+    match perform_install(&mut session, request, overrides, report_replay_progress) {
         Ok((package_count, replayed)) => Ok(InstallReport {
             package_count,
             replayed,
@@ -304,21 +278,35 @@ pub(crate) fn run_with_manifest_target(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn perform_install(
     session: &mut InstallSession,
-    target_manifest_path: &Path,
-    manifest_override: Option<ManifestEdit<'_>>,
-    package: Option<&str>,
-    store_root: Option<&Path>,
-    mode: InstallMode,
-    registry_fixture: Option<&Path>,
-    allow_unverified_registry_artifacts: bool,
+    request: InstallRequest<'_>,
+    overrides: super::dependency_scripts::ExecutionOverrides,
     mut report_replay_progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
+    let InstallRequest {
+        target_manifest_path,
+        mutation,
+        store_root,
+        mode,
+        registry_fixture,
+        allow_unverified_registry_artifacts,
+        ..
+    } = request;
+    let (manifest_override, package) = match mutation {
+        ManifestMutation::None => (None, None),
+        ManifestMutation::AddPackage(package) => (None, Some(package)),
+        ManifestMutation::ReplaceManifest(manifest) => (Some(manifest), None),
+    };
     let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
     let ci = matches!(mode, InstallMode::Ci | InstallMode::CiOffline);
     let frozen = matches!(mode, InstallMode::Frozen) || ci;
+    if overrides.enabled() && (offline || frozen || allow_unverified_registry_artifacts) {
+        return Err(OperationalError::new(
+            ErrorKind::InvalidRequest,
+            "dependency execution overrides require an online install with verified registry artifacts",
+        ));
+    }
     if package.is_some() && (offline || frozen) {
         return Err(OperationalError::new(
             ErrorKind::InvalidRequest,
@@ -329,12 +317,6 @@ fn perform_install(
         return Err(OperationalError::new(
             ErrorKind::InvalidRequest,
             "--allow-unverified-registry-artifacts cannot be used with --offline or --frozen",
-        ));
-    }
-    if manifest_override.is_some() && package.is_some() {
-        return Err(OperationalError::new(
-            ErrorKind::InvalidRequest,
-            "cannot combine a manifest override with a package argument",
         ));
     }
     let project_dir = fs::canonicalize(&session.outcome.project_dir).map_err(|error| {
@@ -353,7 +335,6 @@ fn perform_install(
         ));
     }
     session.outcome.project_dir = project_dir.clone();
-    let lifecycle_policy = super::dependency_scripts::load_policy(&project_dir)?;
     let target_candidate = if target_manifest_path.is_absolute() {
         target_manifest_path.to_path_buf()
     } else {
@@ -380,11 +361,9 @@ fn perform_install(
         ));
     }
     let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
-    online::validate_manifest_roots(&project_dir, &preflight_manifest)
-        .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+    online::validate_manifest_roots(&project_dir, &preflight_manifest)?;
     if let Some(updated) = manifest_override {
-        online::validate_manifest_roots(&project_dir, updated.updated)
-            .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+        online::validate_manifest_roots(&project_dir, updated.updated)?;
     }
     if let Some(spec) = package {
         let (name, requirement) = package_spec::parse(spec);
@@ -401,40 +380,21 @@ fn perform_install(
         let candidate = read_manifest(&manifest_path)?
             .with_dependency(name, requirement)
             .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
-        online::validate_manifest_roots(&project_dir, &candidate)
-            .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?;
+        online::validate_manifest_roots(&project_dir, &candidate)?;
     }
     let lock_path = project_dir.join("tapid.lock");
-    let mut imported = if lock_path.is_file() {
-        let bytes = fs::read_to_string(&lock_path)
-            .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
-        if serde_json::from_str::<serde_json::Value>(&bytes)
-            .ok()
-            .is_some_and(|v| v["lockfileVersion"] == 8)
-        {
-            Some(
-                tapid_lockfile::ImportedNpmLockfile::from_json(&bytes)
-                    .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?,
-            )
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    if ci && imported.is_some() {
-        return Err(OperationalError::new(
-            ErrorKind::Lockfile,
-            "ci requires an ordinary verified-tree lock; use install --frozen to install imported npm locks",
-        ));
+    // Preserve preflight rejection without activating anything. Pending recovery
+    // must run first because its snapshot may replace the current lock format.
+    if !crate::filesystem::lifecycle_journal::has_pending(&project_dir)
+        .map_err(|error| OperationalError::new(ErrorKind::Recovery, error))?
+        && lock_path.is_file()
+    {
+        let bytes = fs::read(&lock_path)
+            .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
+        parse_install_lock(&bytes, &lock_path, ci, overrides)?;
     }
-    let has_imported_lock = imported.is_some();
-    if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
-        imported = None;
-    }
-    if lock_path.is_file() && !has_imported_lock {
-        read_lock(&lock_path)?;
-    }
+    #[cfg(test)]
+    outcome_tests::checkpoint("before_acquire", &project_dir, "")?;
     session.lock = Some(ActivationLock::acquire(&project_dir)?);
     let activation_lock = session.lock.as_ref().expect("project lock acquired");
     if activation_lock.recovered {
@@ -446,6 +406,7 @@ fn perform_install(
     if cfg!(debug_assertions) && std::env::var_os("TAPID_TEST_RECOVER_ONLY").is_some() {
         return Ok((0, false));
     }
+    let lifecycle_policy = super::dependency_scripts::load_policy(&project_dir)?;
     let current_manifest = read_manifest(&manifest_path)?;
     if let Some(edit) = manifest_override
         && edit.expected != &current_manifest
@@ -467,16 +428,19 @@ fn perform_install(
                 .context("cannot preserve tapid.lock for recovery"));
         }
     };
-    if imported.is_some() {
-        imported = original_lock
-            .as_deref()
-            .map(|bytes| {
-                let input = std::str::from_utf8(bytes)
-                    .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
-                tapid_lockfile::ImportedNpmLockfile::from_json(input)
-                    .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))
-            })
-            .transpose()?;
+    // Recovery may restore a different lock format. Classify the current snapshot
+    // under the project lock, before choosing native replay or npm hydration.
+    let current_lock = original_lock
+        .as_deref()
+        .map(|bytes| parse_install_lock(bytes, &lock_path, ci, overrides))
+        .transpose()?;
+    let (previous_lock, mut imported) = match current_lock {
+        Some(InstallLock::Native(lock)) => (Some(lock), None),
+        Some(InstallLock::Imported(lock)) => (None, Some(lock)),
+        None => (None, None),
+    };
+    if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
+        imported = None;
     }
     if offline || frozen || manifest_override.is_some() || package.is_some() {
         session.journal = Some(
@@ -535,11 +499,6 @@ fn perform_install(
             default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
         }
     });
-    let previous_lock = if lock_path.is_file() && !has_imported_lock {
-        Some(read_lock(&lock_path)?)
-    } else {
-        None
-    };
     let mut replayable = true;
     if let Some(lock) = &previous_lock {
         match lock.validate_replay(lock.root_manifest_digest()) {
@@ -570,8 +529,13 @@ fn perform_install(
         if let Some(lock) = &previous_lock {
             let registry_config = crate::registry::RegistryConfig::load(&project_dir)
                 .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-            can_replay_online(&project_dir, lock, &registry_config, &lifecycle_policy)?
-                && replayable
+            super::replay::can_replay_online(
+                &project_dir,
+                lock,
+                &registry_config,
+                &lifecycle_policy,
+            )? && replayable
+                && !overrides.enabled()
         } else {
             false
         }
@@ -581,33 +545,41 @@ fn perform_install(
     if imported.is_some() || !offline && !frozen && !replay_existing {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-        let (mut lock, mut input, mut trees, mut store_transaction, mut workspace_plan) =
-            if let Some(imported) = imported.as_mut() {
-                online::fetch_imported(
-                    imported,
-                    &project_dir,
-                    &store,
-                    offline,
-                    registry_fixture,
-                    &registry_config,
-                )?
-            } else {
-                online::resolve_and_fetch_with_lock(
-                    &project_dir,
-                    &root_manifest,
-                    &store,
-                    registry_fixture,
-                    allow_unverified_registry_artifacts,
-                    &registry_config,
-                    if preserve {
-                        previous_lock.as_ref()
-                    } else {
-                        None
-                    },
-                    update,
-                    &mut report_replay_progress,
-                )?
-            };
+        let online::PreparedInstall {
+            mut lock,
+            layout:
+                online::PreparedLayout {
+                    mut input,
+                    mut trees,
+                    workspace: mut workspace_plan,
+                },
+            transaction: mut store_transaction,
+        } = if let Some(imported) = imported.as_mut() {
+            online::fetch_imported(
+                imported,
+                &project_dir,
+                &store,
+                offline,
+                registry_fixture,
+                &registry_config,
+            )?
+        } else {
+            online::resolve_and_fetch_with_lock(
+                &project_dir,
+                &root_manifest,
+                &store,
+                registry_fixture,
+                allow_unverified_registry_artifacts,
+                &registry_config,
+                if preserve {
+                    previous_lock.as_ref()
+                } else {
+                    None
+                },
+                update,
+                &mut report_replay_progress,
+            )?
+        };
         if let (Some(request), Some(previous)) = (update, previous_lock.as_ref()) {
             session
                 .outcome
@@ -619,6 +591,7 @@ fn perform_install(
                     &lock,
                 )?);
         }
+
         if session.journal.is_none() {
             session.journal = Some(
                 crate::filesystem::lifecycle_journal::LifecycleJournal::begin(
@@ -641,6 +614,7 @@ fn perform_install(
         journal
             .set_store_root(store.root())
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+        let mut lifecycle_snapshots = Vec::new();
         if imported.is_none() {
             session
                 .outcome
@@ -648,12 +622,15 @@ fn perform_install(
                 .extend(super::dependency_scripts::apply(
                     &project_dir,
                     &lifecycle_policy,
+                    overrides,
+                    &mut session.hook_stages,
                     &mut lock,
                     &mut input,
                     &mut trees,
                     &store,
                     Some(&mut store_transaction),
                     activation_lock,
+                    &mut lifecycle_snapshots,
                 )?);
         }
         let lock_json = if let Some(imported) = imported.as_ref() {
@@ -672,18 +649,17 @@ fn perform_install(
                 OperationalError::from(error).context("cannot publish verified store trees")
             })?;
         crate::filesystem::activation::test_crash_at("store_published");
-        let trees = trees
-            .into_iter()
-            .map(|(key, path)| (key, publication.resolve_path(&path)))
-            .collect();
-        for instance in &mut input.instances {
-            instance.tree.root = publication.resolve_path(&instance.tree.root);
-        }
-        for member in workspace_plan.members.values_mut() {
-            for instance in &mut member.input.instances {
-                instance.tree.root = publication.resolve_path(&instance.tree.root);
-            }
-        }
+        let mut layout = online::PreparedLayout {
+            input,
+            trees,
+            workspace: workspace_plan,
+        };
+        layout.rebase(&publication);
+        let online::PreparedLayout {
+            input,
+            trees,
+            workspace: workspace_plan,
+        } = layout;
         if original_lock.as_deref() != Some(lock_json.as_bytes()) {
             session.outcome.changed_files.push(lock_path.clone());
         }
@@ -769,6 +745,7 @@ fn perform_install(
     lock.validate_replay(&current_manifest_digest)
         .map_err(|error| {
             OperationalError::from(error)
+                .at_manifest(&project_dir.join("package.json"))
                 .context(format!("invalid lockfile {}", lock_path.display()))
         })?;
     let registry_config = crate::registry::RegistryConfig::load(&project_dir)
@@ -785,7 +762,11 @@ fn perform_install(
         &workspace,
         &registry_config,
     )?;
-    validate_workspace_dependency_edges(&workspace, &workspace_registry_dependencies, &lock)?;
+    super::replay::validate_workspace_dependency_edges(
+        &workspace,
+        &workspace_registry_dependencies,
+        &lock,
+    )?;
     crate::application::replay::validate_root_bindings(&lock, &root_manifest, &registry_config)?;
     if ci {
         online::validate_locked_artifact_sources(&lock, registry_fixture)?;
@@ -830,47 +811,57 @@ fn perform_install(
                 .values()
                 .any(|p| !p.derived_hooks().is_empty()))
     {
-        let (mut input, mut trees, transaction, mut cached_snapshots) =
-            online::prepare_locked_install(
-                &lock,
-                &root_manifest,
-                &store,
-                &registry_config,
-                registry_fixture,
-                &project_dir,
-                |completed, total| report_replay_progress(Progress::Replay(completed, total)),
-            )?;
-        let source_trees = trees.clone();
+        let online::PreparedLockedInstall {
+            layout:
+                online::PreparedLayout {
+                    mut input,
+                    mut trees,
+                    ..
+                },
+            transaction,
+            snapshots: _cached_snapshots,
+        } = online::prepare_locked_install(
+            &lock,
+            &root_manifest,
+            &store,
+            &registry_config,
+            registry_fixture,
+            &project_dir,
+            |completed, total| report_replay_progress(Progress::Replay(completed, total)),
+        )?;
+        let mut lifecycle_snapshots = Vec::new();
         session
             .outcome
             .warnings
             .extend(super::dependency_scripts::apply(
                 &project_dir,
                 &lifecycle_policy,
+                overrides,
+                &mut session.hook_stages,
                 &mut lock.clone(),
                 &mut input,
                 &mut trees,
                 &store,
                 None,
                 activation_lock,
+                &mut lifecycle_snapshots,
             )?);
-        for (key, tree) in &trees {
-            if source_trees.get(key) != Some(tree) {
-                cached_snapshots.retain(tree.clone());
-            }
-        }
         session.mutated = true;
         let publication = transaction
             .publish_for_lifecycle(&journal.coordinator_path())
             .map_err(OperationalError::from)?;
         crate::filesystem::activation::test_crash_at("store_published");
-        let trees = trees
-            .into_iter()
-            .map(|(key, path)| (key, publication.resolve_path(&path)))
-            .collect();
-        for instance in &mut input.instances {
-            instance.tree.root = publication.resolve_path(&instance.tree.root);
-        }
+        let mut layout = online::PreparedLayout {
+            input,
+            trees,
+            workspace: workspace_plan,
+        };
+        layout.rebase(&publication);
+        let online::PreparedLayout {
+            input,
+            trees,
+            workspace: workspace_plan,
+        } = layout;
         session
             .outcome
             .changed_files
@@ -915,7 +906,11 @@ fn perform_install(
         );
         crate::filesystem::activation::test_crash_at("store_published");
     }
-    let (mut input, mut trees) = crate::application::replay::replay_input_with_publication(
+    let crate::application::replay::ReplayInput {
+        mut input,
+        mut trees,
+        mut snapshots,
+    } = crate::application::replay::replay_input_with_publication(
         &lock,
         &root_manifest,
         &store,
@@ -923,27 +918,19 @@ fn perform_install(
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         publication.as_ref(),
     )?;
-    let source_trees = trees.clone();
     let hook_warnings = super::dependency_scripts::apply(
         &project_dir,
         &lifecycle_policy,
+        overrides,
+        &mut session.hook_stages,
         &mut lock.clone(),
         &mut input,
         &mut trees,
         &store,
         None,
         activation_lock,
+        &mut snapshots,
     );
-    if hook_warnings.is_err() {
-        crate::application::replay::cleanup_replay_snapshots(&source_trees);
-        crate::application::replay::cleanup_replay_snapshots(&trees);
-    } else {
-        let replaced = source_trees
-            .into_iter()
-            .filter(|(key, path)| trees.get(key) != Some(path))
-            .collect();
-        crate::application::replay::cleanup_replay_snapshots(&replaced);
-    }
     session.outcome.warnings.extend(hook_warnings?);
     session.mutated = true;
     session
@@ -976,6 +963,49 @@ fn perform_install(
     Ok((lock.packages().len(), true))
 }
 
+enum InstallLock {
+    Native(Lockfile),
+    Imported(tapid_lockfile::ImportedNpmLockfile),
+}
+
+fn parse_install_lock(
+    bytes: &[u8],
+    path: &Path,
+    ci: bool,
+    overrides: super::dependency_scripts::ExecutionOverrides,
+) -> Result<InstallLock, OperationalError> {
+    let input = std::str::from_utf8(bytes)
+        .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
+    let lock = if serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .is_some_and(|value| value["lockfileVersion"] == 8)
+    {
+        tapid_lockfile::ImportedNpmLockfile::from_json(input)
+            .map(InstallLock::Imported)
+            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error.to_string()))?
+    } else {
+        Lockfile::from_json(input)
+            .map(InstallLock::Native)
+            .map_err(|error| {
+                OperationalError::from(error)
+                    .context(format!("invalid lockfile {}", path.display()))
+            })?
+    };
+    if overrides.enabled() && matches!(lock, InstallLock::Imported(_)) {
+        return Err(OperationalError::new(
+            ErrorKind::InvalidRequest,
+            "dependency execution overrides are unavailable for imported npm locks; create an ordinary Tapid lock first",
+        ));
+    }
+    if ci && matches!(lock, InstallLock::Imported(_)) {
+        return Err(OperationalError::new(
+            ErrorKind::Lockfile,
+            "ci requires an ordinary verified-tree lock; use install --frozen to install imported npm locks",
+        ));
+    }
+    Ok(lock)
+}
+
 fn read_lock(path: &Path) -> Result<Lockfile, OperationalError> {
     let bytes = fs::read_to_string(path).map_err(|error| {
         OperationalError::from_source(ErrorKind::Lockfile, error)
@@ -984,108 +1014,6 @@ fn read_lock(path: &Path) -> Result<Lockfile, OperationalError> {
     Lockfile::from_json(&bytes).map_err(|error| {
         OperationalError::from(error).context(format!("invalid lockfile {}", path.display()))
     })
-}
-
-pub(super) fn validate_workspace_dependency_edges(
-    workspace: &online::WorkspaceMaterialization,
-    registry_dependencies: &[online::WorkspaceRegistryDependency],
-    lock: &Lockfile,
-) -> Result<(), String> {
-    for current in &workspace.locked {
-        let key = current.key();
-        let locked = lock
-            .workspace_packages()
-            .get(&key)
-            .ok_or_else(|| format!("lockfile is missing workspace package {key}"))?;
-        let mut expected_names = std::collections::BTreeSet::new();
-        for (name, target) in current.dependencies() {
-            expected_names.insert(name.clone());
-            if locked.dependencies().get(name) != Some(target) {
-                return Err(format!(
-                    "lockfile workspace dependency '{name}' for {key} does not match the current local workspace graph"
-                ));
-            }
-            let target_key = target
-                .parse::<tapid_lockfile::LockfilePackageKey>()
-                .map_err(|error| error.to_string())?;
-            if target_key.source.workspace().is_none()
-                || !lock.workspace_packages().contains_key(target)
-            {
-                return Err(format!(
-                    "lockfile workspace dependency '{name}' for {key} does not target a workspace package"
-                ));
-            }
-        }
-        for dependency in registry_dependencies
-            .iter()
-            .filter(|dependency| dependency.member_key == key)
-        {
-            let name = dependency.manifest_name.clone();
-            expected_names.insert(name.clone());
-            let target = locked.dependencies().get(&name).ok_or_else(|| {
-                format!(
-                    "lockfile omits workspace member dependency '{}' from {key}",
-                    dependency.manifest_name
-                )
-            })?;
-            let target_key = target
-                .parse::<tapid_lockfile::LockfilePackageKey>()
-                .map_err(|error| error.to_string())?;
-            if target_key.source.package_source().as_ref() != Some(&dependency.registry)
-                || target_key.name != dependency.package
-                || !dependency
-                    .requirement
-                    .matches_locked_version(&target_key.version)
-                || !lock.packages().contains_key(target)
-            {
-                return Err(format!(
-                    "lockfile target for workspace member dependency '{}' does not satisfy its registry, name, and version requirement",
-                    dependency.manifest_name
-                ));
-            }
-        }
-        let actual_names = locked
-            .dependencies()
-            .keys()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>();
-        if actual_names != expected_names {
-            return Err(format!(
-                "lockfile workspace dependency edges for {key} do not match the current member manifest"
-            ));
-        }
-    }
-    for peer in &workspace.peer_dependencies {
-        let provider_found = match &peer.provider {
-            online::WorkspacePeerProvider::Workspace { key, version } => {
-                let target_key = key
-                    .parse::<tapid_lockfile::LockfilePackageKey>()
-                    .map_err(|error| error.to_string())?;
-                target_key.version == *version
-                    && lock.workspace_packages().contains_key(key)
-                    && workspace.locked.iter().any(|member| member.key() == *key)
-            }
-            online::WorkspacePeerProvider::Registry { registry, package } => {
-                lock.roots().iter().any(|key| {
-                    key.parse::<tapid_lockfile::LockfilePackageKey>()
-                        .ok()
-                        .is_some_and(|target| {
-                            target.source.package_source().as_ref() == Some(registry)
-                                && target.name == *package
-                                && peer.requirement.matches_locked_version(&target.version)
-                                && lock.packages().contains_key(key)
-                        })
-                })
-            }
-        };
-        if !provider_found {
-            return Err(format!(
-                "lockfile has no provider satisfying workspace member peer dependency '{}' from {}",
-                peer.manifest_name, peer.member_key
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn materialize_install(
@@ -1166,9 +1094,6 @@ fn materialize_with_lock(
         }
         Ok(())
     })();
-    if replayed {
-        crate::application::replay::cleanup_replay_snapshots(&trees);
-    }
     for (_, stage, _) in stages {
         let _ = fs::remove_dir_all(stage);
     }
@@ -1216,29 +1141,6 @@ fn stage_layout(
         return Err(OperationalError::new(ErrorKind::Materialization, error));
     }
     Ok(stage)
-}
-
-/// The online fast path depends on graph inputs and lifecycle policy, not cache availability.
-pub(super) fn can_replay_online(
-    project: &Path,
-    lock: &Lockfile,
-    config: &crate::registry::RegistryConfig,
-    policy: &tapid_runner::DependencyLifecyclePolicy,
-) -> Result<bool, OperationalError> {
-    let routes_match = online::validate_locked_routes(lock, config)?;
-    let digest_matches = lock.root_manifest_digest() == online::root_digest(project)?;
-    if digest_matches {
-        online::validate_locked_files(project, lock)?;
-    }
-    let workspace = online::workspace_materialization(project, config)?;
-    Ok(routes_match
-        && policy.approvals().is_empty()
-        && lock
-            .packages()
-            .values()
-            .all(|p| p.derived_hooks().is_empty())
-        && digest_matches
-        && online::workspace_matches_lock(&workspace, lock))
 }
 
 #[cfg(test)]

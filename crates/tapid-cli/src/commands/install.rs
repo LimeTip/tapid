@@ -19,6 +19,12 @@ pub(crate) struct Args {
     /// Permit npm metadata without registry-declared integrity. Not allowed with --offline or --frozen.
     #[arg(long)]
     pub(crate) allow_unverified_registry_artifacts: bool,
+    /// Run unapproved dependency hooks for this invocation. Containment remains required.
+    #[arg(long, conflicts_with_all = ["offline", "frozen", "allow_unverified_registry_artifacts"])]
+    pub(crate) allow_unapproved_dependency_scripts: bool,
+    /// UNSAFE: run dependency hooks without containment. Does not grant hook approval or create reusable verified build outputs.
+    #[arg(long, conflicts_with_all = ["offline", "frozen", "allow_unverified_registry_artifacts"])]
+    pub(crate) unsafe_no_dependency_sandbox: bool,
     /// Project directory containing package.json and tapid.lock.
     #[arg(long, default_value = ".")]
     pub(crate) project_dir: PathBuf,
@@ -54,6 +60,11 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
         return preview(&args, json);
     }
     let mut reporter = crate::output::install::Reporter::new(json);
+    let overrides = crate::application::ExecutionOverrides {
+        allow_unapproved: args.allow_unapproved_dependency_scripts,
+        without_containment: args.unsafe_no_dependency_sandbox,
+    };
+    reporter.warnings_before_execution(overrides.warnings());
     let target_manifest_path = if let Some(name) = args.workspace.as_deref() {
         match crate::application::lifecycle::resolve_workspace(&args.project_dir, Some(name)) {
             Ok(selection) => {
@@ -61,11 +72,12 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
                 selection.manifest_path
             }
             Err(error) => {
-                let failure = OperationFailure::unchanged(&args.project_dir, error);
+                let mut failure = OperationFailure::unchanged(&args.project_dir, error);
+                failure.outcome.warnings.extend(overrides.warnings());
                 if json {
                     return crate::output::json::failure_or_human(&failure, "install", true);
                 }
-                reporter.failure(&failure);
+                reporter.failure(failure);
                 return ExitCode::from(1);
             }
         }
@@ -84,29 +96,22 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     } else {
         crate::application::install::InstallMode::Online
     };
-    let result = if args.workspace.is_some() {
-        crate::application::install::run_with_manifest_target(
-            &args.project_dir,
-            &target_manifest_path,
-            None,
-            args.package.as_deref(),
-            args.store_dir.as_deref(),
+    let result = crate::application::install::run_with_execution(
+        crate::application::install::InstallRequest {
+            project_dir: &args.project_dir,
+            target_manifest_path: &target_manifest_path,
+            mutation: args.package.as_deref().map_or(
+                crate::application::install::ManifestMutation::None,
+                crate::application::install::ManifestMutation::AddPackage,
+            ),
+            store_root: args.store_dir.as_deref(),
             mode,
-            args.registry_fixture.as_deref(),
-            args.allow_unverified_registry_artifacts,
-            |event| reporter.progress(event),
-        )
-    } else {
-        crate::application::install::run(
-            &args.project_dir,
-            args.package.as_deref(),
-            args.store_dir.as_deref(),
-            mode,
-            args.registry_fixture.as_deref(),
-            args.allow_unverified_registry_artifacts,
-            |event| reporter.progress(event),
-        )
-    };
+            registry_fixture: args.registry_fixture.as_deref(),
+            allow_unverified_registry_artifacts: args.allow_unverified_registry_artifacts,
+        },
+        overrides,
+        |event| reporter.progress(event),
+    );
     match result {
         Ok(report) => {
             if json {
@@ -117,7 +122,7 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
         }
         Err(error) if json => crate::output::json::failure_or_human(&error, "install", true),
         Err(error) => {
-            reporter.failure(&error);
+            reporter.failure(error);
             ExitCode::from(1)
         }
     }

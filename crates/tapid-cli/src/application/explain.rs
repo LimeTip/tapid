@@ -50,14 +50,13 @@ pub(crate) fn explain(
     let (evidence, source, metadata_fetched_at, metadata_read_at) = if let Some(path) =
         metadata_file
     {
-        let body = crate::commands::run::read_bounded_config_file(path, 32 * 1024 * 1024).map_err(
-            |_| {
+        let body =
+            crate::filesystem::read::read_bounded_file(path, 32 * 1024 * 1024).map_err(|_| {
                 OperationalError::new(
                     ErrorKind::RegistryMetadata,
                     "cannot read metadata snapshot as a regular file within 32 MiB",
                 )
-            },
-        )?;
+            })?;
         let evidence = NpmPackageEvidence::from_metadata(&origin, name, &version, &body)
             .map_err(|error| OperationalError::from_source(ErrorKind::RegistryMetadata, error))?;
         (
@@ -101,8 +100,8 @@ pub(crate) fn explain(
         bytes_checked_at: None,
     };
     if let Some(path) = artifact_file {
-        let bytes = crate::commands::run::read_bounded_config_file(path, 512 * 1024 * 1024)
-            .map_err(|_| {
+        let bytes =
+            crate::filesystem::read::read_bounded_file(path, 512 * 1024 * 1024).map_err(|_| {
                 OperationalError::new(
                     ErrorKind::InvalidData,
                     "cannot read artifact as a regular file within 512 MiB",

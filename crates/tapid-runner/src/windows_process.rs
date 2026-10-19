@@ -8,6 +8,8 @@ struct ProcThreadAttributeList {
     initialized: bool,
     // UpdateProcThreadAttribute retains these pointers until the list is deleted.
     security_capabilities: Box<SECURITY_CAPABILITIES>,
+    _registry_read: super::token::RegistryReadCapability,
+    all_application_packages_policy: Box<u32>,
     inherited_handles: Option<Box<[HANDLE]>>,
 }
 
@@ -16,9 +18,11 @@ impl ProcThreadAttributeList {
         container: &WindowsAppContainer,
         inherited_handles: &[HANDLE],
     ) -> Result<Self, ExecutionError> {
+        // Derive before initializing native list storage so failure needs no list cleanup.
+        let registry_read = super::token::RegistryReadCapability::new()?;
         let inherited_handles =
             (!inherited_handles.is_empty()).then(|| inherited_handles.to_vec().into_boxed_slice());
-        let attribute_count = if inherited_handles.is_some() { 2 } else { 1 };
+        let attribute_count = if inherited_handles.is_some() { 3 } else { 2 };
         let mut required = 0usize;
         // SAFETY: the null probe is the documented first call used to obtain the allocation size.
         unsafe { InitializeProcThreadAttributeList(null_mut(), attribute_count, 0, &mut required) };
@@ -39,8 +43,8 @@ impl ProcThreadAttributeList {
         }
         let security_capabilities = Box::new(SECURITY_CAPABILITIES {
             AppContainerSid: container.sid(),
-            Capabilities: null_mut(),
-            CapabilityCount: 0,
+            Capabilities: registry_read.entry(),
+            CapabilityCount: 1,
             Reserved: 0,
         });
         let attributes = Self {
@@ -48,6 +52,11 @@ impl ProcThreadAttributeList {
             list,
             initialized: true,
             security_capabilities,
+            _registry_read: registry_read,
+            // PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT from the Windows SDK.
+            // LPAC removes ambient All Application Packages access. Explicit per-run
+            // grants remain necessary; this is not a complete toolchain identity.
+            all_application_packages_policy: Box::new(1),
             inherited_handles,
         };
         // SAFETY: the boxed capabilities and attribute-list storage remain alive until the list is
@@ -67,6 +76,24 @@ impl ProcThreadAttributeList {
         if updated == 0 {
             return Err(unsupported_job(
                 "set AppContainer process security capabilities",
+            ));
+        }
+        // SAFETY: the boxed policy value stays at a stable address until the list is
+        // deleted. Windows consumes it during CreateProcessW, before the child runs.
+        if unsafe {
+            UpdateProcThreadAttribute(
+                attributes.list,
+                0,
+                PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY as usize,
+                (&*attributes.all_application_packages_policy as *const u32).cast::<c_void>(),
+                size_of::<u32>(),
+                null_mut(),
+                null(),
+            )
+        } == 0
+        {
+            return Err(unsupported_job(
+                "require Less-Privileged AppContainer launch",
             ));
         }
         if let Some(handles) = &attributes.inherited_handles {
@@ -460,34 +487,38 @@ impl WindowsSuspendedChild {
     ) -> Result<(), ExecutionError> {
         let mut token = 0;
         // SAFETY: process is a valid suspended child handle; token receives the queried handle.
-        if unsafe { OpenProcessToken(self.process, TOKEN_QUERY, &mut token) } == 0 {
+        if unsafe { OpenProcessToken(self.process, TOKEN_QUERY | TOKEN_DUPLICATE, &mut token) } == 0
+        {
             return Err(unsupported_job(
                 "open child token for AppContainer verification",
             ));
         }
         let verification = (|| {
-            let mut is_appcontainer = 0i32;
-            let mut returned = 0u32;
-            // SAFETY: the output buffer is a writable BOOL-sized value.
-            if unsafe {
-                GetTokenInformation(
-                    token,
-                    TokenIsAppContainer,
-                    (&mut is_appcontainer as *mut i32).cast::<c_void>(),
-                    size_of::<i32>() as u32,
-                    &mut returned,
-                )
-            } == 0
             {
-                return Err(unsupported_job("query child AppContainer token state"));
-            }
-            if is_appcontainer == 0 {
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::UnsupportedContainment,
-                    "Windows child token is not an AppContainer; refusing to resume it",
-                ));
+                let mut enabled = 0i32;
+                let mut returned = 0u32;
+                // SAFETY: TokenIsAppContainer returns a DWORD-sized value.
+                if unsafe {
+                    GetTokenInformation(
+                        token,
+                        TokenIsAppContainer,
+                        (&mut enabled as *mut i32).cast::<c_void>(),
+                        size_of::<i32>() as u32,
+                        &mut returned,
+                    )
+                } == 0
+                {
+                    return Err(unsupported_job("query child AppContainer token state"));
+                }
+                if returned != size_of::<i32>() as u32 || enabled == 0 {
+                    return Err(ExecutionError::new(
+                        ExecutionErrorCategory::UnsupportedContainment,
+                        "Windows child token is not a verified AppContainer; refusing to resume it",
+                    ));
+                }
             }
 
+            let mut returned = 0u32;
             let mut required = 0u32;
             // SAFETY: null/zero is the documented size probe for GetTokenInformation.
             unsafe {
@@ -524,7 +555,7 @@ impl WindowsSuspendedChild {
                     "Windows child AppContainer SID differs from the requested profile",
                 ));
             }
-            Ok(())
+            super::token::verify_lpac_access(token, expected_sid)
         })();
         // SAFETY: token is the handle returned by OpenProcessToken above.
         unsafe { CloseHandle(token) };

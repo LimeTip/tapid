@@ -17,6 +17,8 @@ pub struct ImportedNpmLockfile {
     lockfile_version: u32,
     root_manifest_digest: String,
     npm_lock: Value,
+    #[serde(skip)]
+    graph: std::sync::OnceLock<std::sync::Arc<ImportedNpmGraph>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workspace_manifest_digests: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -54,12 +56,14 @@ pub struct ImportedNpmPackage {
 }
 
 /// Registry entry points for one project manifest, with npm optional overrides.
+#[derive(Debug)]
 pub struct ImportedNpmEntryPoints {
     pub dependencies: BTreeMap<String, String>,
     pub optional_dependencies: BTreeSet<String>,
 }
 
 /// Validated npm placement graph; edges target paths, never newly resolved versions.
+#[derive(Debug)]
 pub struct ImportedNpmGraph {
     /// Root-relative local targets and their selected npm manifest fields.
     pub workspaces: BTreeMap<String, Value>,
@@ -75,7 +79,7 @@ pub struct ImportedNpmGraph {
 impl ImportedNpmLockfile {
     pub fn import(input: &str, manifest: &str, digest: &str) -> Result<Self, NpmImportError> {
         let npm_lock = parse::json(input)?;
-        parse::graph(&npm_lock)?;
+        let graph = parse::graph(&npm_lock)?;
         validate_manifest_fields(&npm_lock, manifest)?;
         let digest = digest
             .parse::<ArtifactDigest>()
@@ -84,6 +88,7 @@ impl ImportedNpmLockfile {
             lockfile_version: 8,
             root_manifest_digest: digest.to_string(),
             npm_lock,
+            graph: std::sync::OnceLock::from(std::sync::Arc::new(graph)),
             workspace_manifest_digests: BTreeMap::new(),
             verified_trees: BTreeMap::new(),
             verified_artifacts: BTreeMap::new(),
@@ -184,7 +189,8 @@ impl ImportedNpmLockfile {
         &mut self,
         manifests: &BTreeMap<String, (String, String)>,
     ) -> Result<(), NpmImportError> {
-        self.workspace_manifest_digests = workspace::validate_manifests(&self.graph()?, manifests)?;
+        self.workspace_manifest_digests =
+            workspace::validate_manifests(self.graph()?.as_ref(), manifests)?;
         Ok(())
     }
 
@@ -192,7 +198,7 @@ impl ImportedNpmLockfile {
         &self,
         manifests: &BTreeMap<String, (String, String)>,
     ) -> Result<(), NpmImportError> {
-        let current = workspace::validate_manifests(&self.graph()?, manifests)?;
+        let current = workspace::validate_manifests(self.graph()?.as_ref(), manifests)?;
         if current != self.workspace_manifest_digests {
             return Err(parse::error(
                 "/workspaceManifestDigests",
@@ -204,8 +210,17 @@ impl ImportedNpmLockfile {
         Ok(())
     }
 
-    pub fn graph(&self) -> Result<ImportedNpmGraph, NpmImportError> {
-        parse::graph(&self.npm_lock)
+    pub fn graph(&self) -> Result<std::sync::Arc<ImportedNpmGraph>, NpmImportError> {
+        if let Some(graph) = self.graph.get() {
+            return Ok(graph.clone());
+        }
+        let graph = parse::graph(&self.npm_lock)?;
+        let _ = self.graph.set(std::sync::Arc::new(graph));
+        Ok(self
+            .graph
+            .get()
+            .expect("validated graph was initialized")
+            .clone())
     }
     pub fn root_manifest_digest(&self) -> &str {
         &self.root_manifest_digest
@@ -288,25 +303,6 @@ impl ImportedNpmGraph {
         cpu: &str,
         libc: Option<&str>,
     ) -> Result<BTreeSet<String>, NpmImportError> {
-        let os = match os {
-            "macos" => "darwin",
-            "windows" => "win32",
-            value => value,
-        };
-        let cpu = match cpu {
-            "x86_64" => "x64",
-            "aarch64" => "arm64",
-            "x86" => "ia32",
-            value => value,
-        };
-        fn matches(values: &[String], current: Option<&str>) -> bool {
-            values.is_empty()
-                || current.is_some_and(|current| {
-                    !values.iter().any(|v| v.strip_prefix('!') == Some(current))
-                        && (values.iter().all(|v| v.starts_with('!'))
-                            || values.iter().any(|v| v == current))
-                })
-        }
         let mut selected = BTreeSet::new();
         let mut visited = BTreeSet::new();
         let mut pending: Vec<_> = self
@@ -328,12 +324,12 @@ impl ImportedNpmGraph {
                 continue;
             }
             let package = &self.packages[&path];
-            if !matches(&package.os, Some(os))
-                || !matches(&package.cpu, Some(cpu))
-                || os == "linux"
-                    && !(libc.is_none() && package.libc.iter().all(|value| value.starts_with('!')))
-                    && !matches(&package.libc, libc)
-            {
+            let constraints = tapid_core::PackagePlatform {
+                os: package.os.clone(),
+                cpu: package.cpu.clone(),
+                libc: package.libc.clone(),
+            };
+            if !constraints.matches(os, cpu, libc) {
                 if optional {
                     continue;
                 }

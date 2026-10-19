@@ -665,10 +665,7 @@ impl ExecutionLifecycle for Lifecycle<'_> {
                 .try_wait()
                 .map_err(|e| unsupported(&format!("cannot inspect managed supervisor: {e}")))?
             {
-                termination = status.code().map_or_else(
-                    || Termination::Signaled(status.signal().unwrap_or(0)),
-                    Termination::Exited,
-                );
+                termination = Termination::from_process_status(status);
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
