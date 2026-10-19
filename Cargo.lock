@@ -1522,6 +1522,7 @@ version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",
+ "tapid-protocol",
  "tapid-signatures",
  "time",
 ]
