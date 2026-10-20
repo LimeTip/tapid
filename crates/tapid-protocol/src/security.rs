@@ -15,7 +15,8 @@ pub struct SecuritySubject {
     #[serde(with = "ExactPackage")]
     pub package: PackageInstanceWire,
     pub requested_name: String,
-    /// Stable graph placement supplied by the consumer, never a local absolute path.
+    /// Stable graph identifier using normalized relative slash-separated segments.
+    /// Absolute paths, backslashes, colons, and empty/dot segments are invalid.
     pub placement: String,
     #[serde(deserialize_with = "unique_peers")]
     pub peers: BTreeMap<String, PackageInstanceWire>,
@@ -122,6 +123,7 @@ pub enum SecurityReason {
 }
 
 impl SecurityRequest {
+    /// Checks v1 identity, portable placement, context and coverage invariants.
     pub fn validate(&self) -> Result<(), SecurityReason> {
         if self.version != SECURITY_CONTRACT_V1 {
             return Err(SecurityReason::UnsupportedVersion);
@@ -129,11 +131,19 @@ impl SecurityRequest {
         let subject = &self.subject;
         if !valid_package(&subject.package)
             || subject.requested_name.parse::<PackageName>().is_err()
-            || !text(&subject.placement)
+            || !valid_placement(&subject.placement)
             || subject.peers.len() > 128
             || subject.peers.iter().any(|(name, package)| {
                 name.parse::<PackageName>().is_err() || !valid_package(package)
             })
+            || [
+                &subject.platform.os,
+                &subject.platform.cpu,
+                &subject.platform.libc,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| !text(value))
             || PlatformContext::new(
                 subject.platform.os.as_deref(),
                 subject.platform.cpu.as_deref(),
@@ -157,6 +167,15 @@ impl SecurityRequest {
         }
         Ok(())
     }
+}
+
+fn valid_placement(value: &str) -> bool {
+    text(value)
+        && !value.starts_with('/')
+        && !value.contains(['\\', ':'])
+        && !value
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
 }
 
 fn valid_package(package: &PackageInstanceWire) -> bool {

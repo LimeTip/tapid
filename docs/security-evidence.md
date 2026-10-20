@@ -17,9 +17,12 @@ A request contains one exact graph occurrence and one check. Its `subject` retai
 canonical credential-free HTTPS registry origin, actual package name and exact
 version, `requestedName` for aliases, stable `placement`, resolved peer identities
 including their origins, and explicit `os`, `cpu`, and `libc` target context.
-Optional platform values can be null. Placement is a consumer-owned graph identifier;
-clients must not put absolute local filesystem paths in it. Peer map keys name the
-requested dependency, while values retain actual package identity.
+Optional platform values can be null. Each present value is at most 4096 UTF-8 bytes
+and must also satisfy core platform validation. Placement is a consumer-owned graph
+identifier with normalized relative slash-separated segments. Absolute paths,
+backslashes, colons, empty segments, `.` and `..` segments are rejected on every
+host platform. Clients must not put absolute local filesystem paths in it. Peer
+map keys name the requested dependency, while values retain actual package identity.
 
 Origin is never inferred from name/version. A package from a private registry cannot
 match a public npm advisory merely because its name and version coincide. Copied

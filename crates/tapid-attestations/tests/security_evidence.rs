@@ -438,3 +438,64 @@ fn hosted_claims_and_publication_use_the_same_closed_v1_contract() {
     invalid["scopes"] = json!(["administrator"]);
     assert!(serde_json::from_value::<AccountAuthorization>(invalid).is_err());
 }
+
+#[test]
+fn placements_are_portable_graph_identifiers() {
+    for placement in [
+        "/home/alice/app/node_modules/alias",
+        "C:/Users/alice/app/node_modules/alias",
+        "C:\\Users\\alice\\app\\node_modules\\alias",
+        "C:app/node_modules/alias",
+        "\\\\server\\share\\node_modules\\alias",
+        "//server/share/node_modules/alias",
+        "\\rooted\\node_modules\\alias",
+        "root\\node_modules\\alias",
+        "root/../node_modules/alias",
+        "root/./node_modules/alias",
+        "root//node_modules/alias",
+        "root/node_modules/alias/",
+    ] {
+        let mut request = request();
+        request.subject.placement = placement.into();
+        assert_eq!(
+            request.validate(),
+            Err(SecurityReason::InvalidRequest),
+            "{placement}"
+        );
+    }
+    for placement in [
+        "root",
+        "root/node_modules/alias",
+        "packages/member/node_modules/@scope/alias",
+    ] {
+        let mut request = request();
+        request.subject.placement = placement.into();
+        assert_eq!(request.validate(), Ok(()), "{placement}");
+    }
+}
+
+#[test]
+fn every_present_platform_value_obeys_the_wire_byte_limit() {
+    for field in ["os", "cpu", "libc"] {
+        for (value, expected) in [
+            ("a".repeat(4096), Ok(())),
+            ("a".repeat(4097), Err(SecurityReason::InvalidRequest)),
+            ("é".repeat(2048), Ok(())),
+            ("é".repeat(2049), Err(SecurityReason::InvalidRequest)),
+        ] {
+            let mut request = request();
+            match field {
+                "os" => request.subject.platform.os = Some(value),
+                "cpu" => request.subject.platform.cpu = Some(value),
+                "libc" => request.subject.platform.libc = Some(value),
+                _ => unreachable!(),
+            }
+            assert_eq!(request.validate(), expected, "{field}");
+        }
+    }
+    let mut request = request();
+    request.subject.platform.os = None;
+    request.subject.platform.cpu = None;
+    request.subject.platform.libc = None;
+    assert_eq!(request.validate(), Ok(()));
+}

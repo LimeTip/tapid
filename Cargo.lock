@@ -1518,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-attestations"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-protocol"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "serde",
  "tapid-core",
