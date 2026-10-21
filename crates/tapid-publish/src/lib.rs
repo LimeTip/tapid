@@ -121,7 +121,7 @@ impl NormalizedFileManifest {
     /// A subsequent [`pack`] reads again; use its returned manifest for byte binding.
     /// Applies the same collision policy and errors as [`pack`].
     pub fn from_source(source: &PackageSource) -> Result<Self, PublishError> {
-        Ok(snapshot_source(source)?.manifest)
+        inspect_source(source)
     }
     /// Iterate normalized paths in manifest order (sorted for generated manifests).
     pub fn paths(&self) -> impl Iterator<Item = &str> {
@@ -205,9 +205,6 @@ fn digest_bytes(bytes: &[u8]) -> ArtifactDigest {
         .parse()
         .expect("sha256 digest is valid")
 }
-struct SourceSnapshot {
-    manifest: NormalizedFileManifest,
-}
 fn normalized_source_paths(source: &PackageSource) -> Result<Vec<(String, PathBuf)>, PublishError> {
     if !source.root.is_dir() {
         return Err(PublishError::InvalidSource(
@@ -231,22 +228,34 @@ fn path_collision_key(path: &str) -> String {
     path.to_uppercase().to_lowercase()
 }
 
-fn snapshot_source(source: &PackageSource) -> Result<SourceSnapshot, PublishError> {
+fn inspect_source(source: &PackageSource) -> Result<NormalizedFileManifest, PublishError> {
     let paths = normalized_source_paths(source)?;
     let mut manifest_files = Vec::with_capacity(paths.len());
     for (path, full) in paths {
-        let bytes = read_source_file(&full)?;
+        use std::io::Read;
+        let mut file = fs::File::open(&full)?;
+        let mut hash = Sha256::new();
+        let mut size = 0;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+            size += count as u64;
+        }
         manifest_files.push(ManifestFile {
             path,
-            size: bytes.len() as u64,
-            digest: digest_bytes(&bytes),
+            size,
+            digest: format!("sha256-{}", hex_lower(&hash.finalize()))
+                .parse()
+                .expect("sha256 digest is valid"),
         });
     }
-    Ok(SourceSnapshot {
-        manifest: NormalizedFileManifest {
-            version: source.version.clone(),
-            files: manifest_files,
-        },
+    Ok(NormalizedFileManifest {
+        version: source.version.clone(),
+        files: manifest_files,
     })
 }
 

@@ -1,5 +1,20 @@
 use crate::ManifestError;
 
+/// Discovered commands and whether npm's required native build was synthesized.
+#[derive(Debug, Default)]
+pub struct DependencyLifecyclePlan {
+    commands: Vec<(String, String)>,
+    implicit_install: bool,
+}
+impl DependencyLifecyclePlan {
+    pub fn requires_install(&self) -> bool {
+        self.implicit_install
+    }
+    pub fn into_commands(self) -> Vec<(String, String)> {
+        self.commands
+    }
+}
+
 /// Discovers dependency installation and preparation hooks in execution order.
 /// Only the script map is validated; unrelated metadata is not interpreted.
 pub fn dependency_lifecycle_hooks(input: &str) -> Result<Vec<String>, ManifestError> {
@@ -14,6 +29,14 @@ pub fn dependency_lifecycle_commands(
     input: &str,
     binding_gyp: bool,
 ) -> Result<Vec<(String, String)>, ManifestError> {
+    Ok(dependency_lifecycle_plan(input, binding_gyp)?.into_commands())
+}
+
+/// Discovers exact command bytes and identifies the required implicit build.
+pub fn dependency_lifecycle_plan(
+    input: &str,
+    binding_gyp: bool,
+) -> Result<DependencyLifecyclePlan, ManifestError> {
     let value: serde_json::Value =
         serde_json::from_str(input).map_err(ManifestError::InvalidJson)?;
     let object = value.as_object().ok_or(ManifestError::RootMustBeObject)?;
@@ -50,10 +73,15 @@ pub fn dependency_lifecycle_commands(
     })
     .map(|name| (name.to_owned(), scripts[name].as_str().unwrap().to_owned()))
     .collect::<Vec<_>>();
-    if binding_gyp && !scripts.contains_key("install") && !scripts.contains_key("preinstall") {
+    let implicit_install =
+        binding_gyp && !scripts.contains_key("install") && !scripts.contains_key("preinstall");
+    if implicit_install {
         commands.insert(0, ("install".into(), "node-gyp rebuild".into()));
     }
-    Ok(commands)
+    Ok(DependencyLifecyclePlan {
+        commands,
+        implicit_install,
+    })
 }
 
 #[cfg(test)]
@@ -75,6 +103,16 @@ mod tests {
     }
     #[test]
     fn binding_gyp_discovers_implicit_install_without_overriding_explicit_hooks() {
+        assert!(
+            dependency_lifecycle_plan("{}", true)
+                .unwrap()
+                .requires_install()
+        );
+        assert!(
+            !dependency_lifecycle_plan(r#"{"scripts":{"install":"custom"}}"#, true)
+                .unwrap()
+                .requires_install()
+        );
         assert_eq!(
             dependency_lifecycle_commands("{}", true).unwrap(),
             vec![("install".into(), "node-gyp rebuild".into())]

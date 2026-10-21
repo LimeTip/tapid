@@ -26,10 +26,12 @@ pub(crate) fn json_object(
 ) -> Result<serde_json::Map<String, serde_json::Value>, MetadataError> {
     let value: serde_json::Value = serde_json::from_slice(body)
         .map_err(|error| MetadataError::InvalidJson(error.to_string()))?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| MetadataError::InvalidJson("metadata must be an object".into()))
+    match value {
+        serde_json::Value::Object(object) => Ok(object),
+        _ => Err(MetadataError::InvalidJson(
+            "metadata must be an object".into(),
+        )),
+    }
 }
 
 #[cfg(test)]

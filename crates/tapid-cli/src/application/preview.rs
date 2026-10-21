@@ -188,7 +188,7 @@ fn inspect(
         matches!(mode, InstallMode::Online)
             && replayable
             && before == after
-            && super::install::can_replay_online(project, lock, &config, &policy)?
+            && super::replay::can_replay_online(project, lock, &config, &policy)?
     } else {
         false
     };
@@ -210,7 +210,7 @@ fn inspect(
         }
         let dependencies =
             online::resolved_workspace_registry_dependencies(&manifest, &workspace, &config)?;
-        super::install::validate_workspace_dependency_edges(&workspace, &dependencies, lock)?;
+        super::replay::validate_workspace_dependency_edges(&workspace, &dependencies, lock)?;
         super::replay::validate_root_bindings(lock, &manifest, &config)?;
         online::validate_locked_files(project, lock)?;
         if !online::validate_locked_routes(lock, &config)? {

@@ -1,4 +1,7 @@
-use std::path::{Component, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Component, PathBuf},
+};
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -29,6 +32,21 @@ pub struct WorkspaceShimPackage {
 pub enum ShimStrategy {
     UnixSymlink,
     WindowsCmdAndPowerShell,
+}
+
+impl ShimStrategy {
+    /// Validate generated output identities without reading bin targets or
+    /// selecting interpreters. Uses the same collision rules as shim planning.
+    pub fn validate_targets<'a>(
+        self,
+        targets: impl IntoIterator<Item = &'a std::path::Path>,
+    ) -> Result<(), PlanError> {
+        let mut outputs = BTreeSet::new();
+        for target in targets {
+            reserve_shim_outputs(&mut outputs, target, self)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +126,7 @@ pub fn plan_shims(
         Platform::Other => return Err(PlanError::UnsupportedPlatform(platform)),
     };
     let mut entries = Vec::new();
+    let mut outputs = BTreeSet::new();
     for package in packages {
         if !package.tree_root.is_absolute()
             || package
@@ -146,12 +165,7 @@ pub fn plan_shims(
             if !managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(target_path));
             }
-            let collision = entries
-                .iter()
-                .any(|entry: &ShimEntry| shim_paths_collide(&entry.target, &target_path, strategy));
-            if collision {
-                return Err(PlanError::ShimCollision(target_path));
-            }
+            reserve_shim_outputs(&mut outputs, &target_path, strategy)?;
             entries.push(ShimEntry {
                 interpreter: shim_interpreter(&source, platform)?,
                 command: target.command.clone(),
@@ -193,6 +207,11 @@ pub fn plan_shims_with_workspace_packages(
         Platform::Windows => ShimStrategy::WindowsCmdAndPowerShell,
         Platform::Other => return Err(PlanError::UnsupportedPlatform(platform)),
     };
+    let mut outputs = plan
+        .entries
+        .iter()
+        .flat_map(|entry| shim_output_keys(&entry.target, strategy))
+        .collect::<BTreeSet<_>>();
     for package in workspace_packages {
         if !package.tree_root.is_absolute()
             || package
@@ -257,13 +276,7 @@ pub fn plan_shims_with_workspace_packages(
             if !plan.managed_root.contains(&source) || !plan.managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(source));
             }
-            if plan
-                .entries
-                .iter()
-                .any(|entry| shim_paths_collide(&entry.target, &target_path, strategy))
-            {
-                return Err(PlanError::ShimCollision(target_path));
-            }
+            reserve_shim_outputs(&mut outputs, &target_path, strategy)?;
             plan.entries.push(ShimEntry {
                 interpreter: shim_interpreter(&validated_source, platform)?,
                 command: target.command.clone(),
@@ -278,26 +291,24 @@ pub fn plan_shims_with_workspace_packages(
     Ok(plan)
 }
 
-fn shim_paths_collide(
-    first: &std::path::Path,
-    second: &std::path::Path,
-    strategy: ShimStrategy,
-) -> bool {
-    match strategy {
-        ShimStrategy::UnixSymlink => first == second,
-        ShimStrategy::WindowsCmdAndPowerShell => {
-            let first_keys = shim_output_keys(first, strategy);
-            shim_output_keys(second, strategy)
-                .iter()
-                .any(|key| first_keys.iter().any(|first_key| first_key == key))
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum ShimKey {
     Bytes(Vec<u8>),
     Utf16(Vec<u16>),
+}
+
+fn reserve_shim_outputs(
+    outputs: &mut BTreeSet<ShimKey>,
+    target: &std::path::Path,
+    strategy: ShimStrategy,
+) -> Result<(), PlanError> {
+    if shim_output_keys(target, strategy)
+        .into_iter()
+        .any(|key| !outputs.insert(key))
+    {
+        return Err(PlanError::ShimCollision(target.to_owned()));
+    }
+    Ok(())
 }
 
 fn shim_output_keys(path: &std::path::Path, strategy: ShimStrategy) -> Vec<ShimKey> {
@@ -659,11 +670,10 @@ mod tests {
 
         let first = PathBuf::from(OsString::from_vec(b"node-\xff/.bin/tool".to_vec()));
         let second = PathBuf::from(OsString::from_vec(b"node-\xfe/.bin/tool".to_vec()));
-        assert!(!shim_paths_collide(
-            &first,
-            &second,
-            ShimStrategy::UnixSymlink
-        ));
+        assert_ne!(
+            shim_output_keys(&first, ShimStrategy::UnixSymlink),
+            shim_output_keys(&second, ShimStrategy::UnixSymlink),
+        );
     }
 
     #[cfg(unix)]

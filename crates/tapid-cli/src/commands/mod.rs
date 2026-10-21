@@ -13,6 +13,8 @@ pub(crate) mod manifest;
 mod npm_import;
 mod release_verification;
 pub(crate) mod run;
+mod sandbox;
+mod tool;
 pub(crate) mod upgrade;
 pub(crate) mod why;
 
@@ -51,6 +53,14 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Install and manage standalone npm tools in separate locked environments.
+    #[command(
+        long_about = "Install standalone npm commands without a project. Each tool has its own locked environment and shares the verified package cache. Lifecycle scripts never run. Add the reported bin directory to PATH once; Tapid does not edit shell profiles. JavaScript commands require an existing Node runtime. Commands run with your user permissions, independently of tapid run containment. Additional package-specific runtime setup must be invoked explicitly.",
+        after_help = "Examples:\n  tapid tool install typescript@^5\n  tapid tool list\n  tapid tool update typescript\n  tapid tool remove typescript"
+    )]
+    Tool(tool::Args),
+    #[command(name = "__tool-exec", hide = true)]
+    ToolExec(tool::ExecArgs),
     /// Summarize integrity, provenance, and missing security checks for an exact npm version.
     #[command(
         long_about = "Inspect full npm registry metadata for <package>@<exact-version>. Distinguishes registry claims, byte verification, and missing checks. Reads tapid.toml routing without requiring package.json. Does not install, recover transactions, or write project/store files. Signatures and provenance references are unverified. Vulnerability feeds, malware analysis, and publisher identity verification are unsupported. Use --artifact-file to verify local bytes against the reported SHA-512 digest; a mismatch exits 1.",
@@ -63,6 +73,8 @@ pub(crate) enum Command {
     Clean(cache::CleanArgs),
     /// Print the Apache-2.0 license and copyright attribution.
     License,
+    /// Manage the administrator-installed Windows network guard for unattended contained runs.
+    Sandbox(sandbox::Args),
     #[command(name = "__verify-release-record", hide = true)]
     VerifyReleaseRecord(release_verification::Args),
     #[command(name = "__prepare-release-install", hide = true)]
@@ -172,10 +184,13 @@ pub(crate) enum Command {
 impl Command {
     fn operation(&self) -> &'static str {
         match self {
+            Self::Tool(_) => "tool",
+            Self::ToolExec(_) => "__tool-exec",
             Self::Explain(_) => "explain",
             Self::Cache(_) => "cache",
             Self::Clean(_) => "clean",
             Self::License => "license",
+            Self::Sandbox(_) => "sandbox",
             Self::VerifyReleaseRecord(_) => "__verify-release-record",
             Self::PrepareReleaseInstall(_) => "__prepare-release-install",
             Self::Init(_) => "init",
@@ -202,7 +217,12 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         && !matches!(
             command,
             Some(
-                Command::Cache(_)
+                Command::Ci(_)
+                    | Command::Manifest(_)
+                    | Command::Lock(_)
+                    | Command::ImportPackageLock(_)
+                    | Command::Cache(_)
+                    | Command::Tool(_)
                     | Command::Clean(_)
                     | Command::Install(_)
                     | Command::Explain(_)
@@ -222,10 +242,13 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         );
     }
     match command {
+        Some(Command::Tool(args)) => tool::run(args, json),
+        Some(Command::ToolExec(args)) => tool::execute(args),
         Some(Command::Explain(args)) => explain::run(args, json),
         Some(Command::Cache(args)) => cache::run(args, json),
         Some(Command::Clean(args)) => cache::clean(args, json),
         Some(Command::License) => license::run(),
+        Some(Command::Sandbox(args)) => sandbox::run(args),
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
         Some(Command::PrepareReleaseInstall(args)) => release_verification::prepare_install(args),
         None => {
@@ -233,13 +256,13 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(Command::Init(args)) => init::run(args),
-        Some(Command::ImportPackageLock(args)) => npm_import::run(args),
-        Some(Command::Manifest(args)) => manifest::run(args),
-        Some(Command::Lock(args)) => lock::run(args),
+        Some(Command::ImportPackageLock(args)) => npm_import::run(args, json),
+        Some(Command::Manifest(args)) => manifest::run(args, json),
+        Some(Command::Lock(args)) => lock::run(args, json),
         Some(Command::Run(args)) => run::run(args),
 
         Some(Command::Install(args)) => install::run(args, json),
-        Some(Command::Ci(args)) => ci::run(args),
+        Some(Command::Ci(args)) => ci::run(args, json),
         Some(Command::Add(args)) => lifecycle::add(args, json),
         Some(Command::Remove(args)) => lifecycle::remove(args, json),
         Some(Command::Update(args)) => lifecycle::update(args, json),

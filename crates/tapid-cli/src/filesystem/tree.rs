@@ -67,18 +67,28 @@ pub(crate) fn materialize_stage_with_workspace_links(
 ) -> Result<(), String> {
     fs::create_dir_all(stage.join("node_modules")).map_err(|e| e.to_string())?;
     let mut by_source = BTreeMap::new();
-    let mut verified_sources = Vec::with_capacity(plan.entries.len());
+    let sources = trees.values().collect::<std::collections::BTreeSet<_>>();
+    let mut digests = BTreeMap::new();
+    for instance in instances {
+        if let Some(previous) = digests.insert(&instance.tree.root, instance.tree.digest.as_str())
+            && previous != instance.tree.digest.as_str()
+        {
+            return Err("conflicting tree replay digest mapping".to_owned());
+        }
+    }
+    let mut verified_sources = BTreeMap::new();
     for entry in &plan.entries {
-        let tree = trees
-            .values()
-            .find(|path| **path == entry.source)
+        let tree = sources
+            .get(&entry.source)
             .ok_or_else(|| "tree replay mapping lost".to_owned())?;
-        let expected = instances
-            .iter()
-            .find(|instance| instance.tree.root == *tree)
-            .map(|instance| instance.tree.digest.as_str())
+        let expected = *digests
+            .get(tree)
             .ok_or_else(|| "tree replay digest mapping lost".to_owned())?;
-        if !sources_are_verified_snapshots {
+        if verified_sources
+            .insert((*tree).clone(), expected.to_owned())
+            .is_none()
+            && !sources_are_verified_snapshots
+        {
             let actual = tapid_archive::canonical_tree_digest(tree).map_err(|e| e.to_string())?;
             if actual != expected {
                 return Err(format!(
@@ -86,8 +96,7 @@ pub(crate) fn materialize_stage_with_workspace_links(
                 ));
             }
         }
-        by_source.insert(entry.target.clone(), tree.clone());
-        verified_sources.push((tree.clone(), expected.to_owned()));
+        by_source.insert(entry.target.clone(), (*tree).clone());
     }
     let materialization_total = plan.activation.steps.len();
     for (index, step) in plan.activation.steps.iter().enumerate() {
@@ -662,13 +671,23 @@ pub(crate) fn package_content_root(source: &Path) -> Result<PathBuf, String> {
 }
 
 pub(crate) fn copy_tree_contents(source: &Path, target: &Path) -> Result<(), String> {
-    copy_tree_contents_inner(source, target, true)
+    copy_tree_contents_inner(source, target, true, None)
+}
+
+/// Copy a tree view with one root entry omitted, without following that entry.
+pub(crate) fn copy_tree_contents_without_root_entry(
+    source: &Path,
+    target: &Path,
+    entry: &str,
+) -> Result<(), String> {
+    copy_tree_contents_inner(source, target, true, Some(entry))
 }
 
 fn copy_tree_contents_inner(
     source: &Path,
     target: &Path,
     skip_internal_metadata: bool,
+    excluded: Option<&str>,
 ) -> Result<(), String> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -676,7 +695,9 @@ fn copy_tree_contents_inner(
     fs::create_dir(target).map_err(|e| e.to_string())?;
     for item in fs::read_dir(source).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
-        if skip_internal_metadata && item.file_name() == ".tapid-executable-modes" {
+        if (skip_internal_metadata && item.file_name() == ".tapid-executable-modes")
+            || excluded.is_some_and(|name| item.file_name() == name)
+        {
             continue;
         }
         let src = item.path();
@@ -689,7 +710,7 @@ fn copy_tree_contents_inner(
             ));
         }
         if meta.is_dir() {
-            copy_tree_contents_inner(&src, &dst, false)?;
+            copy_tree_contents_inner(&src, &dst, false, None)?;
             fs::set_permissions(&dst, meta.permissions()).map_err(|e| e.to_string())?;
         } else if meta.is_file() {
             copy_regular_file(&src, &dst)?;

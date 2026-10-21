@@ -169,6 +169,41 @@ jobs:
         run: cargo fmt --all --check
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Install Windows network guard for native containment tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node --experimental-strip-types scripts/dev.ts build -p tapid --bin tapid --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Guard CLI build failed' }
+          $metadata = node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
+          $binary = Join-Path $metadata.target_directory 'debug/tapid.exe'
+          & $binary sandbox install
+          if ($LASTEXITCODE -ne 0) { throw 'Administrator guard installation failed' }
+          "TAPID_CI_GUARD_CLI=$binary" >> $env:GITHUB_ENV
+          & $binary sandbox status
+          if ($LASTEXITCODE -ne 0) { throw 'Guard status failed' }
+      - name: Verify Windows guard namespace removal and rollback
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked guard_owned_namespace_removal -- --ignored
+      - name: Run native Windows dependency acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:TAPID_TEST_NODE = (Get-Command node -ErrorAction Stop).Source
+          cargo test -p tapid-store --lib --locked lifecycle_authentication_ -- --show-output
+          $keyStatus = $LASTEXITCODE
+          cargo test -p tapid-runner --test windows_containment --locked -- --show-output
+          $writeStatus = $LASTEXITCODE
+          if ($keyStatus -ne 0 -or $writeStatus -ne 0) {
+            throw "Native dependency acceptance failed: key=$keyStatus write=$writeStatus"
+          }
       - name: Run tests
         # Retain success output so each Node assertion branch has a receipt.
         run: cargo test --workspace --all-features --locked -- --show-output
@@ -231,6 +266,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (Test-Path -LiteralPath $binary) { throw 'Tapid was not uninstalled' }
           Write-Host 'Windows developer install and uninstall passed.'
+
+      - name: Remove Windows network guard after native tests
+        if: always() && runner.os == 'Windows' && env.TAPID_CI_GUARD_CLI != ''
+        shell: pwsh
+        run: |
+          & $env:TAPID_CI_GUARD_CLI sandbox status
+          if ($LASTEXITCODE -ne 0) { throw 'Final guard status failed' }
+          & $env:TAPID_CI_GUARD_CLI sandbox uninstall
+          if ($LASTEXITCODE -ne 0) { throw 'Idle guard removal failed; inspect retained filters' }
 
   windows-msvc-cross-check:
     name: Windows MSVC compile-only check
@@ -384,6 +428,14 @@ jobs:
           node-version: 22
       - name: Build Tapid binary
         run: cargo build --bin tapid --locked
+      - name: Install Windows network guard for consumer validation
+        if: runner.os == 'Windows'
+        id: consumer-guard
+        run: |
+          & target/debug/tapid.exe sandbox install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & target/debug/tapid.exe sandbox status
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Create dynamic Node fixture project
         run: |
           node tests/fixtures/create_consumer_project.js
@@ -421,6 +473,11 @@ jobs:
           ARTIFACT_ID: ${{ steps.windows-cli.outputs.artifact-id }}
           ARTIFACT_DIGEST: ${{ steps.windows-cli.outputs.artifact-digest }}
         run: Write-Host "Windows CLI artifact $env:ARTIFACT_ID digest $env:ARTIFACT_DIGEST"
+      - name: Remove Windows network guard after consumer validation
+        if: always() && runner.os == 'Windows' && steps.consumer-guard.outcome != 'skipped'
+        run: |
+          & target/debug/tapid.exe sandbox uninstall
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   pr-published-binary-smoke:
     # Exact PR runner + immutable published binary: pre-merge regression evidence only.

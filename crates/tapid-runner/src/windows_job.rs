@@ -22,7 +22,8 @@ use windows_sys::Win32::Security::Isolation::{
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Security::{
     EqualSid, FreeSid, GetTokenInformation, IsValidSid, SECURITY_CAPABILITIES,
-    TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TokenAppContainerSid, TokenIsAppContainer,
+    TOKEN_APPCONTAINER_INFORMATION, TOKEN_DUPLICATE, TOKEN_QUERY, TokenAppContainerSid,
+    TokenIsAppContainer,
 };
 use windows_sys::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
 use windows_sys::Win32::System::JobObjects::{
@@ -38,10 +39,10 @@ use windows_sys::Win32::System::SystemServices::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZE
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
-    OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    OpenProcessToken, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 /// Owns a kernel Job Object configured before any child is assigned to it.
@@ -174,6 +175,10 @@ impl WindowsJob {
             return Err(unsupported_job("terminate Windows Job Object members"));
         }
         Ok(())
+    }
+
+    pub(super) fn handle(&self) -> HANDLE {
+        self.handle
     }
 
     pub(super) fn active_process_count(&self) -> Result<u32, ExecutionError> {
@@ -446,9 +451,12 @@ pub(super) use filesystem::write_permissions;
 
 #[path = "windows_process.rs"]
 mod process;
+#[path = "windows_token.rs"]
+mod token;
 pub(super) use process::{
     WindowsChildTermination, WindowsOutputCapture, WindowsStdioPipes, WindowsSuspendedChild,
 };
+pub(super) use token::validate_runtime_capabilities;
 
 fn unsupported_hresult(operation: &str, hresult: i32) -> ExecutionError {
     ExecutionError::new(
@@ -473,3 +481,17 @@ fn unsupported_job(operation: &str) -> ExecutionError {
 #[cfg(test)]
 #[path = "windows_job_tests.rs"]
 mod tests;
+pub(super) fn token_information(token: isize, class: i32) -> Result<Vec<usize>, u32> {
+    let mut length = 0;
+    unsafe { GetTokenInformation(token, class, null_mut(), 0, &mut length) };
+    if length == 0 || length > 65536 {
+        return Err(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED);
+    }
+    let mut bytes = vec![0usize; (length as usize).div_ceil(size_of::<usize>())];
+    if unsafe { GetTokenInformation(token, class, bytes.as_mut_ptr().cast(), length, &mut length) }
+        == 0
+    {
+        return Err(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED);
+    }
+    Ok(bytes)
+}

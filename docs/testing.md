@@ -31,6 +31,8 @@ The wrapper selects `<git-common-dir>/target/dev` using Git's canonical common d
 
 An explicit `CARGO_TARGET_DIR` takes precedence. Direct `cargo` commands use the root worktree's `target` directory for both workspaces through `.cargo/config.toml`, but do not share it across worktrees. Commands and documentation that need a binary should obtain the target path from `node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked` rather than assume `target/debug/tapid` after a wrapper build.
 
+Windows native no-network execution tests require the administrator-installed guard. Install it once with `tapid sandbox install` from an administrator terminal, then run tests as the ordinary user; missing setup fails closed. Explicit network grants use the standard-user broker independently. The Windows CI test job installs the guard before native tests and uninstalls it afterward. Its separate `guard_owned_namespace_removal` control runs with `--ignored` under administrator rights against unique metadata-only WFP GUIDs, testing rollback and idempotent removal without creating filters or touching the production namespace.
+
 ## Focused development lane
 
 Use strict red-green-refactor for production behavior. Add one observable failing test, confirm its expected failure, implement the smallest change, then rerun that test. Pure refactors use existing behavior tests before and after the move. Run Cargo commands sequentially to avoid build-lock contention.
@@ -67,6 +69,7 @@ Add checks for the files changed:
 - Release tooling: `node --experimental-strip-types --test tools/release/*_test.ts`.
 - Documentation runner: `node --experimental-strip-types --test tests/doc_examples_test.ts` and the affected examples in `scripts/check-doc-examples.ts`.
 - Development wrapper: `node --experimental-strip-types --test tests/dev_test.ts`.
+- Bundled agent skills: `node --experimental-strip-types scripts/sync-agent-skills.ts --check` and `node --experimental-strip-types --test tests/agent_skills_test.ts`.
 - All TypeScript helpers and release tooling: `node --experimental-strip-types --test tests/*_test.ts tools/release/*_test.ts`.
 - News-site native-resolution fixture: set `TAPID_NEWS_FIXTURE_BINARY` to a source-built CLI and run `node --experimental-strip-types --test tests/news_site_fixture_test.ts`. CI requires the binary; without it, only that native probe skips locally.
 - Dependency or publication metadata: `node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked` and `node --experimental-strip-types scripts/dev.ts package --workspace --locked`.
@@ -122,3 +125,23 @@ The main `release-contract` job owns Unix installer syntax (`sh -n`) and offline
 The Windows installer contract consumes the Windows CLI from the same workflow run and attempt. The producer exports its validated image revision through a job output; verification binds the artifact's recorded image revision to that upstream value, rather than to the separate verifier runner's image revision. Hosted image rollouts can give these jobs different revisions of the same Windows image. Both revisions are logged, while the image OS, architecture, source SHA, run/attempt, build settings, compiler receipts, binary digest, and size checks remain enforced. A missing or mismatched producer image output fails before materializing the executable.
 
 The security and package jobs use runner-provided workspaces and do not rely on local absolute paths. A local command may be unavailable on a developer machine, but CI treats the corresponding gate as required.
+
+## Deterministic agent workflows
+
+`agent_workflows` executes the compact [agent guide v1](agent-guide.md) against
+local npm-import fixtures and isolated projects/homes. Run it with:
+
+```sh
+node --experimental-strip-types scripts/dev.ts test -p tapid --test agent_workflows --locked -- --show-output
+```
+
+Each scenario asserts its task result and emits measured command calls, output
+bytes, and unnecessary repeated failures. Calls have an 8 KiB result budget.
+The scenarios check unchanged locked bytes on replay, unselected package records
+across add/remove, preserved npm locks, failure mutations, missing credentials,
+peer conflicts, unsupported declarations, cold and shared caches, project-lock
+contention, and recovery after a lost commit response. Separate temporary
+checkouts model worktree consumers of the same cache; they do not invoke Git.
+These are deterministic contract tests, not measurements of an external agent's
+reasoning or model tool selection. Existing transaction and containment tests
+remain responsible for their broader platform and attack-path coverage.

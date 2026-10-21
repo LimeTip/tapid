@@ -266,6 +266,7 @@ impl From<tapid_store::IngestError> for OperationalError {
             IngestError::DigestMismatch { .. } | IngestError::TreeDigestMismatch { .. } => {
                 ErrorKind::Integrity
             }
+            IngestError::TreeMissing(_) => ErrorKind::StoreUnavailable,
             IngestError::Archive(_) => ErrorKind::Archive,
             IngestError::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 ErrorKind::StoreBusy
@@ -319,6 +320,8 @@ pub(crate) enum RetryAdvice {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Warning {
+    UnapprovedDependencyScriptsAllowed,
+    DependencyScriptsWithoutContainment,
     UpdateGraphChange { package: String, reason: String },
     UnverifiedRegistryArtifactsAllowed,
     PreviousTransactionRecovered,
@@ -343,6 +346,8 @@ impl fmt::Display for Warning {
             );
         }
         f.write_str(match self {
+            Self::UnapprovedDependencyScriptsAllowed => "dependency hook approval is bypassed for this invocation; generated outputs will not enter the verified build cache",
+            Self::DependencyScriptsWithoutContainment => "dependency hooks execute without containment; they can access the host and leave surviving descendants; generated outputs will not enter the verified build cache",
             Self::UnverifiedRegistryArtifactsAllowed => "npm artifacts without registry integrity are not authenticated against a registry-declared digest",
             Self::PreviousTransactionRecovered => "recovered an interrupted project transaction before this operation",
             Self::UpdateGraphChange { .. } | Self::DependencyLifecycleHookSkipped { .. } | Self::DependencyLifecycleDiscoveryFailed { .. } => unreachable!(),
@@ -380,14 +385,24 @@ pub(crate) struct OperationFailure {
 impl OperationFailure {
     pub(crate) fn new(
         error: OperationalError,
-        mut outcome: OperationOutcome,
+        outcome: OperationOutcome,
         recovery_error: Option<OperationalError>,
     ) -> Self {
+        let paths = ["package.json", "tapid.lock", "node_modules"]
+            .map(|name| outcome.project_dir.join(name));
+        Self::with_recovery_paths(error, outcome, recovery_error, paths)
+    }
+
+    /// Recovery scopes belong to the operation owning the durable outputs.
+    /// Ordinary project operations retain their existing default through new.
+    pub(crate) fn with_recovery_paths(
+        error: OperationalError,
+        mut outcome: OperationOutcome,
+        recovery_error: Option<OperationalError>,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
         if outcome.state == ChangeState::RecoveryRequired {
-            // An older transaction may fail before this attempt records mutations.
-            // Recovery must inspect all durable project outputs, not report zero.
-            for name in ["package.json", "tapid.lock", "node_modules"] {
-                let path = outcome.project_dir.join(name);
+            for path in paths {
                 if !outcome.changed_files.contains(&path) {
                     outcome.changed_files.push(path);
                 }

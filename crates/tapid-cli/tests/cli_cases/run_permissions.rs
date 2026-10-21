@@ -273,28 +273,103 @@ fn run_permissions_flag_only_baseline_has_no_implicit_project_or_subprocess_gran
 
 #[cfg(windows)]
 #[test]
-fn run_permissions_network_flag_keeps_unsupported_windows_network_fail_closed() {
-    let project = project();
-    let (_runtime, node) = private_node_runtime();
-    project
-        .write(
-            "package.json",
-            br#"{"name":"flags","version":"1.0.0","scripts":{"probe":"echo MUST_NOT_START"}}"#,
-        )
-        .unwrap();
-    let output = invoke(
-        project.path(),
-        &[
+fn run_permissions_network_grant_serves_http_through_real_cli() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    for flags in [true, false] {
+        let project = project();
+        let (_runtime, node) = private_node_runtime();
+        fs::create_dir_all(project.path().join("node_modules/.bin")).unwrap();
+        let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = reservation.local_addr().unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"flags","version":"1.0.0","scripts":{"start":"node probe.js"}}"#,
+            )
+            .unwrap();
+        project.write("probe.js", format!(
+        "const http=require('node:http');const s=http.createServer((q,r)=>{{r.end('TAPID_HTTP_OK');s.close();}});s.listen({},'127.0.0.1',()=>console.log('READY'));", address.port()
+    ).as_bytes()).unwrap();
+        if flags {
+            project.write("tapid.toml", b"[run.defaults]\nread=['.']\nnetwork=true\nsubprocess=true\nenvironment=['SystemRoot']\ntimeout_seconds=5\n").unwrap();
+        } else {
+            project.write("tapid.toml", b"[run.scripts.start]\nassurance='managed-tree'\nread=['.']\nnetwork=true\nsubprocess=true\nenvironment=['SystemRoot']\ntimeout_seconds=5\nmax_output_bytes=65536\nmax_processes=8\nmax_memory_bytes=536870912\n").unwrap();
+        }
+        let original_config = fs::read(project.path().join("tapid.toml")).unwrap();
+        let mut arguments = vec![
             "run",
-            "probe",
+            "start",
             "--node-runtime",
             node.to_str().unwrap(),
-            "--allow-network",
-        ],
-    );
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported-containment"));
+            "--receipt-json",
+        ];
+        if flags {
+            arguments.extend([
+                "--allow-read",
+                ".",
+                "--allow-network",
+                "--allow-subprocess",
+                "--allow-env",
+                "SystemRoot",
+            ]);
+        }
+        let temporary = tapid_test_support::TempProject::new("network-cli-temp").unwrap();
+        let mut command = isolated_command(project.path(), &arguments, true);
+        command
+            .env("TEMP", temporary.path())
+            .env("TMP", temporary.path());
+        command.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
+        drop(reservation);
+        let worker = std::thread::spawn(move || command.output().unwrap());
+        // This clock starts before CLI setup. Keep polling past the contained
+        // server's separate five-second execution limit so a slow setup cannot
+        // leave a successfully started server waiting for a client we abandoned.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut response = String::new();
+        while Instant::now() < deadline && !worker.is_finished() {
+            if let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(100))
+            {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream
+                    .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                    .unwrap();
+                stream.read_to_string(&mut response).unwrap();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let output = worker.join().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(response.contains("TAPID_HTTP_OK"), "{response}; {stderr}");
+        assert_eq!(output.stdout, b"READY\n");
+        let receipt: serde_json::Value =
+            serde_json::from_str(stderr.lines().find(|line| line.starts_with('{')).unwrap())
+                .unwrap();
+        assert_eq!(receipt["enforced"]["network"], true);
+        assert_eq!(receipt["completion"]["confirmed"]["complete_cleanup"], true);
+        assert!(
+            receipt["established_evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["dimension"] == "Network"
+                    && item["mechanism"]
+                        .as_str()
+                        .unwrap()
+                        .contains("socket broker")
+                    && !item["limitations"].as_array().unwrap().is_empty())
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.toml")).unwrap(),
+            original_config
+        );
+    }
 }
 
 #[test]

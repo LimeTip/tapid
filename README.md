@@ -54,6 +54,8 @@ tapid install --offline --frozen
 
 See the [CLI guide](crates/tapid-cli/README.md) for adding, removing, updating, and inspecting dependencies.
 
+Standalone commands can use `tapid tool install <package>` without a project. Each tool has an isolated lock and dependency environment, with managed commands exposed from the reported bin directory. See the [tool workflow](crates/tapid-cli/README.md#standalone-cli-tools) for PATH setup, runtime requirements, and update/removal behavior.
+
 ## Development status
 
 Tapid is under active development. Releases are available for evaluation and compatibility testing; production support is not yet available. The current target is a bounded subset of the Node.js/npm ecosystem. Deno and Bun compatibility remains a future goal.
@@ -195,6 +197,8 @@ Use `tapid upgrade --dry-run` to inspect the selected release. The new default h
 Released 0.0.10 clients still use signed discovery followed by GitHub checksum fallback and can reach the next release that way. Explicit installer versions through 0.0.10 use the historical GitHub assets and `SHA256SUMS` unless a record override is supplied. Clients older than 0.0.10 require rerunning the installer. Alternate repositories remain explicit through `--repo` or `TAPID_REPO`; their release controls are the operator's responsibility. Source installation remains the development path. Uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data.
 
 Installed package `bin` metadata produces executable entries in `node_modules/.bin`. Unix uses symlinks. Windows uses `.cmd` and PowerShell wrappers. Bin targets must be regular files inside the verified package tree; traversal, absolute paths, symlinks, collisions, and unsupported platforms are rejected.
+
+Automation clients can use the compact [agent guide v1](docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
 
 ## Install from the lockfile
 

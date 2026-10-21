@@ -1,0 +1,90 @@
+{
+  "packages": [
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "hello-tool",
+      "version": "1.0.0",
+      "dependencies": {
+        "shared-lib": "1.0.0"
+      },
+      "integrity": "sha512-1jcpe5RloP/erivdIl524jvDk0HX2m/Chx/Xf16LvlFAJhkMqDDaC/Nb05aLbQtaW7/qaU6s1NY8x3s6uPaOIw==",
+      "artifact": "base64:H4sIAAAAAAAACu2UwWrDMAyGe85TdN4lgdRRAmkhZafddtgOewLX1lJ3nh2sNN0oeffRrAtdGfRS2sHyXWR+hCVb/KqEfBUlJtVX5CtydnRmAABmed5FADiOkE7T/tzpaTrNZqMxnLuR31hTLfwILlLrD7JlVrwhK9gSjXGT2jnDYtagJ+0sK1jKgQOL2UJbVmwPs4qdlnQCXxFrY6awQqvQSo20S6al8KgmRi/6i9r22g8e+MHe98nhLM9d45T/M8iP/Z/n6eD/S3B7k6zJd+NH24ytUxhIZ8kZ5MaV4cPz0yOn2mtb6pePcCt8SUXlnUQiLnzZcDJaYphF8X5p9DtDblSfKTcqjNoomgffCr7r+t4pvJvNg2t/wsDAwMA/5BMGGP7GAAwAAA=="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "hello-tool",
+      "version": "1.1.0",
+      "dependencies": {
+        "shared-lib": "2.0.0"
+      },
+      "integrity": "sha512-tmt8R9Kz9maoJZkTXn7ruEgEi1shX3Fq5yWZVErGnYa7WSlzZWETW4KPgt/7e4+8VFRPWJQmnHLbRGz0QLW/cg==",
+      "artifact": "base64:H4sIAAAAAAAACu2Uz07DMAzGd95TDHNppS51K3WTOnHixgEOPEGWmC4jJFXcbaCp745WxvgjJC7ThkR/FyfWJ9mJ9bmW6lFWlNZvUSzZu8GRQUScFkUXEfF7xGzyce7yWTbJJ4MRHruRn1hxI8MAT1LrD7IFJ58ISliQtX7ceG8hgTUFNt5BCZnIBEICc+Og3O5VjjZQ7lJpdxdLhjYBTTU5TU4Z4p2WFzKQHlszhxJygQKhbc/93p6v7H2ffh7msWv85v8ci+/+L4qs9/8puLxIVxy68ZNbj5zXNFTesbckrK+im/u7W8FNMK4yDy/RVoaKyzp4RcxChmot2BpFUR4n+6Vx2Blqow9KtdFR3MbxbPieoWfTXHtNV9PZ8Nyf0NPT0/MPeQUbjKedAAwAAA=="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "other-tool",
+      "version": "1.0.0",
+      "dependencies": {
+        "shared-lib": "1.0.0"
+      },
+      "integrity": "sha512-V33ADtu6Y9bC9r3lBOS1MhdA/Q5jsqgayLHLtzTz7hvZIC9ecFQLXKrc9qt+v1ziUz35l2tiCG3OHh/SEDni1g==",
+      "artifact": "base64:H4sIAAAAAAAACu2UwU7DMAyGd95TgLm0Upe6g25SJ07cOMCBJ8gS02VkSRV3G2jqu6ONUdCExGXakOh3cfTLip1YvyupXmRJafURxZy96x0ZRMRxnu8iIh5GzEY37XmnZ9noeti7wGM38hNLrmXo4Ulq/UE24OSCoABfzygMau8tJLCiwMY7KCATKBASmBoHxWafpfxiIZ2GYiunM7LWizlDk4CmipwmpwzxNp9nMpAeWDNt72qac7+544u979Pvgzx2jd/8P8T80P95nnX+PwVXl+mSw2785FYXzmvqK+/YWxLWl9H90+OD4DoYV5rnt2gjQ8lFFbwiZiFDuRJsjaJoGCf7pdHuDLXWbaZa6yhu4njS/1To1dR3XtPteNI/9yd0dHR0/EPeAaKbbn0ADAAA"
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "collision-tool",
+      "version": "1.0.0",
+      "integrity": "sha512-mW8V8kd65amtMWB+5kmc4/5Zhij4Fnqft1448oTYUMXZdOa7aWr8r7V5Pjpo/JeO4RZ8dB1nKhHpD1fwOwRWRg==",
+      "artifact": "base64:H4sIAAAAAAAACu2UwUrEMBCGe+5TrOOlhZpOVmqhiydvHvTgE9Q01qwxU5JuVyl9d9nuusgiiFB2BfNdJvkZmEmGf5pSvJS1TJttZEtHJpgYRMQ8y8aIiIcROc/351Hn/OoSgxlO3ch3rFxb2gCPUusP0oMpXyUUIEhr5RSZi5ZIQwKdtJsrFMAZMoQEHpWBoodnqTVts4qNlo4CWzoYhlM/x/NLdr5Pv85x6ho/+X+O2aH/s4x7/x+D87N05ew4fmm6maFKhoKMIy2Zpjq6fbi/Y661ytTq6T3qS1u7orEkpHOstHXHnFZCRvM42S2M/b4Q62qfKdZVFA9xvAg/Ffmm2huq5HW+CE/9CR6Px/MP+QD1Z9XXAAwAAA=="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "case-tool",
+      "version": "1.0.0",
+      "integrity": "sha512-1sM2OHXpiETzvdzokqtjKRrmw4USWaayRgPtIxxYwAETamIMCXCOOcBcMc5v2+ktR97hTCA9befqS3eros3R0g==",
+      "artifact": "base64:H4sIAAAAAAAACu2U0UrDMBSGe92nmMebFrr0pFIHHV6JIFLshb5ATGPtjElJuk4pfXexzjKGIEjZBPvd/OEncHJy+E/F+DMrRFh9KllZrZyRQURcxHGviLivSGk0nHuf0vPozJnh2A/5jrWtmXHwILX+IC0o9iIgAc6smNdaSwigEcaWWkEClCBBCOChVJC0cH2Vptn8PstSSD688ElIqcnKQtcdu5OJ37DNfbg7zLFr/JT/COP9/McxnfJ/CE5PwrU1/fiFamZK58LlWlktBZG68G7usltia1Oqonx881pmCptURnNhLWGmaIiVJRde5AfbrTEsDb7Jh5t8k3t+5/tL98sRr2V9qXNxsVi6x/6EiYmJiX/IOxeLdo4ADAAA"
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "extension-tool",
+      "version": "1.0.0",
+      "integrity": "sha512-m7Tl8t6vqaaTX4htdqBvLwTDv3BKFhfMxBuxAc2HFQ62xvknhsT3HqcT38GEFZynPz4Iyt6ltuEQO4/ba8ZouQ==",
+      "artifact": "base64:H4sIAAAAAAAACu2UwUrDQBCGc85T1PGSQNxMImshxZM3D3rwCeJmjKnb3bCbppWQd5fGGqQIUgit4H6X2f0ZmNkd/qlz8ZaXFNefkS2tVt7EICLOOR8iIh5GTNLr8TzoSXKTcm+GUzfyE2vb5MbDk9T6g3Sg8hVBBrRtSNlKq6tGawkRtGR2V8ggYcgQIniuFGQdvJKUeshiYlVAttPjQWRLC31/7ic5jmDv+/j7DKeu8Zv/U+SH/uc8cf4/BZcX8dqaYfyk2pnSBflCK6slManL4P7p8YHZxlSqrF7egy43pc1qowVZy3JTtszKSlCQhtF+YYz7QmyKMVNsiiDsw3Dhfym0rZo7XdDtfOGf+xMcDofjH/IBmERjQgAMAAA="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "reserved-tool",
+      "version": "1.0.0",
+      "integrity": "sha512-kmtXztvekoIvLx9FBbxRq+gFOP87FCrzh8jRUZ7HWoEcVVj26wVCAayAJsHytQCuyXamkBsMB2IG9Tw+smvr4A==",
+      "artifact": "base64:H4sIAAAAAAAACu2UwUrEMBCGe+5TrOOlhZpOCnWhiydvHvTgE8R0rFljUpJuVyl9d7GuRRZBWMquYL/LnxkCk8zwTy3ks6gorT+Vrb01wcQgIi7zfFBE3FfknI/nIc/5ZZYFC5z6IT+x8Y1wAR6l1h+kAyNeCApw5Mm1VF401mpIoCXnlTVQAGfIEBJ4UAaKDhpRqxKKjzB9Iq0tW3vo+1N/ZOYgdr5Pv09z6hq/+T/DfN//ec5n/x+D87N0490wfjLtwtiSQmmNt5qYtlV0c393y3zjlKnU41vUCVf5onZWkvdMuKplXitJURYnu40xLgy5LcebcltGcR/Hq/ArQ6+qubYlXS1X4ambMDMzM/MPeQelXTc4AAwAAA=="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "shared-lib",
+      "version": "1.0.0",
+      "integrity": "sha512-Ssa3D1ZwjRp3BlBYIf3HHr1aAxlgPPvfUgjhbtzMMB9FZYMnMlvuYUxW+wvn2Zf2RcG3Jr3agtUsIV8FEG1mvw==",
+      "artifact": "base64:H4sIAAAAAAAACu2UUUvDMBDH99xPMeNLCzW9FuqgwyfffNAHP0GWnl1mTEqu65TS7y7WbcoQZFA2wfxe/uFycJcc/6uFfBYVJvWn8hVZMxkZAIBZng8KAIcKafZ1HuJpep1lkymM3chPrKkRbgInqfUH6ZgRL8gKRkvhsLzSasFi1qIjZQ0rWMqBA4vZQhlWdLssZRp0RmhWfFwkS9Ta8hWxvj/3ezzHsfV98n2MY9f4zf8Z5If+z/PU+/8UXF4ka3LD+NG0U2NLDKQ1ZDVybavw7vHhnlPjlKnU01vYCVdRUTsrkYgLV7WctJIYZlG8XRr7nSE35T5Tbsow6qNoHuwi+KqaW1vizWwenPsTPB6P5x/yDoQYmZgADAAA"
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "shared-lib",
+      "version": "2.0.0",
+      "integrity": "sha512-/ph0w1bZpwZb9xZNkKSi0dtcazbyikhBR9mSi86n3doeguLtmHhJh7QqkigmNtlgvoW7aOhn9QqvJKRhtcbYDA==",
+      "artifact": "base64:H4sIAAAAAAAACu2UUUvDMBDH99xPMeNLCzW9BuqgwyfffNAHP0GWnl1mTEqu65TS7y7WbcoQZFA2wf5e/uFycJcc/6ukepYlJtWn8hU5OxkYAIBZlvUKAIcKqfg69/E0vRZiMoWhG/mJNdXST+Aktf4gLbPyBVnOaCk9FldGL1jMGvSknWU5Exw4sJgttGV5u8vStkZvpWH5x0WyRGMcXxHrunO/Z+Q4tr5Pvo9x6Bq/+V9Aduj/LEtH/5+Cy4tkTb4fP9pmal2BgXKWnEFuXBnePT7cc6q9tqV+egtb6UvKK+8UEnHpy4aT0QpDEcXbpbHfGWpT7DPVpgijLormwS6Cr7q+dQXezObBuT9hZGRk5B/yDvUYLRsADAAA"
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "no-bin",
+      "version": "1.0.0",
+      "integrity": "sha512-OExEk5tivH9BHVXEBu5iQ8Me4J2pJEmQTrIliPg72CReCxu7Z18FQ+3M0jEVOX3NJVC7PnwZELE4it0/x0w+4w==",
+      "artifact": "base64:H4sIAAAAAAAACu2UwU7DMAyGe+5TjHBppZK6hW5SJ07cOMCBJ8hSEzJCUsVdB5r27oixgTQh7VI2JPJdfsuyZMvW71bIZ6Ewbz+Vz8nZaGAAACZVtVEA2FeAq8vv+CNfFONyHI1g6EF+YkGd8BEcpdcfZMWseEFWM+suZtqyjPXoSTvLalZw4MDWpx4x8ItsfZ/PtM2f0BjH5zR0j0P+L6Ha939VFcH/x+D8LF+Q35wfbT+yrsFYOkvOIDdOJbcP93ecOq+t0o9vyUp4RXXrnUQiLrzqORktMSnTbPs4dn8jk8vmq1IumyRdp+k03mXwVXc3rsHryTQ+9RICgUDgH/IOY71z4QAMAAA="
+    },
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "@scope/tool",
+      "version": "1.0.0",
+      "integrity": "sha512-XvHY1ODUXiHY1St1uVwT/vV6jCmqk18PLBj7cm+jBIXjQWc4U5ruekXB7zGr0Hv4+2YgqY7um4YWEiWfnsEIug==",
+      "artifact": "base64:H4sIAAAAAAAACu2UwUrEMBCG99ynWMdLCzWdFupCF0Hw5kEPPkFMYu2aZkrS7Sql7y7WdZVFEKHsCua7/OFnYJIM/zRcPPFSJc27spUjM5sYRMRFno+KiPuKafZ5Hv00Pc+y2Rynvsh3rF3L7QwP0usP0oPhtYICLp2gRiUtkYYYOmVdRQYKSBkyhBjuKwNFD2OVPBNU19xIKN785FFpTWzlYBiO/R7P79jmPvk6xql7/JT/DPP9/Od56vN/CE5PkrWz4/iV6eaGpAoEGUdaMU1leH13e8NcaytTVg8vYc9t6YrGklDOMW7LjjldCRVmUbzdGbuVITZyVyk2MoyGKFoGH456rtorkupisQyO/Qkej8fzD3kFIKBSmQAMAAA="
+    }
+  ]
+}

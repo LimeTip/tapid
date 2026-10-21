@@ -7,12 +7,16 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | Command | Global `--json` |
 | --- | --- |
 | `install`, alias `i` | Install or replay result; resolved dependency preview with `--dry-run` |
+| `ci` | Locked install result with the existing install transaction states |
+| `manifest validate`, `lock verify` | Read-only validation result |
+| `import-package-lock` | Offline npm v3 import result; verification remains pending |
 | `add`, `remove`, `update`, `prune` | Dependency operation result; `add`, `remove`, and `update` support resolved previews with `--dry-run` |
+| `tool install`, `tool list`, `tool update`, `tool remove` | Tool inventory and command mappings with operation change/recovery state |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
 | `explain` | Exact package evidence under `data`; registry metadata or a local snapshot, with optional artifact byte verification |
 | `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
 | `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
-| `ci`, `init`, `manifest`, `lock`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
+| `init`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
 | `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
 | Private release helpers, no command | `JSON_UNSUPPORTED_COMMAND`, exit 1 |
 | Invalid arguments | `ARGUMENT_INVALID`, exit 2 |
@@ -33,8 +37,8 @@ Every object contains these fields:
 | `project` | Bounded display of the effective project directory; null before command execution |
 | `project_path` | Lossless native project path record; null before command execution |
 | `changes.state` | `unchanged`, `rolled_back`, `committed`, `committed_cleanup_pending`, or `recovery_required` |
-| `changes.files` | Sorted, deduplicated display paths for affected project outputs |
-| `changes.paths` | Sorted, deduplicated lossless native path records for affected project outputs |
+| `changes.files` | Sorted, deduplicated display paths for affected outputs |
+| `changes.paths` | Sorted, deduplicated lossless native path records for affected outputs |
 | `truncated_fields` | Sorted, deduplicated JSON pointers to display or metadata scalars shortened by the byte limit |
 | `warnings` | Sorted, deduplicated warning codes |
 | `errors` | Error objects with a stable `code`; operational errors also have `phase` of `operation` or `recovery`, and bounded typed `context` when available |
@@ -54,6 +58,34 @@ Successful `update` results include `data.graph_changes`, an array of changed pa
 `cache`, `cache info`, `cache clean`, and `clean` use the version 1 envelope. The operation is `cache` for its subcommands and `clean` for the shortcut. `project` is null and `changes.files` and `changes.paths` are empty because maintenance does not change project outputs. `data.scope` is `published_package_data`; `data.store` is bounded display text and `data.store_path` uses the existing lossless native-path encoding. `data.action` is `info`, `preview`, or `clean`. The `data.summary` object contains `artifacts` and `trees`, each with `entries` and logical file `bytes`, plus `preserved_entries` for unrecognized entries inside those namespaces. Staging and upgrade-recovery caches are excluded. The version 1 `bytes` field names are unchanged: they count file content lengths, not allocated disk space or predicted reclaimed disk space. Human output labels the same values as logical bytes.
 
 Inspection and previews report `changes.state: "unchanged"`. Successful eviction exits 0 and reports `committed` when entries were removed, or `unchanged` for an empty deletion set. `CACHE_BUSY` exits 1 with `unchanged` state and `retry: "after_contention"`. Other failures before eviction exit 1 with `unchanged` state and `CACHE_MAINTENANCE_FAILED`. A deletion or directory-sync failure exits 1 and reports `committed_cleanup_pending` because some cached data may have been removed; this state concerns cache eviction, not a project transaction. Cleanup has stopped, and no background cleanup is scheduled. Inspect the cache or retry after correcting the filesystem error. The state does not promise that removal or synchronization will finish automatically. Failed results have `data.summary: null`. Cache-location failures, including explicit roots that are files or symlinks, use `CACHE_PATH_INVALID`. All cache operational errors include `phase: "operation"`. An empty explicit `--store-dir` is rejected during argument parsing as `ARGUMENT_INVALID`, exit 2.
+
+Validation success data contains `action` of `validate` or `verify` and
+`valid: true`, with unchanged state and no changed files. Manifest validation
+uses the selected manifest's parent directory as the project; lock verification
+uses the current directory. Failures use typed `MANIFEST_INVALID`,
+`LOCKFILE_INVALID`, or `LOCKFILE_MISSING` errors and `after_correction`.
+These commands do not compare manifest and lock, access the store, or recover.
+
+Npm import success data contains `format: "npm_v3"` and
+`verification: "pending"`. It reports `committed` with tapid.lock as the
+changed output, preserving the original npm lock and installed files. Validation
+and contention failures preserve project outputs. Pending install state returns
+`RECOVERY_FAILED`, `recovery_required`, and `recover_first` without recovery.
+Import stages and syncs the new lock in the project directory, then replaces
+tapid.lock with one rename. It never moves the old lock to a backup first.
+A staging or replacement I/O failure reports `TRANSACTION_FAILED`, `unchanged`,
+empty changed paths, and `after_correction`; the previous lock remains in place.
+No rollback or install recovery is needed for these publication failures.
+Successful replacement reports `committed`. Multi-output installation retains
+its separate journal-backed rollback and recovery contract.
+Import errors classify manifest, lock, registry configuration,
+contention, and transaction failures at their operation boundaries. Workspace-member
+edits detected between discovery and import publication return
+`LOCK_MANIFEST_MISMATCH`; other workspace validation failures retain `INVALID_DATA`.
+
+CI uses the install data and failure contract below, including progress suppression.
+It requires a native verified-tree lock, preserves package.json and tapid.lock,
+and replaces managed node_modules. Imported locks use install with --frozen.
 
 ## Install and dependency preview results
 
@@ -80,7 +112,7 @@ Each package entry contains `key`, `source`, `name`, `version`, `integrity`, `de
 
 Each reason contains `graph` of `before` or `after`, `relation` of `direct` for a graph root or `dependency` for a parent edge, `parent` as the parent package key or null for roots, `dependency` as the incoming name, and `requirement` as an available requirement or null. These are selection edges in the indicated graph, not API compatibility claims. Existing lockfile transitive edges do not preserve their original dependency kind or declared range; unavailable ranges remain null rather than presenting reconstructed exact pins as declared requirements.
 
-`effects` contains `network_allowed`, `metadata_source`, `metadata_lookups`, `artifact_requests`, `cache_reads`, `cache_writes`, `project_writes`, `recovery`, and `scripts`. `network_allowed` describes permission to fetch registry metadata, not proof that a request occurred. `metadata_source` is `registry`, `fixture`, or `lockfile`; `metadata_lookups` counts package metadata lookups, not individual HTTP requests. A matching online lock can produce zero lookups even when network access is allowed. Fixtures and offline/frozen inspection forbid registry access. `artifact_requests` is always 0, and the remaining effect flags are always false. Cache fields refer to the package store, not reading the project's lockfile.
+`effects` contains `network_allowed`, `metadata_source`, `metadata_lookups`, `artifact_requests`, `cache_reads`, `cache_writes`, `project_writes`, `recovery`, and `scripts`. `network_allowed` describes permission to fetch registry metadata, not proof that a request occurred. `metadata_source` is `registry`, `fixture`, or `lockfile`; `metadata_lookups` counts package metadata retrievals, not individual HTTP requests. Successful metadata is reused by source and actual package name within one graph operation; reuse by another consumer does not increment the count. A matching online lock can produce zero lookups even when network access is allowed. Fixtures and offline/frozen inspection forbid registry access. `artifact_requests` is always 0, and the remaining effect flags are always false. Cache fields refer to the package store, not reading the project's lockfile.
 
 Previews do not create an activation lock, recover transactions, access the package store, fetch artifacts, or run scripts. Pending recovery fails without attempting recovery. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without establishing that its artifacts are cached. Previews requiring copied file/Git resolution or imported npm locks fail explicitly. Artifact availability, archive validity, lifecycle outputs, and later installation success remain unverified. A later command reads current inputs and may resolve different metadata.
 
@@ -92,7 +124,7 @@ Outdated data contains `entries`, `total_entries`, and `truncated`. Each entry c
 
 Each entry also contains `compatible_impact` and `available_impact`. Both contain `version_change`, `lockfile`, and `manifest`. Version change is `unchanged`, `major`, `minor`, `patch`, `prerelease`, `downgrade`, `unlocked`, or `unknown`, comparing the locked version with the selected metadata version. Major/minor/patch take precedence over prerelease differences on an upgrade. These are SemVer comparisons, not API compatibility claims. Lockfile and manifest impact are `changed`, `unchanged`, or `unknown`. Lockfile impact compares the direct version pin if the shown version is selected; it does not predict transitive changes or resolution success. Manifest impact indicates whether the shown version requires changing the declared range, preserving npm alias and workspace range semantics. Peer declarations do not select direct lockfile pins, so their lockfile impact is `unchanged` even when registry metadata is unavailable. A provider installed through another dependency section does not change this rule; that section reports its own pin impact. Missing metadata otherwise yields unknown impact. `outdated --offline` without a fixture returns `REGISTRY_METADATA_UNAVAILABLE` for registry dependencies and a partial result, with locked versions retained and unchecked versions null. Local workspace versions remain available. Pending transactions return failure with `RECOVERY_FAILED`, `recovery_required`, and `recover_first`, without attempting recovery. An unchanged pin does not establish an unchanged whole lockfile after `update`. Named updates preserve unrelated compatible pins; selected requirements and peer constraints can still require transitive changes. The `UPDATE_GRAPH_CHANGE` warning identifies changed package instances and their requiring parent edges.
 
-Default output includes at most 100 outdated entries. Use `tapid --json outdated --json-limit 250` to select a larger limit, or `--json-limit 0` to retrieve every entry. This option requires `--json`, accepts a nonnegative integer, and affects only result rendering. It does not change resolution or project state. Each display path or metadata scalar is limited to 4096 UTF-8 bytes, removes control characters, and redacts HTTP URL user information, query values, and fragments. Scalar truncation can shorten a displayed name or requirement. Every shortened scalar is identified by a pointer in `truncated_fields`, such as `/data/entries/0/declared` or `/project`. These fields are display data, not identifiers for automatic mutation. Lossless path records are described below. Transaction paths describe only `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are represented by state. Results omit timings and random transaction identifiers. File ordering, warning ordering, and entry ordering are deterministic for the same operation data.
+Default output includes at most 100 outdated entries. Use `tapid --json outdated --json-limit 250` to select a larger limit, or `--json-limit 0` to retrieve every entry. This option requires `--json`, accepts a nonnegative integer, and affects only result rendering. It does not change resolution or project state. Each display path or metadata scalar is limited to 4096 UTF-8 bytes, removes control characters, and redacts HTTP URL user information, query values, and fragments. Scalar truncation can shorten a displayed name or requirement. Every shortened scalar is identified by a pointer in `truncated_fields`, such as `/data/entries/0/declared` or `/project`. These fields are display data, not identifiers for automatic mutation. Lossless path records are described below. Project-operation transaction paths describe only `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are represented by state. Results omit timings and random transaction identifiers. File ordering, warning ordering, and entry ordering are deterministic for the same operation data.
 
 For filesystem inspection and recovery, use `project_path` and `changes.paths`. Each record contains `encoding` and `value`. Encoding `utf8` preserves the exact path string, including characters represented by JSON escapes. Encoding `unix_bytes_base64` preserves native Unix path bytes; `windows_utf16le_base64` preserves Windows UTF-16 code units as little-endian bytes. Decode base64 records to the host's native path type without replacing invalid Unicode. The display fields can redact, remove controls, or truncate characters, and different paths can therefore share one display string. Lossless records preserve each distinct native path and never return a shortened path.
 
@@ -248,3 +280,9 @@ The run envelope is separate from the package-operation envelope:
 The nested receipt retains requested, declared, observed, and enforced dimension maps, per-dimension evidence and limitations, effective filesystem grants, configured limits, termination, and completion evidence. Unsupported containment remains a failure. The result channel adds no descendant ownership, detached-descendant cleanup, or resource enforcement guarantees beyond the checked backend evidence.
 
 Legacy stderr receipts add `policy_inputs` when invocation permission flags are used. Result-file envelopes include the same metadata at the top level once policy selection succeeds, including profile-only runs. `source` is `script-profile`, `configured-defaults` or `invocation-baseline`; `configuration` contains the configured ceiling or null; `invocation` contains the supplied permission lists/booleans; `effective` describes the selected project policy and preserved assurance/limits. Environment entries are names only. Omitted lists inherit configured grants, so an empty invocation list does not itself mean the effective grant list is empty. Backend runtime additions remain in `effective_filesystem`, and checked enforcement remains in the established evidence. Profile-only stderr receipts retain their existing shape. Consumers must accept additive fields; this metadata does not make untrusted child streams a trusted machine-result channel.
+
+## Standalone tools
+
+Tool commands use operation `tool`. Their `changes.files` and `changes.paths` report affected or recovery paths under the tools root: `catalog.json`, `pending.json`, `committed`, `bin`, and `environments`. The `data.tools` array is sorted by npm package name and contains `name`, `version`, `requirement`, `environment`, `lockfile`, and a sorted `commands` array of `name`/`target` mappings. Targets are relative to the recorded environment. `data.bin_dir` identifies the PATH directory. Text follows the same bounded/sanitized presentation rules as other results.
+
+Mutations report committed state only after the global command decision. Retained in-use environments or cleanup failures produce `committed_cleanup_pending`; inconsistent pending publication produces recovery failure instead of overwriting unknown files. Listing may settle a previous transaction or clean inactive owned environments. Installed package scripts are never run by these operations. Execution of an installed command is a normal user process and has no sandbox receipt.

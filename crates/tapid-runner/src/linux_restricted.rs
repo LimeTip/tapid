@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -1230,11 +1230,7 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
         if let Some(report) = private_report {
             parse_private_report(report)?;
         }
-        self.termination = Some(if let Some(code) = status.code() {
-            Termination::Exited(code)
-        } else {
-            Termination::Signaled(status.signal().unwrap_or(0))
-        });
+        self.termination = Some(Termination::from_process_status(status));
         let requested = self.preflight.support.requested();
         let process_memory_stats_evidence = if allow_process_memory_stats {
             "; explicit opt-in created private PID and mount namespaces, remounted procfs read-only, and granted Landlock read access only within that namespace-scoped procfs"
