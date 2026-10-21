@@ -572,6 +572,126 @@ fn json_install_success_and_handled_failure() {
     assert_eq!(result["retry"], "after_correction");
 }
 
+#[test]
+fn json_init_creates_manifest_and_preserves_it_on_repeat() {
+    let project = TempProject::new("json-init").unwrap();
+    let (output, result) = invoke(&project, &["--json", "init"]);
+    assert_eq!(output.status.code(), Some(0), "{result}");
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["operation"], "init");
+    assert_eq!(result["outcome"], "success");
+    assert_eq!(result["changes"]["state"], "committed");
+    let manifest_path = fs::canonicalize(project.path())
+        .unwrap()
+        .join("package.json");
+    assert_eq!(
+        result["changes"]["files"],
+        serde_json::json!([manifest_path])
+    );
+    assert_eq!(
+        result["changes"]["paths"],
+        serde_json::json!([
+            {"encoding": "utf8", "value": manifest_path}
+        ])
+    );
+    assert_eq!(result["data"]["manifest"], "package.json");
+    let bytes = fs::read(&manifest_path).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        manifest["name"],
+        project.path().file_name().unwrap().to_str().unwrap()
+    );
+    assert_eq!(manifest["version"], "0.1.0");
+    assert_eq!(manifest["private"], true);
+
+    let (output, result) = invoke(&project, &["--json", "init"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(result["operation"], "init");
+    assert_eq!(result["outcome"], "failure");
+    assert_eq!(result["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(result["errors"][0]["code"], "MANIFEST_ALREADY_EXISTS");
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(result["changes"]["files"], serde_json::json!([]));
+    assert_eq!(result["changes"]["paths"], serde_json::json!([]));
+    assert_eq!(fs::read(manifest_path).unwrap(), bytes);
+}
+
+#[test]
+fn json_init_preserves_custom_manifest() {
+    let project = TempProject::new("json-init-custom").unwrap();
+    let bytes = b"{\n  \"name\": \"custom\", \"version\": \"7.2.1\", \"scripts\": {\"test\": \"custom\"}\n}\n";
+    project.write("package.json", bytes).unwrap();
+    let (output, result) = invoke(&project, &["init", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(result["operation"], "init");
+    assert_eq!(result["outcome"], "failure");
+    assert_eq!(result["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(result["errors"][0]["code"], "MANIFEST_ALREADY_EXISTS");
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(result["changes"]["files"], serde_json::json!([]));
+    assert_eq!(result["changes"]["paths"], serde_json::json!([]));
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        bytes
+    );
+}
+
+#[test]
+fn json_init_unavailable_targets_leave_files_unchanged() {
+    let project = TempProject::new("json-init-unavailable").unwrap();
+    project
+        .write("regular-file", b"preserved target bytes")
+        .unwrap();
+    for target in ["missing", "regular-file"] {
+        let (output, result) = invoke(&project, &["--json", "init", target]);
+        assert_eq!(output.status.code(), Some(1), "{result}");
+        assert_eq!(result["operation"], "init");
+        assert_eq!(result["outcome"], "failure");
+        assert_eq!(result["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(result["errors"][0]["code"], "PROJECT_UNAVAILABLE");
+        assert_eq!(result["changes"]["state"], "unchanged");
+        assert_eq!(result["changes"]["files"], serde_json::json!([]));
+        assert_eq!(result["changes"]["paths"], serde_json::json!([]));
+        assert!(!project.path().join("missing").exists());
+        assert!(!project.path().join("package.json").exists());
+        assert_eq!(
+            fs::read(project.path().join("regular-file")).unwrap(),
+            b"preserved target bytes"
+        );
+    }
+}
+
+#[test]
+fn json_init_selects_explicit_existing_directory() {
+    let project = TempProject::new("json-init-explicit").unwrap();
+    for (target, args) in [
+        ("first-child", vec!["--json", "init", "first-child"]),
+        ("second-child", vec!["init", "second-child", "--json"]),
+    ] {
+        fs::create_dir(project.path().join(target)).unwrap();
+        let (output, result) = invoke(&project, &args);
+        assert_eq!(output.status.code(), Some(0), "{result}");
+        assert_eq!(result["schema_version"], 1);
+        assert_eq!(result["operation"], "init");
+        assert_eq!(result["outcome"], "success");
+        assert_eq!(result["changes"]["state"], "committed");
+        let manifest_path = fs::canonicalize(project.path().join(target))
+            .unwrap()
+            .join("package.json");
+        assert_eq!(
+            result["changes"]["files"],
+            serde_json::json!([manifest_path])
+        );
+        assert_eq!(result["data"]["manifest"], "package.json");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["name"], target);
+        assert_eq!(manifest["version"], "0.1.0");
+        assert_eq!(manifest["private"], true);
+        assert!(!project.path().join("package.json").exists());
+    }
+}
+
 /// Reject malformed or unsupported requests without echoing values or writing project outputs.
 #[test]
 fn json_parse_errors_and_unsupported_commands_do_not_echo_input() {
@@ -580,26 +700,9 @@ fn json_parse_errors_and_unsupported_commands_do_not_echo_input() {
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(result["errors"][0]["code"], "ARGUMENT_INVALID");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("fixture-secret"));
-    let (output, result) = invoke(&project, &["--json", "init"]);
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-    assert_eq!(result["schema_version"], 1);
-    assert_eq!(result["operation"], "init");
-    assert_eq!(result["outcome"], "success");
-    assert_eq!(result["changes"]["state"], "committed");
-    assert!(
-        result["changes"]["files"][0]
-            .as_str()
-            .unwrap()
-            .replace('\\', "/")
-            .ends_with("/package.json")
-    );
-
-    let (output, result) = invoke(&project, &["--json", "init"]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stderr.is_empty());
-    assert_eq!(result["outcome"], "failure");
-    assert_eq!(result["errors"][0]["code"], "MANIFEST_ALREADY_EXISTS");
+    project
+        .write("package.json", br#"{"name":"app","version":"0.1.0"}"#)
+        .unwrap();
     let (output, result) = invoke(
         &project,
         &["--json", "import-package-lock", "package-lock.json"],
