@@ -12,6 +12,8 @@ pub(crate) struct Args {
     pub(crate) path: Option<PathBuf>,
 }
 
+/// Initialize the selected directory, defaulting to the current directory.
+/// Render human diagnostics or a schema-v1 result describing creation or failure.
 pub(crate) fn run(args: Args, json_output: bool) -> ExitCode {
     let raw = args.path.as_deref().unwrap_or_else(|| Path::new("."));
     let directory = match fs::canonicalize(raw) {
@@ -87,6 +89,9 @@ impl std::fmt::Display for CreationError {
     }
 }
 
+/// Create a private package manifest without overwriting an existing entry.
+/// Distinguish unavailable directories, invalid names, existing entries, and I/O failures.
+/// After a write failure, attempt to remove the new file; cleanup is best effort.
 fn create_manifest(directory: &Path) -> Result<(), CreationError> {
     if !directory.is_dir() {
         return Err(CreationError::Unavailable(format!(
