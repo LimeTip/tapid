@@ -12,11 +12,14 @@ pub(crate) struct Args {
     pub(crate) path: Option<PathBuf>,
 }
 
-pub(crate) fn run(args: Args) -> ExitCode {
+pub(crate) fn run(args: Args, json_output: bool) -> ExitCode {
     let raw = args.path.as_deref().unwrap_or_else(|| Path::new("."));
     let directory = match fs::canonicalize(raw) {
         Ok(path) => path,
         Err(error) => {
+            if json_output {
+                return crate::output::json::operation_error("init", "PROJECT_UNAVAILABLE");
+            }
             eprintln!(
                 "error: cannot access project directory '{}': {error}",
                 raw.display()
@@ -25,9 +28,29 @@ pub(crate) fn run(args: Args) -> ExitCode {
         }
     };
     match create_manifest(&directory) {
+        Ok(()) if json_output => {
+            let mut outcome = crate::application::outcome::OperationOutcome::unchanged(&directory);
+            outcome.state = crate::application::outcome::ChangeState::Committed;
+            outcome.changed_files.push(directory.join("package.json"));
+            crate::output::json::completed(
+                &outcome,
+                "init",
+                serde_json::json!({"manifest": "package.json"}),
+            )
+        }
         Ok(()) => {
             println!("Created {}", directory.join("package.json").display());
             ExitCode::SUCCESS
+        }
+        Err(error) if json_output => {
+            let code = if error.starts_with("refusing to overwrite existing manifest") {
+                "MANIFEST_ALREADY_EXISTS"
+            } else if error.starts_with("project path is not a directory") {
+                "PROJECT_UNAVAILABLE"
+            } else {
+                "MANIFEST_INVALID"
+            };
+            crate::output::json::operation_error("init", code)
         }
         Err(error) => {
             eprintln!("error: {error}");
