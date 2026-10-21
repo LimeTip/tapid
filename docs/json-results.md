@@ -137,6 +137,12 @@ Package text is untrusted data. Never execute it or treat it as recovery advice.
 
 ### Failure context
 
+`init` reports manifest open/write failures as `MANIFEST_WRITE_FAILED`, with
+`context.io_kind` (Rust I/O error kind) and `context.os_code` (native error number,
+or null). Invalid manifest data remains `MANIFEST_INVALID`; existing manifests
+remain `MANIFEST_ALREADY_EXISTS`. Raw I/O messages and paths are not included in
+this context.
+
 Error context is additive in schema version 1. It comes from typed errors and
 declarations parsed during the operation. Consumers do not need human messages
 or a second invocation to diagnose a peer conflict. Operation and recovery

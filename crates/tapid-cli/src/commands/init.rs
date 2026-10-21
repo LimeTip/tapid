@@ -18,7 +18,7 @@ pub(crate) fn run(args: Args, json_output: bool) -> ExitCode {
         Ok(path) => path,
         Err(error) => {
             if json_output {
-                return crate::output::json::operation_error("init", "PROJECT_UNAVAILABLE");
+                return crate::output::json::operation_error("init", "PROJECT_UNAVAILABLE", None);
             }
             eprintln!(
                 "error: cannot access project directory '{}': {error}",
@@ -43,14 +43,19 @@ pub(crate) fn run(args: Args, json_output: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) if json_output => {
-            let code = if error.starts_with("refusing to overwrite existing manifest") {
-                "MANIFEST_ALREADY_EXISTS"
-            } else if error.starts_with("project path is not a directory") {
-                "PROJECT_UNAVAILABLE"
-            } else {
-                "MANIFEST_INVALID"
+            let (code, context) = match &error {
+                CreationError::Unavailable(_) => ("PROJECT_UNAVAILABLE", None),
+                CreationError::Exists(_) => ("MANIFEST_ALREADY_EXISTS", None),
+                CreationError::Invalid(_) => ("MANIFEST_INVALID", None),
+                CreationError::Write(_, source) => (
+                    "MANIFEST_WRITE_FAILED",
+                    Some(serde_json::json!({
+                        "io_kind": format!("{:?}", source.kind()),
+                        "os_code": source.raw_os_error(),
+                    })),
+                ),
             };
-            crate::output::json::operation_error("init", code)
+            crate::output::json::operation_error("init", code, context)
         }
         Err(error) => {
             eprintln!("error: {error}");
@@ -59,24 +64,48 @@ pub(crate) fn run(args: Args, json_output: bool) -> ExitCode {
     }
 }
 
-fn create_manifest(directory: &Path) -> Result<(), String> {
+enum CreationError {
+    Unavailable(String),
+    Exists(PathBuf),
+    Invalid(String),
+    Write(PathBuf, io::Error),
+}
+
+impl std::fmt::Display for CreationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(message) | Self::Invalid(message) => f.write_str(message),
+            Self::Exists(path) => write!(
+                f,
+                "refusing to overwrite existing manifest: {}",
+                path.display()
+            ),
+            Self::Write(path, source) => {
+                write!(f, "cannot write manifest {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+fn create_manifest(directory: &Path) -> Result<(), CreationError> {
     if !directory.is_dir() {
-        return Err(format!(
+        return Err(CreationError::Unavailable(format!(
             "project path is not a directory: {}",
             directory.display()
-        ));
+        )));
     }
     let name = directory
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| {
-            format!(
+            CreationError::Invalid(format!(
                 "project directory has no valid UTF-8 name: {}",
                 directory.display()
-            )
+            ))
         })?;
-    let manifest = PackageManifest::new(name, "0.1.0", true)
-        .map_err(|error| format!("cannot create project manifest: {error}"))?;
+    let manifest = PackageManifest::new(name, "0.1.0", true).map_err(|error| {
+        CreationError::Invalid(format!("cannot create project manifest: {error}"))
+    })?;
     let path = directory.join("package.json");
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -84,17 +113,14 @@ fn create_manifest(directory: &Path) -> Result<(), String> {
         .open(&path)
         .map_err(|error| {
             if error.kind() == io::ErrorKind::AlreadyExists {
-                format!(
-                    "refusing to overwrite existing manifest: {}",
-                    path.display()
-                )
+                CreationError::Exists(path.clone())
             } else {
-                format!("cannot write manifest {}: {error}", path.display())
+                CreationError::Write(path.clone(), error)
             }
         })?;
     if let Err(error) = io::Write::write_all(&mut file, manifest.to_json().as_bytes()) {
         let _ = fs::remove_file(&path);
-        return Err(format!("cannot write manifest {}: {error}", path.display()));
+        return Err(CreationError::Write(path, error));
     }
     Ok(())
 }

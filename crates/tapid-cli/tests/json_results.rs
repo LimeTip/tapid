@@ -662,6 +662,34 @@ fn json_init_unavailable_targets_leave_files_unchanged() {
 }
 
 #[test]
+#[cfg(unix)]
+fn json_init_reports_manifest_write_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = TempProject::new("json-init-readonly").unwrap();
+    let permissions = fs::metadata(project.path()).unwrap().permissions();
+    fs::set_permissions(project.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    let home = TempHome::new("json-init-readonly").unwrap();
+    let output = command(&project, &home, &["--json", "init"]).output();
+    fs::set_permissions(project.path(), permissions).unwrap();
+    let output = output.unwrap();
+    assert!(output.stderr.is_empty());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(result["operation"], "init");
+    assert_eq!(result["outcome"], "failure");
+    assert_eq!(result["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(result["errors"][0]["code"], "MANIFEST_WRITE_FAILED");
+    assert_eq!(
+        result["errors"][0]["context"]["io_kind"],
+        "PermissionDenied"
+    );
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(result["changes"]["files"], serde_json::json!([]));
+    assert_eq!(result["changes"]["paths"], serde_json::json!([]));
+    assert!(!project.path().join("package.json").exists());
+}
+
+#[test]
 fn json_init_selects_explicit_existing_directory() {
     let project = TempProject::new("json-init-explicit").unwrap();
     for (target, args) in [

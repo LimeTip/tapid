@@ -156,9 +156,9 @@ pub(crate) fn information(operation: &str, data: Value) -> ExitCode {
     emit(result, 0)
 }
 
-pub(crate) fn operation_error(operation: &str, code: &str) -> ExitCode {
+pub(crate) fn operation_error(operation: &str, code: &str, context: Option<Value>) -> ExitCode {
     let mut result = envelope(operation, "failure", None);
-    result["errors"] = json!([{"code": code, "phase": "operation", "context": null}]);
+    result["errors"] = json!([{"code": code, "phase": "operation", "context": context}]);
     emit(result, 1)
 }
 

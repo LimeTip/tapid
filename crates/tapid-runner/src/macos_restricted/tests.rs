@@ -1756,9 +1756,18 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
             assert_eq!(unsafe { libc::dup2(source, target) }, target);
             assert_eq!(unsafe { libc::fcntl(target, libc::F_SETFD, 0) }, 0);
         }
-        let (destination_read, destination_write) = launch_pipe().unwrap();
-        let (mut sink, input) = spawn_live_sink(destination_write.as_raw_fd()).unwrap();
+        let (mut destination_read, destination_write) = UnixStream::pair().unwrap();
+        destination_read
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let (mut sink, mut input) = spawn_live_sink(destination_write.as_raw_fd()).unwrap();
         drop(destination_write);
+        // spawn waits for exec, not for dyld to finish opening its own descriptors.
+        // Observe a round trip before inspecting the relay blocked on its next read.
+        input.write_all(b"ready\n").unwrap();
+        let mut ready = [0; 6];
+        destination_read.read_exact(&mut ready).unwrap();
+        assert_eq!(&ready, b"ready\n");
         let mut entries = [libc::proc_fdinfo {
             proc_fd: 0,
             proc_fdtype: 0,
