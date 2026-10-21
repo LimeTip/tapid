@@ -89,7 +89,7 @@ A shared type belongs in `tapid-core` only when it is a stable domain value with
 - `tapid-runner`: controlled process and executable invocation, environment handling, output and time limits, and script execution policy enforcement.
 - `tapid-publish`: package packing, publication preparation, staging, and promotion workflows.
 - `tapid-signatures`: signing and signature verification primitives.
-- `tapid-attestations`: artifact-bound provenance and audit attestation models.
+- `tapid-attestations`: artifact-bound provenance, audit claims and authenticated package-security evidence verification.
 - `tapid-transparency`: append-only transparency records and verification foundations.
 - `tapid-test-support`: fixtures, fake registries, adversarial inputs, and shared test utilities. Production crates must not depend on it.
 
@@ -129,11 +129,25 @@ Security-sensitive behavior is modeled as explicit, validated state transitions.
 
 Tests cover successful transitions and rejection, interruption, replay, and recovery paths. Human and machine-readable output derive from the same transition result.
 
-## Registry seam
+## Hosted services and public contracts
 
-The future Tapid Registry is an online system for package metadata, publishing, distribution, identities, verification, and attestations. It is distinct from `tapid-store`, which is local developer-machine storage. Registry transport is a real I/O seam and can have production and deterministic test adapters.
+The open-source client and its libraries own versioned interchange contracts,
+verification rules and conformance fixtures. Private Cloud owns security intelligence,
+analysis, issuance and security-evidence publication or withdrawal. Private Web owns
+the sign-in and account experience. One account authority owns users, organizations,
+memberships and roles. Client and Web consume the same security results.
 
-The main repository remains the default home for the client and its libraries. A future registry system or independently operated storage system may use a separate repository when deployment, security, ownership, or release lifecycle justifies that split.
+Account authorization is independent of evidence issuer authentication. Public evidence
+that was deliberately published remains anonymously readable. Private results and
+publication require separate tenant authorization. Public builds, tests and local
+operations remain independent of private code and accounts. Signatures authenticate
+issuer and content, not scanner accuracy. See [the security evidence contract](security-evidence.md)
+and [ADR 0011](adr/0011-security-evidence-contract.md).
+
+The future Tapid Registry handles package metadata, publishing and distribution.
+Registry transport remains a real I/O seam, separate from local verified storage in
+`tapid-store`. These responsibilities do not make the CLI the owner of provider rules.
+Security evidence stays outside immutable resolution identity and the lock schema.
 
 ## Architecture decisions and checks
 
