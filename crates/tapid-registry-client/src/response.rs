@@ -1,5 +1,8 @@
 use crate::{HttpResponse, MetadataError, RegistryClientError};
 
+/// Borrows the body for statuses 200–203 with a case-insensitive JSON media type.
+/// Media-type parameters are ignored. Other statuses return `HttpStatus`; missing
+/// or unsupported content types return `UnsupportedContentType`. JSON is not parsed.
 pub(crate) fn json_response(response: &HttpResponse) -> Result<&[u8], RegistryClientError> {
     if !(200..=203).contains(&response.status) {
         return Err(RegistryClientError::Metadata(MetadataError::HttpStatus(
@@ -21,6 +24,8 @@ pub(crate) fn json_response(response: &HttpResponse) -> Result<&[u8], RegistryCl
     Ok(&response.body)
 }
 
+/// Parses an owned JSON object, returning `InvalidJson` for malformed JSON or
+/// a non-object root.
 pub(crate) fn json_object(
     body: &[u8],
 ) -> Result<serde_json::Map<String, serde_json::Value>, MetadataError> {
