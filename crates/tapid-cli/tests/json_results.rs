@@ -591,6 +591,7 @@ fn json_parse_errors_and_unsupported_commands_do_not_echo_input() {
         result["changes"]["files"][0]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with("/package.json")
     );
 
