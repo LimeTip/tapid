@@ -18,8 +18,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Networking::WinSock::*;
 use windows_sys::Win32::Security::{
     CopySid, EqualSid, GetLengthSid, GetTokenInformation, IsValidSid,
-    TOKEN_APPCONTAINER_INFORMATION, TOKEN_GROUPS, TOKEN_QUERY, TokenAppContainerSid,
-    TokenCapabilities, TokenIsAppContainer,
+    TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TokenAppContainerSid, TokenIsAppContainer,
 };
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
@@ -180,10 +179,7 @@ impl Authority {
         {
             return Err(WSAEACCES as u32);
         }
-        let groups = token_information(token.0, TokenCapabilities)?;
-        if unsafe { (*groups.as_ptr().cast::<TOKEN_GROUPS>()).GroupCount } != 0 {
-            return Err(WSAEACCES as u32);
-        }
+        crate::execution::windows_job::validate_runtime_capabilities(token.0)?;
         Ok(pid)
     }
 }

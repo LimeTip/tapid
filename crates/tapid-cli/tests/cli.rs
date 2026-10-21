@@ -5974,20 +5974,742 @@ hook = "prepare"
 }
 
 #[test]
+fn dependency_lifecycle_required_native_build_fails_without_approval() {
+    let project = tapid_test_support::TempProject::new("required-native-hook").unwrap();
+    let home = tapid_test_support::TempHome::new("required-native-hook").unwrap();
+    let manifest = br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"}}"#;
+    project.write("package.json", manifest).unwrap();
+    write_dependency_script_fixture(
+        &project,
+        "H4sIAAAAAAAAE+3TTQrCMBAF4B5FZq3pS61d9DbRhhClk9DWghTvLv4spAhuahWcb/OG2cxsXjS7g3E2jfdU+zZwMjEAKPL8lgDGCWye5ute6yLTyQJTP/LKse1Mk2CWWz9oIDa1pZLYdL63q8rWgZbU26b1gakkraBA52//KT7j0ft067ny7JQ7xclvvO0/snH/82It/Z/DIM0WQoi/dAELlQxvAAwAAA==",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+        ])
+        .arg(home.path().join("store"))
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "required native build must not appear installed successfully"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("required dependency lifecycle hook install")
+    );
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!project.path().join("tapid.lock").exists());
+    assert!(!project.path().join("node_modules").exists());
+    // Exact approval must pass the required-hook gate. The containment override
+    // must still verify pinned tool bytes before any execution.
+    project.write("shell", b"not an executable").unwrap();
+    let fixture: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("registry.json")).unwrap()).unwrap();
+    let policy = toml::to_string(&serde_json::json!({"schema":1,"approvals":[{
+        "package":"native-demo","version":"1.0.0","archive-digest":fixture["packages"][0]["integrity"],
+        "hook":"install","script-digest":format!("sha256-{:x}", Sha256::digest(b"node-gyp rebuild")),
+        "system-toolchain":true,"read":["."],"write":["."],"network":false,"environment":{},
+        "timeout-seconds":5,"max-output-bytes":1024,"max-processes":32,"max-memory-bytes":134217728,
+        "tools":[{"name":"sh","path":project.path().join("shell").to_str().unwrap(),"digest":format!("sha256-{}", "0".repeat(64))}]
+    }]})).unwrap();
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+        ])
+        .arg(home.path().join("store"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("lifecycle tool digest mismatch for sh")
+    );
+}
+
+fn write_dependency_script_fixture(project: &tapid_test_support::TempProject, archive: &str) {
+    let bytes = STANDARD.decode(archive).unwrap();
+    project
+        .write(
+            "registry.json",
+            &serde_json::to_vec(&serde_json::json!({"packages":[{
+                "registry":"https://registry.npmjs.org", "name":"native-demo", "version":"1.0.0",
+                "integrity":format!("sha512-{}", STANDARD.encode(Sha512::digest(&bytes))),
+                "artifact":format!("base64:{archive}")
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn dependency_lifecycle_failed_unsafe_hook_preserves_previous_install() {
+    let project = tapid_test_support::TempProject::new("unsafe-hook-rollback").unwrap();
+    let home = tapid_test_support::TempHome::new("unsafe-hook-rollback").unwrap();
+    let manifest = br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"}}"#;
+    project.write("package.json", manifest).unwrap();
+    write_dependency_script_fixture(
+        &project,
+        "H4sIAAAAAAAAE+3PQQrCMBAF0B6l/HWNEy1Z5DahBom2ScjEUii9u1AXgrgRirrI2/zhb2Ymmu5qznYfHykuHHy1MSIi1bZrEtFrkpTPee2lVFJVNW19yDs3ziZV9JVdf2iGN4OFhjfZjXZ3skNAg9EmdsFDQwoShAbcJRczQ89wnrPpe2jYyeX6cMSy/PqPoiiK4jN3HmGcyAAIAAA=",
+    );
+    let install = |flags: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .args([
+                "install",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+            ])
+            .arg(home.path().join("store"))
+            .args(flags)
+            .env_remove("PATH")
+            .output()
+            .unwrap()
+    };
+    assert!(install(&[]).status.success());
+    project
+        .write("node_modules/previous-marker", b"preserved")
+        .unwrap();
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let output = install(&[
+        "--allow-unapproved-dependency-scripts",
+        "--unsafe-no-dependency-sandbox",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Exited(23)"));
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/previous-marker")).unwrap(),
+        b"preserved"
+    );
+    assert!(!home.path().join("store/.tapid-lifecycle-key").exists());
+}
+
+#[test]
+fn dependency_override_warnings_preserve_json_and_human_output_contracts() {
+    let project = tapid_test_support::TempProject::new("override-warning-output").unwrap();
+    let home = tapid_test_support::TempHome::new("override-warning-output").unwrap();
+    project
+        .write("package.json", br#"{"name":"demo","version":"1.0.0"}"#)
+        .unwrap();
+    let install = |json: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+        command
+            .current_dir(project.path())
+            .args([
+                "install",
+                "--allow-unapproved-dependency-scripts",
+                "--unsafe-no-dependency-sandbox",
+                "--store-dir",
+            ])
+            .arg(home.path().join("store"));
+        if json {
+            command.arg("--json");
+        }
+        command.output().unwrap()
+    };
+    for json in [true, false] {
+        let output = install(json);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if json {
+            assert!(
+                output.stderr.is_empty(),
+                "JSON commands must keep stderr empty"
+            );
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                result
+                    .to_string()
+                    .contains("DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT")
+            );
+        } else {
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr)
+                    .matches("warning:")
+                    .count(),
+                2
+            );
+        }
+    }
+    fs::remove_file(project.path().join("package.json")).unwrap();
+    let failed = install(false);
+    assert!(!failed.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&failed.stderr)
+            .matches("warning:")
+            .count(),
+        2
+    );
+    let failed = install(true);
+    assert!(!failed.status.success());
+    assert!(failed.stderr.is_empty());
+    serde_json::from_slice::<serde_json::Value>(&failed.stdout).unwrap();
+}
+
+#[test]
+fn dependency_review_regression_workspace_selection_retains_json_override_warnings() {
+    let project = tapid_test_support::TempProject::new("workspace-override-warning").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/local/package.json",
+            br#"{"name":"local","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--json",
+            "--workspace",
+            "missing",
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    for warning in [
+        "UNAPPROVED_DEPENDENCY_SCRIPTS_ALLOWED",
+        "DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT",
+    ] {
+        assert!(
+            json.to_string().contains(warning),
+            "missing {warning}: {json}"
+        );
+    }
+    assert!(!project.path().join("tapid.lock").exists());
+}
+
+#[test]
+fn dependency_review_regression_workspace_override_does_not_read_live_members() {
+    let project = tapid_test_support::TempProject::new("workspace-hook-override").unwrap();
+    let home = tapid_test_support::TempHome::new("workspace-hook-override").unwrap();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"native-demo":"1.0.0"}}"#).unwrap();
+    project
+        .write(
+            "packages/local/package.json",
+            br#"{"name":"local","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    project
+        .write("packages/local/private.txt", b"live-workspace-secret")
+        .unwrap();
+    write_dependency_script_fixture(
+        &project,
+        "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+        ])
+        .arg(home.path().join("store"))
+        .env_remove("PATH")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+            .is_file()
+    );
+    assert_eq!(
+        fs::read(project.path().join("packages/local/private.txt")).unwrap(),
+        b"live-workspace-secret"
+    );
+    assert!(!home.path().join("store/.tapid-lifecycle-key").exists());
+    // An exact approval still cannot request live workspace dependency access.
+    let package: serde_json::Value = serde_json::from_slice(
+        &fs::read(project.path().join("node_modules/native-demo/package.json")).unwrap(),
+    )
+    .unwrap();
+    let fixture: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("registry.json")).unwrap()).unwrap();
+    let shell = if cfg!(windows) {
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe")
+    } else {
+        PathBuf::from("/bin/sh")
+    };
+    let shell = fs::canonicalize(shell).unwrap();
+    let policy = toml::to_string(&serde_json::json!({"schema":1,"approvals":[{
+        "package":"native-demo","version":"1.0.0","archive-digest":fixture["packages"][0]["integrity"],
+        "hook":"postinstall","script-digest":format!("sha256-{:x}", Sha256::digest(package["scripts"]["postinstall"].as_str().unwrap().as_bytes())),
+        "system-toolchain":true,"dependencies":true,"read":["."],"write":["."],"network":false,"environment":{},
+        "timeout-seconds":5,"max-output-bytes":1024,"max-processes":32,"max-memory-bytes":134217728,
+        "tools":[{"name":if cfg!(windows) {"cmd"} else {"sh"},"path":shell,"digest":format!("sha256-{:x}", Sha256::digest(fs::read(&shell).unwrap()))}]
+    }]})).unwrap();
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+        ])
+        .arg(home.path().join("store"))
+        .env_remove("PATH")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot read live workspace packages")
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+            .is_file()
+    );
+}
+
+#[test]
+fn dependency_review_regression_implicit_node_gyp_uses_private_bundled_modules() {
+    let Some(node) = node_assertion_output(
+        Command::new("node").args(["-p", "process.execPath"]),
+        std::env::var_os("TAPID_REQUIRE_NODE_ASSERTIONS").is_some(),
+        "implicit-node-gyp",
+    ) else {
+        return;
+    };
+    assert!(node.status.success());
+    let node = PathBuf::from(String::from_utf8(node.stdout).unwrap().trim());
+    let project = tapid_test_support::TempProject::new("implicit-node-gyp").unwrap();
+    let home = tapid_test_support::TempHome::new("implicit-node-gyp").unwrap();
+    let runtime = tapid_test_support::TempProject::new("node-gyp-runtime").unwrap();
+    runtime.write("bin/placeholder", b"").unwrap();
+    let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+    fs::copy(node, runtime.path().join("bin").join(node_name)).unwrap();
+    runtime
+        .write(
+            "lib/node_modules/npm/package.json",
+            br#"{"name":"npm","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    runtime
+        .write(
+            "lib/node_modules/npm/node_modules/node-gyp/package.json",
+            br#"{"name":"node-gyp","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    runtime.write("lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js", br#"const fs = require('node:fs'); if (process.argv[2] !== 'rebuild') throw Error('wrong arguments'); if (!__filename.includes('.tools')) throw Error('host tool executed'); fs.writeFileSync('BUILT', require('fixture-helper'));"#).unwrap();
+    runtime
+        .write(
+            "lib/node_modules/npm/node_modules/fixture-helper/index.js",
+            b"module.exports = 'private-toolchain';",
+        )
+        .unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"}}"#,
+        )
+        .unwrap();
+    write_dependency_script_fixture(
+        &project,
+        "H4sIAAAAAAAAE+3TTQrCMBAF4B5FZq3pS61d9DbRhhClk9DWghTvLv4spAhuahWcb/OG2cxsXjS7g3E2jfdU+zZwMjEAKPL8lgDGCWye5ute6yLTyQJTP/LKse1Mk2CWWz9oIDa1pZLYdL63q8rWgZbU26b1gakkraBA52//KT7j0ft067ny7JQ7xclvvO0/snH/82It/Z/DIM0WQoi/dAELlQxvAAwAAA==",
+    );
+    let install = || {
+        Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .args([
+                "install",
+                "--allow-unapproved-dependency-scripts",
+                "--unsafe-no-dependency-sandbox",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+            ])
+            .arg(home.path().join("store"))
+            .env("PATH", runtime.path().join("bin"))
+            .output()
+            .unwrap()
+    };
+    let output = install();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/native-demo/BUILT")).unwrap(),
+        b"private-toolchain"
+    );
+    assert!(!home.path().join("store/.tapid-lifecycle-key").exists());
+    fs::remove_dir_all(runtime.path().join("lib/node_modules/npm")).unwrap();
+    let output = install();
+    assert!(
+        !output.status.success(),
+        "missing bundled toolchain must fail before executing an arbitrary PATH tool"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("node-gyp"));
+    assert_eq!(
+        fs::read(project.path().join("node_modules/native-demo/BUILT")).unwrap(),
+        b"private-toolchain"
+    );
+}
+
+#[test]
+fn dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations() {
+    let project = tapid_test_support::TempProject::new("dependency-hooks-override").unwrap();
+    let home = tapid_test_support::TempHome::new("dependency-hooks-override").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let archive = "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=";
+    write_dependency_script_fixture(&project, archive);
+    let install = |flags: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .args([
+                "install",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+            ])
+            .arg(home.path().join("store"))
+            .args(flags)
+            .output()
+            .unwrap()
+    };
+    let output = install(&["--unsafe-no-dependency-sandbox"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+            .exists()
+    );
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+        let output = install(&["--allow-unapproved-dependency-scripts"]);
+        assert!(
+            !output.status.success(),
+            "approval override must retain containment"
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_before
+        );
+        assert!(
+            !project
+                .path()
+                .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+                .exists()
+        );
+    }
+    #[cfg(windows)]
+    {
+        let output = install(&["--allow-unapproved-dependency-scripts"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("without containment"));
+        assert!(
+            project
+                .path()
+                .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+                .is_file()
+        );
+        assert!(!home.path().join("store/.tapid-lifecycle-key").exists());
+    }
+    let output = install(&[
+        "--allow-unapproved-dependency-scripts",
+        "--unsafe-no-dependency-sandbox",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("without containment"));
+    assert!(
+        project
+            .path()
+            .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+            .is_file()
+    );
+    assert!(!home.path().join("store/.tapid-lifecycle-key").exists());
+    let lock = Lockfile::from_json(&fs::read_to_string(project.path().join("tapid.lock")).unwrap())
+        .unwrap();
+    assert!(
+        lock.packages()
+            .values()
+            .all(|p| p.derived_hooks().is_empty())
+    );
+    let output = install(&[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+            .exists()
+    );
+    let output = install(&[
+        "--allow-unapproved-dependency-scripts",
+        "--unsafe-no-dependency-sandbox",
+        "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let text = result.to_string();
+    assert!(text.contains("DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT"));
+    assert!(text.contains("UNAPPROVED_DEPENDENCY_SCRIPTS_ALLOWED"));
+    for flags in [
+        vec!["--allow-unapproved-dependency-scripts", "--offline"],
+        vec!["--unsafe-no-dependency-sandbox", "--frozen"],
+        vec![
+            "--unsafe-no-dependency-sandbox",
+            "--allow-unverified-registry-artifacts",
+        ],
+    ] {
+        let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+        assert!(!install(&flags).status.success());
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_before
+        );
+    }
+}
+
+#[test]
+fn dependency_lifecycle_sandbox_only_override_skips_hooks_with_a_dependency_cycle() {
+    let fixture = command_support::CliFixture::new("sandbox-only-cycle");
+    let project = &fixture.project;
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"a":"1.0.0","b":"2.0.0","native-demo":"1.0.0"}}"#).unwrap();
+    write_dependency_script_fixture(
+        project,
+        "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=",
+    );
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/aliased-root-cycle.json")).unwrap();
+    let hook_registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("registry.json")).unwrap()).unwrap();
+    registry["packages"].as_array_mut().unwrap().extend(
+        hook_registry["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    project
+        .write("registry.json", &serde_json::to_vec(&registry).unwrap())
+        .unwrap();
+    let output = fixture
+        .command(&[
+            "install",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    for hook in ["preinstall", "install", "postinstall", "prepare"] {
+        assert!(
+            stderr.contains(&format!(
+                "skipped dependency lifecycle hook {hook} for native-demo@1.0.0"
+            )),
+            "{stderr}"
+        );
+    }
+    assert!(
+        !project
+            .path()
+            .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+            .exists()
+    );
+    let lock = Lockfile::from_json(&fs::read_to_string(project.path().join("tapid.lock")).unwrap())
+        .unwrap();
+    assert!(
+        lock.packages()
+            .values()
+            .all(|package| package.derived_hooks().is_empty())
+    );
+    assert!(project.path().join("node_modules/a/package.json").is_file());
+    assert!(
+        project
+            .path()
+            .join("node_modules/a/node_modules/b/package.json")
+            .is_file()
+    );
+    let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let output = fixture
+        .command(&[
+            "install",
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "authorized cyclic lifecycle graphs must still be rejected"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("approved dependency lifecycle graphs must be acyclic")
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_before
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+            .exists()
+    );
+}
+
+#[test]
+fn dependency_lifecycle_sandbox_only_override_warns_on_discovery_failure() {
+    let fixture = command_support::CliFixture::new("sandbox-only-discovery");
+    let project = &fixture.project;
+    project
+        .write(
+            "package.json",
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"broken":"1.0.0"}}"#,
+        )
+        .unwrap();
+    // The verified manifest is valid but exceeds the 1 MiB lifecycle discovery bound.
+    // Skipping hooks must still allow installation; authorization retains that bound.
+    project
+        .write(
+            "registry.json",
+            include_bytes!("fixtures/dependency-discovery-oversized.json"),
+        )
+        .unwrap();
+    let output = fixture
+        .command(&[
+            "install",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("could not discover dependency lifecycle hooks for broken@1.0.0"),
+        "{stderr}"
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/broken/SHOULD_NOT_EXIST")
+            .exists()
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/broken/package.json")
+            .is_file()
+    );
+    let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let output = fixture
+        .command(&[
+            "install",
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "discovery limits must fail closed when execution is authorized"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("dependency package.json must be a regular file no larger than 1 MiB")
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/broken/SHOULD_NOT_EXIST")
+            .exists()
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_before
+    );
+}
+
+#[test]
 fn dependency_lifecycle_hooks_are_reported_and_never_run_by_default() {
     let project = tapid_test_support::TempProject::new("dependency-hooks-denied").unwrap();
     let home = tapid_test_support::TempHome::new("dependency-hooks-denied").unwrap();
     project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"},"scripts":{"install":"echo root > ROOT_SCRIPT_RAN"}}"#).unwrap();
     let archive = "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=";
-    let bytes = STANDARD.decode(archive).unwrap();
-    let fixture = serde_json::json!({"packages":[{
-        "registry":"https://registry.npmjs.org", "name":"native-demo", "version":"1.0.0",
-        "integrity":format!("sha512-{}", STANDARD.encode(Sha512::digest(&bytes))),
-        "artifact":format!("base64:{archive}")
-    }]});
-    project
-        .write("registry.json", &serde_json::to_vec(&fixture).unwrap())
-        .unwrap();
+    write_dependency_script_fixture(&project, archive);
     for flags in [
         vec!["install", "--registry-fixture", "registry.json"],
         vec!["install", "--offline", "--frozen"],

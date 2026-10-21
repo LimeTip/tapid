@@ -230,10 +230,7 @@ pub(super) fn target(
     {
         return Err(ERROR_ACCESS_DENIED);
     }
-    let capabilities = value::<u32>(raw(&t), TokenCapabilities)?;
-    if capabilities != 0 {
-        return Err(ERROR_ACCESS_DENIED);
-    }
+    crate::execution::windows_job::validate_runtime_capabilities(raw(&t))?;
     let package_buffer = token_information(raw(&t), TokenAppContainerSid)?;
     let package = unsafe {
         &*package_buffer

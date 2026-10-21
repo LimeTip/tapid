@@ -55,6 +55,21 @@ impl LifecycleTool {
     pub fn digest(&self) -> &str {
         &self.digest
     }
+    /// Filename of this pinned tool in private executable storage.
+    pub fn executable_name(&self) -> String {
+        if cfg!(windows) {
+            windows_executable_name(&self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+}
+fn windows_executable_name(name: &str) -> String {
+    if name.to_ascii_lowercase().ends_with(".exe") {
+        name.into()
+    } else {
+        format!("{name}.exe")
+    }
 }
 
 /// Validated approval. Fields cannot be changed after parsing.
@@ -221,7 +236,9 @@ impl DependencyLifecyclePolicy {
                 return Err("lifecycle tools must contain between 1 and 64 executables".into());
             }
             let mut names = BTreeSet::new();
+            let mut portable_names = BTreeSet::new();
             for tool in &tools {
+                let executable_name = windows_executable_name(&tool.name);
                 if tool.name.is_empty()
                     || tool.name.len() > 255
                     || !tool
@@ -231,6 +248,8 @@ impl DependencyLifecyclePolicy {
                     || tool.name == "."
                     || tool.name == ".."
                     || !names.insert(&tool.name)
+                    || executable_name.len() > 255
+                    || !portable_names.insert(executable_name.to_ascii_lowercase())
                 {
                     return Err("invalid or duplicate lifecycle tool name".into());
                 }
@@ -242,8 +261,8 @@ impl DependencyLifecyclePolicy {
                 }
                 check_sha256(&tool.digest)?;
             }
-            if !names.contains(&"sh".to_owned()) {
-                return Err("lifecycle tools must pin sh".into());
+            if !names.contains(&"sh".to_owned()) && !names.contains(&"cmd".to_owned()) {
+                return Err("lifecycle tools must pin sh or cmd".into());
             }
             approvals.push(DependencyLifecycleApproval {
                 package: raw.package,
@@ -446,6 +465,22 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn approvals_reject_tool_names_that_collide_as_windows_executables() {
+        for name in ["SH", "sh.exe", "sh.EXE"] {
+            let mut input: toml::Value = toml::from_str(&document()).unwrap();
+            let tools = input["approvals"][0]["tools"].as_array_mut().unwrap();
+            let mut alias = tools[0].clone();
+            alias["name"] = toml::Value::String(name.into());
+            tools.push(alias);
+            assert!(
+                DependencyLifecyclePolicy::parse(toml::to_string(&input).unwrap().as_bytes())
+                    .is_err(),
+                "accepted colliding tool {name}"
+            );
+        }
     }
 
     #[test]

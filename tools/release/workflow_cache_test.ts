@@ -154,6 +154,9 @@ const assertGuardPrerequisite = (native: string) => {
   assert(install.includes('if ($LASTEXITCODE -ne 0)'));
   assert(control.includes('guard_owned_namespace_removal -- --ignored'));
   assert(native.indexOf(install) < native.indexOf(control));
+  const dependencyAcceptance = step(native, 'Run native Windows dependency acceptance');
+  assert(native.indexOf(control) < native.indexOf(dependencyAcceptance));
+  assert(native.indexOf(dependencyAcceptance) < native.indexOf(step(native, 'Run tests')));
   assert(native.indexOf(control) < native.indexOf(step(native, 'Run tests')));
   assert(cleanup.includes("if: always() && runner.os == 'Windows' && env.TAPID_CI_GUARD_CLI != ''"));
   assert(cleanup.includes('& $env:TAPID_CI_GUARD_CLI sandbox uninstall\n'));
@@ -164,10 +167,12 @@ test('Windows guard is mandatory before native tests and removed afterward', asy
   const native = job(await source('.github/workflows/ci.yml'), 'test');
   assertGuardPrerequisite(native);
   const install = step(native, guardNames[0]);
+  const dependencyAcceptance = step(native, 'Run native Windows dependency acceptance');
   for (const broken of [
     native.replace(install, ''),
     native.replace(install, install.replace("runner.os == 'Windows'", 'false')),
     native.replace(install, '').replace(step(native, 'Run tests'), step(native, 'Run tests') + install),
+    native.replace(dependencyAcceptance, '').replace(install, dependencyAcceptance + install),
     native.replace('sandbox install\n', 'sandbox status\n'),
     native.replace(step(native, guardNames[2]), ''),
   ]) assert.throws(() => assertGuardPrerequisite(broken));
@@ -185,11 +190,12 @@ const assertInstallerCache = (ci: string) => {
   // Strip the separately validated guard steps, then normalize the approved Test bootstrap,
   // pin migration and two installer compiler env blocks.
   // All actual install commands, source-ref, fresh destination, help, uninstall,
-  // Keep current-main TypeScript helper changes and freeze the reviewed Node prerequisite.
+  // native tests, standard Node prerequisites and TypeScript helpers retain the merged snapshot.
+  // The reviewed native Windows key/write acceptance step is included in this snapshot.
   assertTestBootstrap(ci);
   const withoutGuard = guardNames.reduce((text, name) => text.replace(step(native, name), ''), native);
   const original = withoutGuard.replace(testCacheInputs, '').replaceAll(compilerEnv, '').replaceAll(pin, 'Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2');
-  assert.equal(digest(original), '62230f37cc0392d8dbb88f4feb23b1cc989bf5bc51372aeecf15fbe2f8ed8564');
+  assert.equal(digest(original), 'f530830f1bfb6c648463c728c67aba74bc522041b4bb1555ac1fc2cf4c48c13a');
 };
 const assertSourceInstallers = (sh: string, ps: string) => {
   const unixStart = sh.indexOf('if [ "$SOURCE_REF_SET" -eq 1 ]; then');
