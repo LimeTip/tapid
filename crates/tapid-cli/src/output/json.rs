@@ -168,7 +168,7 @@ pub(crate) fn operation_error_with_context(
         "phase": phase,
         "context": context.map(|value| {
             let bounded = value.chars().take(512).collect::<String>();
-            serde_json::Value::String(text(bounded).0)
+            json!({"message": text(bounded).0})
         })
     }]);
     emit(result, 1)

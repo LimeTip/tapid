@@ -143,6 +143,7 @@ fn json_init_reports_manifest_write_failure_separately_from_invalid_name() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stderr.is_empty());
     assert_eq!(result["errors"][0]["code"], "MANIFEST_WRITE_FAILED");
+    assert!(result["errors"][0]["context"].is_object());
     assert!(!project.path().join("package.json").exists());
 }
 
