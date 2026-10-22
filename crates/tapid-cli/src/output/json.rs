@@ -156,6 +156,21 @@ pub(crate) fn information(operation: &str, data: Value) -> ExitCode {
     emit(result, 0)
 }
 
+pub(crate) fn operation_error_with_context(
+    operation: &str,
+    code: &str,
+    phase: &str,
+    context: Option<String>,
+) -> ExitCode {
+    let mut result = envelope(operation, "failure", None);
+    result["errors"] = json!([{
+        "code": code,
+        "phase": phase,
+        "context": context.map(|value| serde_json::Value::String(value.chars().take(512).collect()))
+    }]);
+    emit(result, 1)
+}
+
 pub(crate) fn operation_error(operation: &str, code: &str) -> ExitCode {
     let mut result = envelope(operation, "failure", None);
     result["errors"] = json!([{"code": code, "phase": "operation", "context": null}]);

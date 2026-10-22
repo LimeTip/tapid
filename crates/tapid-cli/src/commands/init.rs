@@ -51,8 +51,13 @@ pub(crate) fn run(args: Args, json_output: bool) -> ExitCode {
         Err(CreateManifestError::Invalid(_)) if json_output => {
             crate::output::json::operation_error("init", "MANIFEST_INVALID")
         }
-        Err(CreateManifestError::Write(_)) if json_output => {
-            crate::output::json::operation_error("init", "MANIFEST_WRITE_FAILED")
+        Err(CreateManifestError::Write(error)) if json_output => {
+            crate::output::json::operation_error_with_context(
+                "init",
+                "MANIFEST_WRITE_FAILED",
+                "operation",
+                Some(error),
+            )
         }
         Err(error) => {
             eprintln!("error: {error}");
