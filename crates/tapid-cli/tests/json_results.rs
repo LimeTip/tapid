@@ -131,6 +131,22 @@ fn json_manifest_failure_identifies_field_without_echoing_contents() {
     assert!(!result.to_string().contains("fixture-secret"));
 }
 
+#[cfg(unix)]
+#[test]
+fn json_init_reports_manifest_write_failure_separately_from_invalid_name() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let project = TempProject::new("json-init-write-failure").unwrap();
+    fs::set_permissions(project.path(), fs::Permissions::from_mode(0o500)).unwrap();
+    let (output, result) = invoke(&project, &["--json", "init"]);
+    fs::set_permissions(project.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert_eq!(result["errors"][0]["code"], "MANIFEST_WRITE_FAILED");
+    assert!(result["errors"][0]["context"].is_object());
+    assert!(!project.path().join("package.json").exists());
+}
+
 #[test]
 fn json_invalid_workspace_manifest_keeps_its_location() {
     let project = TempProject::new("json-member-manifest-context").unwrap();
@@ -581,9 +597,25 @@ fn json_parse_errors_and_unsupported_commands_do_not_echo_input() {
     assert_eq!(result["errors"][0]["code"], "ARGUMENT_INVALID");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("fixture-secret"));
     let (output, result) = invoke(&project, &["--json", "init"]);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["operation"], "init");
+    assert_eq!(result["outcome"], "success");
+    assert_eq!(result["changes"]["state"], "committed");
+    assert!(
+        result["changes"]["files"][0]
+            .as_str()
+            .unwrap()
+            .replace('\\', "/")
+            .ends_with("/package.json")
+    );
+
+    let (output, result) = invoke(&project, &["--json", "init"]);
     assert_eq!(output.status.code(), Some(1));
-    assert_eq!(result["errors"][0]["code"], "JSON_UNSUPPORTED_COMMAND");
-    assert!(!project.path().join("package.json").exists());
+    assert!(output.stderr.is_empty());
+    assert_eq!(result["outcome"], "failure");
+    assert_eq!(result["errors"][0]["code"], "MANIFEST_ALREADY_EXISTS");
     let (output, result) = invoke(
         &project,
         &["--json", "import-package-lock", "package-lock.json"],
@@ -858,7 +890,6 @@ fn json_workspace_selection_errors_have_consistent_codes() {
 fn json_unsupported_results_preserve_canonical_command_names() {
     let project = TempProject::new("json-unsupported-operation").unwrap();
     for (args, operation) in [
-        (vec!["--json", "init"], "init"),
         (vec!["--json", "run", "test"], "run"),
         (vec!["--json", "license"], "license"),
         (vec!["--json", "upgrade"], "upgrade"),

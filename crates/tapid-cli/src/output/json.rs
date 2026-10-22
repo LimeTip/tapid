@@ -156,6 +156,24 @@ pub(crate) fn information(operation: &str, data: Value) -> ExitCode {
     emit(result, 0)
 }
 
+pub(crate) fn operation_error_with_context(
+    operation: &str,
+    code: &str,
+    phase: &str,
+    context: Option<String>,
+) -> ExitCode {
+    let mut result = envelope(operation, "failure", None);
+    result["errors"] = json!([{
+        "code": code,
+        "phase": phase,
+        "context": context.map(|value| {
+            let bounded = value.chars().take(512).collect::<String>();
+            json!({"message": text(bounded).0})
+        })
+    }]);
+    emit(result, 1)
+}
+
 pub(crate) fn operation_error(operation: &str, code: &str) -> ExitCode {
     let mut result = envelope(operation, "failure", None);
     result["errors"] = json!([{"code": code, "phase": "operation", "context": null}]);
