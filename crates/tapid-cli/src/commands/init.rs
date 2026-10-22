@@ -42,15 +42,17 @@ pub(crate) fn run(args: Args, json_output: bool) -> ExitCode {
             println!("Created {}", directory.join("package.json").display());
             ExitCode::SUCCESS
         }
-        Err(error) if json_output => {
-            let code = if error.starts_with("refusing to overwrite existing manifest") {
-                "MANIFEST_ALREADY_EXISTS"
-            } else if error.starts_with("project path is not a directory") {
-                "PROJECT_UNAVAILABLE"
-            } else {
-                "MANIFEST_INVALID"
-            };
-            crate::output::json::operation_error("init", code)
+        Err(CreateManifestError::AlreadyExists(_)) if json_output => {
+            crate::output::json::operation_error("init", "MANIFEST_ALREADY_EXISTS")
+        }
+        Err(CreateManifestError::Unavailable(_)) if json_output => {
+            crate::output::json::operation_error("init", "PROJECT_UNAVAILABLE")
+        }
+        Err(CreateManifestError::Invalid(_)) if json_output => {
+            crate::output::json::operation_error("init", "MANIFEST_INVALID")
+        }
+        Err(CreateManifestError::Write(_)) if json_output => {
+            crate::output::json::operation_error("init", "MANIFEST_WRITE_FAILED")
         }
         Err(error) => {
             eprintln!("error: {error}");
@@ -59,24 +61,43 @@ pub(crate) fn run(args: Args, json_output: bool) -> ExitCode {
     }
 }
 
-fn create_manifest(directory: &Path) -> Result<(), String> {
+enum CreateManifestError {
+    AlreadyExists(String),
+    Unavailable(String),
+    Invalid(String),
+    Write(String),
+}
+
+impl std::fmt::Display for CreateManifestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyExists(message)
+            | Self::Unavailable(message)
+            | Self::Invalid(message)
+            | Self::Write(message) => f.write_str(message),
+        }
+    }
+}
+
+fn create_manifest(directory: &Path) -> Result<(), CreateManifestError> {
     if !directory.is_dir() {
-        return Err(format!(
+        return Err(CreateManifestError::Unavailable(format!(
             "project path is not a directory: {}",
             directory.display()
-        ));
+        )));
     }
     let name = directory
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| {
-            format!(
+            CreateManifestError::Invalid(format!(
                 "project directory has no valid UTF-8 name: {}",
                 directory.display()
-            )
+            ))
         })?;
-    let manifest = PackageManifest::new(name, "0.1.0", true)
-        .map_err(|error| format!("cannot create project manifest: {error}"))?;
+    let manifest = PackageManifest::new(name, "0.1.0", true).map_err(|error| {
+        CreateManifestError::Invalid(format!("cannot create project manifest: {error}"))
+    })?;
     let path = directory.join("package.json");
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -84,17 +105,23 @@ fn create_manifest(directory: &Path) -> Result<(), String> {
         .open(&path)
         .map_err(|error| {
             if error.kind() == io::ErrorKind::AlreadyExists {
-                format!(
+                CreateManifestError::AlreadyExists(format!(
                     "refusing to overwrite existing manifest: {}",
                     path.display()
-                )
+                ))
             } else {
-                format!("cannot write manifest {}: {error}", path.display())
+                CreateManifestError::Write(format!(
+                    "cannot write manifest {}: {error}",
+                    path.display()
+                ))
             }
         })?;
     if let Err(error) = io::Write::write_all(&mut file, manifest.to_json().as_bytes()) {
         let _ = fs::remove_file(&path);
-        return Err(format!("cannot write manifest {}: {error}", path.display()));
+        return Err(CreateManifestError::Write(format!(
+            "cannot write manifest {}: {error}",
+            path.display()
+        )));
     }
     Ok(())
 }

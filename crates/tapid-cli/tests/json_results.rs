@@ -131,6 +131,21 @@ fn json_manifest_failure_identifies_field_without_echoing_contents() {
     assert!(!result.to_string().contains("fixture-secret"));
 }
 
+#[cfg(unix)]
+#[test]
+fn json_init_reports_manifest_write_failure_separately_from_invalid_name() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let project = TempProject::new("json-init-write-failure").unwrap();
+    fs::set_permissions(project.path(), fs::Permissions::from_mode(0o500)).unwrap();
+    let (output, result) = invoke(&project, &["--json", "init"]);
+    fs::set_permissions(project.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert_eq!(result["errors"][0]["code"], "MANIFEST_WRITE_FAILED");
+    assert!(!project.path().join("package.json").exists());
+}
+
 #[test]
 fn json_invalid_workspace_manifest_keeps_its_location() {
     let project = TempProject::new("json-member-manifest-context").unwrap();
