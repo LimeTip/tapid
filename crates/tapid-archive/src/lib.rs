@@ -98,6 +98,10 @@ fn extract_inner(
     Ok(())
 }
 
+/// Validate each logical header before advancing through its payload, using the
+/// parser's effective size (including PAX overrides). Each advance receives only
+/// the preceding validated payload size plus the bounded framing/metadata budget.
+/// Extraction must wait until this complete validation pass succeeds.
 fn validate_archive(
     bytes: &[u8],
     format: ArchiveFormat,
@@ -178,6 +182,9 @@ struct ParserBudgetReader<'a, R> {
 }
 
 impl<R: Read> Read for ParserBudgetReader<'_, R> {
+    /// Charge decompressed bytes against the current parser budget. Nonempty
+    /// reads fail when it is exhausted; only the validation loop replenishes it
+    /// after accepting a header, so hidden extensions cannot grant payload budget.
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {
             return Ok(0);
@@ -654,6 +661,7 @@ struct EntryValidator {
 }
 
 impl EntryValidator {
+    /// Start an archive with no accepted paths, entries, or file payload bytes.
     fn new(limits: ValidationLimits) -> Self {
         Self {
             limits,
@@ -664,6 +672,10 @@ impl EntryValidator {
         }
     }
 
+    /// Check portable paths, collisions, entry kinds, and cumulative limits using
+    /// metadata alone. Callers must supply the effective payload size. An error
+    /// may leave counters or path sets advanced; discard the validator on failure.
+    /// Safe symlink targets pass this metadata check; extraction rejects all links.
     fn push(&mut self, entry: ArchiveEntry) -> Result<(), ValidationError> {
         self.count = self
             .count
@@ -790,6 +802,8 @@ fn symlink_target_escapes(link: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Hidden GNU/PAX metadata must exhaust the same bound for tar and tar.gz,
+    /// and a failed validation must leave no staging directory.
     #[test]
     fn extraction_bounds_hidden_tar_metadata_before_parsing_the_next_file() {
         let project = tapid_test_support::TempProject::new("gnu-metadata-limit").unwrap();
@@ -821,6 +835,8 @@ mod tests {
         }
     }
 
+    /// Validated payloads may exceed the metadata budget without rejecting
+    /// legitimate files or bounded GNU long-name extensions.
     #[test]
     fn extraction_preserves_large_payloads_and_bounded_long_names() {
         let project = tapid_test_support::TempProject::new("large-valid-archive").unwrap();
@@ -851,6 +867,8 @@ mod tests {
         }
     }
 
+    /// Header violations take precedence over malformed bytes later in the tar,
+    /// proving rejection happens before the parser traverses their payloads.
     #[test]
     fn extraction_rejects_header_limits_before_later_invalid_bytes() {
         for (label, headers, validation, expected) in [
@@ -926,6 +944,7 @@ mod tests {
         }
     }
 
+    /// PAX size overrides, rather than raw header sizes, govern early rejection.
     #[test]
     fn extraction_limits_use_pax_effective_size_before_reading_payload() {
         let project = tapid_test_support::TempProject::new("pax-size-limit").unwrap();
@@ -964,6 +983,8 @@ mod tests {
         assert!(!destination.exists());
     }
 
+    /// An oversized declaration fails with a size diagnostic even when its
+    /// payload is absent, and validation failure removes staging.
     #[test]
     fn extraction_rejects_oversized_entry_before_reading_its_missing_payload() {
         let project = tapid_test_support::TempProject::new("early-entry-limit").unwrap();

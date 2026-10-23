@@ -4493,6 +4493,8 @@ fn install_does_not_commit_verified_store_trees_when_materialization_fails() {
     cleanup(dir);
 }
 
+/// Integrity, malformed-gzip, and oversized-entry failures preserve the prior project
+/// and verified store, report the rejection cause, and leave no staging residue.
 #[test]
 fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
     use tapid_store::Store;
