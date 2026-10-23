@@ -1,6 +1,6 @@
 # Tapid Architecture
 
-Tapid is a domain-oriented modular monolith in one Rust workspace and one public repository. Domain capability modules provide strong internal separation without distributing the contributor experience or adding network boundaries. A crate is useful when it expresses a cohesive capability and dependency direction, not merely because code can be moved into it.
+The Tapid client is a domain-oriented modular monolith in one Rust workspace and one public repository. Domain capability modules provide strong internal separation without distributing the contributor experience or adding network boundaries. A crate is useful when it expresses a cohesive capability and dependency direction, not merely because code can be moved into it.
 
 The engineering standard behind this architecture is in [engineering-principles.md](engineering-principles.md). ADR 0002 records the decision.
 
@@ -128,6 +128,55 @@ Linux Restricted uses Landlock, `no_new_privs`, seccomp, explicit environment, a
 Security-sensitive behavior is modeled as explicit, validated state transitions. Examples include unverified to verified artifact, staged to active layout, candidate to accepted policy decision, and staged to active or quarantined release. Each transition identifies evidence, authorization, failure state, and allowed recovery. Invalid, stale, interrupted, or unauthorized transitions fail closed. State must not be inferred from a filename, mutable URL, or partially completed side effect.
 
 Tests cover successful transitions and rejection, interruption, replay, and recovery paths. Human and machine-readable output derive from the same transition result.
+
+## Client and hosted ownership
+
+[ADR 0010](adr/0010-client-and-hosted-ownership.md) records the separation between
+the public client and the private hosted applications. This is the intended
+ownership; it does not establish that hosted scanning or authentication exists.
+
+- `tapid` owns local package management, public interchange contracts and
+  conformance fixtures, evidence verification, audit output, and local policy
+  enforcement. Supported local operations build, test, and work independently
+  of private repositories and hosted accounts.
+- `tapid-web` owns the website, docs rendering, package explorer, dashboard,
+  sign-in experience, and account/organization management. One account authority
+  owns memberships and roles. Billing and entitlements are separately scoped
+  future capabilities.
+- `tapid-cloud` owns hosted security-intelligence ingestion, scan jobs, analysis
+  results, evidence issuance and publication/withdrawal, and authorization of
+  access to those resources. Its implementation remains closed source.
+
+Web and the CLI consume the same versioned security-evidence contract. Web may
+maintain a display/search projection, but it does not independently collect or
+reinterpret the same security findings. Public CLI documentation has one
+editable owner here; private applications consume reviewed, pinned inputs.
+
+Web presents sign-in and credential management. Cloud validates credentials
+and authorizes each resource, using the single account authority rather than a
+second user or membership database. Browser sessions, scoped CLI/CI credentials,
+and evidence signatures have separate purposes. The CLI calls Cloud directly
+after authorization. Define membership revocation and outage behavior before
+enabling authenticated use.
+
+Published public evidence remains anonymously readable; private inventories,
+uploads, and scan results require explicit scoped access. Sign-in alone does
+not authorize disclosure, publication, hook execution, or installation. Missing,
+stale, unavailable, partial, and invalid evidence remain distinct from no known
+findings. A signature authenticates the issuer and bytes, not scanner accuracy.
+
+Hosted checks are explicit. A project may require fresh evidence, in which case
+unavailable required evidence blocks that operation. Other supported local
+operations retain their local contract, and offline operations make no requests.
+Required checks precede hooks and activation and reuse existing rollback and
+recovery operations. Immutable artifact identity remains separate from changing
+security knowledge.
+
+Repository ownership does not require a deployment per module. The hosted
+applications must agree on account authority, result publication, compatibility,
+revocation, and shutdown before rollout. Workers, credentials, and databases
+must have explicit access scopes; separate repositories alone provide no
+runtime isolation. Client integration work is tracked in #312 through #315.
 
 ## Registry seam
 

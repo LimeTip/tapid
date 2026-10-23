@@ -4493,12 +4493,15 @@ fn install_does_not_commit_verified_store_trees_when_materialization_fails() {
     cleanup(dir);
 }
 
+/// Integrity, malformed-gzip, and oversized-entry failures preserve the prior project
+/// and verified store, report the rejection cause, and leave no staging residue.
 #[test]
 fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
     use tapid_store::Store;
 
-    for failure in ["integrity", "archive"] {
-        let dir = temp_dir(&format!("rollback-{failure}"));
+    for failure in ["integrity", "archive", "archive-entry-limit"] {
+        let project = tapid_test_support::TempProject::new(&format!("rollback-{failure}")).unwrap();
+        let dir = project.path().to_path_buf();
         let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"plugin":"1.0.0"}}"#;
         fs::write(dir.join("package.json"), manifest).unwrap();
         let previous_lock = prior_empty_lock();
@@ -4507,6 +4510,8 @@ fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
         fs::write(dir.join(".tapid-managed"), "tapid-managed-v1\n").unwrap();
         fs::write(dir.join("node_modules/KEEP"), "user data").unwrap();
 
+        let installed_digest =
+            tapid_archive::canonical_tree_digest(&dir.join("node_modules")).unwrap();
         let store_dir = dir.join("store");
         let store = Store::new(&store_dir);
         let prior_source = dir.join("prior-store-tree");
@@ -4526,6 +4531,11 @@ fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
 
         let archive = if failure == "integrity" {
             STANDARD.decode("H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA").unwrap()
+        } else if failure == "archive-entry-limit" {
+            // Gzip of one ustar header declaring a 512 MiB + 1 byte file,
+            // with no payload. Rejection must use the header limit before
+            // trying to traverse the missing payload.
+            STANDARD.decode("H4sIAAAAAAAAEytITM5OTE/Vz0ksSk9loA0wMDAwMDMxAdMGBgYI2gTKMjCEiUHEDQ2MTQ0YFAxo5B4UUFpckljEYEAXuwYhAAAASQbGAAIAAA==").unwrap()
         } else {
             b"not a gzip tar archive".to_vec()
         };
@@ -4565,6 +4575,8 @@ fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
             );
             assert!(stderr.contains("plugin"), "{stderr}");
             assert!(stderr.contains("integrity"), "unexpected error: {stderr}");
+        } else if failure == "archive-entry-limit" {
+            assert!(stderr.contains("too large (536870913 bytes)"), "{stderr}");
         } else {
             assert!(
                 stderr.contains("invalid gzip header"),
@@ -4587,6 +4599,10 @@ fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
             fs::read(dir.join(".tapid-managed")).unwrap(),
             b"tapid-managed-v1\n"
         );
+        assert_eq!(
+            tapid_archive::canonical_tree_digest(&dir.join("node_modules")).unwrap(),
+            installed_digest
+        );
         assert!(store.verified_tree_path(&prior_digest).is_ok());
         let trees_after = fs::read_dir(store_dir.join("trees"))
             .unwrap()
@@ -4596,6 +4612,14 @@ fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
             trees_after, trees_before,
             "store changed after {failure} failure"
         );
+        let staging = store_dir.join(".staging");
+        if staging.exists() {
+            assert_eq!(
+                fs::read_dir(staging).unwrap().count(),
+                0,
+                "staging leaked after {failure}"
+            );
+        }
         cleanup(dir);
     }
 }
