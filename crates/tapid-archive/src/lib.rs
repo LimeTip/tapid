@@ -64,6 +64,10 @@ impl From<io::Error> for ExtractError {
 }
 
 /// Validate, then extract an archive into an empty staging directory.
+///
+/// On validation or extraction failure, attempt to remove the newly created
+/// staging directory. Cleanup can fail; return the original processing error
+/// even if staging removal fails.
 pub fn extract_to(
     bytes: &[u8],
     format: ArchiveFormat,
@@ -803,7 +807,7 @@ fn symlink_target_escapes(link: &str, target: &str) -> bool {
 mod tests {
     use super::*;
     /// Hidden GNU/PAX metadata must exhaust the same bound for tar and tar.gz,
-    /// and a failed validation must leave no staging directory.
+    /// and failed validation cleans staging under normal filesystem conditions.
     #[test]
     fn extraction_bounds_hidden_tar_metadata_before_parsing_the_next_file() {
         let project = tapid_test_support::TempProject::new("gnu-metadata-limit").unwrap();
@@ -984,7 +988,7 @@ mod tests {
     }
 
     /// An oversized declaration fails with a size diagnostic even when its
-    /// payload is absent, and validation failure removes staging.
+    /// payload is absent, and failure cleans staging under normal filesystem conditions.
     #[test]
     fn extraction_rejects_oversized_entry_before_reading_its_missing_payload() {
         let project = tapid_test_support::TempProject::new("early-entry-limit").unwrap();
