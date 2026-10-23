@@ -683,6 +683,16 @@ fn json_init_reports_manifest_write_failure() {
         result["errors"][0]["context"]["io_kind"],
         "PermissionDenied"
     );
+    let context = result["errors"][0]["context"].as_object().unwrap();
+    assert_eq!(context.len(), 2);
+    assert!(context["io_kind"].is_string());
+    assert!(context["os_code"].is_i64() || context["os_code"].is_null());
+    assert!(!context.contains_key("message"));
+    assert!(
+        !serde_json::to_string(context)
+            .unwrap()
+            .contains(project.path().to_str().unwrap())
+    );
     assert_eq!(result["changes"]["state"], "unchanged");
     assert_eq!(result["changes"]["files"], serde_json::json!([]));
     assert_eq!(result["changes"]["paths"], serde_json::json!([]));
