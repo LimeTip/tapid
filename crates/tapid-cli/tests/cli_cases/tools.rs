@@ -1399,7 +1399,9 @@ fn tool_command_forwards_arguments_and_exit_status() {
     assert_eq!(output.status.code(), Some(7), "{output:?}");
     let arguments: Value = serde_json::from_slice(&output.stdout).unwrap();
     #[cfg(windows)]
-    assert_eq!(arguments, json!(["two words", "--tool-argument"]));
+    {
+        assert_eq!(arguments, json!(["two words", "--tool-argument"]));
+    }
     #[cfg(not(windows))]
     assert_eq!(arguments, json!(["two words", "", "--tool-argument"]));
 }

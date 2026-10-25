@@ -226,7 +226,7 @@ fn cache_maintenance_refuses_artifact_ingestion_in_progress() {
 fn cache_maintenance_reports_cleanup_failure_after_eviction_starts() {
     use std::os::unix::fs::PermissionsExt;
     // Root ignores these permissions, so this fixture needs an ordinary user.
-    if unsafe { libc::geteuid() } == 0 {
+    if rustix::process::geteuid().is_root() {
         return;
     }
     let (_home, store, artifact, _tree) = populated();

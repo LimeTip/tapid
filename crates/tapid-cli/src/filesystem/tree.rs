@@ -747,6 +747,10 @@ fn copy_regular_file_with(
 }
 
 #[cfg(target_os = "macos")]
+#[allow(
+    unsafe_code,
+    reason = "macOS directory cloning requires native no-follow clone flags"
+)]
 fn clone_directory_tree(source: &Path, target: &Path) -> Result<bool, String> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
@@ -798,6 +802,7 @@ fn clone_directory_tree(_source: &Path, _target: &Path) -> Result<bool, String> 
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code, reason = "macOS file cloning requires clonefile")]
 fn clone_regular_file(source: &Path, target: &Path) -> Result<bool, String> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
 

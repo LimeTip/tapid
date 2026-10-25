@@ -266,6 +266,124 @@ fn runner_streams_and_detects_libuv_process_memory_stats_denial() {
 }
 
 #[test]
+fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
+    const CHILD: &str = "TAPID_TEST_LINUX_LIVE_SINK_FDS";
+    if std::env::var_os(CHILD).is_some() {
+        assert!(fs::read_link("/proc/self/fd/9").is_ok());
+        let (mut read, write) = UnixStream::pair().unwrap();
+        read.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let (mut sink, mut input) =
+            super::super::unix_output::spawn_live_sink(write.as_fd(), sanitize_output_descriptors)
+                .unwrap();
+        drop(write);
+        input.write_all(b"x").unwrap();
+        let mut ready = [0];
+        read.read_exact(&mut ready).unwrap();
+        assert_eq!(&ready, b"x");
+        let inherited = fs::read_dir(format!("/proc/{}/fd", sink.id()))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert!(!inherited.iter().any(|fd| fd == "9"));
+        drop(input);
+        assert!(sink.wait().unwrap().success());
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("linux-live-sink-fds").unwrap();
+    let sentinel = project
+        .write("sentinel", b"private fixture descriptor")
+        .unwrap();
+    let output = Command::new("/bin/sh")
+        .args(["-c", r#"exec 9<"$1"; exec "$2" --exact "$3" --nocapture"#, "tapid-live-sink-fds"])
+        .arg(sentinel)
+        .arg(std::env::current_exe().unwrap())
+        .arg("execution::platform_backend::tests::live_sink_exec_closes_unrelated_inheritable_descriptors")
+        .env_clear().env(CHILD, "1")
+        .output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn restricted_completion_is_bounded_when_parent_stderr_is_unread() {
+    const CHILD: &str = "TAPID_TEST_RESTRICTED_UNREAD_STDERR";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = PathBuf::from(root);
+        let result = execute(&request(
+            &root,
+            "chunk=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=0; while [ $i -lt 16384 ]; do printf '%s' \"$chunk\" >&2 || break; i=$((i+1)); done; exit 0",
+            restricted(&root, vec![], false),
+        ));
+        fs::write(root.join("result"), format!("{result:?}")).unwrap();
+        std::process::exit(match result {
+            Err(error) if error.category() == ExecutionErrorCategory::Internal => 0,
+            _ => 2,
+        });
+    }
+    let project = tapid_test_support::TempProject::new("restricted-unread-stderr").unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "execution::platform_backend::tests::restricted_completion_is_bounded_when_parent_stderr_is_unread",
+            "--nocapture",
+        ])
+        .env(CHILD, project.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    if status.is_none() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    assert!(
+        status.is_some(),
+        "stderr forwarding blocked restricted completion"
+    );
+    assert!(
+        status.unwrap().success(),
+        "expected a bounded backpressure error: {}",
+        fs::read_to_string(project.path().join("result")).unwrap_or_default()
+    );
+}
+
+#[test]
+fn restricted_completion_does_not_wait_for_inherited_descendant_stderr() {
+    let project = tapid_test_support::TempProject::new("restricted-stderr-lifetime").unwrap();
+    let started = std::time::Instant::now();
+    let outcome = execute(&request(
+        project.path(),
+        "printf root-diagnostic >&2; sleep 3 >&2 & exit 0",
+        restricted(project.path(), vec![], false),
+    ))
+    .unwrap();
+    assert_eq!(outcome.termination(), &Termination::Exited(0));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "a descendant holding stderr must not keep the diagnostic worker alive"
+    );
+    assert_ne!(
+        outcome.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+}
+
+#[test]
 fn restricted_backend_runs_real_child_and_issues_receipt() {
     let root = root();
     let req = request(
