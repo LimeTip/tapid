@@ -22,6 +22,18 @@ const step = (section: string, name: string) => {
   return matches[0];
 };
 
+test('release contracts use a verified PowerShell runtime before executing tests', async () => {
+  const owner = job(await workflow('ci'), 'release-contract');
+  const provision = step(owner, 'Provision verified PowerShell');
+  assert.match(provision, /sha256sum --check --strict/);
+  assert.match(provision, /powershell-7\.4\.21-linux-x64\.tar\.gz/);
+  assert(provision.indexOf('sha256sum --check --strict') < provision.indexOf('tar -xzf'));
+  assert.match(provision, /GITHUB_PATH/);
+  assert.match(provision, /for attempt in 1 2 3/);
+  assert.match(provision, /-NoProfile -NonInteractive -Command/);
+  assert(owner.indexOf(provision) < owner.indexOf(step(owner, 'Test release helpers and workflows')));
+});
+
 const assertStandaloneTestOwners = (ci: string) => {
   const failureCapture = step(job(ci, 'coverage'), 'Upload failed coverage profiles');
   assert.equal(failureCapture.trimEnd(), `      - name: Upload failed coverage profiles

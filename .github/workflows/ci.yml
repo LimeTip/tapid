@@ -606,6 +606,27 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
+      # Avoid the image-bundled runtime: its .NET assembly loader failed even
+      # for a standalone no-op. Keep installer tests on a verified LTS runtime.
+      - name: Provision verified PowerShell
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/tapid-powershell-7.4.21"
+          archive="$RUNNER_TEMP/powershell-7.4.21-linux-x64.tar.gz"
+          curl --fail --location --retry 3 --output "$archive" \
+            https://github.com/PowerShell/PowerShell/releases/download/v7.4.21/powershell-7.4.21-linux-x64.tar.gz
+          echo "3fc5e1567c450bd7bd5ae69ebb0a9a4a4e0418bbc36b0232cf6dd547f0bfc0eb  $archive" | sha256sum --check --strict
+          mkdir -p "$runtime"
+          tar -xzf "$archive" -C "$runtime"
+          chmod +x "$runtime/pwsh"
+          echo "$runtime" >> "$GITHUB_PATH"
+          for attempt in 1 2 3; do
+            echo "PowerShell startup probe $attempt"
+            # PowerShell, rather than bash, expands these variables.
+            # shellcheck disable=SC2016
+            "$runtime/pwsh" -NoProfile -NonInteractive -Command '$PSVersionTable; [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription; if ([System.Numerics.BigInteger]::One -ne 1) { exit 1 }'
+          done
       - name: Test release helpers and workflows
         run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/*_test.ts
       - name: Test consumer capability contracts
