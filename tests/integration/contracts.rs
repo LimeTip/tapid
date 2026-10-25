@@ -68,7 +68,7 @@ fn contracts_flow_from_runtime_fixture_to_deterministic_plan() {
     );
     let resolution = resolve(
         &[dependency],
-        &[snapshot.clone()],
+        std::slice::from_ref(&snapshot),
         ResolutionOptions::default(),
     )
     .unwrap();
