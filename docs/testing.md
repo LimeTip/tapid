@@ -102,6 +102,9 @@ The GitHub Actions workflow runs native tests and Clippy on Ubuntu, macOS, and W
 
 Standalone nextest and normal Cargo/libtest coverage remain separate required lanes. Per-test process isolation in combined nextest coverage lost execution of a store traversal instantiation despite matching test identities and aggregate source coverage; normal Cargo coverage therefore remains authoritative. Both Ubuntu lanes explicitly install Node.js 22 and require CLI Node assertions (`TAPID_REQUIRE_NODE_ASSERTIONS=1`). Coverage retains the `lcov-coverage` artifact; no combined lane or comparison-only discovery build is retained.
 
+Failed coverage runs also upload raw profiles and the merge input list as
+`failed-coverage-profiles` for one day. A profile merge failure still fails the job.
+
 The oracle uses Node.js 22 and lockfile-pinned `semver` 7.8.5 to validate the authoritative compatibility fixture answers. To reproduce it locally:
 
 ```sh

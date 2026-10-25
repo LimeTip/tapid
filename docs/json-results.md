@@ -14,6 +14,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `tool install`, `tool list`, `tool update`, `tool remove` | Tool inventory and command mappings with operation change/recovery state |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
 | `explain` | Exact package evidence under `data`; registry metadata or a local snapshot, with optional artifact byte verification |
+| `status` | Read-only local project preflight; blockers and pending recovery retain `data` and exit 1 |
 | `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
 | `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
 | `init` | Creates `package.json` with committed change state; handled failures return a typed error |
@@ -287,6 +288,72 @@ The run envelope is separate from the package-operation envelope:
 The nested receipt retains requested, declared, observed, and enforced dimension maps, per-dimension evidence and limitations, effective filesystem grants, configured limits, termination, and completion evidence. Unsupported containment remains a failure. The result channel adds no descendant ownership, detached-descendant cleanup, or resource enforcement guarantees beyond the checked backend evidence.
 
 Legacy stderr receipts add `policy_inputs` when invocation permission flags are used. Result-file envelopes include the same metadata at the top level once policy selection succeeds, including profile-only runs. `source` is `script-profile`, `configured-defaults` or `invocation-baseline`; `configuration` contains the configured ceiling or null; `invocation` contains the supplied permission lists/booleans; `effective` describes the selected project policy and preserved assurance/limits. Environment entries are names only. Omitted lists inherit configured grants, so an empty invocation list does not itself mean the effective grant list is empty. Backend runtime additions remain in `effective_filesystem`, and checked enforcement remains in the established evidence. Profile-only stderr receipts retain their existing shape. Consumers must accept additive fields; this metadata does not make untrusted child streams a trusted machine-result channel.
+
+## Project status
+
+`tapid --json status` uses the version 1 envelope and always reports unchanged
+project files, including when recovery is pending. `data` remains present on
+inspection failures. `data.assessment` is `no_local_blockers` or `blocked`;
+`outcome` is respectively `success` or `failure`, and the exit code is 0 or 1.
+These describe local preflight only. They do not establish that installation,
+lock replay, or script execution will succeed.
+
+Status data contains `manifest_lock_agreement`, `workspace`, `installation`,
+`recovery`, `recovery_guidance`, `registries`, `blockers`, `truncated`, `snapshot`,
+`verification_depth`, `checks_not_performed`, and `capabilities`. Manifest/lock
+agreement is `match`, `mismatch`, or `unknown`. Installation states are `absent`,
+`managed`, or `unmanaged_or_invalid`. Recovery is `none_detected`, `pending`, or
+`unknown`. Root digest and replay checks run whenever the manifest and lock parse, even
+when registry configuration or workspace discovery fails. Root binding checks
+require valid registry configuration; workspace checks also require discovery.
+A confirmed mismatch remains conclusive when other checks cannot run.
+Imported npm schema-8 locks use their own parser and root/workspace receipt
+validators. Their registry routing, platform selection, and ancestor installation
+layout checks are listed as unperformed.
+The shared store is not inspected. Blockers contain stable `code`
+and bounded `location` fields, using JSON pointers for dependency declarations.
+A selected member does not limit full-workspace checks. Registry data includes
+origins, credential variable names, and `credentials: "not_read"`.
+Root peer dependencies remain declarations rather than installable specs; member
+peer declarations still undergo compatibility checks. Recovery blocker locations
+identify the primary or backup journal whose metadata was inspected.
+
+`snapshot.consistency` is always `not_atomic`. Its `files` identify metadata
+reads by digest, explicit absence/read failure, or directory/journal metadata.
+Member manifest identities use the exact bounded bytes parsed during discovery,
+so a later persistent replacement cannot become the baseline for stale parsed data.
+`changes_detected` and each `changed_on_recheck` flag describe the second pass;
+false does not prove that no concurrent change occurred. Workspace discovery
+and other readers may observe different moments. Node_modules contents and
+workspace links are not verified. Runner/platform assurance is not assessed.
+The report lists these limits in `checks_not_performed` and exposes current
+supported lock/spec forms in the experimental `capabilities` summary. Use
+`tapid --json status --help` for arguments and defaults from Clap definitions.
+
+The report includes at most 128 blockers, 128 workspace members, and 128
+declarations from each dependency section. Discovery stops before parsing members
+if it exceeds 128 candidate manifests or 4,096 expansion steps. Each pattern,
+component, directory entry, literal path expansion, and candidate manifest probe
+consumes a step; overlapping patterns count before deduplication. Exceeding either
+limit reports `WORKSPACE_DISCOVERY_LIMIT` and marks the inspection truncated.
+Workspace discovery and planning bound root/member manifest reads to 32 MiB
+before parsing or hashing. File digests are bounded to 32 MiB, registry configuration to 64 KiB,
+and marker reads to 1 KiB. A truncated inspection exits 1. Display locations are
+sanitized and bounded to 4 KiB; they are descriptive and must not be used for
+automatic recovery. Use the envelope's lossless `project_path` to identify the
+project. Status never advises deleting recovery data or bypassing verification.
+
+Status blocker codes are `MANIFEST_INVALID_OR_MISSING`, `WORKSPACE_INVALID`, `WORKSPACE_DISCOVERY_LIMIT`,
+`WORKSPACE_SELECTION_INVALID`, `UNSUPPORTED_SPEC`, `UNSUPPORTED_OVERRIDE`,
+`MANIFEST_COMPATIBILITY_BLOCKER`, `WORKSPACE_COMPATIBILITY_BLOCKER`,
+`REGISTRY_CONFIGURATION_INVALID`, `LOCKFILE_MISSING`, `LOCKFILE_UNREADABLE`,
+`LOCKFILE_INVALID`, `LOCK_MANIFEST_MISMATCH`, `LOCK_WORKSPACE_MISMATCH`,
+`LOCK_ROOT_BINDINGS_INVALID`, `LOCK_REPLAY_UNSUPPORTED`, `INSTALLATION_NOT_MANAGED`,
+`RECOVERY_REQUIRED`, `RECOVERY_STATE_INVALID`, and `SNAPSHOT_CHANGED`.
+`INSPECTION_TRUNCATED` appears in the envelope's errors when entry or display
+limits prevent a complete report. A lock can agree with manifests and still
+have a replay blocker, such as a legacy schema requiring regeneration or
+locally computed registry integrity. Status reports those separately.
 
 ## Standalone tools
 

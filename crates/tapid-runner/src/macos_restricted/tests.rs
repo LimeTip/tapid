@@ -1763,18 +1763,31 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
             assert_eq!(unsafe { libc::dup2(source, target) }, target);
             assert_eq!(unsafe { libc::fcntl(target, libc::F_SETFD, 0) }, 0);
         }
-        let (mut destination_read, destination_write) = UnixStream::pair().unwrap();
-        destination_read
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        let (destination_read, destination_write) = launch_pipe().unwrap();
         let (mut sink, mut input) = spawn_live_sink(destination_write.as_raw_fd()).unwrap();
         drop(destination_write);
-        // spawn waits for exec, not for dyld to finish opening its own descriptors.
-        // Observe a round trip before inspecting the relay blocked on its next read.
-        input.write_all(b"ready\n").unwrap();
-        let mut ready = [0; 6];
-        destination_read.read_exact(&mut ready).unwrap();
-        assert_eq!(&ready, b"ready\n");
+        // spawn confirms exec, but dyld can still hold temporary descriptors.
+        // Observe cat relaying a byte before inspecting its steady-state authority.
+        input.write_all(b"x").unwrap();
+        let mut ready = libc::pollfd {
+            fd: destination_read.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: ready is one initialized, writable poll entry with a live fd.
+        let readable = unsafe { libc::poll(&mut ready, 1, 5_000) };
+        if readable != 1 || ready.revents & libc::POLLIN == 0 {
+            let _ = sink.kill();
+            let _ = sink.wait();
+            panic!(
+                "relay did not become ready: poll={readable}, events={}",
+                ready.revents
+            );
+        }
+        let mut destination = fs::File::from(destination_read);
+        let mut echoed = [0];
+        destination.read_exact(&mut echoed).unwrap();
+        assert_eq!(&echoed, b"x");
         let mut entries = [libc::proc_fdinfo {
             proc_fd: 0,
             proc_fdtype: 0,
@@ -1797,7 +1810,7 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
             .collect();
         drop(input);
         assert!(sink.wait().unwrap().success());
-        drop(destination_read);
+        drop(destination);
         drop(pipe_write);
         drop(peer);
         for fd in [100, 101, 102] {
