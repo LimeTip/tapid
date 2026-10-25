@@ -653,7 +653,9 @@ jobs:
         with:
           tool: cargo-audit
       - name: Audit Rust dependencies
-        run: cargo audit
+        run: |
+          cargo audit --deny unsound
+          cargo audit --deny unsound --file tests/integration/Cargo.lock
 
   windows-installer-contract:
     name: Windows installer contract
