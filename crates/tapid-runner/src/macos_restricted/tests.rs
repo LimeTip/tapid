@@ -557,7 +557,8 @@ fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
               STDOUT.reopen('descendant.stdout', 'w')
               STDERR.reopen('descendant.stderr', 'w')
               sleep 0.01 until File.exist?('receipt-returned')
-          system('node', 'detached-node')
+              abort 'detached node failed' unless system('node', 'detached-node')
+              File.write('descendant-done', 'done')
               exit! 0
             end
             File.write('descendant-ready', 'ready')
@@ -579,9 +580,14 @@ fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
     assert!(project.join("descendant-ready").exists());
     fs::write(project.join("receipt-returned"), b"receipt").unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
-    while !project.join("detached-node").exists() && Instant::now() < deadline {
+    // Output creation precedes its write; wait for the child command to finish.
+    while !project.join("descendant-done").exists() && Instant::now() < deadline {
         thread::sleep(POLL_INTERVAL);
     }
+    assert!(
+        project.join("descendant-done").exists(),
+        "detached node did not finish successfully"
+    );
     let resolution = outcome.enforcement().executable_resolution().unwrap();
     let private = PathBuf::from(OsString::from_vec(
         resolution
