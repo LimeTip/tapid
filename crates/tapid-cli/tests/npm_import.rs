@@ -967,12 +967,14 @@ fn npm_import_workspace_links_install_and_replay_without_resolution() {
                 .is_symlink()
         );
         #[cfg(windows)]
-        assert!(
-            project
-                .path()
-                .join("apps/second/node_modules/.bin/member.cmd")
-                .is_file()
-        );
+        {
+            assert!(
+                project
+                    .path()
+                    .join("apps/second/node_modules/.bin/member.cmd")
+                    .is_file()
+            );
+        }
         let node = Command::new("node")
             .args([
                 "-e",

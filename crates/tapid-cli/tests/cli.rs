@@ -4330,10 +4330,12 @@ fn run_lifecycle_recovery_crash_case(crash_point: &str) {
         );
     }
     #[cfg(not(unix))]
-    assert!(
-        !crash.status.success(),
-        "crash hook did not terminate process"
-    );
+    {
+        assert!(
+            !crash.status.success(),
+            "crash hook did not terminate process"
+        );
+    }
 
     let pending_manifest = fs::read(dir.join("package.json")).unwrap();
     let pending_lock = fs::read(dir.join("tapid.lock")).unwrap();
@@ -5404,7 +5406,9 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
         "{stderr}"
     );
     #[cfg(windows)]
-    assert!(stderr.contains("metadata open failed"), "{stderr}");
+    {
+        assert!(stderr.contains("metadata open failed"), "{stderr}");
+    }
     assert!(stderr.contains("no enforcement receipt was issued"));
     assert!(!stderr.contains(secret));
     assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
@@ -7287,7 +7291,9 @@ fn frozen_cold_cache_recovery_preserves_lock_bytes_and_publication_decision() {
             );
         }
         #[cfg(not(unix))]
-        assert!(!crash.status.success());
+        {
+            assert!(!crash.status.success());
+        }
         let journal_path = dir.join(".tapid-lifecycle-journal.json");
         let pending_journal = fs::read(&journal_path).unwrap();
         let inspection = run(
