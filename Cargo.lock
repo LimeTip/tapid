@@ -1561,6 +1561,7 @@ dependencies = [
 name = "tapid-manifest"
 version = "0.0.9"
 dependencies = [
+ "libc",
  "proptest",
  "serde",
  "serde_json",
