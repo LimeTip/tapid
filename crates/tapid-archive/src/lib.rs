@@ -410,6 +410,35 @@ pub fn canonical_tree_digest_without_root_entry(root: &Path, entry: &str) -> io:
     tree_digest(root, Some(entry))
 }
 
+/// Incrementally hashes exactly the recorded length using a fixed 65,536-byte buffer.
+///
+/// Rejects premature EOF and probes one additional byte to reject growth. Reader
+/// errors propagate unchanged; on any failure, the supplied hasher may already
+/// contain a prefix of the file's bytes.
+fn hash_file_contents<R: Read>(reader: &mut R, length: u64, hasher: &mut Sha256) -> io::Result<()> {
+    let mut remaining = length;
+    let mut buffer = [0u8; 65_536];
+    while remaining != 0 {
+        let chunk_size = remaining.min(65_536) as usize;
+        let count = reader.read(&mut buffer[..chunk_size])?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "tree file changed during hashing",
+            ));
+        }
+        hasher.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+    if reader.read(&mut buffer[..1])? != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "tree file grew during hashing",
+        ));
+    }
+    Ok(())
+}
+
 fn tree_digest(root: &Path, excluded: Option<&str>) -> io::Result<String> {
     let mut executable_paths = read_executable_manifest(root)?;
     if let (Some(paths), Some(entry)) = (&mut executable_paths, excluded) {
@@ -442,25 +471,7 @@ fn tree_digest(root: &Path, excluded: Option<&str>) -> io::Result<String> {
             TreePayload::File(path, length) => {
                 h.update(length.to_be_bytes());
                 let mut file = fs::File::open(path)?;
-                let mut remaining = length;
-                let mut buffer = [0u8; 65536];
-                while remaining != 0 {
-                    let count = file.read(&mut buffer[..remaining.min(65536) as usize])?;
-                    if count == 0 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "tree file changed during hashing",
-                        ));
-                    }
-                    h.update(&buffer[..count]);
-                    remaining -= count as u64;
-                }
-                if file.read(&mut buffer[..1])? != 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "tree file grew during hashing",
-                    ));
-                }
+                hash_file_contents(&mut file, length, &mut h)?;
             }
         }
     }
@@ -1266,6 +1277,119 @@ mod tests {
     fn ok(entry: ArchiveEntry) -> Result<(), ValidationError> {
         validate_entries([entry], ValidationLimits::default())
     }
+    /// Exact and empty inputs retain independently known SHA-256 digests.
+    #[test]
+    fn digest_reader_hashes_exact_and_zero_lengths() {
+        for (bytes, expected) in [
+            (
+                b"abc".as_slice(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                b"".as_slice(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+        ] {
+            let mut reader = bytes;
+            let mut hasher = Sha256::new();
+            hash_file_contents(&mut reader, bytes.len() as u64, &mut hasher).unwrap();
+            assert_eq!(hex::encode(hasher.finalize()), expected);
+        }
+    }
+
+    /// Successful short reads contribute every byte to the same known digest.
+    #[test]
+    fn digest_reader_hashes_short_successful_reads() {
+        /// Limits each read to one byte even when the caller requests more.
+        struct ShortReader<'a>(&'a [u8]);
+        impl Read for ShortReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let count = buffer.len().min(1);
+                self.0.read(&mut buffer[..count])
+            }
+        }
+
+        let mut reader = ShortReader(b"abc");
+        let mut hasher = Sha256::new();
+        hash_file_contents(&mut reader, 3, &mut hasher).unwrap();
+        assert_eq!(
+            hex::encode(hasher.finalize()),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// Truncation preserves the EOF error kind and existing diagnostic.
+    #[test]
+    fn digest_reader_rejects_premature_eof() {
+        let error = hash_file_contents(&mut b"ab".as_slice(), 3, &mut Sha256::new()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(error.to_string(), "tree file changed during hashing");
+    }
+
+    /// The growth probe rejects extra bytes after zero or nonzero recorded lengths.
+    #[test]
+    fn digest_reader_rejects_trailing_data() {
+        for length in [0, 2] {
+            let error =
+                hash_file_contents(&mut b"abc".as_slice(), length, &mut Sha256::new()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(error.to_string(), "tree file grew during hashing");
+        }
+    }
+
+    /// Content reads and the growth probe preserve the reader's error and message.
+    #[test]
+    fn digest_reader_propagates_io_errors() {
+        /// Injects a transport failure independently of the requested slice length.
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected read failure",
+                ))
+            }
+        }
+
+        // Exercise both the content read and the final growth probe.
+        for length in [1, 0] {
+            let error =
+                hash_file_contents(&mut FailingReader, length, &mut Sha256::new()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(error.to_string(), "injected read failure");
+        }
+    }
+
+    /// Consumes 3 MiB while bounding requested per-file read slices independently
+    /// of total input length; this does not measure RSS or total caller memory.
+    #[test]
+    fn digest_reader_requests_at_most_one_fixed_chunk() {
+        /// Synthesizes bytes without allocating the payload and records the largest
+        /// requested slice, including the final growth probe.
+        struct MeasuringReader {
+            remaining: usize,
+            max_request: usize,
+        }
+        impl std::io::Read for MeasuringReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.max_request = self.max_request.max(buffer.len());
+                let count = self.remaining.min(buffer.len());
+                buffer[..count].fill(b'x');
+                self.remaining -= count;
+                Ok(count)
+            }
+        }
+
+        let mut reader = MeasuringReader {
+            remaining: 3 * 1024 * 1024,
+            max_request: 0,
+        };
+        let mut hasher = Sha256::new();
+        hash_file_contents(&mut reader, 3 * 1024 * 1024, &mut hasher).unwrap();
+        assert_eq!(reader.remaining, 0);
+        assert!(reader.max_request <= 65_536);
+    }
+
     #[test]
     fn rejects_traversal_and_absolute_cross_platform_forms() {
         for path in [
