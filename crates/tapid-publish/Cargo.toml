@@ -13,3 +13,6 @@ authors.workspace = true
 [dependencies]
 sha2 = "0.10"
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
+
+[dev-dependencies]
+tapid-test-support = { version = "0.0.3", path = "../tapid-test-support" }

@@ -1716,7 +1716,8 @@ fn closed_live_sink_sets_the_supervisor_failure_signal() {
         return;
     }
     let (read, write) = launch_pipe().unwrap();
-    let (mut child, mut input) = spawn_live_sink(write.as_raw_fd()).unwrap();
+    let (mut child, mut input) =
+        spawn_live_sink(write.as_fd(), || sanitize_descriptors(false)).unwrap();
     drop(write);
     child.kill().unwrap();
     child.wait().unwrap();
@@ -1730,16 +1731,14 @@ fn closed_live_sink_sets_the_supervisor_failure_signal() {
 #[test]
 fn bounded_live_sink_preserves_normal_output_exactly_once() {
     let (read, write) = launch_pipe().unwrap();
-    let (child, mut input) = spawn_live_sink(write.as_raw_fd()).unwrap();
+    let (mut sinks, [mut input]) =
+        LiveSinks::spawn([write.as_fd()], || sanitize_descriptors(false)).unwrap();
     drop(write);
     let stop = AtomicBool::new(false);
     let backpressure = AtomicBool::new(false);
     write_live_output(&mut input, b"first\n", &stop, &backpressure).unwrap();
     write_live_output(&mut input, b"second\n", &stop, &backpressure).unwrap();
     drop(input);
-    let mut sinks = LiveSinks {
-        children: vec![child],
-    };
     sinks.finish().unwrap();
     let mut output = Vec::new();
     fs::File::from(read).read_to_end(&mut output).unwrap();
@@ -1763,7 +1762,8 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
             assert_eq!(unsafe { libc::fcntl(target, libc::F_SETFD, 0) }, 0);
         }
         let (destination_read, destination_write) = launch_pipe().unwrap();
-        let (mut sink, mut input) = spawn_live_sink(destination_write.as_raw_fd()).unwrap();
+        let (mut sink, mut input) =
+            spawn_live_sink(destination_write.as_fd(), || sanitize_descriptors(false)).unwrap();
         drop(destination_write);
         // spawn confirms exec, but dyld can still hold temporary descriptors.
         // Observe cat relaying a byte before inspecting its steady-state authority.

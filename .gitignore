@@ -9,6 +9,15 @@ node_modules/
 .env.*
 !.env.example
 
+# Local security audit reports and supporting artifacts
+/audit/
+*[Aa]udit*[Rr]eport*.md
+*[Ss]ecurity*[Rr]eport*.md
+*AUDIT*REPORT*.md
+*SECURITY*REPORT*.md
+[Ss]ecurity[-_][Aa]udit*.md
+SECURITY[-_]AUDIT*.md
+
 # Hermes planning and session artifacts
 .hermes/
 
