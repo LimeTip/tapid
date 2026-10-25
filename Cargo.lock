@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-archive"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "flate2",
  "hex",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-runner"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "libc",
  "serde",
