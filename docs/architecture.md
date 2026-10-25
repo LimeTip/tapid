@@ -89,7 +89,7 @@ A shared type belongs in `tapid-core` only when it is a stable domain value with
 - `tapid-runner`: controlled process and executable invocation, environment handling, output and time limits, and script execution policy enforcement.
 - `tapid-publish`: package packing, publication preparation, staging, and promotion workflows.
 - `tapid-signatures`: signing and signature verification primitives.
-- `tapid-attestations`: artifact-bound provenance and audit attestation models.
+- `tapid-attestations`: artifact-bound provenance, audit claims and authenticated package-security evidence verification.
 - `tapid-transparency`: append-only transparency records and verification foundations.
 - `tapid-test-support`: fixtures, fake registries, adversarial inputs, and shared test utilities. Production crates must not depend on it.
 
@@ -178,11 +178,17 @@ revocation, and shutdown before rollout. Workers, credentials, and databases
 must have explicit access scopes; separate repositories alone provide no
 runtime isolation. Client integration work is tracked in #312 through #315.
 
+Account authorization is independent of evidence issuer authentication. The
+public [security evidence contract](security-evidence.md) and
+[ADR 0011](adr/0011-security-evidence-contract.md) define the versioned schemas,
+verification rules, and conformance fixtures. Security evidence stays outside
+immutable resolution identity and the lock schema.
+
 ## Registry seam
 
-The future Tapid Registry is an online system for package metadata, publishing, distribution, identities, verification, and attestations. It is distinct from `tapid-store`, which is local developer-machine storage. Registry transport is a real I/O seam and can have production and deterministic test adapters.
-
-The main repository remains the default home for the client and its libraries. A future registry system or independently operated storage system may use a separate repository when deployment, security, ownership, or release lifecycle justifies that split.
+The future Tapid Registry handles package metadata, publishing and distribution.
+Registry transport remains a real I/O seam, separate from local verified storage in
+`tapid-store`. These responsibilities do not make the CLI the owner of provider rules.
 
 ## Architecture decisions and checks
 

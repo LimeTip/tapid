@@ -15,6 +15,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tapid-test-support = { path = "../tapid-test-support" }
 proptest = "1"

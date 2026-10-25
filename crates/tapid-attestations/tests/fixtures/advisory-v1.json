@@ -1,0 +1,68 @@
+{
+  "version": "tapid-trust-envelope-v1",
+  "subject": "tapid-security-v1",
+  "artifact_digest": "version-scope",
+  "claims": {
+    "checkedAt": 1000,
+    "coverage": [
+      "archive-static",
+      "install-scripts"
+    ],
+    "expiresAt": 2000,
+    "findings": [],
+    "issuedAt": 1010,
+    "issuer": "fixture.example",
+    "limitations": [
+      "no runtime execution"
+    ],
+    "request": {
+      "audience": {
+        "visibility": "public"
+      },
+      "check": {
+        "kind": "advisory"
+      },
+      "coverage": [
+        "archive-static",
+        "install-scripts"
+      ],
+      "subject": {
+        "package": {
+          "name": "actual",
+          "registry": "https://registry.example",
+          "version": "1.2.3"
+        },
+        "peers": {
+          "peer": {
+            "name": "peer",
+            "registry": "https://private.example",
+            "version": "2.0.0"
+          }
+        },
+        "placement": "root/node_modules/alias",
+        "platform": {
+          "cpu": "x86_64",
+          "libc": "gnu",
+          "os": "linux"
+        },
+        "requestedName": "alias"
+      },
+      "version": "tapid-security-v1"
+    },
+    "ruleVersion": "2026-10-18",
+    "scanner": "fixture-static",
+    "scannerVersion": "1",
+    "scope": "package_version",
+    "sequence": 3,
+    "sourceRevision": "rules:abc123",
+    "status": "no_known_findings",
+    "version": "tapid-security-v1"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "fixture-1",
+    "subject": "tapid-security-v1",
+    "artifact_digest": "version-scope",
+    "value": "c//J4bBvIhtqbfwy3TUS42ED4GyhBDhouI4m6mdJ3aBGpjmjQlznGJ2NPsbyeGSI0qVE26mtdAjS7weVuDPRBQ=="
+  }
+}

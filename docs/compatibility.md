@@ -88,7 +88,9 @@ For example, `apps/news`, `packages/*`, and `packages/*/*` are supported.
 Overlapping patterns discover each canonical member once, and members are
 sorted by package name. Directories without a `package.json` entry are ignored;
 existing non-regular entries, including dangling manifest symlinks, are rejected. A
-missing directory traversed to expand `*` produces an error.
+missing directory traversed to expand `*` produces an error. Root and member
+manifest reads are limited to 32 MiB each; oversized manifests fail discovery
+before parsing.
 
 Recursive `**`, partial-component wildcards such as `ui*`, `?`, character
 classes, braces, negation, extglobs, and backslash escapes are rejected with a

@@ -17,10 +17,28 @@ The crate validates required `name` and `version`, optional `private`, `descript
 map key, expected constraint, and observed JSON type. It does not copy arbitrary
 field values. `Workspace::discover_typed` preserves this evidence and the
 manifest path in `WorkspaceError::Manifest`; `discover` retains its string-error
-interface for existing callers.
+interface for existing callers. `WorkspaceError::ManifestRead` retains the path
+for manifest metadata, file-type, read, UTF-8, and size-limit failures while
+preserving the existing error text.
 
 `with_dependency_kind` adds a dependency to one section and removes declarations of that name from other sections. `update_dependency_kind` changes an existing declaration only in the selected section, preserving overlapping declarations and unrelated fields. It returns an error when that section does not declare the name.
 
-`Workspace::discover` reads root and member manifests, checks canonical path containment, and selects members by exact package name. It accepts string, array, and `workspaces.packages` declarations with literal directory paths and `*` as a whole component for one directory level. Unsupported glob syntax fails with a diagnostic. Overlapping patterns are deduplicated, duplicate names are rejected, and manifests must be regular files. See the [workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces) for the exact supported subset.
+`Workspace::discover` reads root and member manifests, checks canonical path containment, and selects members by exact package name. It accepts string, array, and `workspaces.packages` declarations with literal directory paths and `*` as a whole component for one directory level. Unsupported glob syntax fails with a diagnostic. Overlapping patterns are deduplicated, duplicate names are rejected, and manifests must be regular files. Discovery rejects root and member manifests larger than `MAX_MANIFEST_BYTES`, 32 MiB, before parsing and bounds the read itself if a file grows. See the [workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces) for the exact supported subset.
 
 `dependency_lifecycle_commands` preserves exact script bytes in lifecycle order. It includes the implicit `node-gyp rebuild` install hook when `binding.gyp` exists and neither `preinstall` nor `install` is declared. The CLI supplies that filesystem fact; parsing grants no execution permission.
+
+`Workspace::discover_bounded` uses the same discovery rules with limits on candidate
+manifests and expansion steps. Patterns, components, directory entries, literal
+path expansions, and candidate probes consume steps. Candidate manifests count
+before deduplication. Exceeding either budget returns
+`WorkspaceError::DiscoveryLimitExceeded` before member parsing. Existing discovery
+entry points retain their unrestricted enumeration behavior.
+
+On Unix, manifest opens reject replacement symlinks and do not wait for FIFO
+writers. Discovery checks the opened descriptor is a regular file before reading.
+
+`Workspace::discover_bounded_with_member_source` passes each member's exact parsed
+UTF-8 source to a borrowed callback. Snapshot consumers can fingerprint those bytes
+before a later filesystem read. Discovery discards the source after each member;
+the shared workspace model retains only parsed manifests. Callback observations
+are partial if discovery fails.
