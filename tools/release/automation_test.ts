@@ -1,4 +1,5 @@
-import { strictEqual, throws, rejects } from "node:assert/strict";
+import { strictEqual, throws, rejects, match, doesNotMatch, deepStrictEqual } from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { checkReviewedContracts, checkApprovedPlan, evaluateCi, waitForCi } from "./automation.ts";
 
@@ -6,6 +7,37 @@ const sha = "a".repeat(40);
 const run = (overrides: Record<string, unknown> = {}) => ({ id: 10, run_number: 2, head_sha: sha, head_branch: "main", event: "push", status: "completed", conclusion: "success", ...overrides });
 const codeqlNames = ['Analyze (actions)', 'Analyze (rust)', 'Analyze (javascript-typescript)'];
 const codeqlChecks = () => codeqlNames.map((name, index) => ({ id: index + 1, name, head_sha: sha, app: { id: 15368 }, status: 'completed', conclusion: 'success' }));
+
+test('advanced CodeQL covers every PR base and source update including draft readiness and retargeting', async () => {
+  const workflow = await readFile(new URL('../../.github/workflows/codeql.yml', import.meta.url), 'utf8');
+  const pr = workflow.match(/^  pull_request:\n((?:    .+\n)*)/m)?.[1] ?? '';
+  const events = pr.match(/types: \[([^\]]+)\]/)?.[1].split(',').map(value => value.trim()).sort();
+  deepStrictEqual(events, ['edited', 'opened', 'ready_for_review', 'reopened', 'synchronize']);
+  doesNotMatch(pr, /branches|paths/);
+  // Retain PR-token execution, including forks, rather than privileged target execution.
+  doesNotMatch(workflow, /pull_request_target:/);
+  doesNotMatch(workflow, /^    if:|continue-on-error:/m);
+});
+
+test('advanced CodeQL scans all language scopes daily without path or crate restrictions', async () => {
+  const workflow = await readFile(new URL('../../.github/workflows/codeql.yml', import.meta.url), 'utf8');
+  // Require a daily schedule independently of source activity, plus manual recovery.
+  match(workflow, /^  schedule:\n(?:    #.*\n)*    - cron: '17 3 \* \* \*'$/m);
+  match(workflow, /^  workflow_dispatch:$/m);
+  match(workflow, /^  push:\n    branches: \[main\]$/m);
+  match(workflow, /group: .*\$\{\{ github.event_name \}\}/);
+  doesNotMatch(workflow, /^\s*(?:paths(?:-ignore)?|source-root|working-directory|config(?:-file)?):/m);
+  doesNotMatch(workflow, /cargo (?:build|check|test)|--package|--manifest-path/);
+  const languages = workflow.match(/language: \[([^\]]+)\]/)?.[1].split(',').map(value => value.trim());
+  deepStrictEqual(languages?.map(language => `Analyze (${language})`), codeqlNames);
+  match(workflow, /name: Analyze \(\$\{\{ matrix.language \}\}\)/);
+  match(workflow, /languages: \$\{\{ matrix.language \}\}/);
+  match(workflow, /build-mode: none/);
+  match(workflow, /queries: security-extended/);
+  match(workflow, /fail-fast: false/);
+  match(workflow, /security-events: write/);
+  match(workflow, /category: \/language:\$\{\{ matrix.language \}\}/);
+});
 
 test('exact main CI owns command help without an obsolete standalone check', async () => {
   const { requiredChecks } = await import('./automation.ts');
