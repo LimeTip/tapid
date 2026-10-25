@@ -421,6 +421,7 @@ test('native and public smoke verification can be called with exact release iden
   }
 });
 const handoffName = 'ci-cli-${{ github.run_id }}-${{ github.run_attempt }}-windows-latest-Windows-X64-default-debug';
+/** Enforce single-producer, same-run Windows artifact ownership and verification before execution; retain failure cleanup. */
 function assertWindowsHandoff(ci: string) {
   assertSourceOnlyOwners(ci);
   const producer = job(ci, 'platform-consumer-validation');
@@ -576,6 +577,7 @@ test('previous-release upgrade uses that release installer beneath the current r
   assert(!windowsUpgrade.includes('& $installer -Version $env:PREVIOUS_TAG'));
 });
 
+/** Preserve stable required contexts that fail unless the complete native consumer matrix succeeds. */
 function assertConsumerCompatibility(ci: string) {
   const compatibility = job(ci, 'consumer-validation');
   assert.match(compatibility, /name: Consumer validation \(\$\{\{ matrix.os \}\}\)\n/);
