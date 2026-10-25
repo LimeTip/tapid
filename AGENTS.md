@@ -37,7 +37,6 @@ For planning, implementation, review, PR descriptions, domain documentation, or 
 - Preserve fail-closed verification, registry identity, atomic install/recovery, and containment. Include failure and attack-path tests when changing a trust seam.
 - Use `tapid-test-support` temporary projects and homes. Tests must not use real credentials, the user's home, fixed checkout paths, or external network services.
 - Update only documentation whose behavior, interface, security claim, or commands changed. ADRs are for consequential decisions. Private file moves do not require an ADR.
-- Never commit or push without the user's explicit approval for that action.
 - Request pull request reviews from Codex by posting `@codex review` in a PR comment. Do not request reviews from GitHub Copilot.
 - UI work must not add eyebrow headings, overlines, or decorative labels above titles.
 
