@@ -37,11 +37,13 @@ ManagedTree and every configured timeout, output, process-count, or memory limit
 
 Consumers must call `tapid_runner::initialize_or_dispatch_private_launcher()` as the first operation in `main`. Normal invocation returns an opaque token retained by subsequent requests; private invocation never returns. Without initialization, Restricted support fails before process creation. Tapid's binary installs this dispatch before CLI parsing. The helper canonical path uses the fixed `H0` profile parameter and an exact BackendRuntime grant, and its device/inode is revalidated before launch. Protocol data uses argv and two private pipes, with no protocol environment variables. Only stdio reaches the target.
 
-Linux Restricted relays stderr through a socket with timed reads. After the root
-exits, the diagnostic worker drains for at most 100 ms plus a pending 50 ms read
-before closing its input. A detached descendant holding stderr cannot keep that
-worker waiting for EOF; its later stderr may be truncated. This does not add a
-descendant-cleanup guarantee.
+Linux Restricted relays stderr through a socket with timed reads and an owned
+output sink. Each nonblocking forwarding write and sink shutdown has a 250 ms
+deadline, including when the caller keeps an unread stderr pipe open. After the
+root exits, the diagnostic worker drains for 100 ms plus a pending 50 ms read and
+bounded forwarding call before closing its input. Blocked output returns an
+error; later descendant stderr may be truncated. This does not add a descendant
+cleanup guarantee.
 
 Executable-resolution receipts encode PATH and its ordered entries as exact Unix byte arrays. They disclose `caller_path_inherited = false`, reserved `node`, private path, trusted runtime, the private snapshot device/inode, byte and executable-metadata verification timing, cleanup observation, and residual host-race limitations. PATH order is private node directory, project `.bin`, trusted runtime parent, then any explicitly approved directories. The selected runtime must be outside project write authority. A held source object is copied and byte-compared into a distinct owner-private inode; Seatbelt denies hard links and writes to the snapshot while project writes remain allowed. Bare `node` and `/usr/bin/env node` are reserved; explicitly addressed project Node executables are outside this guarantee. The private Node snapshot guarantee described here applies only to macOS. Linux Restricted does not claim snapshot resolution.
 

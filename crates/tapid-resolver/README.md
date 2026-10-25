@@ -17,8 +17,10 @@ Normalization and resolution reject metadata above 100,000 version records,
 alias targets, range clauses, comparators, and prerelease identifiers even when
 callers edit the public diagnostic text. Resolution applies these bounds across
 all supplied registries before building its candidate index, including
-caller-edited records that bypass normalization. Root declarations are capped at
-100,000. Oversized input returns `MetadataLimitExceeded`.
+caller-edited records that bypass normalization. Root registries, names, and
+retained requirements share that byte budget before root constraints are cloned.
+Root declarations are also capped at 100,000. Oversized input returns
+`MetadataLimitExceeded`.
 
 The supported npm range contract is differentially tested against pinned `node-semver` 7.8.5: exact and partial versions, `x`/`*` wildcards, comparator sets and intersections, caret/tilde including zero-major boundaries, hyphen ranges, and non-empty `||` alternatives. Empty range strings have npm wildcard semantics at the range parser; registry metadata separately rejects blank dependency declarations as malformed. Prerelease eligibility follows npm's same-base comparator rule, and build metadata is ignored for satisfaction. Candidate selection remains a separate deterministic policy. Git, file, and workspace declarations are source specifications rather than ranges and return structured `UnsupportedRange` errors at this parser. The CLI prepares immutable copied source metadata before resolution. Dist-tags are separate from version ranges: `Requirement::matches` cannot match a tag without metadata, while candidate selection uses each exact version's `dist_tags`. Tags select their exact target, including prereleases, and missing tags never fall back to the highest version.
 

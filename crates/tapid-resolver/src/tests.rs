@@ -206,6 +206,41 @@ fn oversized_metadata_text_is_rejected_without_building_an_index() {
 }
 
 #[test]
+fn roots_and_registry_records_share_the_resolution_payload_budget() {
+    let origin = "https://registry.npmjs.org";
+    let mut root = dep(origin, "pkg", "*");
+    root.requirement.raw = "x".repeat(32 * 1024 * 1024);
+    let mut value = package("pkg", "1.0.0", &[]);
+    value.dist_tags.insert("y".repeat(32 * 1024 * 1024));
+    let metadata = registry(origin, vec![value]);
+    assert!(matches!(
+        resolve_graph(&[root], &[metadata], Default::default()),
+        Err(ResolveError::MetadataLimitExceeded)
+    ));
+}
+
+#[test]
+fn root_requirement_payloads_are_bounded_before_resolution() {
+    for parsed_tag in [false, true] {
+        let large = "x".repeat(64 * 1024 * 1024 + 1);
+        let mut requirement = if parsed_tag { req(&large) } else { req("*") };
+        requirement.raw = if parsed_tag { "*".into() } else { large };
+        let root = Dependency::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            "pkg".parse().unwrap(),
+            requirement,
+        );
+        assert!(
+            matches!(
+                resolve_graph(&[root], &[], Default::default()),
+                Err(ResolveError::MetadataLimitExceeded)
+            ),
+            "root payloads must be checked before cloning, parsed tag: {parsed_tag}"
+        );
+    }
+}
+
+#[test]
 fn metadata_budget_counts_parsed_tags_after_diagnostic_changes() {
     let mut requirement = req(&"x".repeat(64 * 1024 * 1024 + 1));
     requirement.raw = "*".into();

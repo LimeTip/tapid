@@ -216,6 +216,35 @@ impl FromStr for Requirement {
 }
 
 impl Requirement {
+    // Account for the representation retained for matching and cloning, even
+    // when a caller edits the public diagnostic text independently.
+    fn retained_bytes(&self) -> usize {
+        let mut bytes = self
+            .raw
+            .len()
+            .saturating_add(self.dist_tag().map_or(0, str::len))
+            .saturating_add(self.alias.as_ref().map_or(0, |name| name.as_str().len()))
+            .saturating_add(
+                self.clauses
+                    .len()
+                    .saturating_mul(size_of::<RequirementClause>()),
+            );
+        for clause in &self.clauses {
+            if let RequirementClause::Comparators(comparators) = clause {
+                bytes = bytes.saturating_add(
+                    comparators
+                        .len()
+                        .saturating_mul(size_of::<RequirementComparator>()),
+                );
+                for comparator in comparators {
+                    bytes = bytes
+                        .saturating_add(comparator.base.version.prerelease().map_or(0, str::len));
+                }
+            }
+        }
+        bytes
+    }
+
     /// Actual registry name for an npm alias, or the declared dependency name.
     pub fn package_name<'a>(&'a self, declared: &'a PackageName) -> &'a PackageName {
         self.alias.as_ref().unwrap_or(declared)
@@ -656,13 +685,22 @@ where
             "offline resolution requires a cached snapshot",
         ));
     }
-    validate_metadata(
+    let mut bytes = validate_metadata(
         metadata
             .iter()
             .map(|item| (&item.registry, item.packages.as_slice())),
     )?;
     if ds.len() > 100_000 {
         return Err(ResolveError::MetadataLimitExceeded);
+    }
+    for dependency in ds {
+        bytes = bytes
+            .saturating_add(dependency.registry.as_str().len())
+            .saturating_add(dependency.name.as_str().len())
+            .saturating_add(dependency.requirement.retained_bytes());
+        if bytes > 64 * 1024 * 1024 {
+            return Err(ResolveError::MetadataLimitExceeded);
+        }
     }
     let candidate_index = candidate_index(metadata);
     let mut root_constraints: BTreeMap<
@@ -876,7 +914,7 @@ type CandidateIndex<'a> = BTreeMap<(PackageSource, PackageName), Vec<&'a Package
 // Both normalize and resolve enforce this because RegistryMetadata is editable.
 fn validate_metadata<'a>(
     metadata: impl IntoIterator<Item = (&'a PackageSource, &'a [PackageVersionMetadata])>,
-) -> Result<(), ResolveError> {
+) -> Result<usize, ResolveError> {
     let mut packages = 0usize;
     let mut relationships = 0usize;
     let mut bytes = 0usize;
@@ -901,36 +939,7 @@ fn validate_metadata<'a>(
             for (name, requirement) in record.dependencies.iter().chain(&record.peer_dependencies) {
                 bytes = bytes
                     .saturating_add(name.as_str().len())
-                    .saturating_add(requirement.raw.len())
-                    .saturating_add(requirement.dist_tag().map_or(0, str::len))
-                    .saturating_add(
-                        requirement
-                            .alias
-                            .as_ref()
-                            .map_or(0, |name| name.as_str().len()),
-                    )
-                    .saturating_add(
-                        requirement
-                            .clauses
-                            .len()
-                            .saturating_mul(size_of::<RequirementClause>()),
-                    );
-                // The diagnostic text is public and editable independently of
-                // the parsed representation retained for matching and cloning.
-                for clause in &requirement.clauses {
-                    if let RequirementClause::Comparators(comparators) = clause {
-                        bytes = bytes.saturating_add(
-                            comparators
-                                .len()
-                                .saturating_mul(size_of::<RequirementComparator>()),
-                        );
-                        for comparator in comparators {
-                            bytes = bytes.saturating_add(
-                                comparator.base.version.prerelease().map_or(0, str::len),
-                            );
-                        }
-                    }
-                }
+                    .saturating_add(requirement.retained_bytes());
             }
             for name in &record.optional_peer_dependencies {
                 bytes = bytes.saturating_add(name.as_str().len());
@@ -943,7 +952,7 @@ fn validate_metadata<'a>(
             }
         }
     }
-    Ok(())
+    Ok(bytes)
 }
 
 fn candidate_index(metadata: &[RegistryMetadata]) -> CandidateIndex<'_> {
