@@ -23,11 +23,11 @@
     },
     {
       "name": "tapid-manifest",
-      "version": "0.0.9"
+      "version": "0.0.10"
     },
     {
       "name": "tapid-linker",
-      "version": "0.0.7"
+      "version": "0.0.8"
     },
     {
       "name": "tapid-registry-client",
@@ -39,7 +39,7 @@
     },
     {
       "name": "tapid-lockfile",
-      "version": "0.0.12"
+      "version": "0.0.13"
     },
     {
       "name": "tapid-policy",

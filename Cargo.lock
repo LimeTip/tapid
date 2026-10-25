@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-linker"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "sha2",
  "tapid-core",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-lockfile"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "proptest",
  "serde",
@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "tapid-manifest"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "libc",
  "proptest",
