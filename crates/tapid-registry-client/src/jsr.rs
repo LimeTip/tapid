@@ -1,7 +1,9 @@
-use crate::metadata::{json_object, json_response};
 use crate::{
     HttpResponse, HttpTransport, MetadataError, RegistryArtifact, RegistryClientError,
-    RegistryKind, RegistryPackageId, artifact::download_artifact, transport::request_url_is_safe,
+    RegistryKind, RegistryPackageId,
+    artifact::download_artifact,
+    response::{json_object, json_response},
+    transport::request_url_is_safe,
 };
 use std::collections::BTreeMap;
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};

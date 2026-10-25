@@ -1763,8 +1763,9 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
             assert_eq!(unsafe { libc::fcntl(target, libc::F_SETFD, 0) }, 0);
         }
         let (destination_read, destination_write) = launch_pipe().unwrap();
-        let (mut sink, mut input) =
-            spawn_live_sink(destination_write.as_fd(), || sanitize_descriptors(false)).unwrap();
+        let (mut sinks, [mut input]) =
+            LiveSinks::spawn([destination_write.as_fd()], || sanitize_descriptors(false)).unwrap();
+        let sink_pid = sinks.child_id(0);
         drop(destination_write);
         // spawn confirms exec, but dyld can still hold temporary descriptors.
         // Observe cat relaying a byte before inspecting its steady-state authority.
@@ -1777,8 +1778,6 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
         // SAFETY: ready is one initialized, writable poll entry with a live fd.
         let readable = unsafe { libc::poll(&mut ready, 1, 5_000) };
         if readable != 1 || ready.revents & libc::POLLIN == 0 {
-            let _ = sink.kill();
-            let _ = sink.wait();
             panic!(
                 "relay did not become ready: poll={readable}, events={}",
                 ready.revents
@@ -1794,7 +1793,7 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
         }; 128];
         let bytes = unsafe {
             libc::proc_pidinfo(
-                sink.id() as i32,
+                sink_pid as i32,
                 libc::PROC_PIDLISTFDS,
                 0,
                 entries.as_mut_ptr().cast(),
@@ -1809,7 +1808,7 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
             .filter(|fd| *fd > 2)
             .collect();
         drop(input);
-        assert!(sink.wait().unwrap().success());
+        sinks.finish().unwrap();
         drop(destination);
         drop(pipe_write);
         drop(peer);
