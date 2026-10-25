@@ -14,7 +14,9 @@ before traversing that entry's payload. Size checks use the effective size,
 including PAX overrides. Decompressed tar framing and extension metadata have a
 64 KiB budget between logical entries, in addition to the preceding validated
 payload. This also bounds GNU/PAX metadata consumed internally by the parser.
-Validation failure removes the staging directory before returning an error.
+After validation or extraction fails, extraction attempts to remove the newly
+created staging directory. Filesystem cleanup can fail; the original processing
+error is returned even if staging removal fails.
 
 Unix extraction normalizes regular files to `0644` or `0755`, preserves only the executable distinction, and strips ownership and privilege bits. A canonical internal mode manifest makes executable-aware tree digests identical across Unix and Windows while Unix verification also checks the actual mode. The crate does not scan executable content or provide malware detection; store activation remains a separate layer.
 
