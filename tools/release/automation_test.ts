@@ -16,7 +16,8 @@ test('advanced CodeQL covers every PR base and source update including draft rea
   doesNotMatch(pr, /branches|paths/);
   // Retain PR-token execution, including forks, rather than privileged target execution.
   doesNotMatch(workflow, /pull_request_target:/);
-  doesNotMatch(workflow, /^    if:|continue-on-error:/m);
+  doesNotMatch(workflow, /^    if:/m);
+  doesNotMatch(workflow, /continue-on-error:/);
 });
 
 test('advanced CodeQL scans all language scopes daily without path or crate restrictions', async () => {
