@@ -65,3 +65,11 @@ mod tests {
         assert!(PackageInstanceId::try_from(wire).is_err());
     }
 }
+
+mod security;
+pub use security::{
+    AccountAuthorization, EvidenceAudience, EvidencePublicationRequest, MAX_SECURITY_BYTES,
+    SECURITY_CONTRACT_V1, SecurityCheck, SecurityErrorResponse, SecurityFinding,
+    SecurityPermission, SecurityPlatform, SecurityReason, SecurityRequest, SecurityResult,
+    SecurityScope, SecurityServiceError, SecurityStatus, SecuritySubject,
+};
