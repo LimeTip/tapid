@@ -1,0 +1,13 @@
+{
+  "version": "tapid-security-v1",
+  "subject": {
+    "package": {"registry": "https://registry.example", "name": "actual", "version": "1.2.3"},
+    "requestedName": "alias",
+    "placement": "root/node_modules/alias",
+    "peers": {"peer": {"registry": "https://private.example", "name": "peer", "version": "2.0.0"}},
+    "platform": {"os": "linux", "cpu": "x86_64", "libc": "gnu"}
+  },
+  "check": {"kind": "artifact", "digest": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "coverage": ["archive-static", "install-scripts"],
+  "audience": {"visibility": "public"}
+}

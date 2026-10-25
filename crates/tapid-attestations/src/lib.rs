@@ -191,3 +191,8 @@ mod tests {
         assert!(c.validate().is_ok());
     }
 }
+
+mod security;
+pub use security::{
+    EvidenceFreshness, SecurityTrust, VerifiedSecurityEvidence, verify_security_evidence,
+};

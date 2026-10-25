@@ -557,7 +557,8 @@ fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
               STDOUT.reopen('descendant.stdout', 'w')
               STDERR.reopen('descendant.stderr', 'w')
               sleep 0.01 until File.exist?('receipt-returned')
-          system('node', 'detached-node')
+              abort 'detached node failed' unless system('node', 'detached-node')
+              File.write('descendant-done', 'done')
               exit! 0
             end
             File.write('descendant-ready', 'ready')
@@ -579,9 +580,14 @@ fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
     assert!(project.join("descendant-ready").exists());
     fs::write(project.join("receipt-returned"), b"receipt").unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
-    while !project.join("detached-node").exists() && Instant::now() < deadline {
+    // Output creation precedes its write; wait for the child command to finish.
+    while !project.join("descendant-done").exists() && Instant::now() < deadline {
         thread::sleep(POLL_INTERVAL);
     }
+    assert!(
+        project.join("descendant-done").exists(),
+        "detached node did not finish successfully"
+    );
     let resolution = outcome.enforcement().executable_resolution().unwrap();
     let private = PathBuf::from(OsString::from_vec(
         resolution
@@ -1710,7 +1716,8 @@ fn closed_live_sink_sets_the_supervisor_failure_signal() {
         return;
     }
     let (read, write) = launch_pipe().unwrap();
-    let (mut child, mut input) = spawn_live_sink(write.as_raw_fd()).unwrap();
+    let (mut child, mut input) =
+        spawn_live_sink(write.as_fd(), || sanitize_descriptors(false)).unwrap();
     drop(write);
     child.kill().unwrap();
     child.wait().unwrap();
@@ -1724,16 +1731,14 @@ fn closed_live_sink_sets_the_supervisor_failure_signal() {
 #[test]
 fn bounded_live_sink_preserves_normal_output_exactly_once() {
     let (read, write) = launch_pipe().unwrap();
-    let (child, mut input) = spawn_live_sink(write.as_raw_fd()).unwrap();
+    let (mut sinks, [mut input]) =
+        LiveSinks::spawn([write.as_fd()], || sanitize_descriptors(false)).unwrap();
     drop(write);
     let stop = AtomicBool::new(false);
     let backpressure = AtomicBool::new(false);
     write_live_output(&mut input, b"first\n", &stop, &backpressure).unwrap();
     write_live_output(&mut input, b"second\n", &stop, &backpressure).unwrap();
     drop(input);
-    let mut sinks = LiveSinks {
-        children: vec![child],
-    };
     sinks.finish().unwrap();
     let mut output = Vec::new();
     fs::File::from(read).read_to_end(&mut output).unwrap();
@@ -1757,8 +1762,31 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
             assert_eq!(unsafe { libc::fcntl(target, libc::F_SETFD, 0) }, 0);
         }
         let (destination_read, destination_write) = launch_pipe().unwrap();
-        let (mut sink, input) = spawn_live_sink(destination_write.as_raw_fd()).unwrap();
+        let (mut sink, mut input) =
+            spawn_live_sink(destination_write.as_fd(), || sanitize_descriptors(false)).unwrap();
         drop(destination_write);
+        // spawn confirms exec, but dyld can still hold temporary descriptors.
+        // Observe cat relaying a byte before inspecting its steady-state authority.
+        input.write_all(b"x").unwrap();
+        let mut ready = libc::pollfd {
+            fd: destination_read.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: ready is one initialized, writable poll entry with a live fd.
+        let readable = unsafe { libc::poll(&mut ready, 1, 5_000) };
+        if readable != 1 || ready.revents & libc::POLLIN == 0 {
+            let _ = sink.kill();
+            let _ = sink.wait();
+            panic!(
+                "relay did not become ready: poll={readable}, events={}",
+                ready.revents
+            );
+        }
+        let mut destination = fs::File::from(destination_read);
+        let mut echoed = [0];
+        destination.read_exact(&mut echoed).unwrap();
+        assert_eq!(&echoed, b"x");
         let mut entries = [libc::proc_fdinfo {
             proc_fd: 0,
             proc_fdtype: 0,
@@ -1781,7 +1809,7 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
             .collect();
         drop(input);
         assert!(sink.wait().unwrap().success());
-        drop(destination_read);
+        drop(destination);
         drop(pipe_write);
         drop(peer);
         for fd in [100, 101, 102] {

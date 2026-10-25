@@ -216,6 +216,35 @@ impl FromStr for Requirement {
 }
 
 impl Requirement {
+    // Account for the representation retained for matching and cloning, even
+    // when a caller edits the public diagnostic text independently.
+    fn retained_bytes(&self) -> usize {
+        let mut bytes = self
+            .raw
+            .len()
+            .saturating_add(self.dist_tag().map_or(0, str::len))
+            .saturating_add(self.alias.as_ref().map_or(0, |name| name.as_str().len()))
+            .saturating_add(
+                self.clauses
+                    .len()
+                    .saturating_mul(size_of::<RequirementClause>()),
+            );
+        for clause in &self.clauses {
+            if let RequirementClause::Comparators(comparators) = clause {
+                bytes = bytes.saturating_add(
+                    comparators
+                        .len()
+                        .saturating_mul(size_of::<RequirementComparator>()),
+                );
+                for comparator in comparators {
+                    bytes = bytes
+                        .saturating_add(comparator.base.version.prerelease().map_or(0, str::len));
+                }
+            }
+        }
+        bytes
+    }
+
     /// Actual registry name for an npm alias, or the declared dependency name.
     pub fn package_name<'a>(&'a self, declared: &'a PackageName) -> &'a PackageName {
         self.alias.as_ref().unwrap_or(declared)
@@ -461,6 +490,7 @@ impl RegistryMetadata {
         registry: PackageSource,
         mut packages: Vec<PackageVersionMetadata>,
     ) -> Result<Self, ResolveError> {
+        validate_metadata([(&registry, packages.as_slice())])?;
         packages.sort_by(|a, b| a.name.cmp(&b.name).then(b.version.cmp(&a.version)));
         let mut tags = BTreeSet::new();
         for package in &packages {
@@ -543,6 +573,7 @@ pub struct RequirementOrigin {
 /// Structured deterministic failures from requirement parsing and graph selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveError {
+    MetadataLimitExceeded,
     InvalidRequirement(String),
     UnsupportedRange(String),
     UnsupportedMode(&'static str),
@@ -653,6 +684,23 @@ where
         return Err(ResolveError::UnsupportedMode(
             "offline resolution requires a cached snapshot",
         ));
+    }
+    let mut bytes = validate_metadata(
+        metadata
+            .iter()
+            .map(|item| (&item.registry, item.packages.as_slice())),
+    )?;
+    if ds.len() > 100_000 {
+        return Err(ResolveError::MetadataLimitExceeded);
+    }
+    for dependency in ds {
+        bytes = bytes
+            .saturating_add(dependency.registry.as_str().len())
+            .saturating_add(dependency.name.as_str().len())
+            .saturating_add(dependency.requirement.retained_bytes());
+        if bytes > 64 * 1024 * 1024 {
+            return Err(ResolveError::MetadataLimitExceeded);
+        }
     }
     let candidate_index = candidate_index(metadata);
     let mut root_constraints: BTreeMap<
@@ -861,6 +909,51 @@ where
 }
 
 type CandidateIndex<'a> = BTreeMap<(PackageSource, PackageName), Vec<&'a PackageVersionMetadata>>;
+
+// Check before sorting, indexing, cloning selected records, or expanding edges.
+// Both normalize and resolve enforce this because RegistryMetadata is editable.
+fn validate_metadata<'a>(
+    metadata: impl IntoIterator<Item = (&'a PackageSource, &'a [PackageVersionMetadata])>,
+) -> Result<usize, ResolveError> {
+    let mut packages = 0usize;
+    let mut relationships = 0usize;
+    let mut bytes = 0usize;
+    for (registry, records) in metadata {
+        packages = packages.saturating_add(records.len());
+        bytes = bytes.saturating_add(registry.as_str().len());
+        if packages > 100_000 || bytes > 64 * 1024 * 1024 {
+            return Err(ResolveError::MetadataLimitExceeded);
+        }
+        for record in records {
+            relationships = relationships
+                .saturating_add(record.dependencies.len())
+                .saturating_add(record.peer_dependencies.len())
+                .saturating_add(record.optional_peer_dependencies.len())
+                .saturating_add(record.dist_tags.len());
+            if relationships > 1_000_000 {
+                return Err(ResolveError::MetadataLimitExceeded);
+            }
+            bytes = bytes
+                .saturating_add(record.name.as_str().len())
+                .saturating_add(record.version.prerelease().map_or(0, str::len));
+            for (name, requirement) in record.dependencies.iter().chain(&record.peer_dependencies) {
+                bytes = bytes
+                    .saturating_add(name.as_str().len())
+                    .saturating_add(requirement.retained_bytes());
+            }
+            for name in &record.optional_peer_dependencies {
+                bytes = bytes.saturating_add(name.as_str().len());
+            }
+            for tag in &record.dist_tags {
+                bytes = bytes.saturating_add(tag.len());
+            }
+            if bytes > 64 * 1024 * 1024 {
+                return Err(ResolveError::MetadataLimitExceeded);
+            }
+        }
+    }
+    Ok(bytes)
+}
 
 fn candidate_index(metadata: &[RegistryMetadata]) -> CandidateIndex<'_> {
     let mut index = CandidateIndex::new();

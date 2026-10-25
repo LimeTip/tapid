@@ -3,6 +3,10 @@
 use super::*;
 use hmac::{Hmac, Mac};
 #[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "Windows owner-only key protection requires security descriptor APIs"
+)]
 mod windows;
 #[cfg(windows)]
 use windows::lifecycle_key;
@@ -85,7 +89,7 @@ fn lifecycle_key(root: &Path, create: bool) -> Result<[u8; 32], IngestError> {
     if !metadata.is_file()
         || metadata.len() != 32
         || metadata.mode() & 0o777 != 0o600
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != rustix::process::geteuid().as_raw()
     {
         return Err(invalid(
             "lifecycle authentication key must be an owner-only regular 32-byte file",

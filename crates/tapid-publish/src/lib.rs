@@ -9,6 +9,24 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 use tapid_core::ArtifactDigest;
+const PACK_MAGIC: &[u8] = b"TAPID-PACK-1\n";
+
+/// Memory and traversal bounds applied to packing and manifest inspection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackLimits {
+    pub max_files: usize,
+    pub max_file_bytes: u64,
+    pub max_artifact_bytes: u64,
+}
+impl Default for PackLimits {
+    fn default() -> Self {
+        Self {
+            max_files: 100_000,
+            max_file_bytes: 512 * 1024 * 1024,
+            max_artifact_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
 
 /// Version of this library, not the `TAPID-PACK-1` encoding version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -20,6 +38,7 @@ pub struct PackageSource {
     pub root: PathBuf,
     pub version: String,
     pub exclusions: ExclusionRules,
+    pub limits: PackLimits,
 }
 impl PackageSource {
     /// Select a root and version, with only the built-in `.git`/`target` exclusions.
@@ -28,11 +47,17 @@ impl PackageSource {
             root: root.into(),
             version: version.into(),
             exclusions: ExclusionRules::default(),
+            limits: PackLimits::default(),
         }
     }
     /// Replace explicit path exclusions without reading the filesystem.
     pub fn with_exclusions(mut self, exclusions: ExclusionRules) -> Self {
         self.exclusions = exclusions;
+        self
+    }
+    /// Replace the bounds for both packing and manifest inspection.
+    pub fn with_limits(mut self, limits: PackLimits) -> Self {
+        self.limits = limits;
         self
     }
 }
@@ -95,6 +120,7 @@ pub enum PublishError {
     InvalidSource(String),
     ImmutableVersion(String),
     InvalidState(&'static str),
+    LimitExceeded(&'static str),
 }
 impl fmt::Display for PublishError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -104,6 +130,7 @@ impl fmt::Display for PublishError {
             Self::InvalidSource(s) => f.write_str(s),
             Self::ImmutableVersion(v) => write!(f, "version is already promoted: {v}"),
             Self::InvalidState(s) => f.write_str(s),
+            Self::LimitExceeded(s) => write!(f, "package publication limit exceeded: {s}"),
         }
     }
 }
@@ -148,7 +175,7 @@ impl PackedArtifact {
 /// Encode included files in sorted order using `TAPID-PACK-1`.
 ///
 /// Each file is read once: its encoded content, size, and digest use that same
-/// buffer. This is not an atomic directory snapshot; callers must prevent source
+/// captured bytes. This is not an atomic directory snapshot; callers must prevent source
 /// mutation, including symlink replacement during traversal and reads.
 ///
 /// # Path policy and errors
@@ -164,23 +191,34 @@ impl PackedArtifact {
 ///
 /// Also rejects invalid roots, unsafe paths and observed symlinks/special files;
 /// filesystem failures return [`PublishError::Io`]. No files are written and no
-/// transport is invoked. Memory grows with the resulting artifact.
+/// transport is invoked. Memory is bounded by the source's [`PackLimits`].
 pub fn pack(source: &PackageSource) -> Result<PackedArtifact, PublishError> {
     let paths = normalized_source_paths(source)?;
+    check_artifact_size(
+        PACK_MAGIC.len() as u64 + 8,
+        source.version.len() as u64,
+        source.limits,
+    )?;
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"TAPID-PACK-1\n");
+    bytes.extend_from_slice(PACK_MAGIC);
     append_field(&mut bytes, source.version.as_bytes());
     let mut manifest_files = Vec::with_capacity(paths.len());
     for (path, full) in paths {
-        let file_bytes = read_source_file(&full)?;
+        let framing = 16u64.saturating_add(path.len() as u64);
+        check_artifact_size(bytes.len() as u64, framing, source.limits)?;
         append_field(&mut bytes, path.as_bytes());
-        bytes.extend_from_slice(&(file_bytes.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&file_bytes);
-        manifest_files.push(ManifestFile {
-            path,
-            size: file_bytes.len() as u64,
-            digest: digest_bytes(&file_bytes),
-        });
+        let size_offset = bytes.len();
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        let start = bytes.len();
+        let maximum = source
+            .limits
+            .max_file_bytes
+            .min(source.limits.max_artifact_bytes - start as u64);
+        read_source_file(&full, maximum, &mut bytes)?;
+        let size = (bytes.len() - start) as u64;
+        bytes[size_offset..start].copy_from_slice(&size.to_le_bytes());
+        let digest = digest_bytes(&bytes[start..]);
+        manifest_files.push(ManifestFile { path, size, digest });
     }
     let manifest = NormalizedFileManifest {
         version: source.version.clone(),
@@ -212,7 +250,14 @@ fn normalized_source_paths(source: &PackageSource) -> Result<Vec<(String, PathBu
         ));
     }
     let mut paths = Vec::new();
-    collect_files(&source.root, &source.root, &source.exclusions, &mut paths)?;
+    collect_files(
+        &source.root,
+        &source.root,
+        &source.exclusions,
+        source.limits,
+        0,
+        &mut paths,
+    )?;
     paths.sort();
     let mut seen = BTreeSet::new();
     for (path, _) in &paths {
@@ -230,10 +275,27 @@ fn path_collision_key(path: &str) -> String {
 
 fn inspect_source(source: &PackageSource) -> Result<NormalizedFileManifest, PublishError> {
     let paths = normalized_source_paths(source)?;
+    let mut total = check_artifact_size(
+        PACK_MAGIC.len() as u64 + 8,
+        source.version.len() as u64,
+        source.limits,
+    )?;
     let mut manifest_files = Vec::with_capacity(paths.len());
     for (path, full) in paths {
         use std::io::Read;
         let mut file = fs::File::open(&full)?;
+        total = check_artifact_size(
+            total,
+            16u64.saturating_add(path.len() as u64),
+            source.limits,
+        )?;
+        let maximum = source
+            .limits
+            .max_file_bytes
+            .min(source.limits.max_artifact_bytes - total);
+        if file.metadata()?.len() > maximum {
+            return Err(PublishError::LimitExceeded("file bytes"));
+        }
         let mut hash = Sha256::new();
         let mut size = 0;
         let mut buffer = [0_u8; 64 * 1024];
@@ -244,7 +306,11 @@ fn inspect_source(source: &PackageSource) -> Result<NormalizedFileManifest, Publ
             }
             hash.update(&buffer[..count]);
             size += count as u64;
+            if size > maximum {
+                return Err(PublishError::LimitExceeded("file bytes"));
+            }
         }
+        total = check_artifact_size(total, size, source.limits)?;
         manifest_files.push(ManifestFile {
             path,
             size,
@@ -259,11 +325,27 @@ fn inspect_source(source: &PackageSource) -> Result<NormalizedFileManifest, Publ
     })
 }
 
-fn read_source_file(path: &Path) -> io::Result<Vec<u8>> {
-    let bytes = fs::read(path)?;
+fn check_artifact_size(current: u64, added: u64, limits: PackLimits) -> Result<u64, PublishError> {
+    current
+        .checked_add(added)
+        .filter(|size| *size <= limits.max_artifact_bytes)
+        .ok_or(PublishError::LimitExceeded("artifact bytes"))
+}
+
+fn read_source_file(path: &Path, maximum: u64, bytes: &mut Vec<u8>) -> Result<(), PublishError> {
+    use std::io::Read;
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > maximum {
+        return Err(PublishError::LimitExceeded("file bytes"));
+    }
+    let start = bytes.len();
+    file.take(maximum.saturating_add(1)).read_to_end(bytes)?;
+    if (bytes.len() - start) as u64 > maximum {
+        return Err(PublishError::LimitExceeded("file bytes"));
+    }
     #[cfg(test)]
     maybe_mutate_test_source(path);
-    Ok(bytes)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -328,14 +410,21 @@ fn collect_files(
     root: &Path,
     dir: &Path,
     rules: &ExclusionRules,
+    limits: PackLimits,
+    depth: usize,
     out: &mut Vec<(String, PathBuf)>,
 ) -> Result<(), PublishError> {
-    let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
+    if depth > 128 {
+        return Err(PublishError::LimitExceeded("directory depth"));
+    }
+    for e in fs::read_dir(dir)? {
+        let e = e?;
         let full = e.path();
         let rel = full.strip_prefix(root).expect("root prefix");
         let rel = normalize_path(&rel.to_string_lossy())?;
+        if rel.len() > 4096 {
+            return Err(PublishError::LimitExceeded("path bytes"));
+        }
         if rules.matches(&rel)
             || rel == ".git"
             || rel == "target"
@@ -351,8 +440,11 @@ fn collect_files(
             return Err(PublishError::UnsafePath(rel));
         }
         if metadata.file_type().is_dir() {
-            collect_files(root, &full, rules, out)?;
+            collect_files(root, &full, rules, limits, depth + 1, out)?;
         } else if metadata.file_type().is_file() {
+            if out.len() >= limits.max_files {
+                return Err(PublishError::LimitExceeded("file count"));
+            }
             out.push((rel, full));
         }
     }
@@ -427,6 +519,66 @@ impl<T: PublicationTransport> Publisher<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn publication_limits_include_framing_and_apply_to_inspection_and_preview() {
+        let fixture = tapid_test_support::TempProject::new("publish-total-limit").unwrap();
+        fixture.write("a", b"1234").unwrap();
+        fixture.write("b", b"5678").unwrap();
+        let source = PackageSource::new(fixture.path(), "1.0.0");
+        // 13 magic bytes, 8-byte version length, 5 version bytes, then
+        // two records with 16 framing bytes, one path byte, and four data bytes.
+        let exact = source.clone().with_limits(PackLimits {
+            max_files: 2,
+            max_file_bytes: 4,
+            max_artifact_bytes: 68,
+        });
+        assert_eq!(pack(&exact).unwrap().bytes.len(), 68);
+        assert_eq!(
+            NormalizedFileManifest::from_source(&exact)
+                .unwrap()
+                .files
+                .len(),
+            2
+        );
+        let too_small = source.clone().with_limits(PackLimits {
+            max_artifact_bytes: 67,
+            ..PackLimits::default()
+        });
+        assert!(matches!(
+            pack(&too_small),
+            Err(PublishError::LimitExceeded(_))
+        ));
+        assert!(matches!(
+            NormalizedFileManifest::from_source(&too_small),
+            Err(PublishError::LimitExceeded(_))
+        ));
+        assert!(Publisher::new(Tx(0)).preview(&too_small).is_err());
+        let too_many = source.with_limits(PackLimits {
+            max_files: 1,
+            ..PackLimits::default()
+        });
+        assert!(matches!(
+            pack(&too_many),
+            Err(PublishError::LimitExceeded(_))
+        ));
+        assert!(NormalizedFileManifest::from_source(&too_many).is_err());
+    }
+
+    #[test]
+    fn packing_and_inspection_reject_oversized_files_before_reading_them() {
+        let fixture = tapid_test_support::TempProject::new("publish-file-limit").unwrap();
+        fixture.write("file", b"12345").unwrap();
+        let source = PackageSource::new(fixture.path(), "1.0.0").with_limits(PackLimits {
+            max_file_bytes: 4,
+            ..PackLimits::default()
+        });
+        assert!(matches!(pack(&source), Err(PublishError::LimitExceeded(_))));
+        assert!(matches!(
+            NormalizedFileManifest::from_source(&source),
+            Err(PublishError::LimitExceeded(_))
+        ));
+    }
+
     use std::sync::atomic::{AtomicU64, Ordering};
     fn tree(files: &[(&str, &[u8])]) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);

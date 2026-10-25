@@ -1,6 +1,6 @@
 # Tapid Architecture
 
-Tapid is a domain-oriented modular monolith in one Rust workspace and one public repository. Domain capability modules provide strong internal separation without distributing the contributor experience or adding network boundaries. A crate is useful when it expresses a cohesive capability and dependency direction, not merely because code can be moved into it.
+The Tapid client is a domain-oriented modular monolith in one Rust workspace and one public repository. Domain capability modules provide strong internal separation without distributing the contributor experience or adding network boundaries. A crate is useful when it expresses a cohesive capability and dependency direction, not merely because code can be moved into it.
 
 The engineering standard behind this architecture is in [engineering-principles.md](engineering-principles.md). ADR 0002 records the decision.
 
@@ -89,7 +89,7 @@ A shared type belongs in `tapid-core` only when it is a stable domain value with
 - `tapid-runner`: controlled process and executable invocation, environment handling, output and time limits, and script execution policy enforcement.
 - `tapid-publish`: package packing, publication preparation, staging, and promotion workflows.
 - `tapid-signatures`: signing and signature verification primitives.
-- `tapid-attestations`: artifact-bound provenance and audit attestation models.
+- `tapid-attestations`: artifact-bound provenance, audit claims and authenticated package-security evidence verification.
 - `tapid-transparency`: append-only transparency records and verification foundations.
 - `tapid-test-support`: fixtures, fake registries, adversarial inputs, and shared test utilities. Production crates must not depend on it.
 
@@ -129,11 +129,66 @@ Security-sensitive behavior is modeled as explicit, validated state transitions.
 
 Tests cover successful transitions and rejection, interruption, replay, and recovery paths. Human and machine-readable output derive from the same transition result.
 
+## Client and hosted ownership
+
+[ADR 0010](adr/0010-client-and-hosted-ownership.md) records the separation between
+the public client and the private hosted applications. This is the intended
+ownership; it does not establish that hosted scanning or authentication exists.
+
+- `tapid` owns local package management, public interchange contracts and
+  conformance fixtures, evidence verification, audit output, and local policy
+  enforcement. Supported local operations build, test, and work independently
+  of private repositories and hosted accounts.
+- `tapid-web` owns the website, docs rendering, package explorer, dashboard,
+  sign-in experience, and account/organization management. One account authority
+  owns memberships and roles. Billing and entitlements are separately scoped
+  future capabilities.
+- `tapid-cloud` owns hosted security-intelligence ingestion, scan jobs, analysis
+  results, evidence issuance and publication/withdrawal, and authorization of
+  access to those resources. Its implementation remains closed source.
+
+Web and the CLI consume the same versioned security-evidence contract. Web may
+maintain a display/search projection, but it does not independently collect or
+reinterpret the same security findings. Public CLI documentation has one
+editable owner here; private applications consume reviewed, pinned inputs.
+
+Web presents sign-in and credential management. Cloud validates credentials
+and authorizes each resource, using the single account authority rather than a
+second user or membership database. Browser sessions, scoped CLI/CI credentials,
+and evidence signatures have separate purposes. The CLI calls Cloud directly
+after authorization. Define membership revocation and outage behavior before
+enabling authenticated use.
+
+Published public evidence remains anonymously readable; private inventories,
+uploads, and scan results require explicit scoped access. Sign-in alone does
+not authorize disclosure, publication, hook execution, or installation. Missing,
+stale, unavailable, partial, and invalid evidence remain distinct from no known
+findings. A signature authenticates the issuer and bytes, not scanner accuracy.
+
+Hosted checks are explicit. A project may require fresh evidence, in which case
+unavailable required evidence blocks that operation. Other supported local
+operations retain their local contract, and offline operations make no requests.
+Required checks precede hooks and activation and reuse existing rollback and
+recovery operations. Immutable artifact identity remains separate from changing
+security knowledge.
+
+Repository ownership does not require a deployment per module. The hosted
+applications must agree on account authority, result publication, compatibility,
+revocation, and shutdown before rollout. Workers, credentials, and databases
+must have explicit access scopes; separate repositories alone provide no
+runtime isolation. Client integration work is tracked in #312 through #315.
+
+Account authorization is independent of evidence issuer authentication. The
+public [security evidence contract](security-evidence.md) and
+[ADR 0011](adr/0011-security-evidence-contract.md) define the versioned schemas,
+verification rules, and conformance fixtures. Security evidence stays outside
+immutable resolution identity and the lock schema.
+
 ## Registry seam
 
-The future Tapid Registry is an online system for package metadata, publishing, distribution, identities, verification, and attestations. It is distinct from `tapid-store`, which is local developer-machine storage. Registry transport is a real I/O seam and can have production and deterministic test adapters.
-
-The main repository remains the default home for the client and its libraries. A future registry system or independently operated storage system may use a separate repository when deployment, security, ownership, or release lifecycle justifies that split.
+The future Tapid Registry handles package metadata, publishing and distribution.
+Registry transport remains a real I/O seam, separate from local verified storage in
+`tapid-store`. These responsibilities do not make the CLI the owner of provider rules.
 
 ## Architecture decisions and checks
 

@@ -351,6 +351,16 @@ jobs:
           path: lcov.info
           if-no-files-found: error
           retention-days: 30
+      - name: Upload failed coverage profiles
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: failed-coverage-profiles
+          path: |
+            target/llvm-cov-target/*.profraw
+            target/llvm-cov-target/*-profraw-list
+          if-no-files-found: warn
+          retention-days: 1
 
   release-platform-build:
     name: Release target (${{ matrix.target }})
@@ -622,7 +632,9 @@ jobs:
         with:
           tool: cargo-audit
       - name: Audit Rust dependencies
-        run: cargo audit
+        run: |
+          cargo audit --deny unsound
+          cargo audit --deny unsound --file tests/integration/Cargo.lock
 
   windows-installer-contract:
     name: Windows installer contract

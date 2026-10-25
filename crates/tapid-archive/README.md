@@ -9,6 +9,15 @@
 
 `tapid-archive` validates archive entry metadata before extraction. Names using either slash style are checked. Traversal, absolute, drive, and UNC paths are rejected. Entry count, path length, compressed size, extracted size, and path limits are explicit. Duplicate and case-colliding names, links, device nodes, and other special files are rejected. Tar and tar.gz archives are extracted into a fresh staging directory.
 
+Validation applies entry and aggregate limits as each logical header arrives,
+before traversing that entry's payload. Size checks use the effective size,
+including PAX overrides. Decompressed tar framing and extension metadata have a
+64 KiB budget between logical entries, in addition to the preceding validated
+payload. This also bounds GNU/PAX metadata consumed internally by the parser.
+After validation or extraction fails, extraction attempts to remove the newly
+created staging directory. Filesystem cleanup can fail; the original processing
+error is returned even if staging removal fails.
+
 Unix extraction normalizes regular files to `0644` or `0755`, preserves only the executable distinction, and strips ownership and privilege bits. A canonical internal mode manifest makes executable-aware tree digests identical across Unix and Windows while Unix verification also checks the actual mode. The crate does not scan executable content or provide malware detection; store activation remains a separate layer.
 
 `validate_tree` applies portable archive bounds to generated filesystem outputs and rejects symlinks, special files, noncanonical paths, and reserved store metadata. Canonical tree hashing streams regular-file contents while preserving the established digest framing.
@@ -18,3 +27,11 @@ Unix extraction normalizes regular files to `0644` or `0755`, preserves only the
 Git commit tar archives may contain one global PAX header with a full hexadecimal
 commit comment. That bounded, inert header is validated and omitted from the
 tree. Other global PAX fields and duplicate global headers remain rejected.
+
+A preflight inspects at most 64 KiB of decompressed leading metadata and stops
+before the first package payload. It rejects GNU long name and long link
+declarations above the configured path limit plus their terminator, global PAX
+declarations above 1 KiB, and local PAX declarations above 64 KiB before reading
+those bodies.
+The complete logical validation pass bounds all remaining parser metadata and
+honors PAX size overrides when checking entry and aggregate sizes.

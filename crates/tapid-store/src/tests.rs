@@ -1200,6 +1200,111 @@ fn publication_snapshot_survives_rollback_without_reentering_store_lock() {
 }
 
 #[test]
+fn last_snapshot_drop_preserves_a_replaced_shared_lease() {
+    let fixture = tapid_test_support::TempProject::new("shared-lease-identity").unwrap();
+    let source = fixture.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file"), b"snapshot").unwrap();
+    let digest = tapid_archive::canonical_tree_digest(&source)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let store = Store::new(fixture.path().join("store"));
+    store.activate_verified_tree(&digest, &source).unwrap();
+    let snapshot = store.verified_tree_snapshot(&digest).unwrap();
+    let lease = fs::read_dir(store.root.join(".staging"))
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("replay-lease-")
+        })
+        .unwrap()
+        .path();
+    fs::rename(&lease, fixture.path().join("moved-lease")).unwrap();
+    fs::write(&lease, b"replacement").unwrap();
+    drop(snapshot);
+    assert_eq!(fs::read(lease).unwrap(), b"replacement");
+}
+
+#[test]
+#[cfg(unix)]
+fn snapshot_drop_does_not_accumulate_file_descriptors() {
+    const ROLE: &str = "TAPID_TEST_REPLAY_LEASE_FDS";
+    if std::env::var_os(ROLE).is_none() {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::snapshot_drop_does_not_accumulate_file_descriptors",
+            ])
+            .env(ROLE, "1")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        return;
+    }
+    let fixture = tapid_test_support::TempProject::new("snapshot-descriptor-count").unwrap();
+    let source = fixture.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file"), b"snapshot").unwrap();
+    let digest = tapid_archive::canonical_tree_digest(&source)
+        .unwrap()
+        .parse()
+        .unwrap();
+    #[cfg(target_os = "macos")]
+    let descriptor_directory = "/dev/fd";
+    #[cfg(not(target_os = "macos"))]
+    let descriptor_directory = "/proc/self/fd";
+    let count = || fs::read_dir(descriptor_directory).unwrap().count();
+    let before = count();
+    for index in 0..16 {
+        let store = Store::new(fixture.path().join(format!("store-{index}")));
+        store.activate_verified_tree(&digest, &source).unwrap();
+        drop(store.verified_tree_snapshot(&digest).unwrap());
+    }
+    assert_eq!(
+        count(),
+        before,
+        "snapshot leases must release their descriptors"
+    );
+}
+
+#[test]
+fn last_snapshot_drop_releases_shared_lease_and_allows_reuse() {
+    let fixture = tapid_test_support::TempProject::new("snapshot-lease-cleanup").unwrap();
+    let source = fixture.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file"), b"snapshot").unwrap();
+    let digest = tapid_archive::canonical_tree_digest(&source)
+        .unwrap()
+        .parse()
+        .unwrap();
+    for index in 0..8 {
+        let store = Store::new(fixture.path().join(format!("store-{index}")));
+        store.activate_verified_tree(&digest, &source).unwrap();
+        for _ in 0..2 {
+            let first = store.verified_tree_snapshot(&digest).unwrap();
+            let second = store.verified_tree_snapshot(&digest).unwrap();
+            drop(first);
+            store.cleanup_stale_replay_snapshots().unwrap();
+            assert_eq!(fs::read(second.join("file")).unwrap(), b"snapshot");
+            drop(second);
+            assert_eq!(
+                fs::read_dir(store.root.join(".staging")).unwrap().count(),
+                0,
+                "the last snapshot must release its shared lease file"
+            );
+        }
+    }
+}
+
+#[test]
 fn owned_snapshot_releases_reservation_on_drop() {
     let fixture = tapid_test_support::TempProject::new("owned-snapshot").unwrap();
     let store = Store::new(fixture.path().join("store"));
