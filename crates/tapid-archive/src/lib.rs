@@ -727,7 +727,7 @@ impl EntryValidator {
                     .link_target
                     .as_deref()
                     .ok_or_else(|| ValidationError::InvalidPath(entry.path.clone()))?;
-                if symlink_target_escapes(&entry.path, target) {
+                if symlink_target_escapes(&normalized, target) {
                     return Err(ValidationError::SymlinkEscape(entry.path));
                 }
             }
@@ -1104,6 +1104,18 @@ mod tests {
         assert!(ok(ArchiveEntry::symlink("dir/link", "../../outside")).is_err());
         assert!(ok(ArchiveEntry::symlink("link", "/outside")).is_err());
         assert!(ok(ArchiveEntry::symlink("dir/link", "../sibling")).is_ok());
+        for (path, target) in [
+            ("./link", "../outside"),
+            ("dir/./link", "../../outside"),
+            (r"dir\.\link", r"..\..\outside"),
+        ] {
+            assert_eq!(
+                ok(ArchiveEntry::symlink(path, target)),
+                Err(ValidationError::SymlinkEscape(path.to_owned())),
+                "{path} -> {target}"
+            );
+        }
+        assert!(ok(ArchiveEntry::symlink("./dir/./link", "../sibling")).is_ok());
     }
     #[test]
     fn rejects_special_files_and_resource_limits() {
