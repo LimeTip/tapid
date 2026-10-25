@@ -642,6 +642,36 @@ fn unix_search_directory_must_match_native_join_paths_semantics() {
     assert!(error.to_string().contains("cannot be joined into PATH"));
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_command_environment_uses_pinned_bootstrap_values_without_home() {
+    let environment = std::collections::BTreeMap::from([
+        (
+            std::ffi::OsString::from("systemroot"),
+            std::ffi::OsString::from("untrusted"),
+        ),
+        (
+            std::ffi::OsString::from("localappdata"),
+            std::ffi::OsString::from("untrusted"),
+        ),
+        (
+            std::ffi::OsString::from("PATH"),
+            std::ffi::OsString::from("private-tools"),
+        ),
+    ]);
+    let actual = super::request::windows_child_environment(&environment).unwrap();
+    assert_eq!(
+        actual[std::ffi::OsStr::new("SYSTEMROOT")],
+        std::env::var_os("SystemRoot").unwrap()
+    );
+    assert_eq!(
+        actual[std::ffi::OsStr::new("LOCALAPPDATA")],
+        std::env::var_os("LOCALAPPDATA").unwrap()
+    );
+    assert_eq!(actual.len(), 3);
+    assert!(!actual.contains_key(std::ffi::OsStr::new("HOME")));
+}
+
 #[test]
 fn windows_environment_block_sorts_names_and_has_double_termination() {
     let environment = BTreeMap::from([

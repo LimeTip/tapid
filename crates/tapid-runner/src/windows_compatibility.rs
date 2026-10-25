@@ -37,7 +37,8 @@ mod network_broker;
 mod network_protocol;
 pub(super) use network_broker::Broker;
 
-const COMPONENT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tapid-node-compat.dll"));
+pub(super) const COMPONENT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/tapid-node-compat.dll"));
 
 #[derive(Debug)]
 struct Metadata {
@@ -331,14 +332,6 @@ impl Binding {
         }
         Ok(())
     }
-}
-
-pub(super) fn describe() -> String {
-    use sha2::{Digest, Sha256};
-    format!(
-        "Node DLL sha256:{:x}; app-IAT child propagation; exact ancestor handles (READ_ATTRIBUTES, non-inherited); EOF stdin; NT realpath; no ancestor ACL writes",
-        Sha256::digest(COMPONENT)
-    )
 }
 
 #[link(name = "kernel32")]

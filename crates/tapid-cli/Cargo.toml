@@ -20,10 +20,10 @@ tapid-manifest = { version = "0.0.9", path = "../tapid-manifest" }
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
 tapid-linker = { version = "0.0.7", path = "../tapid-linker" }
 tapid-store = { version = "0.0.8", path = "../tapid-store" }
-tapid-archive = { version = "0.0.5", path = "../tapid-archive" }
+tapid-archive = { version = "0.0.6", path = "../tapid-archive" }
 tapid-registry-client = { version = "0.0.7", path = "../tapid-registry-client" }
 tapid-resolver = { version = "0.0.8", path = "../tapid-resolver" }
-tapid-runner = { version = "0.0.6", path = "../tapid-runner" }
+tapid-runner = { version = "0.0.7", path = "../tapid-runner" }
 tapid-release-client = { version = "0.0.5", path = "../tapid-release-client" }
 tapid-signatures = { version = "0.0.4", path = "../tapid-signatures" }
 serde = { version = "1", features = ["derive"] }
