@@ -555,8 +555,6 @@ fn no_follow_artifact_open_rejects_symlink() {
 #[cfg(unix)]
 #[test]
 fn fifo_artifact_open_does_not_block() {
-    use std::os::unix::ffi::OsStrExt;
-
     if let Some(path) = std::env::var_os("TAPID_TEST_FIFO_PATH") {
         let expected = digest(b"artifact");
         let result = verify_existing_artifact(Path::new(&path), &expected);
@@ -569,8 +567,14 @@ fn fifo_artifact_open_does_not_block() {
     let root = root();
     fs::create_dir_all(&root).unwrap();
     let fifo = root.join("artifact-fifo");
-    let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
-    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    assert!(
+        std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
         .arg("tests::fifo_artifact_open_does_not_block")
