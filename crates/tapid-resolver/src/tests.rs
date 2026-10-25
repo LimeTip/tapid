@@ -206,6 +206,62 @@ fn oversized_metadata_text_is_rejected_without_building_an_index() {
 }
 
 #[test]
+fn metadata_budget_counts_parsed_tags_after_diagnostic_changes() {
+    let mut requirement = req(&"x".repeat(64 * 1024 * 1024 + 1));
+    requirement.raw = "*".into();
+    let mut value = package("pkg", "1.0.0", &[]);
+    value
+        .dependencies
+        .insert("dep".parse().unwrap(), requirement);
+    let metadata = RegistryMetadata {
+        registry: "https://registry.npmjs.org".parse().unwrap(),
+        packages: vec![value],
+    };
+    let resolved = resolve_graph(&[], std::slice::from_ref(&metadata), Default::default());
+    let normalized = RegistryMetadata::normalize(metadata.registry, metadata.packages);
+    assert!(
+        matches!(resolved, Err(ResolveError::MetadataLimitExceeded)),
+        "resolution must count retained parsed tags"
+    );
+    assert!(
+        matches!(normalized, Err(ResolveError::MetadataLimitExceeded)),
+        "normalization must count retained parsed tags"
+    );
+}
+
+#[test]
+fn metadata_budget_counts_parsed_ranges_after_diagnostic_changes() {
+    for (spec, count) in [
+        (format!("1.0.0-{}", "a".repeat(128 * 1024)), 513),
+        (">=1.0.0 ".repeat(2048), 1024),
+    ] {
+        let mut requirement = req(&spec);
+        requirement.raw = "*".into();
+        let mut value = package("pkg", "1.0.0", &[]);
+        for index in 0..count {
+            value.peer_dependencies.insert(
+                format!("peer-{index}").parse().unwrap(),
+                requirement.clone(),
+            );
+        }
+        let metadata = RegistryMetadata {
+            registry: "https://registry.npmjs.org".parse().unwrap(),
+            packages: vec![value],
+        };
+        let resolved = resolve_graph(&[], std::slice::from_ref(&metadata), Default::default());
+        let normalized = RegistryMetadata::normalize(metadata.registry, metadata.packages);
+        assert!(
+            matches!(resolved, Err(ResolveError::MetadataLimitExceeded)),
+            "resolution must count retained parsed ranges"
+        );
+        assert!(
+            matches!(normalized, Err(ResolveError::MetadataLimitExceeded)),
+            "normalization must count retained parsed ranges"
+        );
+    }
+}
+
+#[test]
 fn exact_prerelease_selects_only_the_matching_candidate() {
     let m = registry(
         "https://registry.npmjs.org",

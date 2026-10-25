@@ -27,6 +27,27 @@ import {
   hasCommand,
 } from "./script-support.ts";
 
+test("bounded process caps decoded UTF-8 output at a character boundary", async () => {
+  await temporary(async (path) => {
+    for (const { bytes, limit, output, failure } of [
+      { bytes: [0xff, 0xff, 0xff], limit: 3, output: "\uFFFD", failure: "output-limit" },
+      { bytes: [0xff], limit: 1, output: "", failure: "output-limit" },
+      { bytes: [0xff], limit: 2, output: "", failure: "output-limit" },
+      { bytes: [0xff], limit: 3, output: "\uFFFD", failure: null },
+      { bytes: [65, 0xff, 66], limit: 4, output: "A\uFFFD", failure: "output-limit" },
+      { bytes: [...Buffer.from("\u{1F642}\u{1F642}")], limit: 5, output: "\u{1F642}", failure: "output-limit" },
+    ]) {
+      const result = await boundedProcess([
+        process.execPath, "-e", `process.stdout.write(Buffer.from(${JSON.stringify(bytes)}))`,
+      ], { cwd: path, env: {}, output_limit: limit });
+      assert.equal(result.output, output);
+      assert.ok(Buffer.byteLength(result.output, "utf8") <= limit);
+      assert.equal(result.failure_class, failure);
+      assert.equal(result.exit_code, failure ? null : 0);
+    }
+  });
+});
+
 test("bounded process does not retain discarded output buffers", {
   skip: process.platform === "win32",
 }, async () => {

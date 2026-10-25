@@ -901,7 +901,36 @@ fn validate_metadata<'a>(
             for (name, requirement) in record.dependencies.iter().chain(&record.peer_dependencies) {
                 bytes = bytes
                     .saturating_add(name.as_str().len())
-                    .saturating_add(requirement.raw.len());
+                    .saturating_add(requirement.raw.len())
+                    .saturating_add(requirement.dist_tag().map_or(0, str::len))
+                    .saturating_add(
+                        requirement
+                            .alias
+                            .as_ref()
+                            .map_or(0, |name| name.as_str().len()),
+                    )
+                    .saturating_add(
+                        requirement
+                            .clauses
+                            .len()
+                            .saturating_mul(size_of::<RequirementClause>()),
+                    );
+                // The diagnostic text is public and editable independently of
+                // the parsed representation retained for matching and cloning.
+                for clause in &requirement.clauses {
+                    if let RequirementClause::Comparators(comparators) = clause {
+                        bytes = bytes.saturating_add(
+                            comparators
+                                .len()
+                                .saturating_mul(size_of::<RequirementComparator>()),
+                        );
+                        for comparator in comparators {
+                            bytes = bytes.saturating_add(
+                                comparator.base.version.prerelease().map_or(0, str::len),
+                            );
+                        }
+                    }
+                }
             }
             for name in &record.optional_peer_dependencies {
                 bytes = bytes.saturating_add(name.as_str().len());

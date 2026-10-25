@@ -163,9 +163,19 @@ export function boundedProcess(
     child.once("close", (code) => {
       clearTimeout(timer);
       kill();
+      let output = Buffer.concat(chunks).toString("utf8");
+      if (Buffer.byteLength(output, "utf8") > output_limit) {
+        failure ??= "output-limit";
+        const encoded = Buffer.from(output, "utf8");
+        let end = output_limit;
+        // A decoded replacement character can be wider than its input byte.
+        // Keep only complete UTF-8 characters within the returned byte cap.
+        while (end > 0 && (encoded[end] & 0xc0) === 0x80) end--;
+        output = encoded.subarray(0, end).toString("utf8");
+      }
       resolveResult({
         exit_code: failure ? null : code,
-        output: Buffer.concat(chunks).toString("utf8"),
+        output,
         failure_class: failure,
       });
     });
