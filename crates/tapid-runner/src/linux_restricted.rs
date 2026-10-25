@@ -1,3 +1,4 @@
+use super::unix_output::{LiveSinks, write_live_output};
 use super::{
     AssuranceLevel, BackendIdentity, CleanupConfidence, CompletionEvidence, ContainmentSupport,
     DimensionEvidence, EnforcementDimensions, EnforcementReceipt, ExecutionBackend, ExecutionError,
@@ -9,7 +10,7 @@ use super::{
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -67,6 +68,7 @@ const LIMITATIONS: &[&str] = &[
     "network-disabled policy denies Internet socket creation, connection, binding, listening, accepts, sendto, and recvfrom; AF_UNIX socketpairs with sendmsg/recvmsg and shutdown remain available for local runtime IPC; enabled networking is unrestricted",
     "Restricted does not own or guarantee cleanup of detached descendants",
     "standard streams remain connected; other inherited descriptors are closed",
+    "stderr relay stops shortly after root exit; detached descendant output may be truncated",
 ];
 
 #[path = "linux_restricted/managed.rs"]
@@ -1147,6 +1149,24 @@ struct LinuxLifecycle<'a> {
     filter: Vec<libc::sock_filter>,
     termination: Option<Termination>,
 }
+
+fn sanitize_output_descriptors() -> io::Result<()> {
+    // SAFETY: mark unrelated descriptors close-on-exec after Rust has installed
+    // stdio. Preserve the spawn-error channel until exec.
+    if unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 impl ExecutionLifecycle for LinuxLifecycle<'_> {
     fn execute(&mut self) -> Result<Box<ExecutionOutcome>, ExecutionError> {
         let allow_process_memory_stats = self.request.allow_process_memory_stats();
@@ -1169,13 +1189,29 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             }
             (command, None)
         };
+        let (mut child_stderr, stderr_writer) = UnixStream::pair().map_err(|error| {
+            ExecutionError::new(
+                ExecutionErrorCategory::Spawn,
+                format!("cannot create stderr diagnostic socket: {error}"),
+            )
+        })?;
+        child_stderr
+            .set_read_timeout(Some(std::time::Duration::from_millis(50)))
+            .map_err(|error| {
+                ExecutionError::new(
+                    ExecutionErrorCategory::Spawn,
+                    format!("cannot bound stderr diagnostic reads: {error}"),
+                )
+            })?;
         command
             .current_dir(self.request.working_directory())
             .env_clear()
             .envs(&self.preflight.child_environment)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::from(OwnedFd::from(stderr_writer)));
+        let (mut sinks, [mut stderr_sink]) =
+            LiveSinks::spawn([io::stderr().as_fd()], sanitize_output_descriptors)?;
         let mut child = command.spawn().map_err(|e| {
             ExecutionError::new(
                 ExecutionErrorCategory::Spawn,
@@ -1183,50 +1219,77 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             )
         })?;
         drop(command);
-        let mut child_stderr = child
-            .stderr
-            .take()
-            .expect("stderr was configured as a pipe");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = stop.clone();
         let stderr_reader = std::thread::spawn(move || {
             const DETECTION_WINDOW: usize = 128;
-            let mut output = io::stderr().lock();
+            let backpressure = std::sync::atomic::AtomicBool::new(false);
+            // Finish the current diagnostic chunk even if the root exits.
+            // The sink imposes an absolute deadline on each forwarding call.
+            let forwarding_stop = std::sync::atomic::AtomicBool::new(false);
             let mut carry = Vec::with_capacity(DETECTION_WINDOW);
             let mut buffer = [0_u8; 4096];
             let mut denied = false;
+            let mut deadline = None;
             loop {
-                let count = child_stderr.read(&mut buffer)?;
+                if reader_stop.load(std::sync::atomic::Ordering::Acquire) {
+                    let deadline = deadline.get_or_insert_with(|| {
+                        std::time::Instant::now() + std::time::Duration::from_millis(100)
+                    });
+                    if std::time::Instant::now() >= *deadline {
+                        break;
+                    }
+                }
+                let count = match child_stderr.read(&mut buffer) {
+                    Ok(count) => count,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock
+                                | io::ErrorKind::TimedOut
+                                | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(ExecutionError::new(
+                            ExecutionErrorCategory::Internal,
+                            format!("cannot read restricted project script stderr: {error}"),
+                        ));
+                    }
+                };
                 if count == 0 {
                     break;
                 }
-                let _ = output.write_all(&buffer[..count]);
+                write_live_output(
+                    &mut stderr_sink,
+                    &buffer[..count],
+                    &forwarding_stop,
+                    &backpressure,
+                )?;
                 let mut window = std::mem::take(&mut carry);
                 window.extend_from_slice(&buffer[..count]);
                 denied |= is_process_memory_stats_permission_error(&window);
                 carry.extend_from_slice(&window[window.len().saturating_sub(DETECTION_WINDOW)..]);
             }
-            let _ = output.flush();
-            Ok::<bool, io::Error>(denied)
+            Ok::<bool, ExecutionError>(denied)
         });
-        let status = child.wait().map_err(|e| {
+        let status = child.wait();
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        let memory_stats_denied = stderr_reader.join().map_err(|_| {
+            ExecutionError::new(
+                ExecutionErrorCategory::Internal,
+                "stderr diagnostic reader panicked",
+            )
+        })??;
+        sinks.finish()?;
+        let status = status.map_err(|e| {
             ExecutionError::new(
                 ExecutionErrorCategory::Spawn,
                 format!("cannot wait for restricted project script: {e}"),
             )
         })?;
-        let memory_stats_denied = stderr_reader
-            .join()
-            .map_err(|_| {
-                ExecutionError::new(
-                    ExecutionErrorCategory::Internal,
-                    "stderr diagnostic reader panicked",
-                )
-            })?
-            .map_err(|e| {
-                ExecutionError::new(
-                    ExecutionErrorCategory::Internal,
-                    format!("cannot read restricted project script stderr: {e}"),
-                )
-            })?;
         if let Some(report) = private_report {
             parse_private_report(report)?;
         }
