@@ -157,6 +157,146 @@ fn registry(url: &str, packages: Vec<PackageVersionMetadata>) -> RegistryMetadat
 }
 
 #[test]
+fn excessive_metadata_is_rejected_before_normalization_or_resolution() {
+    let origin: PackageSource = "https://registry.npmjs.org".parse().unwrap();
+    let packages = (0..100_001)
+        .map(|index| {
+            let mut value = package("pkg", "1.0.0", &[]);
+            value.version = PackageVersion::stable(1, 0, index);
+            value
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        RegistryMetadata::normalize(origin.clone(), packages.clone()),
+        Err(ResolveError::MetadataLimitExceeded)
+    );
+    let split = packages
+        .chunks(50_001)
+        .map(|chunk| registry("https://registry.npmjs.org", chunk.to_vec()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolve_graph(&[], &split, ResolutionOptions::default()),
+        Err(ResolveError::MetadataLimitExceeded)
+    );
+    // Public metadata fields must not bypass bounds by skipping normalize.
+    let result = resolve_graph(
+        &[],
+        &[RegistryMetadata {
+            registry: origin,
+            packages,
+        }],
+        ResolutionOptions::default(),
+    );
+    assert_eq!(result, Err(ResolveError::MetadataLimitExceeded));
+}
+
+#[test]
+fn oversized_metadata_text_is_rejected_without_building_an_index() {
+    let mut value = package("pkg", "1.0.0", &[]);
+    value.dist_tags.insert("x".repeat(64 * 1024 * 1024 + 1));
+    let origin = "https://registry.npmjs.org".parse().unwrap();
+    let metadata = RegistryMetadata {
+        registry: origin,
+        packages: vec![value],
+    };
+    assert_eq!(
+        resolve_graph(&[], &[metadata], ResolutionOptions::default()),
+        Err(ResolveError::MetadataLimitExceeded)
+    );
+}
+
+#[test]
+fn roots_and_registry_records_share_the_resolution_payload_budget() {
+    let origin = "https://registry.npmjs.org";
+    let mut root = dep(origin, "pkg", "*");
+    root.requirement.raw = "x".repeat(32 * 1024 * 1024);
+    let mut value = package("pkg", "1.0.0", &[]);
+    value.dist_tags.insert("y".repeat(32 * 1024 * 1024));
+    let metadata = registry(origin, vec![value]);
+    assert!(matches!(
+        resolve_graph(&[root], &[metadata], Default::default()),
+        Err(ResolveError::MetadataLimitExceeded)
+    ));
+}
+
+#[test]
+fn root_requirement_payloads_are_bounded_before_resolution() {
+    for parsed_tag in [false, true] {
+        let large = "x".repeat(64 * 1024 * 1024 + 1);
+        let mut requirement = if parsed_tag { req(&large) } else { req("*") };
+        requirement.raw = if parsed_tag { "*".into() } else { large };
+        let root = Dependency::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            "pkg".parse().unwrap(),
+            requirement,
+        );
+        assert!(
+            matches!(
+                resolve_graph(&[root], &[], Default::default()),
+                Err(ResolveError::MetadataLimitExceeded)
+            ),
+            "root payloads must be checked before cloning, parsed tag: {parsed_tag}"
+        );
+    }
+}
+
+#[test]
+fn metadata_budget_counts_parsed_tags_after_diagnostic_changes() {
+    let mut requirement = req(&"x".repeat(64 * 1024 * 1024 + 1));
+    requirement.raw = "*".into();
+    let mut value = package("pkg", "1.0.0", &[]);
+    value
+        .dependencies
+        .insert("dep".parse().unwrap(), requirement);
+    let metadata = RegistryMetadata {
+        registry: "https://registry.npmjs.org".parse().unwrap(),
+        packages: vec![value],
+    };
+    let resolved = resolve_graph(&[], std::slice::from_ref(&metadata), Default::default());
+    let normalized = RegistryMetadata::normalize(metadata.registry, metadata.packages);
+    assert!(
+        matches!(resolved, Err(ResolveError::MetadataLimitExceeded)),
+        "resolution must count retained parsed tags"
+    );
+    assert!(
+        matches!(normalized, Err(ResolveError::MetadataLimitExceeded)),
+        "normalization must count retained parsed tags"
+    );
+}
+
+#[test]
+fn metadata_budget_counts_parsed_ranges_after_diagnostic_changes() {
+    for (spec, count) in [
+        (format!("1.0.0-{}", "a".repeat(128 * 1024)), 513),
+        (">=1.0.0 ".repeat(2048), 1024),
+    ] {
+        let mut requirement = req(&spec);
+        requirement.raw = "*".into();
+        let mut value = package("pkg", "1.0.0", &[]);
+        for index in 0..count {
+            value.peer_dependencies.insert(
+                format!("peer-{index}").parse().unwrap(),
+                requirement.clone(),
+            );
+        }
+        let metadata = RegistryMetadata {
+            registry: "https://registry.npmjs.org".parse().unwrap(),
+            packages: vec![value],
+        };
+        let resolved = resolve_graph(&[], std::slice::from_ref(&metadata), Default::default());
+        let normalized = RegistryMetadata::normalize(metadata.registry, metadata.packages);
+        assert!(
+            matches!(resolved, Err(ResolveError::MetadataLimitExceeded)),
+            "resolution must count retained parsed ranges"
+        );
+        assert!(
+            matches!(normalized, Err(ResolveError::MetadataLimitExceeded)),
+            "normalization must count retained parsed ranges"
+        );
+    }
+}
+
+#[test]
 fn exact_prerelease_selects_only_the_matching_candidate() {
     let m = registry(
         "https://registry.npmjs.org",

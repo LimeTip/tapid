@@ -133,7 +133,9 @@ Each journey gets a disposable project, HOME and binary copy. Child environments
 are allowlisted, excluding registry credentials and inherited TAPID overrides.
 Unix commands have a 120-second timeout and 64-KiB combined-output ceiling;
 version probes have a 10-second timeout. Source builds have a ten-minute limit
-and eight-MiB output ceiling. Inputs and lockfile snapshots are bounded. Native
+and eight-MiB output ceiling. On timeout or output overflow, the Unix runner
+closes its capture pipes so detached descendants cannot keep it waiting for EOF.
+Discarded chunks do not retain backing buffers. Inputs and lockfile snapshots are bounded. Native
 PowerShell has a 120-second/65,536-character command ceiling. Process-group/tree
 cleanup is best effort: neither runner is an OS sandbox. Do not run unreviewed
 code with secrets or privileged tokens.
