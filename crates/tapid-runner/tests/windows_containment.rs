@@ -608,7 +608,7 @@ fn windows_ctrl_c_helper(network: bool) {
         .unwrap();
         command_request_with_policy(
             &root,
-            "echo CTRL_C_READY>ready.txt & for /L %i in (1,1,2147483647) do @rem",
+            "echo CTRL_C_READY>ready.txt& for /L %i in (1,1,2147483647) do @rem",
             policy,
         )
     };
@@ -658,12 +658,21 @@ fn windows_ctrl_c_helper(network: bool) {
     }
 
     if !network {
-        while !fs::read(&ready).is_ok_and(|bytes| bytes == b"CTRL_C_READY\r\n") {
-            assert!(
-                Instant::now() < deadline,
-                "command did not write its start marker before Ctrl+C"
-            );
-            assert!(!worker.is_finished(), "command exited before Ctrl+C");
+        loop {
+            let marker = fs::read(&ready);
+            if marker
+                .as_deref()
+                .is_ok_and(|bytes| bytes == b"CTRL_C_READY\r\n")
+            {
+                break;
+            }
+            if Instant::now() >= deadline || worker.is_finished() {
+                panic!(
+                    "command did not write its start marker before Ctrl+C; marker={marker:?}; execution={:?}; worker_finished={}",
+                    receiver.try_recv(),
+                    worker.is_finished()
+                );
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
