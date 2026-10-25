@@ -15,10 +15,18 @@ relative paths, excludes `.git`, `target`, and configured paths, hashes file
 contents, and sorts entries lexicographically. `pack` emits a versioned,
 byte-stable pack format and binds its exact bytes to a SHA-256 `ArtifactDigest`.
 
+`PackageSource::with_limits` configures `PackLimits` for packing, inspection, and
+previews. Defaults permit 100,000 files, 512 MiB per file, and 512 MiB for the
+complete encoded artifact, including version, paths, and framing. Source paths
+are limited to 4,096 bytes and directory recursion to 128 levels. Reads check
+file metadata first and still stop if a file grows past the remaining budget.
+Packing reads directly into the capped artifact buffer; inspection hashes with
+a fixed-size buffer and applies the same byte accounting.
+
 ## Consistency and portable-path policy
 
 `pack` reads each included file once. The encoded content and its manifest size
-and digest come from that same buffer. Use the manifest returned by `pack` when
+and digest come from the same captured bytes. Use the manifest returned by `pack` when
 you need this binding; a separate `NormalizedFileManifest::from_source` call is
 an independent read. Neither operation provides an atomic directory snapshot.
 Keep the source tree stable and trusted during traversal and reads: concurrent

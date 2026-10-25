@@ -11,6 +11,10 @@ use std::{
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "Windows relative cache deletion requires held native handles"
+)]
 mod windows;
 #[cfg(unix)]
 pub(super) use unix::CacheDirectory;

@@ -1,3 +1,5 @@
+#![deny(unsafe_code, unsafe_op_in_unsafe_fn)]
+
 mod application;
 mod commands;
 mod filesystem;

@@ -24,6 +24,9 @@ use request::{serialize_windows_command_line_units, windows_environment_block_un
 pub use uncontained::execute_uncontained;
 
 mod supervision;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "unix_output.rs"]
+mod unix_output;
 #[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
 use supervision::ExecutionLifecycle;
 use supervision::{
