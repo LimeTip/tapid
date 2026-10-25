@@ -309,6 +309,11 @@ pub fn canonical_tree_digest_without_root_entry(root: &Path, entry: &str) -> io:
     tree_digest(root, Some(entry))
 }
 
+/// Incrementally hashes exactly the recorded length using a fixed 65,536-byte buffer.
+///
+/// Rejects premature EOF and probes one additional byte to reject growth. Reader
+/// errors propagate unchanged; on any failure, the supplied hasher may already
+/// contain a prefix of the file's bytes.
 fn hash_file_contents<R: Read>(reader: &mut R, length: u64, hasher: &mut Sha256) -> io::Result<()> {
     let mut remaining = length;
     let mut buffer = [0u8; 65_536];
@@ -773,6 +778,7 @@ mod tests {
     fn ok(entry: ArchiveEntry) -> Result<(), ValidationError> {
         validate_entries([entry], ValidationLimits::default())
     }
+    /// Exact and empty inputs retain independently known SHA-256 digests.
     #[test]
     fn digest_reader_hashes_exact_and_zero_lengths() {
         for (bytes, expected) in [
@@ -792,8 +798,10 @@ mod tests {
         }
     }
 
+    /// Successful short reads contribute every byte to the same known digest.
     #[test]
     fn digest_reader_hashes_short_successful_reads() {
+        /// Limits each read to one byte even when the caller requests more.
         struct ShortReader<'a>(&'a [u8]);
         impl Read for ShortReader<'_> {
             fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -811,6 +819,7 @@ mod tests {
         );
     }
 
+    /// Truncation preserves the EOF error kind and existing diagnostic.
     #[test]
     fn digest_reader_rejects_premature_eof() {
         let error = hash_file_contents(&mut b"ab".as_slice(), 3, &mut Sha256::new()).unwrap_err();
@@ -818,6 +827,7 @@ mod tests {
         assert_eq!(error.to_string(), "tree file changed during hashing");
     }
 
+    /// The growth probe rejects extra bytes after zero or nonzero recorded lengths.
     #[test]
     fn digest_reader_rejects_trailing_data() {
         for length in [0, 2] {
@@ -828,8 +838,10 @@ mod tests {
         }
     }
 
+    /// Content reads and the growth probe preserve the reader's error and message.
     #[test]
     fn digest_reader_propagates_io_errors() {
+        /// Injects a transport failure independently of the requested slice length.
         struct FailingReader;
         impl Read for FailingReader {
             fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
@@ -849,8 +861,12 @@ mod tests {
         }
     }
 
+    /// Consumes 3 MiB while bounding requested per-file read slices independently
+    /// of total input length; this does not measure RSS or total caller memory.
     #[test]
     fn digest_reader_requests_at_most_one_fixed_chunk() {
+        /// Synthesizes bytes without allocating the payload and records the largest
+        /// requested slice, including the final growth probe.
         struct MeasuringReader {
             remaining: usize,
             max_request: usize,
