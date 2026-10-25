@@ -10,7 +10,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-tapid-archive = { version = "0.0.5", path = "../tapid-archive" }
+tapid-archive = { version = "0.0.6", path = "../tapid-archive" }
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
 sha2 = "0.10"
 hmac = "0.12"

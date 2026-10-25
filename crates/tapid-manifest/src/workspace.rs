@@ -1,11 +1,13 @@
-use crate::PackageManifest;
+use crate::{MAX_MANIFEST_BYTES, PackageManifest};
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
+/// A validated member whose parsed manifest is retained without its source text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceMember {
     name: String,
@@ -14,17 +16,21 @@ pub struct WorkspaceMember {
 }
 
 impl WorkspaceMember {
+    /// Return the package name validated as unique across the root and members.
     pub fn name(&self) -> &str {
         &self.name
     }
+    /// Return the canonical path to the member's `package.json`, not its directory.
     pub fn path(&self) -> &Path {
         &self.path
     }
+    /// Return the parsed discovery result; later file changes do not refresh it.
     pub fn manifest(&self) -> &PackageManifest {
         &self.manifest
     }
 }
 
+/// Root and member manifests discovered without excluding concurrent filesystem writers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Workspace {
     root: PackageManifest,
@@ -33,12 +39,47 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Discover the workspace with string errors for callers that need only display text.
+    /// Each manifest is limited to 32 MiB; enumeration is unrestricted. Unsupported
+    /// patterns, duplicate names, non-regular manifests, and path escapes are rejected.
     pub fn discover(project_dir: &Path) -> Result<Self, String> {
         Self::discover_typed(project_dir).map_err(|error| error.to_string())
     }
 
-    /// Discover members without discarding the location of a manifest parse failure.
+    /// Discover with file-access paths and parse diagnostics preserved in typed errors.
+    /// Candidate enumeration is unrestricted; use `Self::discover_bounded` to cap it.
     pub fn discover_typed(project_dir: &Path) -> Result<Self, crate::WorkspaceError> {
+        Self::discover_bounded(project_dir, usize::MAX, usize::MAX)
+    }
+
+    /// Bound candidate manifests and filesystem expansion work before parsing members.
+    /// Overlapping patterns count toward the candidate limit before deduplication.
+    /// Exhausting either budget returns `WorkspaceError::DiscoveryLimitExceeded`;
+    /// successful discovery otherwise follows the same rules as `Self::discover_typed`.
+    pub fn discover_bounded(
+        project_dir: &Path,
+        max_candidates: usize,
+        max_expansion_steps: usize,
+    ) -> Result<Self, crate::WorkspaceError> {
+        Self::discover_bounded_with_member_source(
+            project_dir,
+            max_candidates,
+            max_expansion_steps,
+            |_, _| {},
+        )
+    }
+
+    /// Observe the exact member source parsed during bounded discovery.
+    /// The borrowed source is discarded after each member; it is not retained in
+    /// the workspace. Observations before a discovery error are partial.
+    /// The callback receives member manifests only, after parsing and before return;
+    /// it does not observe the root or establish a filesystem snapshot.
+    pub fn discover_bounded_with_member_source(
+        project_dir: &Path,
+        max_candidates: usize,
+        max_expansion_steps: usize,
+        mut observe: impl FnMut(&Path, &str),
+    ) -> Result<Self, crate::WorkspaceError> {
         let project_dir = fs::canonicalize(project_dir).map_err(|error| {
             format!(
                 "cannot resolve workspace root {}: {error}",
@@ -53,14 +94,20 @@ impl Workspace {
             .into());
         }
         let root_manifest_path = project_dir.join("package.json");
-        let root_metadata = fs::symlink_metadata(&root_manifest_path)
-            .map_err(|error| format!("cannot inspect workspace root manifest: {error}"))?;
+        let root_read_error = |message| crate::WorkspaceError::ManifestRead {
+            path: root_manifest_path.clone(),
+            message,
+        };
+        let root_metadata = fs::symlink_metadata(&root_manifest_path).map_err(|error| {
+            root_read_error(format!("cannot inspect workspace root manifest: {error}"))
+        })?;
         if !root_metadata.file_type().is_file() {
-            return Err("workspace root package.json must be a regular file"
-                .to_owned()
-                .into());
+            return Err(root_read_error(
+                "workspace root package.json must be a regular file".to_owned(),
+            ));
         }
-        let root_path = contained_path(&project_dir, &root_manifest_path)?;
+        let root_path =
+            contained_path(&project_dir, &root_manifest_path).map_err(root_read_error)?;
         let root_text = read_file(&root_path)?;
         let root = PackageManifest::parse(&root_text).map_err(|error| {
             crate::WorkspaceError::Manifest {
@@ -71,26 +118,36 @@ impl Workspace {
         })?;
         let patterns = workspace_patterns(root.extra.get("workspaces"))?;
         let mut paths = Vec::new();
+        let mut remaining = max_expansion_steps;
         for pattern in patterns {
-            paths.extend(expand_pattern(&project_dir, &pattern)?);
+            paths.extend(expand_pattern_bounded(
+                &project_dir,
+                &pattern,
+                max_candidates - paths.len(),
+                &mut remaining,
+            )?);
         }
         paths = paths
             .into_iter()
             .map(|path| {
+                let read_error = |message| crate::WorkspaceError::ManifestRead {
+                    path: path.clone(),
+                    message,
+                };
                 // Inspect the declared manifest before canonicalization loses symlink identity.
                 let metadata = fs::symlink_metadata(&path).map_err(|error| {
-                    format!(
+                    read_error(format!(
                         "cannot inspect workspace manifest {}: {error}",
                         path.display()
-                    )
+                    ))
                 })?;
                 if !metadata.file_type().is_file() {
-                    return Err(format!(
+                    return Err(read_error(format!(
                         "workspace manifest must be a regular file, not a symlink: {}",
                         path.display()
-                    ));
+                    )));
                 }
-                contained_path(&project_dir, &path)
+                contained_path(&project_dir, &path).map_err(read_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
         paths.sort();
@@ -98,12 +155,14 @@ impl Workspace {
         let mut members = Vec::new();
         let mut names = BTreeSet::from([root.name().to_string()]);
         for path in paths {
-            let canonical = fs::canonicalize(&path).map_err(|error| {
-                format!(
-                    "cannot resolve workspace manifest {}: {error}",
-                    path.display()
-                )
-            })?;
+            let canonical =
+                fs::canonicalize(&path).map_err(|error| crate::WorkspaceError::ManifestRead {
+                    path: path.clone(),
+                    message: format!(
+                        "cannot resolve workspace manifest {}: {error}",
+                        path.display()
+                    ),
+                })?;
             if !canonical.starts_with(&project_dir) {
                 return Err(format!(
                     "workspace member escapes workspace root: {}",
@@ -142,6 +201,7 @@ impl Workspace {
                     format!("duplicate workspace package name '{}'", manifest.name()).into(),
                 );
             }
+            observe(&canonical, &text);
             members.push(WorkspaceMember {
                 name: manifest.name().to_string(),
                 path: canonical,
@@ -156,16 +216,21 @@ impl Workspace {
         })
     }
 
+    /// Return the root manifest that declares workspace membership.
     pub fn root(&self) -> &PackageManifest {
         &self.root
     }
+    /// Return the canonical root `package.json` path, not the workspace directory.
     pub fn root_path(&self) -> &Path {
         &self.root_path
     }
+    /// Return members sorted by package name and then path, excluding the root.
     pub fn members(&self) -> &[WorkspaceMember] {
         &self.members
     }
 
+    /// Select the root with `None`, or a member by its exact package name.
+    /// Empty selectors and names absent from this discovery result are errors.
     pub fn select(&self, name: Option<&str>) -> Result<&PackageManifest, String> {
         match name {
             None => Ok(&self.root),
@@ -179,6 +244,7 @@ impl Workspace {
         }
     }
 
+    /// Apply `Self::select` selection rules and return the selected manifest's canonical path.
     pub fn select_path(&self, name: Option<&str>) -> Result<&Path, String> {
         match name {
             None => Ok(&self.root_path),
@@ -193,6 +259,8 @@ impl Workspace {
     }
 }
 
+/// Resolve an existing path and reject canonical targets outside the workspace root.
+/// This is a pathname containment check, not protection against later replacement.
 fn contained_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
     let canonical = fs::canonicalize(path).map_err(|error| {
         format!(
@@ -209,10 +277,179 @@ fn contained_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn read_file(path: &Path) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+/// Read at most 32 MiB of UTF-8 from an opened regular file, retaining its error path.
+/// Both metadata and actual byte count enforce the limit. Unix no-follow and
+/// nonblocking opens reject replacement symlinks and avoid waiting on FIFOs.
+fn read_file(path: &Path) -> Result<String, crate::WorkspaceError> {
+    let at_path = |message| crate::WorkspaceError::ManifestRead {
+        path: path.to_path_buf(),
+        message,
+    };
+    #[cfg(all(test, unix))]
+    read_race_tests::before_open(path);
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Type checks before opening cannot exclude replacement by a symlink or
+        // FIFO. Reject symlinks and never wait for a FIFO writer, then check the
+        // opened descriptor's type before reading any bytes.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| at_path(format!("cannot read {}: {error}", path.display())))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| at_path(format!("cannot inspect {}: {error}", path.display())))?;
+    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES as u64 {
+        return Err(at_path(format!(
+            "workspace manifest must be a regular file no larger than 32 MiB: {}",
+            path.display()
+        )));
+    }
+    // Bound the read itself as well as metadata, so growth after inspection cannot
+    // allocate the whole replacement content.
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| at_path(format!("cannot read {}: {error}", path.display())))?;
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(at_path(format!(
+            "workspace manifest exceeds 32 MiB: {}",
+            path.display()
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| at_path(format!("cannot read {}: {error}", path.display())))
 }
 
+#[cfg(all(test, unix))]
+mod read_race_tests {
+    use super::*;
+    use std::{cell::RefCell, os::unix::fs::symlink};
+    use tapid_test_support::TempProject;
+
+    thread_local! {
+        static REPLACEMENT: RefCell<Option<(PathBuf, PathBuf)>> = const { RefCell::new(None) };
+    }
+
+    struct FaultGuard;
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            REPLACEMENT.with(|pending| pending.borrow_mut().take());
+        }
+    }
+
+    pub(super) fn before_open(path: &Path) {
+        let replacement = REPLACEMENT.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            if pending.as_ref().is_some_and(|(target, _)| target == path) {
+                pending.take()
+            } else {
+                None
+            }
+        });
+        if let Some((target, replacement)) = replacement {
+            fs::rename(replacement, target).unwrap();
+        }
+    }
+
+    fn project() -> TempProject {
+        let project = TempProject::new("workspace-open-race").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["member"]}"#,
+            )
+            .unwrap();
+        project
+            .write(
+                "member/package.json",
+                br#"{"name":"member","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        project
+    }
+
+    #[test]
+    fn discovery_rejects_symlink_replacements_before_open() {
+        for manifest in ["package.json", "member/package.json"] {
+            let project = project();
+            let external = TempProject::new("workspace-open-external").unwrap();
+            let source = br#"{"name":"external","version":"1.0.0"}"#;
+            let external_manifest = external.write("package.json", source).unwrap();
+            let replacement = project.path().join("replacement");
+            symlink(&external_manifest, &replacement).unwrap();
+            let target = project.path().join(manifest).canonicalize().unwrap();
+            REPLACEMENT.with(|pending| *pending.borrow_mut() = Some((target, replacement)));
+            let _guard = FaultGuard;
+            assert!(
+                Workspace::discover_typed(project.path()).is_err(),
+                "followed replacement for {manifest}"
+            );
+            assert_eq!(fs::read(external_manifest).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn discovery_rejects_fifo_replacements_without_waiting_for_a_writer() {
+        const ROOT_ENV: &str = "TAPID_TEST_WORKSPACE_FIFO_ROOT";
+        const MANIFEST_ENV: &str = "TAPID_TEST_WORKSPACE_FIFO_MANIFEST";
+        if let Some(root) = std::env::var_os(ROOT_ENV) {
+            let root = PathBuf::from(root);
+            let manifest = std::env::var_os(MANIFEST_ENV).unwrap();
+            let target = root.join(manifest).canonicalize().unwrap();
+            REPLACEMENT.with(|pending| {
+                *pending.borrow_mut() = Some((target, root.join("replacement")));
+            });
+            let _guard = FaultGuard;
+            assert!(Workspace::discover_typed(&root).is_err());
+            return;
+        }
+
+        // A blocking open must fail this test rather than hang the test runner.
+        for manifest in ["package.json", "member/package.json"] {
+            let project = project();
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(project.path().join("replacement"))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "workspace::read_race_tests::discovery_rejects_fifo_replacements_without_waiting_for_a_writer", "--nocapture"])
+                .env(ROOT_ENV, project.path())
+                .env(MANIFEST_ENV, manifest)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if child.try_wait().unwrap().is_some() {
+                    let output = child.wait_with_output().unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("discovery blocked opening replacement FIFO for {manifest}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+/// Decode supported `workspaces` and `workspaces.packages` string/array forms.
+/// Pattern syntax and containment are validated during expansion rather than here.
 fn workspace_patterns(workspaces: Option<&Value>) -> Result<Vec<String>, String> {
     let value = match workspaces {
         None => return Ok(Vec::new()),
@@ -240,14 +477,39 @@ fn workspace_patterns(workspaces: Option<&Value>) -> Result<Vec<String>, String>
         .collect()
 }
 
+/// Exercise production pattern rules with unrestricted budgets and display-only errors.
+#[cfg(test)]
 fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
+    let mut remaining = usize::MAX;
+    expand_pattern_bounded(root, pattern, usize::MAX, &mut remaining)
+        .map_err(|error| error.to_string())
+}
+
+/// Charge one expansion operation, failing before the counter could underflow.
+fn expansion_step(remaining: &mut usize) -> Result<(), crate::WorkspaceError> {
+    *remaining = remaining
+        .checked_sub(1)
+        .ok_or(crate::WorkspaceError::DiscoveryLimitExceeded)?;
+    Ok(())
+}
+
+/// Expand literal components and single-directory `*` components inside the root.
+/// Charge filesystem probes and directory entries even when they yield no manifest;
+/// return candidate paths for subsequent file-type validation and deduplication.
+fn expand_pattern_bounded(
+    root: &Path,
+    pattern: &str,
+    max_candidates: usize,
+    remaining: &mut usize,
+) -> Result<Vec<PathBuf>, crate::WorkspaceError> {
+    expansion_step(remaining)?;
     let relative = Path::new(pattern);
     if relative.is_absolute()
         || relative
             .components()
             .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        return Err(format!("workspace pattern is outside project: {pattern}"));
+        return Err(format!("workspace pattern is outside project: {pattern}").into());
     }
     if !relative
         .components()
@@ -261,10 +523,11 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
     {
         return Err(format!(
             "unsupported workspace pattern '{pattern}'; use a relative directory path or a whole path component '*' for one directory level"
-        ));
+        ).into());
     }
     let mut paths = vec![root.to_path_buf()];
     for component in relative.components() {
+        expansion_step(remaining)?;
         let name = component.as_os_str();
         if name == "*" {
             let mut next = Vec::new();
@@ -277,6 +540,7 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
                     )
                 })?;
                 for entry in entries {
+                    expansion_step(remaining)?;
                     let entry = entry
                         .map_err(|error| format!("cannot inspect workspace directory: {error}"))?;
                     let file_type = entry
@@ -297,7 +561,8 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
                             return Err(format!(
                                 "workspace glob encountered an unsupported symlink target: {}",
                                 candidate.display()
-                            ));
+                            )
+                            .into());
                         }
                     } else if !file_type.is_dir() {
                         continue;
@@ -308,23 +573,33 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
             paths = next;
         } else {
             for path in &mut paths {
+                expansion_step(remaining)?;
                 path.push(name);
             }
         }
     }
     let mut manifests = Vec::new();
     for path in paths {
+        expansion_step(remaining)?;
         let manifest = path.join("package.json");
         match fs::symlink_metadata(&manifest) {
             // Keep every existing entry for the regular-file validation in discovery.
             // Following the final component here would hide dangling symlinks.
-            Ok(_) => manifests.push(manifest),
+            Ok(_) => {
+                if manifests.len() == max_candidates {
+                    return Err(crate::WorkspaceError::DiscoveryLimitExceeded);
+                }
+                manifests.push(manifest);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(format!(
-                    "cannot inspect workspace manifest {}: {error}",
-                    manifest.display()
-                ));
+                return Err(crate::WorkspaceError::ManifestRead {
+                    message: format!(
+                        "cannot inspect workspace manifest {}: {error}",
+                        manifest.display()
+                    ),
+                    path: manifest,
+                });
             }
         }
     }
@@ -338,6 +613,63 @@ mod tests {
     use proptest::prelude::*;
     use std::{fs, path::Path};
     use tapid_test_support::TempProject;
+
+    #[test]
+    fn bounded_discovery_counts_entries_without_manifests_and_across_patterns() {
+        let project = TempProject::new("workspace-discovery-work-limit").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        for i in 0..8 {
+            project
+                .write(format!("packages/file-{i}"), b"not a workspace")
+                .unwrap();
+        }
+        assert!(matches!(
+            Workspace::discover_bounded(project.path(), 1, 6),
+            Err(crate::WorkspaceError::DiscoveryLimitExceeded)
+        ));
+        assert!(
+            Workspace::discover(project.path())
+                .unwrap()
+                .members()
+                .is_empty()
+        );
+        project.write("package.json", br#"{"name":"root","version":"1.0.0","workspaces":["missing","missing","missing"]}"#).unwrap();
+        assert!(matches!(
+            Workspace::discover_bounded(project.path(), 1, 8),
+            Err(crate::WorkspaceError::DiscoveryLimitExceeded)
+        ));
+    }
+
+    #[test]
+    fn bounded_discovery_preserves_selection_at_the_candidate_limit() {
+        let project = TempProject::new("workspace-discovery-candidate-limit").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        for name in ["a", "b"] {
+            project
+                .write(
+                    format!("packages/{name}/package.json"),
+                    format!(r#"{{"name":"{name}","version":"1.0.0"}}"#).as_bytes(),
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            Workspace::discover_bounded(project.path(), 1, 100),
+            Err(crate::WorkspaceError::DiscoveryLimitExceeded)
+        ));
+        let workspace = Workspace::discover_bounded(project.path(), 2, 100).unwrap();
+        assert_eq!(workspace, Workspace::discover(project.path()).unwrap());
+        assert_eq!(workspace.select(Some("b")).unwrap().name().as_str(), "b");
+    }
 
     #[test]
     fn unsupported_workspace_patterns_fail_instead_of_silently_dropping_members() {
@@ -597,5 +929,32 @@ mod containment_tests {
         symlink(external.path(), &link).unwrap();
         let error = Workspace::discover(project.path()).unwrap_err();
         assert!(error.contains("outside project"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod read_limit_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_rejects_oversized_member_before_parsing() {
+        let project = tapid_test_support::TempProject::new("workspace-member-limit").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        let path = project
+            .write("packages/member/package.json", b"{}")
+            .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(32 * 1024 * 1024 + 1)
+            .unwrap();
+        let error = Workspace::discover(project.path()).unwrap_err();
+        assert!(error.contains("32 MiB"), "{error}");
     }
 }
