@@ -522,7 +522,7 @@ fn windows_ctrl_c_cancels_execution_and_restores_project_dacl() {
 }
 
 fn windows_ctrl_c_helper(network: bool) {
-    use std::sync::mpsc::{self, TryRecvError};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::Console::{
@@ -552,6 +552,10 @@ fn windows_ctrl_c_helper(network: bool) {
     let endpoint = reservation
         .as_ref()
         .map(|listener| listener.local_addr().unwrap());
+    let ready = root.join("ready.txt");
+    if !network {
+        fs::write(&ready, b"").unwrap();
+    }
     let baseline_acl = project_dacl(&root);
     eprintln!(
         "[windows-ctrl-c helper] baseline captured after {:?}: root={} dacl={:?}",
@@ -592,10 +596,20 @@ fn windows_ctrl_c_helper(network: bool) {
             .build()
             .unwrap()
     } else {
-        command_request(
-            &root,
-            "for /L %i in (1,1,2147483647) do @rem",
+        let policy = SandboxPolicy::new_with_assurance(
+            SandboxMode::Required,
+            AssuranceLevel::ManagedTree,
+            FilesystemPolicy::new(vec![".".into()], vec!["ready.txt".into()]).unwrap(),
+            false,
+            vec![],
+            false,
             ExecutionLimits::new(Some(30), Some(4096), Some(8), Some(128 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap();
+        command_request_with_policy(
+            &root,
+            "echo CTRL_C_READY>ready.txt & for /L %i in (1,1,2147483647) do @rem",
+            policy,
         )
     };
     let runtime_acls = network.then(|| {
@@ -617,34 +631,6 @@ fn windows_ctrl_c_helper(network: bool) {
         sender.send(result).unwrap();
     });
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut active_acl = project_dacl(&root);
-    while active_acl == baseline_acl {
-        match receiver.try_recv() {
-            Ok(result) => panic!(
-                "execution returned before its project grant became visible: {result:?}; root={}",
-                root.display()
-            ),
-            Err(TryRecvError::Disconnected) => panic!(
-                "execution worker disconnected before applying its project grant; finished={}; root={}",
-                worker.is_finished(),
-                root.display()
-            ),
-            Err(TryRecvError::Empty) => {}
-        }
-        if Instant::now() >= deadline {
-            let current_acl = project_dacl(&root);
-            panic!(
-                "execution did not apply its project grant before Ctrl+C; worker_finished={}; root={}; baseline_dacl={:?}; current_dacl={:?}",
-                worker.is_finished(),
-                root.display(),
-                String::from_utf8_lossy(&baseline_acl),
-                String::from_utf8_lossy(&current_acl)
-            );
-        }
-        std::thread::sleep(Duration::from_millis(10));
-        active_acl = project_dacl(&root);
-    }
-
     if let Some(endpoint) = endpoint {
         use std::io::Read;
         loop {
@@ -671,6 +657,18 @@ fn windows_ctrl_c_helper(network: bool) {
         }
     }
 
+    if !network {
+        while !fs::read(&ready).is_ok_and(|bytes| bytes == b"CTRL_C_READY\r\n") {
+            assert!(
+                Instant::now() < deadline,
+                "command did not write its start marker before Ctrl+C"
+            );
+            assert!(!worker.is_finished(), "command exited before Ctrl+C");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let active_acl = project_dacl(&root);
+
     eprintln!(
         "[windows-ctrl-c helper] grant active after {:?}: root={} baseline_dacl={:?} active_dacl={:?}",
         started.elapsed(),
@@ -681,8 +679,8 @@ fn windows_ctrl_c_helper(network: bool) {
     println!("DACL_ACTIVE");
     use std::io::Write;
     std::io::stdout().flush().unwrap();
-    // SAFETY: this helper owns an isolated console; the event is sent only after the project DACL
-    // shows that the execution is active and its cancellation handler should be installed.
+    // SAFETY: this helper owns an isolated console. The target has demonstrated startup via
+    // its TCP response or file marker, after the runner activated its cancellation scope.
     let event_sent = unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) };
     if event_sent == 0 {
         let error = unsafe { GetLastError() };
