@@ -255,11 +255,15 @@ Start with the [contributing guide](CONTRIBUTING.md) and [open issues](https://g
 
 ## Development
 
-Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later. Run Cargo through the development wrapper to reuse build artifacts across worktrees. See the [testing guide](docs/testing.md) for focused checks and the full local lane.
+Use Git, Rust with rustfmt and Clippy, and a supported Node.js major (26 preferred, 24, or 22). Run Cargo through the development wrapper to reuse build artifacts across worktrees. See the [testing guide](docs/testing.md) for focused checks and the full local lane.
 
 Rust owns Tapid behavior and security verification. TypeScript owns developer
 scripts, release orchestration, documentation checks, and website/consumer
 fixtures, with tests run by Node. Python and uv are not project prerequisites.
+
+Tapid supports every released Node.js major in Current, Active LTS, or Maintenance LTS status according to the [official Node.js release lifecycle](https://nodejs.org/en/about/previous-releases). End-of-life versions and prereleases are outside the support policy. The current supported majors are 26 (preferred), 24, and 22. Tapid itself is a Rust binary and does not require Node.js for installation commands.
+
+Consumer CI checks use the latest release of every supported major on Linux, macOS, and Windows, with `check-latest: true` to avoid stale runner versions. Update the CI major-version matrix when Node.js releases a new Current version or a supported major reaches end of life.
 
 ```text
 node --experimental-strip-types tools/check_architecture.ts

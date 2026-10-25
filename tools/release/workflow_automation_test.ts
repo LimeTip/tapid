@@ -399,7 +399,10 @@ function assertWindowsHandoff(ci: string) {
   const producer = job(ci, 'platform-consumer-validation');
   const verifier = job(ci, 'windows-installer-contract');
   assert.match(verifier, /name: Windows installer contract\n    runs-on: windows-latest\n    needs: \[platform-consumer-validation\]\n    if: \$\{\{ always\(\) && !cancelled\(\) \}\}\n    steps:/);
-  assert.match(producer, /name: Consumer validation \(\$\{\{ matrix.os \}\}\)/);
+  assert.match(producer, /name: Consumer validation \(\$\{\{ matrix.os \}\}, Node \$\{\{ matrix.node-version \}\}\)/);
+  assert.match(producer, /os: \[ubuntu-latest, macos-latest, windows-latest\]/);
+  assert.match(producer, /node-version: \['26', '24', '22'\]/);
+  assert.match(step(producer, 'Install Node.js fixture runtime'), /node-version: \$\{\{ matrix.node-version \}\}\n          check-latest: true\n/);
   assert.match(producer, /fail-fast: false/);
   assert(producer.includes('    outputs:\n      windows-image-version: ${{ steps.windows-cli-provenance.outputs.image-version }}\n'));
   assert.match(step(producer, 'Build Tapid binary'), /run: cargo build --bin tapid --locked\n/);
@@ -410,7 +413,9 @@ function assertWindowsHandoff(ci: string) {
   ] as const) assert.equal(step(producer, name), `      - name: ${name}\n        if: ${condition}\n${timeout}        run: node tests/fixtures/validate_consumer_project.js\n`);
   const prepare = step(producer, 'Prepare same-run Windows CLI handoff');
   const upload = step(producer, 'Retain same-run Windows CLI');
-  for (const s of [prepare, upload]) assert.match(s, /if: runner.os == 'Windows'\n/);
+  for (const s of [prepare, upload, step(producer, 'Record Windows handoff artifact identity')]) {
+    assert.match(s, /if: runner.os == 'Windows' && matrix.node-version == '26'\n/);
+  }
   assert.match(prepare, /id: windows-cli-provenance\n/);
   assert(prepare.includes('node --experimental-strip-types tools/release/ci_binary.ts prepare --directory "$env:RUNNER_TEMP/tapid-ci-cli" --binary target/debug/tapid.exe\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n          "image-version=$env:ImageVersion" >> $env:GITHUB_OUTPUT\n'));
   assert(producer.indexOf(prepare) > producer.indexOf(step(producer, 'Verify native Restricted child, forwarding and exit codes (macOS)')));
@@ -446,6 +451,10 @@ test('Windows handoff contract rejects ownership, stale-attempt, bypass and fixt
   const producer = job(ci, 'platform-consumer-validation'); const verifier = job(ci, 'windows-installer-contract');
   const upload = step(producer, 'Retain same-run Windows CLI');
   const mutations = [
+    ci.replace("os: [ubuntu-latest, macos-latest, windows-latest]\n        # Keep", "os: [ubuntu-latest, windows-latest]\n        # Keep"),
+    ci.replace("node-version: ['26', '24', '22']", "node-version: ['26', '24']"),
+    ci.replace('check-latest: true', 'check-latest: false'),
+    ci.replaceAll(" && matrix.node-version == '26'", ''),
     ci.replace(verifier, ''), ci.replace(verifier, verifier.replace('    steps:', '    continue-on-error: true\n    steps:')),
     ci.replace('always() && !cancelled()', "needs.platform-consumer-validation.result == 'success'"),
     ci.replace('always() && !cancelled()', 'always()'),
