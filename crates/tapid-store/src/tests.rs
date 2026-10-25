@@ -1095,3 +1095,113 @@ fn snapshot_drop_preserves_a_replaced_reservation() {
     drop(snapshot);
     assert_eq!(fs::read(reservation.join("replacement")).unwrap(), b"keep");
 }
+
+#[test]
+fn archive_resource_failure_cannot_be_published_by_the_transaction() {
+    use tapid_archive::{
+        ArchiveFormat, ArchiveLimits, ExtractError, ValidationError, ValidationLimits,
+    };
+
+    // Keep the fixture local: two ordinary ustar files with six-byte payloads.
+    let mut archive = Vec::new();
+    for name in ["first", "second"] {
+        let mut header = [0u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[124..136].copy_from_slice(b"00000000006\0");
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+        header[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
+        archive.extend_from_slice(&header);
+        archive.extend_from_slice(b"abcdef");
+        archive.resize(archive.len() + 506, 0);
+    }
+    archive.extend_from_slice(&[0; 1024]);
+    let defaults = ValidationLimits::default();
+    for (validation, expected) in [
+        (
+            ValidationLimits {
+                max_entries: 1,
+                ..defaults
+            },
+            ValidationError::TooManyEntries,
+        ),
+        (
+            ValidationLimits {
+                max_path_bytes: 4,
+                ..defaults
+            },
+            ValidationError::PathTooLong,
+        ),
+        (
+            ValidationLimits {
+                max_entry_size: 5,
+                ..defaults
+            },
+            ValidationError::EntryTooLarge {
+                path: "first".into(),
+                size: 6,
+            },
+        ),
+        (
+            ValidationLimits {
+                max_total_size: 10,
+                ..defaults
+            },
+            ValidationError::TotalSizeExceeded,
+        ),
+    ] {
+        let project = tapid_test_support::TempProject::new("archive-limit-publication").unwrap();
+        project
+            .write("existing/package.json", b"existing content")
+            .unwrap();
+        let source = project.path().join("existing");
+        let existing: ArtifactDigest = tapid_archive::canonical_tree_digest(&source)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let store = Store::new(project.path().join("store"));
+        store.activate_verified_tree(&existing, &source).unwrap();
+        let prior = store.verified_tree_path(&existing).unwrap();
+        let prior_marker = fs::read(prior.join(".tapid-tree")).unwrap();
+        let rejected = digest(b"rejected candidate tree");
+        let mut transaction = store.transaction();
+        let error = transaction
+            .stage_archive(
+                &archive,
+                &digest(&archive),
+                &rejected,
+                ArchiveFormat::Tar,
+                ArchiveLimits {
+                    validation,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, IngestError::Archive(ExtractError::Invalid(ref actual)) if actual == &expected),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_dir(store.root().join(".staging")).unwrap().count(),
+            0
+        );
+        // A caller continuing with publication must not register the failed tree.
+        transaction.publish().unwrap().commit().unwrap();
+        assert!(!store.root().join("trees").join(rejected.as_str()).exists());
+        assert_eq!(fs::read_dir(store.root().join("trees")).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(prior.join("package.json")).unwrap(),
+            b"existing content"
+        );
+        assert_eq!(fs::read(prior.join(".tapid-tree")).unwrap(), prior_marker);
+        assert!(store.verified_tree_path(&existing).is_ok());
+        assert_eq!(
+            fs::read_dir(store.root().join(".staging")).unwrap().count(),
+            0
+        );
+    }
+}
