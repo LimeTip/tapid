@@ -493,6 +493,22 @@ jobs:
           & target/debug/tapid.exe sandbox uninstall
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  consumer-validation:
+    name: Consumer validation (${{ matrix.os }})
+    needs: [platform-consumer-validation]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Require all native consumer legs to succeed
+        shell: bash
+        env:
+          CONSUMER_RESULT: ${{ needs.platform-consumer-validation.result }}
+        run: test "$CONSUMER_RESULT" = success
+
   pr-published-binary-smoke:
     # Exact PR runner + immutable published binary: pre-merge regression evidence only.
     # No release readiness, installer promotion, or website evidence is produced here.

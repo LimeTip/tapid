@@ -485,7 +485,7 @@ test('Windows handoff contract rejects ownership, stale-attempt, bypass and fixt
     ci.replace(verifier, ''), ci.replace(verifier, verifier.replace('    steps:', '    continue-on-error: true\n    steps:')),
     ci.replace('always() && !cancelled()', "needs.platform-consumer-validation.result == 'success'"),
     ci.replace('always() && !cancelled()', 'always()'),
-    ci.replace('    needs: [platform-consumer-validation]\n', ''),
+    ci.replace(verifier, verifier.replace('    needs: [platform-consumer-validation]\n', '')),
     ci.replace(verifier, verifier.replace('    steps:', '    if: false\n    steps:')),
     ci.replace('digest-mismatch: error', 'digest-mismatch: warn'),
     ci.replaceAll('${{ github.run_attempt }}-', ''),
@@ -574,4 +574,53 @@ test('previous-release upgrade uses that release installer beneath the current r
   assert(windowsUpgrade.includes('-fsSL $env:PREVIOUS_INSTALLER_URL --output $previousInstaller'));
   assert(windowsUpgrade.includes('& $previousInstaller -Version $env:PREVIOUS_TAG'));
   assert(!windowsUpgrade.includes('& $installer -Version $env:PREVIOUS_TAG'));
+});
+
+function assertConsumerCompatibility(ci: string) {
+  const compatibility = job(ci, 'consumer-validation');
+  assert.match(compatibility, /name: Consumer validation \(\$\{\{ matrix.os \}\}\)\n/);
+  assert.equal(ci.match(/name: Consumer validation \(\$\{\{ matrix.os \}\}\)\n/g)?.length, 1);
+  assert.match(compatibility, /needs: \[platform-consumer-validation\]\n/);
+  assert.match(compatibility, /if: \$\{\{ always\(\) \}\}\n/);
+  assert.match(compatibility, /runs-on: ubuntu-latest\n/);
+  assert.match(compatibility, /matrix:\n        os: \[ubuntu-latest, windows-latest\]\n/);
+  assert.doesNotMatch(compatibility, /continue-on-error:|exclude:|include:/);
+  assert.equal(step(compatibility, 'Require all native consumer legs to succeed').trimEnd(), `      - name: Require all native consumer legs to succeed
+        shell: bash
+        env:
+          CONSUMER_RESULT: \${{ needs.platform-consumer-validation.result }}
+        run: test "$CONSUMER_RESULT" = success`);
+  assert.match(job(ci, 'platform-consumer-validation'), /name: Consumer validation \(\$\{\{ matrix.os \}\}, Node /);
+}
+
+test('stable consumer contexts require successful completion of every native leg', async () => {
+  assertConsumerCompatibility(await workflow('ci'));
+});
+
+test('stable consumer context contract rejects renamed checks and fail-open aggregation', async () => {
+  const ci = await workflow('ci');
+  const owner = job(ci, 'consumer-validation');
+  for (const replacement of [
+    owner.replace('name: Consumer validation (', 'name: Compatibility ('),
+    owner.replace('os: [ubuntu-latest, windows-latest]', 'os: [ubuntu-latest]'),
+    owner.replace('    needs: [platform-consumer-validation]\n', ''),
+    owner.replace('    if: ${{ always() }}\n', ''),
+    owner.replace('run: test "$CONSUMER_RESULT" = success', 'run: true'),
+    owner.replace('run: test "$CONSUMER_RESULT" = success', 'run: test "$CONSUMER_RESULT" != failure'),
+    owner.replace('run: test "$CONSUMER_RESULT" = success', 'run: test "$CONSUMER_RESULT" = success || true'),
+    owner.replace('        shell: bash', '        continue-on-error: true\n        shell: bash'),
+    ...['failure', 'cancelled', 'skipped'].map(result => owner.replace('= success', `= ${result}`)),
+  ]) {
+    assert.notEqual(replacement, owner, 'compatibility mutation must not be vacuous');
+    assert.throws(() => assertConsumerCompatibility(ci.replace(owner, replacement)));
+  }
+});
+
+test('stable consumer shell gate rejects failure cancellation skipped and absent results', async () => {
+  const gate = step(job(await workflow('ci'), 'consumer-validation'), 'Require all native consumer legs to succeed');
+  const command = gate.match(/        run: (.+)\n/)![1];
+  await execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: 'success' } });
+  for (const result of ['failure', 'cancelled', 'skipped', '']) {
+    await assert.rejects(execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: result } }));
+  }
 });
