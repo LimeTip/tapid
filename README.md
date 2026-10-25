@@ -54,6 +54,10 @@ tapid install --offline --frozen
 
 See the [CLI guide](crates/tapid-cli/README.md) for adding, removing, updating, and inspecting dependencies.
 
+## Evaluate an existing project
+
+Tapid releases are available for development and compatibility evaluation; production support has not been declared. It manages packages and lockfiles, not application execution: keep Node.js (or your existing runtime), build/test tools, and deployment workflow unchanged during evaluation. Start with the [supported compatibility subset](docs/compatibility.md), then follow the [existing-project npm lock migration and rollback guide](docs/npm-lockfile-import.md) in a disposable checkout. Keep the npm lock and known-good install path until your application passes its own checks; dependency lifecycle scripts are disabled by default. A successful import or fixture run is not a production-support claim.
+
 Standalone commands can use `tapid tool install <package>` without a project. Each tool has an isolated lock and dependency environment, with managed commands exposed from the reported bin directory. See the [tool workflow](crates/tapid-cli/README.md#standalone-cli-tools) for PATH setup, runtime requirements, and update/removal behavior.
 
 ## Development status

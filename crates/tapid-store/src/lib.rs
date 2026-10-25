@@ -1,5 +1,7 @@
 //! Filesystem-authoritative, content-addressed artifact ingestion.
 
+#![deny(unsafe_code, unsafe_op_in_unsafe_fn)]
+
 use fs4::{FileExt, TryLockError};
 use same_file::Handle;
 use sha2::{Digest, Sha256};
@@ -386,7 +388,13 @@ impl Store {
     {
         let source = self.marked_tree_path(digest)?;
         let reservation = create_replay_reservation(&self.root)?;
-        let reservation_identity = Handle::from_path(&reservation)?;
+        let reservation_identity = match Handle::from_path(&reservation) {
+            Ok(identity) => identity,
+            Err(error) => {
+                release_replay_lease(&reservation.join("tree"));
+                return Err(error.into());
+            }
+        };
         let snapshot = reservation.join("tree");
         let result = (|| {
             if !clone_tree(&source, &snapshot)? {
@@ -593,6 +601,10 @@ fn process_is_alive(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "Windows process liveness requires native handle APIs"
+)]
 fn process_is_alive(pid: u32) -> bool {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError},
@@ -619,6 +631,10 @@ fn process_is_alive(_pid: u32) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(
+    unsafe_code,
+    reason = "macOS directory cloning requires clonefile with no-follow flags"
+)]
 fn clone_snapshot_tree(source: &Path, target: &Path) -> io::Result<bool> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
@@ -736,6 +752,7 @@ fn create_replay_reservation(root: &Path) -> io::Result<PathBuf> {
         Ok(())
     })();
     if let Err(error) = result {
+        release_replay_lease(&reservation.join("tree"));
         let _ = fs::remove_dir_all(&reservation);
         return Err(error);
     }
@@ -779,9 +796,18 @@ fn release_replay_lease(snapshot: &Path) {
     if let Some(groups) = REPLAY_LEASES.get()
         && let Ok(mut groups) = groups.lock()
     {
-        for group in groups.iter_mut() {
+        groups.retain_mut(|group| {
             group.snapshots.remove(snapshot);
-        }
+            if !group.snapshots.is_empty() {
+                return true;
+            }
+            // Compare to the held lease, not a fresh pathname identity, before
+            // unlinking. Removing the group then closes its locked descriptor.
+            if let Ok(identity) = group._file.try_clone().and_then(Handle::from_file) {
+                remove_file_if_unchanged(&group.lease_path, &identity);
+            }
+            false
+        });
     }
 }
 

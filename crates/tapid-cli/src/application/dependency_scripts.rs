@@ -710,6 +710,10 @@ fn prepare_tools(
     Ok(paths)
 }
 #[cfg(target_os = "macos")]
+#[allow(
+    unsafe_code,
+    reason = "macOS trusted tool verification requires fstatfs mount flags"
+)]
 fn readonly_tool_volume(file: &fs::File) -> Result<bool, OperationalError> {
     use std::os::fd::AsRawFd;
     let mut status = std::mem::MaybeUninit::<libc::statfs>::zeroed();

@@ -358,6 +358,10 @@ pub(crate) fn run(
         }
     }
 }
+#[allow(
+    unsafe_code,
+    reason = "pre_exec preserves the tool lease using async-signal-safe descriptor operations"
+)]
 pub(crate) fn execute(
     root: &Path,
     command: &str,

@@ -27,6 +27,112 @@ import {
   hasCommand,
 } from "./script-support.ts";
 
+test("bounded process caps decoded UTF-8 output at a character boundary", async () => {
+  await temporary(async (path) => {
+    for (const { bytes, limit, output, failure } of [
+      { bytes: [0xff, 0xff, 0xff], limit: 3, output: "\uFFFD", failure: "output-limit" },
+      { bytes: [0xff], limit: 1, output: "", failure: "output-limit" },
+      { bytes: [0xff], limit: 2, output: "", failure: "output-limit" },
+      { bytes: [0xff], limit: 3, output: "\uFFFD", failure: null },
+      { bytes: [65, 0xff, 66], limit: 4, output: "A\uFFFD", failure: "output-limit" },
+      { bytes: [...Buffer.from("\u{1F642}\u{1F642}")], limit: 5, output: "\u{1F642}", failure: "output-limit" },
+    ]) {
+      const result = await boundedProcess([
+        process.execPath, "-e", `process.stdout.write(Buffer.from(${JSON.stringify(bytes)}))`,
+      ], { cwd: path, env: {}, output_limit: limit });
+      assert.equal(result.output, output);
+      assert.ok(Buffer.byteLength(result.output, "utf8") <= limit);
+      assert.equal(result.failure_class, failure);
+      assert.equal(result.exit_code, failure ? null : 0);
+    }
+  });
+});
+
+test("bounded process does not retain discarded output buffers", {
+  skip: process.platform === "win32",
+}, async () => {
+  await temporary(async (path) => {
+    write(join(path, "writer.cjs"), `
+      const {spawn} = require('node:child_process');
+      if (!process.argv[2]) {
+        spawn(process.execPath, [__filename, 'writer'], {
+          detached: true, stdio: ['ignore', 1, 2]
+        });
+        setTimeout(() => process.exit(0), 3000);
+      } else {
+        const chunk = Buffer.alloc(65536, 120);
+        let sent = 0;
+        const timer = setTimeout(() => process.exit(0), 3000);
+        process.stdout.on('error', () => process.exit(0));
+        function write() {
+          while (sent < 32 * 1024 * 1024) {
+            sent += chunk.length;
+            if (!process.stdout.write(chunk)) {
+              process.stdout.once('drain', write);
+              return;
+            }
+          }
+          clearTimeout(timer);
+        }
+        write();
+      }
+    `);
+    const helper = new URL("../scripts/check-doc-examples.ts", import.meta.url).href;
+    write(join(path, "probe.mjs"), `
+      import {boundedProcess} from ${JSON.stringify(helper)};
+      const before = process.memoryUsage().arrayBuffers;
+      let peak = before;
+      const timer = setInterval(() => {
+        global.gc();
+        peak = Math.max(peak, process.memoryUsage().arrayBuffers);
+      }, 1);
+      const result = await boundedProcess([process.execPath, 'writer.cjs'], {
+        cwd: process.cwd(), env: {}, timeout: 1, output_limit: 1024
+      });
+      clearInterval(timer);
+      console.log(JSON.stringify({result, growth: peak - before}));
+    `);
+    const probe = spawnSync(process.execPath, ["--expose-gc", "--experimental-strip-types", "probe.mjs"], {
+      cwd: path, encoding: "utf8", timeout: 8000,
+    });
+    assert.ifError(probe.error);
+    assert.equal(probe.status, 0, probe.stderr);
+    const {result, growth} = JSON.parse(probe.stdout);
+    assert.equal(result.failure_class, "output-limit");
+    assert.equal(Buffer.byteLength(result.output), 1024);
+    assert.ok(growth < 8 * 1024 * 1024, `retained ${growth} bytes for a 1 KiB cap`);
+  });
+});
+
+test("bounded process releases pipes held by detached descendants after output overflow", {
+  skip: process.platform === "win32",
+}, async () => {
+  await temporary(async (path) => {
+    const writer = join(path, "writer.cjs");
+    write(writer, `
+      const {spawn} = require('node:child_process');
+      if (!process.argv[2]) {
+        spawn(process.execPath, [__filename, 'writer'], {
+          detached: true, stdio: ['ignore', 1, 2]
+        });
+        setTimeout(() => process.exit(0), 3000);
+      } else {
+        process.stdout.on('error', () => process.exit(0));
+        process.stdout.write(Buffer.alloc(65536, 120));
+        setInterval(() => process.stdout.write('x'), 50);
+        setTimeout(() => process.exit(0), 3000);
+      }
+    `);
+    const start = Date.now();
+    const result = await boundedProcess([process.execPath, writer], {
+      cwd: path, env: {}, timeout: 0.5, output_limit: 1024,
+    });
+    assert.equal(result.failure_class, "output-limit");
+    assert.equal(Buffer.byteLength(result.output), 1024);
+    assert.ok(Date.now() - start < 2000, "inherited pipes must not defeat termination");
+  });
+});
+
 async function fixtureRun(
   commands: string,
   body = "exit 0",
