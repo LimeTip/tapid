@@ -1757,8 +1757,16 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
             assert_eq!(unsafe { libc::fcntl(target, libc::F_SETFD, 0) }, 0);
         }
         let (destination_read, destination_write) = launch_pipe().unwrap();
-        let (mut sink, input) = spawn_live_sink(destination_write.as_raw_fd()).unwrap();
+        let (mut sink, mut input) = spawn_live_sink(destination_write.as_raw_fd()).unwrap();
         drop(destination_write);
+        let mut destination = fs::File::from(destination_read);
+        // Successful spawn establishes exec, but dyld may still hold temporary
+        // descriptors. Wait for cat to relay a byte before inspecting its steady
+        // state; every unrelated caller descriptor must still be absent.
+        input.write_all(b"!").unwrap();
+        let mut ready = [0];
+        destination.read_exact(&mut ready).unwrap();
+        assert_eq!(ready, *b"!");
         let mut entries = [libc::proc_fdinfo {
             proc_fd: 0,
             proc_fdtype: 0,
@@ -1781,7 +1789,7 @@ fn live_sink_exec_closes_unrelated_inheritable_descriptors() {
             .collect();
         drop(input);
         assert!(sink.wait().unwrap().success());
-        drop(destination_read);
+        drop(destination);
         drop(pipe_write);
         drop(peer);
         for fd in [100, 101, 102] {
