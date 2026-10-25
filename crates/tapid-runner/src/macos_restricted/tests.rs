@@ -536,7 +536,7 @@ fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
     let runtime = trusted.join("node");
     fs::write(
             &runtime,
-            b"#!/bin/sh\ncase \"$*\" in *second-node*) printf verified > second-node ;; *detached-node*) printf verified > detached-node ;; esac\n",
+            b"#!/bin/sh\ncase \"$*\" in *second-node*) printf verified > second-node ;; *detached-node*) { sleep 0.2; printf verified; } > detached-node ;; esac\n",
         )
         .unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
@@ -557,7 +557,8 @@ fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
               STDOUT.reopen('descendant.stdout', 'w')
               STDERR.reopen('descendant.stderr', 'w')
               sleep 0.01 until File.exist?('receipt-returned')
-          system('node', 'detached-node')
+              abort 'detached node failed' unless system('node', 'detached-node')
+              File.write('detached-complete', 'complete')
               exit! 0
             end
             File.write('descendant-ready', 'ready')
@@ -579,9 +580,14 @@ fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
     assert!(project.join("descendant-ready").exists());
     fs::write(project.join("receipt-returned"), b"receipt").unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
-    while !project.join("detached-node").exists() && Instant::now() < deadline {
+    while !project.join("detached-complete").exists() && Instant::now() < deadline {
         thread::sleep(POLL_INTERVAL);
     }
+    assert!(
+        project.join("detached-complete").exists(),
+        "detached node did not complete: {}",
+        fs::read_to_string(project.join("descendant.stderr")).unwrap_or_default()
+    );
     let resolution = outcome.enforcement().executable_resolution().unwrap();
     let private = PathBuf::from(OsString::from_vec(
         resolution
