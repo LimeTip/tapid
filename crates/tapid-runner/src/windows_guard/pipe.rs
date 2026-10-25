@@ -74,7 +74,9 @@ pub(super) fn connected(pipe: isize) -> Result<bool, u32> {
     }
 }
 pub(super) fn connect() -> Result<OwnedHandle, u32> {
-    let end = Instant::now() + Duration::from_secs(5);
+    // Native WFP work is serialized by the service. Concurrent launches may
+    // legitimately wait longer than one exchange while earlier clients register.
+    let end = Instant::now() + Duration::from_secs(15);
     loop {
         let pipe = owned(unsafe {
             CreateFileW(

@@ -135,7 +135,7 @@ This is development evidence from parent commit `57fb1a1008b45aa9a8b2ec29d573382
 
 Strict bind denial is still unresolved. A fresh native ordinary-AppContainer probe binds IPv4 and IPv6 loopback. An LPAC experiment fails Winsock initialization with 10107 and therefore proves no denial. Opening WFP is permitted, but creating a valid uniquely named empty sublayer returns access denied (5); no WFP policy was installed. A privileged enforcement design needs a separate installation boundary and native verification. Import hooks cannot satisfy this kernel security requirement. Windows 11 Pro VM126 access and symlink-capable full workspace verification remain unavailable. Issue #157 remains open; this follow-up does not relax the denial criterion or claim the broader native assurance matrix complete.
 
-### Administrator-installed network guard (installation acceptance pending)
+### Administrator-installed network guard
 
 The user selected this physical Windows device for current acceptance; VM126 remains historical evidence, not a prerequisite. The user also authorized building a one-time administrator-installed guard after the standard-user WFP probe returned access denied (5).
 
@@ -145,6 +145,31 @@ For `network=false`, preparation registers the held suspended root and its origi
 
 The service holds each Job until a fresh kernel accounting query proves it empty. Caller loss terminates that caller-owned Job before filter cleanup. An unexpected service exit retains persistent denial; orphan filters are counted and never removed on a timer or by a blanket uninstall. The local pipe excludes remote clients and client server-instance rights, uses fixed frames and bounded nonblocking I/O, expires idle unleased connections, and bounds active connections and per-user leases. Privileged host or BFE tampering remains a trusted-host limitation.
 
-The native TCP/UDP IPv4/IPv6 bind regression reproduces the old gap. Wire, source-image substitution, held-handle rights and pipe-recovery controls pass before installation. Native service/WFP acceptance, crash controls, full runner rerun and final consumer acceptance are pending administrator installation approval. The Windows CI workflow now provisions the guard before tests, runs an isolated metadata-removal/rollback control, and uninstalls the idle guard afterward; those native CI results remain pending. This section does not claim strict bind denial has been verified on the device yet.
+At the initial implementation checkpoint, the native TCP/UDP IPv4/IPv6 bind regression reproduced the old gap. Wire, source-image substitution, held-handle rights and pipe-recovery controls passed before installation. Service/WFP acceptance, crash controls, the full runner rerun and final consumer acceptance were pending administrator installation approval. The October 25 record below supersedes installation, bind-denial and runner status. The Windows CI workflow provisions the guard before tests, runs an isolated metadata-removal/rollback control, and uninstalls the idle guard afterward; exact-head native CI results remain separate.
 
 The integrated dependency-hook branch retains LPAC startup and its exact enabled `registryRead` runtime capability. Broker recipients and guard registration share the same token-capability check: zero entries or that single non-network SID are accepted; additional, duplicate, disabled or network capability entries are rejected. Existing held-process, exact AppContainer/Job and WFP checks remain required. The merged native Windows acceptance must run at the integrated commit; cross-target compilation does not establish it.
+
+### October 25 native guard acceptance
+
+Administrator installation now succeeds on the selected Windows 11 Home x64 device, build 26200.9711, with Rust 1.99.0 MSVC and unchanged Node 22.23.1. Ordinary-user authentication initially failed because the LocalSystem process and token DACLs did not permit the client's read-only identity checks. Startup now merges an Interactive SID process-query/wait grant and a token-query grant before opening the listener or reporting readiness. Existing DACL entries and the SCM, protected-image, held-process and actual token-identity checks remain. The disposable process/token regressions check the exact added rights and preservation of an existing token allow and explicit privilege-adjustment denial. No token duplication, impersonation or mutation authority is added.
+
+Concurrent containment exposed the five-second connection queue deadline: 32 simultaneous read-only status requests took about 5.5 seconds behind serialized native WFP work and one failed with `ERROR_PIPE_BUSY`. Connection queue waiting is now bounded at 15 seconds; the five-second message exchange bound is unchanged. All 30 native containment tests pass concurrently after that correction, including Ctrl+C cleanup, LPAC outside-read denial, declared writes, timeout, output limits and standard-Node descendants.
+
+All ten `windows_network` tests pass, including the native TCP/UDP IPv4/IPv6 bind controls in both the root and a real descendant, outbound denial against a reachable positive control, allowed networking, DNS and cleanup. Ordinary-user `tapid sandbox status` reports a running guard with zero active executions and zero retained denial filters after those controls. Workspace Clippy and formatting pass. Commands and complete development logs are retained locally under `.tmp/windows-network-acceptance.log`, `.tmp/windows-containment-acceptance.log` and `.tmp/windows-clippy.log`:
+
+```text
+node --experimental-strip-types scripts/dev.ts test -p tapid-runner --test windows_network --locked
+node --experimental-strip-types scripts/dev.ts test -p tapid-runner --test windows_containment --locked
+node --experimental-strip-types scripts/dev.ts clippy --workspace --all-targets --all-features --locked -- -D warnings
+node --experimental-strip-types scripts/dev.ts fmt --all --check
+```
+
+This is uncommitted development evidence based on `32fa56e`, not clean-commit or hosted acceptance. The installed guard artifact has SHA-256 `23d885920c2ded2d981d35942906e545e04e5586c21ccd8b8de0626d277f8ed7`; the subsequent client queue-wait correction is exercised by the rebuilt test clients. Service-crash/orphan-filter controls, a fresh original news-site build/test/start run, the broader common assurance matrix and contained dependency lifecycle identity remain separate acceptance work. Earlier statements that installation and bind denial were pending describe the initial implementation checkpoint above.
+
+The final workspace lane passes all runner targets: 224 library tests (four intentionally ignored diagnostics/administrator controls), 30 containment tests, ten network tests, three review regressions and seven doctests. All five tests in the separate integration workspace pass. Formatting, workspace Clippy, the architecture check and independent source review pass. The full workspace test command remains red: the CLI library, CLI integration and npm-import targets report 1, 23 and 5 failures respectively. Workspace-link cases encounter missing symlink privilege (Windows error 1314). Three store/activation cases instead report access denied (error 5); `frozen_hydration_failures_preserve_lock_and_installed_tree`, `ci_recovers_store_and_project_after_precommit_and_postcommit_crashes` and `tool_human_list_exposes_its_requirement_and_inspectable_lock_path` all pass when rerun individually. This does not turn the complete lane green. Full failure names and diagnostics are retained in `.tmp/windows-workspace-tests.log`; separate integration output is in `.tmp/windows-integration-tests.log`.
+
+```text
+node --experimental-strip-types scripts/dev.ts test --workspace --all-features --locked --no-fail-fast
+node --experimental-strip-types scripts/dev.ts test --manifest-path tests/integration/Cargo.toml --locked
+node --experimental-strip-types tools/check_architecture.ts
+```

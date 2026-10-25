@@ -121,6 +121,7 @@ impl Connection {
     }
 }
 fn run() -> Result<(), u32> {
+    identity::prepare_server_authentication()?;
     let engine = Engine::open()?;
     engine.count()?;
     let mut listener = pipe::listener(true)?;

@@ -10,10 +10,12 @@ use std::{
 use windows_sys::Win32::{
     Foundation::*,
     Security::*,
+    Storage::FileSystem::{READ_CONTROL, WRITE_DAC},
     System::{
         Pipes::{
             GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, ImpersonateNamedPipeClient,
         },
+        SystemServices::SECURITY_DESCRIPTOR_REVISION,
         Threading::*,
     },
 };
@@ -154,6 +156,123 @@ pub(super) fn server(pipe: isize) -> Result<OwnedHandle, u32> {
     }
     Ok(process)
 }
+/// Permit ordinary clients to hold the server and query its actual token identity.
+pub(super) fn prepare_server_authentication() -> Result<(), u32> {
+    let process = unsafe { GetCurrentProcess() };
+    allow_interactive_inspection(
+        process,
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+    )?;
+    let mut token = 0;
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY | READ_CONTROL | WRITE_DAC, &mut token) } == 0
+    {
+        return Err(unsafe { GetLastError() });
+    }
+    let token = owned(token)?;
+    allow_interactive_inspection(raw(&token), TOKEN_QUERY)
+}
+
+fn allow_interactive_inspection(object: isize, rights: u32) -> Result<(), u32> {
+    use windows_sys::Win32::Security::Authorization::*;
+    let mut needed = 0;
+    unsafe {
+        GetKernelObjectSecurity(
+            object,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            0,
+            &mut needed,
+        );
+    }
+    if needed == 0 || needed > 65536 {
+        return Err(ERROR_INVALID_DATA);
+    }
+    let mut buffer = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+    let descriptor = buffer.as_mut_ptr().cast();
+    if unsafe {
+        GetKernelObjectSecurity(
+            object,
+            DACL_SECURITY_INFORMATION,
+            descriptor,
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(unsafe { GetLastError() });
+    }
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut original = null_mut();
+    if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut original, &mut defaulted) }
+        == 0
+        || present == 0
+        || original.is_null()
+    {
+        return Err(ERROR_INVALID_DATA);
+    }
+    let mut sid = [0u32; 17];
+    let mut length = size_of::<[u32; 17]>() as u32;
+    if unsafe {
+        CreateWellKnownSid(
+            WinInteractiveSid,
+            null_mut(),
+            sid.as_mut_ptr().cast(),
+            &mut length,
+        )
+    } == 0
+    {
+        return Err(unsafe { GetLastError() });
+    }
+    let entry = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: rights,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: 0,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+            ptstrName: sid.as_mut_ptr().cast(),
+        },
+    };
+    let mut merged = null_mut();
+    let result = unsafe { SetEntriesInAclW(1, &entry, original, &mut merged) };
+    if result != 0 {
+        return Err(result);
+    }
+    // Preserve existing authority, including SYSTEM/administrator control and
+    // explicit denials. Add no inheritance, token duplication or mutation rights.
+    let mut update: SECURITY_DESCRIPTOR = unsafe { zeroed() };
+    let initialized = unsafe {
+        InitializeSecurityDescriptor(
+            (&mut update as *mut SECURITY_DESCRIPTOR).cast(),
+            SECURITY_DESCRIPTOR_REVISION,
+        )
+    };
+    let attached = initialized != 0
+        && unsafe {
+            SetSecurityDescriptorDacl(
+                (&mut update as *mut SECURITY_DESCRIPTOR).cast(),
+                1,
+                merged,
+                0,
+            )
+        } != 0;
+    let result = attached
+        && unsafe {
+            SetKernelObjectSecurity(
+                object,
+                DACL_SECURITY_INFORMATION,
+                (&mut update as *mut SECURITY_DESCRIPTOR).cast(),
+            )
+        } != 0;
+    let error = unsafe { GetLastError() };
+    unsafe {
+        LocalFree(merged.cast());
+    }
+    if result { Ok(()) } else { Err(error) }
+}
 fn clone_handle(caller: isize, handle: u64) -> Result<OwnedHandle, u32> {
     let mut output = 0;
     if unsafe {
@@ -263,6 +382,153 @@ pub(super) fn job_empty(job: isize) -> Result<bool, u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn guard_server_inspection_grants_only_query_and_wait_to_interactive_users() {
+        use std::{
+            os::windows::io::AsRawHandle,
+            process::{Command, Stdio},
+        };
+        // Use a disposable process: other kernel object types have different
+        // valid access masks and cannot prove process-query permission.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "execution::windows_guard::identity::tests::guard_server_inspection_child",
+            ])
+            .env("TAPID_GUARD_INSPECTION_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let process = child.as_raw_handle() as isize;
+        allow_interactive_inspection(
+            process,
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+        )
+        .unwrap();
+        let rights = interactive_rights(process);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(
+            rights,
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE
+        );
+    }
+
+    #[test]
+    fn guard_token_inspection_grants_query_without_duplication_or_mutation() {
+        use windows_sys::Win32::Security::Authorization::*;
+        let mut source = 0;
+        assert_ne!(
+            unsafe {
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_DUPLICATE | TOKEN_QUERY,
+                    &mut source,
+                )
+            },
+            0
+        );
+        let source = owned(source).unwrap();
+        let mut duplicate = 0;
+        assert_ne!(
+            unsafe {
+                DuplicateTokenEx(
+                    raw(&source),
+                    TOKEN_QUERY | READ_CONTROL | WRITE_DAC,
+                    std::ptr::null(),
+                    SecurityIdentification,
+                    TokenImpersonation,
+                    &mut duplicate,
+                )
+            },
+            0
+        );
+        let duplicate = owned(duplicate).unwrap();
+        // The explicit deny must continue to override the matching allow;
+        // READ_CONTROL is an existing allow which the merge must retain.
+        let fixture =
+            super::super::wide("D:P(D;;0x20;;;IU)(A;;0x20020;;;IU)(A;;GA;;;SY)(A;;GA;;;BA)");
+        let mut descriptor = null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    fixture.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    null_mut(),
+                )
+            },
+            0
+        );
+        let applied = unsafe {
+            SetKernelObjectSecurity(raw(&duplicate), DACL_SECURITY_INFORMATION, descriptor)
+        };
+        unsafe {
+            LocalFree(descriptor);
+        }
+        assert_ne!(applied, 0);
+        assert_eq!(interactive_rights(raw(&duplicate)), READ_CONTROL);
+        allow_interactive_inspection(raw(&duplicate), TOKEN_QUERY).unwrap();
+        assert_eq!(
+            interactive_rights(raw(&duplicate)),
+            READ_CONTROL | TOKEN_QUERY
+        );
+    }
+
+    fn interactive_rights(object: isize) -> u32 {
+        use windows_sys::Win32::Security::Authorization::*;
+        let mut acl = null_mut();
+        let mut descriptor = null_mut();
+        assert_eq!(
+            unsafe {
+                GetSecurityInfo(
+                    object,
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    &mut acl,
+                    null_mut(),
+                    &mut descriptor,
+                )
+            },
+            0
+        );
+        let mut sid = [0u32; 17];
+        let mut length = size_of::<[u32; 17]>() as u32;
+        assert_ne!(
+            unsafe {
+                CreateWellKnownSid(
+                    WinInteractiveSid,
+                    null_mut(),
+                    sid.as_mut_ptr().cast(),
+                    &mut length,
+                )
+            },
+            0
+        );
+        let trustee = TRUSTEE_W {
+            pMultipleTrustee: null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+            ptstrName: sid.as_mut_ptr().cast(),
+        };
+        let mut rights = 0;
+        let result = unsafe { GetEffectiveRightsFromAclW(acl, &trustee, &mut rights) };
+        unsafe {
+            LocalFree(descriptor);
+        }
+        assert_eq!(result, 0);
+        rights
+    }
+    #[test]
+    fn guard_server_inspection_child() {
+        if std::env::var("TAPID_GUARD_INSPECTION_CHILD").as_deref() == Ok("1") {
+            let _ = std::io::Read::read(&mut std::io::stdin(), &mut [0u8; 1]);
+        }
+    }
     #[test]
     fn guard_rejects_host_process_and_source_job_without_termination_rights() {
         use windows_sys::Win32::System::JobObjects::*;
