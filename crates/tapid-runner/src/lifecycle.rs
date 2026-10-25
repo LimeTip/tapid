@@ -247,7 +247,7 @@ impl DependencyLifecyclePolicy {
                         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
                     || tool.name == "."
                     || tool.name == ".."
-                    || !names.insert(&tool.name)
+                    || !names.insert(tool.name.as_str())
                     || executable_name.len() > 255
                     || !portable_names.insert(executable_name.to_ascii_lowercase())
                 {
@@ -261,7 +261,7 @@ impl DependencyLifecyclePolicy {
                 }
                 check_sha256(&tool.digest)?;
             }
-            if !names.contains(&"sh".to_owned()) && !names.contains(&"cmd".to_owned()) {
+            if !names.contains("sh") && !names.contains("cmd") {
                 return Err("lifecycle tools must pin sh or cmd".into());
             }
             approvals.push(DependencyLifecycleApproval {
