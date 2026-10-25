@@ -135,6 +135,10 @@ export function boundedProcess(
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
+      // A detached descendant can keep inherited writers open after the root
+      // is killed. Stop reading once termination is requested.
+      child.stdout.destroy();
+      child.stderr.destroy();
     };
     const timer = setTimeout(() => {
       failure ??= "timeout";
@@ -142,7 +146,8 @@ export function boundedProcess(
     }, timeout * 1000);
     const collect = (chunk: Buffer) => {
       const remaining = Math.max(0, output_limit - size);
-      chunks.push(chunk.subarray(0, remaining));
+      if (remaining > 0)
+        chunks.push(Buffer.from(chunk.subarray(0, remaining)));
       size += chunk.length;
       if (size > output_limit && !failure) {
         failure = "output-limit";

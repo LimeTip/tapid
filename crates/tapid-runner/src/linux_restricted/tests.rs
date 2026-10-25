@@ -266,6 +266,27 @@ fn runner_streams_and_detects_libuv_process_memory_stats_denial() {
 }
 
 #[test]
+fn restricted_completion_does_not_wait_for_inherited_descendant_stderr() {
+    let project = tapid_test_support::TempProject::new("restricted-stderr-lifetime").unwrap();
+    let started = std::time::Instant::now();
+    let outcome = execute(&request(
+        project.path(),
+        "printf root-diagnostic >&2; sleep 3 >&2 & exit 0",
+        restricted(project.path(), vec![], false),
+    ))
+    .unwrap();
+    assert_eq!(outcome.termination(), &Termination::Exited(0));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "a descendant holding stderr must not keep the diagnostic worker alive"
+    );
+    assert_ne!(
+        outcome.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+}
+
+#[test]
 fn restricted_backend_runs_real_child_and_issues_receipt() {
     let root = root();
     let req = request(

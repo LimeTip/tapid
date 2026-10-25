@@ -157,6 +157,55 @@ fn registry(url: &str, packages: Vec<PackageVersionMetadata>) -> RegistryMetadat
 }
 
 #[test]
+fn excessive_metadata_is_rejected_before_normalization_or_resolution() {
+    let origin: PackageSource = "https://registry.npmjs.org".parse().unwrap();
+    let packages = (0..100_001)
+        .map(|index| {
+            let mut value = package("pkg", "1.0.0", &[]);
+            value.version = PackageVersion::stable(1, 0, index);
+            value
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        RegistryMetadata::normalize(origin.clone(), packages.clone()),
+        Err(ResolveError::MetadataLimitExceeded)
+    );
+    let split = packages
+        .chunks(50_001)
+        .map(|chunk| registry("https://registry.npmjs.org", chunk.to_vec()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolve_graph(&[], &split, ResolutionOptions::default()),
+        Err(ResolveError::MetadataLimitExceeded)
+    );
+    // Public metadata fields must not bypass bounds by skipping normalize.
+    let result = resolve_graph(
+        &[],
+        &[RegistryMetadata {
+            registry: origin,
+            packages,
+        }],
+        ResolutionOptions::default(),
+    );
+    assert_eq!(result, Err(ResolveError::MetadataLimitExceeded));
+}
+
+#[test]
+fn oversized_metadata_text_is_rejected_without_building_an_index() {
+    let mut value = package("pkg", "1.0.0", &[]);
+    value.dist_tags.insert("x".repeat(64 * 1024 * 1024 + 1));
+    let origin = "https://registry.npmjs.org".parse().unwrap();
+    let metadata = RegistryMetadata {
+        registry: origin,
+        packages: vec![value],
+    };
+    assert_eq!(
+        resolve_graph(&[], &[metadata], ResolutionOptions::default()),
+        Err(ResolveError::MetadataLimitExceeded)
+    );
+}
+
+#[test]
 fn exact_prerelease_selects_only_the_matching_candidate() {
     let m = registry(
         "https://registry.npmjs.org",

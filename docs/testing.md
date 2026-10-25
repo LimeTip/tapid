@@ -85,7 +85,8 @@ node --experimental-strip-types scripts/dev.ts package --workspace --locked
 node --experimental-strip-types scripts/dev.ts nextest run --workspace --all-features --locked
 node --experimental-strip-types scripts/dev.ts llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
 node --experimental-strip-types scripts/dev.ts deny check
-node --experimental-strip-types scripts/dev.ts audit
+node --experimental-strip-types scripts/dev.ts audit --deny unsound
+node --experimental-strip-types scripts/dev.ts audit --deny unsound --file tests/integration/Cargo.lock
 ```
 
 Coverage writes the CI artifact `lcov.info`. Mutation testing is a focused periodic test-strength check, not a per-change requirement:

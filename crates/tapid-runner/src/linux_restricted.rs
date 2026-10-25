@@ -67,6 +67,7 @@ const LIMITATIONS: &[&str] = &[
     "network-disabled policy denies Internet socket creation, connection, binding, listening, accepts, sendto, and recvfrom; AF_UNIX socketpairs with sendmsg/recvmsg and shutdown remain available for local runtime IPC; enabled networking is unrestricted",
     "Restricted does not own or guarantee cleanup of detached descendants",
     "standard streams remain connected; other inherited descriptors are closed",
+    "stderr relay stops shortly after root exit; detached descendant output may be truncated",
 ];
 
 #[path = "linux_restricted/managed.rs"]
@@ -1169,13 +1170,27 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             }
             (command, None)
         };
+        let (mut child_stderr, stderr_writer) = UnixStream::pair().map_err(|error| {
+            ExecutionError::new(
+                ExecutionErrorCategory::Spawn,
+                format!("cannot create stderr diagnostic socket: {error}"),
+            )
+        })?;
+        child_stderr
+            .set_read_timeout(Some(std::time::Duration::from_millis(50)))
+            .map_err(|error| {
+                ExecutionError::new(
+                    ExecutionErrorCategory::Spawn,
+                    format!("cannot bound stderr diagnostic reads: {error}"),
+                )
+            })?;
         command
             .current_dir(self.request.working_directory())
             .env_clear()
             .envs(&self.preflight.child_environment)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::from(OwnedFd::from(stderr_writer)));
         let mut child = command.spawn().map_err(|e| {
             ExecutionError::new(
                 ExecutionErrorCategory::Spawn,
@@ -1183,18 +1198,38 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             )
         })?;
         drop(command);
-        let mut child_stderr = child
-            .stderr
-            .take()
-            .expect("stderr was configured as a pipe");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = stop.clone();
         let stderr_reader = std::thread::spawn(move || {
             const DETECTION_WINDOW: usize = 128;
             let mut output = io::stderr().lock();
             let mut carry = Vec::with_capacity(DETECTION_WINDOW);
             let mut buffer = [0_u8; 4096];
             let mut denied = false;
+            let mut deadline = None;
             loop {
-                let count = child_stderr.read(&mut buffer)?;
+                if reader_stop.load(std::sync::atomic::Ordering::Acquire) {
+                    let deadline = deadline.get_or_insert_with(|| {
+                        std::time::Instant::now() + std::time::Duration::from_millis(100)
+                    });
+                    if std::time::Instant::now() >= *deadline {
+                        break;
+                    }
+                }
+                let count = match child_stderr.read(&mut buffer) {
+                    Ok(count) => count,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock
+                                | io::ErrorKind::TimedOut
+                                | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 if count == 0 {
                     break;
                 }
@@ -1207,12 +1242,8 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
             let _ = output.flush();
             Ok::<bool, io::Error>(denied)
         });
-        let status = child.wait().map_err(|e| {
-            ExecutionError::new(
-                ExecutionErrorCategory::Spawn,
-                format!("cannot wait for restricted project script: {e}"),
-            )
-        })?;
+        let status = child.wait();
+        stop.store(true, std::sync::atomic::Ordering::Release);
         let memory_stats_denied = stderr_reader
             .join()
             .map_err(|_| {
@@ -1227,6 +1258,12 @@ impl ExecutionLifecycle for LinuxLifecycle<'_> {
                     format!("cannot read restricted project script stderr: {e}"),
                 )
             })?;
+        let status = status.map_err(|e| {
+            ExecutionError::new(
+                ExecutionErrorCategory::Spawn,
+                format!("cannot wait for restricted project script: {e}"),
+            )
+        })?;
         if let Some(report) = private_report {
             parse_private_report(report)?;
         }

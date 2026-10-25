@@ -88,10 +88,87 @@ fn extract_inner(
     destination: &Path,
     limits: ArchiveLimits,
 ) -> Result<(), ExtractError> {
+    validate_raw_entries(bytes, format, limits.validation)?;
     let metadata = archive_metadata(bytes, format)?;
     validate_entries(metadata, limits.validation).map_err(ExtractError::Invalid)?;
     let executable_paths = extract_entries(bytes, format, destination)?;
     write_executable_manifest(destination, &executable_paths)?;
+    Ok(())
+}
+
+// Raw iteration exposes extension headers before tar allocates their bodies.
+// Size overrides are rejected so raw and effective entry boundaries agree.
+fn validate_raw_entries(
+    bytes: &[u8],
+    format: ArchiveFormat,
+    limits: ValidationLimits,
+) -> Result<(), ExtractError> {
+    let reader: Box<dyn Read + '_> = match format {
+        ArchiveFormat::Tar => Box::new(Cursor::new(bytes)),
+        ArchiveFormat::TarGz => Box::new(flate2::read::GzDecoder::new(Cursor::new(bytes))),
+    };
+    let mut archive = tar::Archive::new(reader);
+    let mut entries = 0usize;
+    let mut extensions = 0usize;
+    let mut metadata_bytes = 0u64;
+    let mut total = 0u64;
+    for item in archive.entries()?.raw(true) {
+        let mut entry = item?;
+        let kind = entry.header().entry_type();
+        let size = entry.size();
+        if kind.is_gnu_longname()
+            || kind.is_gnu_longlink()
+            || kind.is_pax_local_extensions()
+            || kind.is_pax_global_extensions()
+        {
+            extensions = extensions.saturating_add(1);
+            metadata_bytes = metadata_bytes.saturating_add(size);
+            let maximum = if kind.is_gnu_longname() || kind.is_gnu_longlink() {
+                (limits.max_path_bytes as u64).saturating_add(1)
+            } else if kind.is_pax_global_extensions() {
+                1024
+            } else {
+                64 * 1024
+            };
+            if size > maximum
+                || metadata_bytes > 16 * 1024 * 1024
+                || extensions > limits.max_entries.saturating_mul(3).saturating_add(1)
+            {
+                return Err(ExtractError::InvalidArchive(
+                    "archive metadata limit exceeded".into(),
+                ));
+            }
+            if kind.is_pax_local_extensions()
+                && let Some(records) = entry.pax_extensions()?
+            {
+                for record in records {
+                    let record = record?;
+                    if record.key_bytes() == b"size"
+                        || record.key_bytes().starts_with(b"GNU.sparse.")
+                    {
+                        return Err(ExtractError::InvalidArchive(
+                            "unsupported PAX size or sparse metadata".into(),
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+        entries = entries.saturating_add(1);
+        if entries > limits.max_entries {
+            return Err(ExtractError::Invalid(ValidationError::TooManyEntries));
+        }
+        if size > limits.max_entry_size {
+            return Err(ExtractError::Invalid(ValidationError::EntryTooLarge {
+                path: entry.path()?.to_string_lossy().into_owned(),
+                size,
+            }));
+        }
+        total = total.saturating_add(size);
+        if total > limits.max_total_size {
+            return Err(ExtractError::Invalid(ValidationError::TotalSizeExceeded));
+        }
+    }
     Ok(())
 }
 
@@ -133,7 +210,7 @@ fn archive_metadata(
         } else {
             EntryKind::Other
         };
-        let size = e.header().size().map_err(ExtractError::Io)?;
+        let size = e.size();
         let target = if matches!(kind, EntryKind::Symlink) {
             e.link_name()
                 .map_err(|x| ExtractError::InvalidArchive(x.to_string()))?
@@ -719,6 +796,110 @@ fn symlink_target_escapes(link: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn entry_count_is_checked_before_reading_more_archive_bodies() {
+        let project = tapid_test_support::TempProject::new("archive-entry-limit").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        for name in ["a", "b"] {
+            let mut header = tar::Header::new_ustar();
+            header.set_mode(0o644);
+            header.set_size(0);
+            builder.append_data(&mut header, name, io::empty()).unwrap();
+        }
+        let mut bytes = builder.into_inner().unwrap();
+        bytes.truncate(1024);
+        bytes.extend_from_slice(&[b'!'; 512]);
+        let mut limits = ArchiveLimits::default();
+        limits.validation.max_entries = 1;
+        let destination = project.path().join("tree");
+        assert!(matches!(
+            extract_to(&bytes, ArchiveFormat::Tar, &destination, limits),
+            Err(ExtractError::Invalid(ValidationError::TooManyEntries))
+        ));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn bounded_pax_paths_and_gnu_longnames_still_extract() {
+        for pax in [false, true] {
+            let project = tapid_test_support::TempProject::new("bounded-archive-path").unwrap();
+            let path = format!("package/{}/file", "a".repeat(120));
+            let mut builder = tar::Builder::new(Vec::new());
+            if pax {
+                builder
+                    .append_pax_extensions([("path", path.as_bytes())])
+                    .unwrap();
+            }
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(2);
+            builder
+                .append_data(
+                    &mut header,
+                    if pax { "placeholder" } else { &path },
+                    b"ok".as_slice(),
+                )
+                .unwrap();
+            let bytes = builder.into_inner().unwrap();
+            let destination = project.path().join("tree");
+            extract_to(
+                &bytes,
+                ArchiveFormat::Tar,
+                &destination,
+                ArchiveLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(fs::read(destination.join(path)).unwrap(), b"ok");
+        }
+    }
+
+    #[test]
+    fn oversized_extension_is_rejected_before_its_body_is_read() {
+        let project = tapid_test_support::TempProject::new("extension-limit").unwrap();
+        for kind in [tar::EntryType::GNULongName, tar::EntryType::XHeader] {
+            let mut header = tar::Header::new_gnu();
+            header.set_path("metadata").unwrap();
+            header.set_entry_type(kind);
+            header.set_size(32 * 1024 * 1024);
+            header.set_cksum();
+            let destination = project.path().join("tree");
+            // The missing body makes this distinguish an early bound from a
+            // parser that attempts to materialize all of the extension first.
+            assert!(matches!(extract_to(header.as_bytes(), ArchiveFormat::Tar,
+                &destination, ArchiveLimits::default()),
+                Err(ExtractError::InvalidArchive(message)) if message.contains("metadata")));
+            assert!(!destination.exists());
+        }
+    }
+
+    #[test]
+    fn pax_size_cannot_bypass_extraction_limits() {
+        use std::io::Write;
+        let project = tapid_test_support::TempProject::new("pax-size-limit").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder
+            .append_pax_extensions([("size", b"4096".as_slice())])
+            .unwrap();
+        let mut header = tar::Header::new_ustar();
+        header.set_path("package/file").unwrap();
+        header.set_mode(0o644);
+        header.set_size(0);
+        header.set_cksum();
+        let mut bytes = builder.into_inner().unwrap();
+        // Replace the builder's end markers with a raw zero-sized header whose
+        // effective PAX body is larger than both configured extraction limits.
+        bytes.truncate(1024);
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.write_all(&[b'x'; 4096]).unwrap();
+        bytes.extend_from_slice(&[0; 1024]);
+        let mut limits = ArchiveLimits::default();
+        limits.validation.max_entry_size = 1024;
+        limits.validation.max_total_size = 1024;
+        let destination = project.path().join("tree");
+        assert!(extract_to(&bytes, ArchiveFormat::Tar, &destination, limits).is_err());
+        assert!(!destination.exists());
+    }
+
     #[test]
     fn global_pax_accepts_only_one_bounded_commit_comment() {
         let commit = "a".repeat(40);

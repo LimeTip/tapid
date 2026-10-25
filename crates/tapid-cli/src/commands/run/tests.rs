@@ -88,6 +88,10 @@ fn cancelled_termination_maps_to_sigint_exit_code() {
 
 #[cfg(unix)]
 #[test]
+#[allow(
+    unsafe_code,
+    reason = "this native control inspects descriptor inheritance flags"
+)]
 fn result_file_is_empty_and_close_on_exec_before_execution() {
     use std::os::fd::AsRawFd;
     let project = tapid_test_support::TempProject::new("run-result-project").unwrap();

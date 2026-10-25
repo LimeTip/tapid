@@ -18,3 +18,10 @@ Unix extraction normalizes regular files to `0644` or `0755`, preserves only the
 Git commit tar archives may contain one global PAX header with a full hexadecimal
 commit comment. That bounded, inert header is validated and omitted from the
 tree. Other global PAX fields and duplicate global headers remain rejected.
+
+Raw headers are checked before the tar parser reads extension bodies. GNU long
+names are bounded by the configured path limit plus their terminator; local PAX
+headers are capped at 64 KiB and all extension bodies at 16 MiB per archive.
+PAX size overrides and sparse-file metadata are rejected so validation and
+extraction use the same entry boundaries. Entry count and byte limits are checked
+before advancing past a body, and failures remove the staging directory.
