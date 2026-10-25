@@ -78,6 +78,11 @@ pub(super) struct LiveSinks {
 }
 
 impl LiveSinks {
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn child_id(&self, index: usize) -> u32 {
+        self.children[index].id()
+    }
+
     pub(super) fn spawn<const N: usize>(
         destinations: [BorrowedFd<'_>; N],
         sanitize: fn() -> std::io::Result<()>,
