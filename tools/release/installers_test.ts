@@ -903,25 +903,26 @@ test("Zsh modes honor an absolute ZDOTDIR and reject ambiguous directories", she
   } finally { await f.cleanup(); }
 });
 
-test("Native Bash and Zsh startup modes resolve a custom installation automatically", { skip: platform === "win32" }, async (context) => {
-  for (const selected of ["bash", "zsh"]) {
+test("Native Bash, Zsh and POSIX startup modes resolve a custom installation automatically", { skip: platform === "win32" }, async (context) => {
+  for (const selected of ["bash", "zsh", "posix"]) {
     await context.test(selected, async (context) => {
-      const executable = await run("/bin/sh", ["-c", "command -v " + selected]).then(result => result.stdout.trim(), () => "");
-      if (!executable) { context.skip(selected + " is unavailable"); return; }
+      const executable = await run("/bin/sh", ["-c", "command -v " + (selected === "posix" ? "sh" : selected)]).then(result => result.stdout.trim(), () => "");
+      if (!executable) { equal(processEnv.TAPID_REQUIRE_NATIVE_SHELLS, undefined, "required native " + selected + " is unavailable"); context.skip(selected + " is unavailable"); return; }
       const f = await fixture();
       const home = join(f.directory, selected + "-native-home");
       const install = join(home, "custom bin");
       try {
         await mkdir(home);
-        const args = ["--install-dir", shellPath(install), "--configure-path", "--shell", selected, "--shell-mode", "both"];
+        const args = ["--install-dir", shellPath(install), "--configure-path", "--shell", selected, "--shell-mode", selected === "posix" ? "login" : "both"];
+        const modes = selected === "posix" ? ["-l"] : ["-l", "-i"];
         await f.installShell(args, { HOME: shellPath(home), ZDOTDIR: shellPath(home) });
         const probeEnv = { ...f.env, HOME: shellPath(home), ZDOTDIR: shellPath(home), PATH: "/usr/bin:/bin", BASH_ENV: "", ENV: "" };
-        for (const mode of ["-l", "-i"]) {
+        for (const mode of modes) {
           const probe = await run(executable, [mode, "-c", "command -v tapid"], { env: probeEnv });
           equal(probe.stdout.trim(), shellPath(join(install, "tapid")));
         }
         await run(shell!, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(install)], { env: { ...f.env, HOME: shellPath(home) } });
-        for (const mode of ["-l", "-i"]) {
+        for (const mode of modes) {
           const probe = await run(executable, [mode, "-c", 'printf "%s" "$PATH"'], { env: probeEnv });
           ok(!probe.stdout.split(":").includes(shellPath(install)));
         }
@@ -1082,5 +1083,196 @@ test("Fish pending receipts recover and uninstall without the binary or current 
     await run(shell!, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(f.install)], { env: { ...f.env, SHELL: "/bin/sh", XDG_CONFIG_HOME: "/unused" } });
     equal(await readFile(profile, "utf8"), "");
     await rejects(() => access(receipt), { code: "ENOENT" });
+  } finally { await f.cleanup(); }
+});
+
+// Source-build fixtures exercise the generated installer without Git, Cargo or network access.
+const powerShellSourceStubs = `function git { $global:LASTEXITCODE = 0 }
+function cargo {
+  $global:BuildCalls++
+  $buildRoot = $args[-1]
+  New-Item -ItemType Directory -Force (Join-Path $buildRoot 'bin') | Out-Null
+  [IO.File]::WriteAllText((Join-Path $buildRoot 'bin/tapid.exe'), 'fixture')
+  $global:LASTEXITCODE = 0
+}`;
+
+test("generated PowerShell installer preserves PATH without consent and prints literal activation", async (context) => {
+  try { await run("pwsh", ["-NoProfile", "-Command", "$null"]); }
+  catch { context.skip("PowerShell is unavailable"); return; }
+  const f = await fixture();
+  const directory = f.directory;
+  try {
+    await writeFile(join(directory, "install.ps1"), await readFile(join(directory, "bootstrap-assets/install.ps1")));
+    await writeFile(join(directory, "test.ps1"), `$ErrorActionPreference = 'Stop'
+${powerShellSourceStubs}
+$global:BuildCalls = 0
+$before = $env:Path
+$userBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
+$install = Join-Path $PSScriptRoot 'literal '' dollar $() bin'
+$output = & (Join-Path $PSScriptRoot 'install.ps1') -SourceRef fixture -InstallDir $install
+if ($env:Path -cne $before) { throw 'process PATH changed without consent' }
+if ([Environment]::GetEnvironmentVariable('Path', 'User') -cne $userBefore) { throw 'user PATH changed without consent' }
+if (-not (Test-Path (Join-Path $install 'tapid.exe'))) { throw 'binary missing' }
+$guidance = @($output | Where-Object { $_ -like '$env:Path =*' })
+if ($guidance.Count -ne 1) { throw 'literal activation command missing' }
+Invoke-Expression $guidance[0]
+if ($env:Path.Split(';')[0] -cne $install) { throw 'activation did not preserve literal directory' }
+$activated = $env:Path
+Invoke-Expression $guidance[0]
+if ($env:Path -cne $activated) { throw 'repeated activation duplicated the directory' }
+foreach ($invalid in @($install + ';bad', $install + [char]10 + 'bad', $install + '%PATH%')) {
+    $calls = $global:BuildCalls
+    $refused = $false
+    try { & (Join-Path $PSScriptRoot 'install.ps1') -SourceRef fixture -InstallDir $invalid -ConfigurePath | Out-Null } catch { $refused = $true }
+    if (-not $refused -or $global:BuildCalls -ne $calls) { throw 'invalid PATH directory was not rejected before building' }
+}
+Write-Output 'No-consent preservation verified'
+`);
+    const result = await run("pwsh", ["-NoProfile", "-File", join(directory, "test.ps1")]);
+    match(result.stdout, /No-consent preservation verified/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("generated PowerShell installer preserves opaque PATH tokens and compares literal entries", async (context) => {
+  try { await run("pwsh", ["-NoProfile", "-Command", "$null"]); }
+  catch { context.skip("PowerShell is unavailable"); return; }
+  const f = await fixture();
+  try {
+    // Substitute only the platform persistence boundary; execute the generated installer unchanged otherwise.
+    const source = await readFile(join(f.directory, "bootstrap-assets/install.ps1"), "utf8");
+    await writeFile(join(f.directory, "install.ps1"), source.replaceAll("Configure-UserPath $InstallDir", "Configure-UserPath $global:FixtureDirectory").replaceAll("function Read-UserPath", "function Read-NativeUserPath").replaceAll("function Write-UserPath", "function Write-NativeUserPath"));
+    await writeFile(join(f.directory, "uninstall.ps1"), (await readFile(join(root, "scripts/uninstall.ps1"), "utf8")).replaceAll("function Read-UserPath", "function Read-NativeUserPath").replaceAll("function Write-UserPath", "function Write-NativeUserPath").replaceAll("Read-PathReceipt $receipt $InstallDir", "Read-PathReceipt $receipt $global:FixtureDirectory"));
+    await writeFile(join(f.directory, "test.ps1"), `$ErrorActionPreference = 'Stop'
+function Read-UserPath { return $global:FixturePath.PSObject.Copy() }
+function Write-UserPath($Snapshot) { if (-not $global:FixtureSuppressWrite) { $global:FixturePath = $Snapshot.PSObject.Copy() }; $global:FixtureWrites++ }
+${powerShellSourceStubs}
+$install = Join-Path $PSScriptRoot 'installed'
+$cases = @(
+  @{ Before = 'relative;; %UNKNOWN%;C:\\other;'; After = 'relative;; %UNKNOWN%;C:\\other;;C:\\Tapid' },
+  @{ Before = ''; After = ';C:\\Tapid' },
+  @{ Before = $null; After = 'C:\\Tapid' },
+  @{ Before = 'c:/tapid/;;relative'; After = 'c:/tapid/;;relative' },
+  @{ Before = 'C:\\TAPID\\;other'; After = 'C:\\TAPID\\;other' },
+  @{ Before = '%TAPID_EQUIVALENT%;other'; After = '%TAPID_EQUIVALENT%;other' },
+  @{ Before = 'C:Tapid;C:\\bad?; C:\\Tapid'; After = 'C:Tapid;C:\\bad?; C:\\Tapid;C:\\Tapid' },
+  @{ Directory = 'C:\\'; Before = 'c:/;relative'; After = 'c:/;relative' },
+  @{ Directory = '\\\\server\\share'; Before = '//SERVER/share/;relative'; After = '//SERVER/share/;relative' }
+)
+$env:TAPID_EQUIVALENT = 'C:\\Tapid'
+foreach ($case in $cases) {
+  $global:FixtureDirectory = if ($case.ContainsKey('Directory')) { $case.Directory } else { 'C:\\Tapid' }
+  $global:FixturePath = [pscustomobject]@{ Present = $null -ne $case.Before; Value = [string]$case.Before; Kind = 'ExpandString' }
+  if (-not $global:FixturePath.Present) { $global:FixturePath.Kind = 'String' }
+  $global:FixtureWrites = 0
+  $original = Read-UserPath
+  $beforeProcess = $env:Path
+  & (Join-Path $PSScriptRoot 'install.ps1') -SourceRef fixture -InstallDir $install -ConfigurePath | Out-Null
+  if ($global:FixturePath.Value -cne $case.After) { throw "PATH changed incorrectly: $($global:FixturePath.Value)" }
+  if ($env:Path -cne $beforeProcess) { throw 'process PATH was silently activated' }
+  $writes = $global:FixtureWrites
+  & (Join-Path $PSScriptRoot 'install.ps1') -SourceRef fixture -InstallDir $install -ConfigurePath | Out-Null
+  if ($global:FixtureWrites -ne $writes) { throw 'repeated install rewrote PATH' }
+  $receipt = Join-Path $install '.tapid-path-v1'
+  if ([IO.File]::ReadAllText((Join-Path $receipt 'inserted')) -ceq '1') {
+    # Recovery on both sides of the registry write.
+    [IO.File]::WriteAllText((Join-Path $receipt 'state'), 'pending')
+    & (Join-Path $PSScriptRoot 'install.ps1') -SourceRef fixture -InstallDir $install -ConfigurePath | Out-Null
+    if ($global:FixtureWrites -ne $writes) { throw 'pending after snapshot was rewritten' }
+    [IO.File]::WriteAllText((Join-Path $receipt 'state'), 'pending')
+    $global:FixturePath = $original.PSObject.Copy()
+    $global:FixtureSuppressWrite = $true
+    $refused = $false
+    try { & (Join-Path $PSScriptRoot 'install.ps1') -SourceRef fixture -InstallDir $install -ConfigurePath | Out-Null } catch { $refused = $true }
+    if (-not $refused -or [IO.File]::ReadAllText((Join-Path $receipt 'state')) -cne 'pending') { throw 'read-back failure did not retain pending recovery' }
+    $global:FixtureSuppressWrite = $false
+    & (Join-Path $PSScriptRoot 'install.ps1') -SourceRef fixture -InstallDir $install -ConfigurePath | Out-Null
+    if ($global:FixturePath.Value -cne $case.After) { throw 'pending before snapshot not recovered' }
+    $expected = Read-UserPath
+    $global:FixturePath.Value += ';user-edit'
+    $refused = $false
+    try { & (Join-Path $PSScriptRoot 'uninstall.ps1') -InstallDir $install | Out-Null } catch { $refused = $true }
+    if (-not $refused -or -not (Test-Path $receipt) -or -not (Test-Path (Join-Path $install 'tapid.exe'))) { throw 'edited PATH was not preserved with retry state' }
+    $global:FixturePath = $expected
+    $manifestPath = Join-Path $receipt 'manifest'
+    $manifest = [IO.File]::ReadAllText($manifestPath)
+    [IO.File]::WriteAllText($manifestPath, 'unknown-version')
+    $refused = $false
+    try { & (Join-Path $PSScriptRoot 'uninstall.ps1') -InstallDir $install | Out-Null } catch { $refused = $true }
+    if (-not $refused -or $global:FixturePath.Value -cne $expected.Value) { throw 'malformed receipt authorized cleanup' }
+    [IO.File]::WriteAllText($manifestPath, $manifest)
+    $unexpected = Join-Path $receipt 'unknown'
+    [IO.File]::WriteAllText($unexpected, 'user data')
+    $refused = $false
+    try { & (Join-Path $PSScriptRoot 'uninstall.ps1') -InstallDir $install | Out-Null } catch { $refused = $true }
+    if (-not $refused -or -not (Test-Path $unexpected)) { throw 'unknown receipt field was removed' }
+    Remove-Item -LiteralPath $unexpected
+    $saved = $receipt + '.saved'
+    Move-Item -LiteralPath $receipt -Destination $saved
+    $linkType = if ([IO.Path]::DirectorySeparatorChar -eq '\\') { 'Junction' } else { 'SymbolicLink' }
+    New-Item -ItemType $linkType -Path $receipt -Target $saved | Out-Null
+    $refused = $false
+    try { & (Join-Path $PSScriptRoot 'uninstall.ps1') -InstallDir $install | Out-Null } catch { $refused = $true }
+    if (-not $refused -or -not (Test-Path $saved)) { throw 'receipt reparse point was followed' }
+    [IO.Directory]::Delete($receipt)
+    Move-Item -LiteralPath $saved -Destination $receipt
+  }
+  Remove-Item -LiteralPath (Join-Path $install 'tapid.exe')
+  & (Join-Path $PSScriptRoot 'uninstall.ps1') -InstallDir $install | Out-Null
+  if ($global:FixturePath.Present -ne $original.Present -or $global:FixturePath.Value -cne $original.Value -or $global:FixturePath.Kind -cne $original.Kind) { throw 'uninstall did not restore exact PATH snapshot' }
+}
+
+Write-Output 'Token preservation verified'
+`);
+    const result = await run("pwsh", ["-NoProfile", "-File", join(f.directory, "test.ps1")]);
+    match(result.stdout, /Token preservation verified/);
+  } finally { await f.cleanup(); }
+});
+
+test("native Windows PATH persistence resolves a fresh-session executable and restores registry kind", { skip: platform !== "win32" }, async () => {
+  const f = await fixture();
+  try {
+    await writeFile(join(f.directory, "test.ps1"), `$ErrorActionPreference = 'Stop'
+function git { $global:LASTEXITCODE = 0 }
+function cargo {
+    $buildRoot = $args[-1]
+    New-Item -ItemType Directory -Force (Join-Path $buildRoot 'bin') | Out-Null
+    [IO.File]::Copy($env:TAPID_FIXTURE_EXE, (Join-Path $buildRoot 'bin/tapid.exe'), $true)
+    $global:LASTEXITCODE = 0
+}
+$key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+$present = $key.GetValueNames() -icontains 'Path'
+$original = if ($present) { $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } else { '' }
+$kind = if ($present) { $key.GetValueKind('Path') } else { [Microsoft.Win32.RegistryValueKind]::String }
+$processPath = $env:Path
+$install = Join-Path $PSScriptRoot "custom ' bin"
+try {
+    $before = 'relative;;%TAPID_UNRESOLVED_FIXTURE%;'
+    $key.SetValue('Path', $before, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    & (Join-Path $PSScriptRoot 'bootstrap-assets/install.ps1') -SourceRef fixture -InstallDir $install | Out-Null
+    if ($key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -cne $before -or $env:Path -cne $processPath) { throw 'no-consent install changed PATH' }
+    & (Join-Path $PSScriptRoot 'bootstrap-assets/install.ps1') -SourceRef fixture -InstallDir $install -ConfigurePath | Out-Null
+    $persisted = $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    if ($persisted -cne "$before;$install" -or $key.GetValueKind('Path') -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) { throw 'registry persistence changed raw tokens or kind' }
+    # Construct a fresh session solely from persisted values, never add the fixture directory separately.
+    $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $env:Path = [Environment]::ExpandEnvironmentVariables("$machine;$persisted")
+    $pwsh = Join-Path $PSHOME 'pwsh.exe'
+    $resolved = & $pwsh -NoProfile -Command '(Get-Command tapid -CommandType Application -ErrorAction Stop).Source'
+    if ($LASTEXITCODE -ne 0 -or $resolved -cne (Join-Path $install 'tapid.exe')) { throw "wrong fresh-session executable: $resolved" }
+    $version = & $pwsh -NoProfile -Command '& tapid --version'
+    if ($LASTEXITCODE -ne 0 -or $version -cne $env:TAPID_FIXTURE_VERSION) { throw 'fixture executable did not run by name' }
+    & $env:TAPID_FIXTURE_UNINSTALLER -InstallDir $install | Out-Null
+    if ($key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -cne $before -or $key.GetValueKind('Path') -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) { throw 'cleanup failed to preserve raw registry value and kind' }
+    Write-Output 'Native Windows fresh-session resolution verified'
+} finally {
+    $env:Path = $processPath
+    if ($present) { $key.SetValue('Path', $original, $kind) } else { $key.DeleteValue('Path', $false) }
+    $key.Dispose()
+}
+`);
+    const result = await run("pwsh", ["-NoProfile", "-File", join(f.directory, "test.ps1")], {
+      env: { ...processEnv, TAPID_FIXTURE_EXE: process.execPath, TAPID_FIXTURE_VERSION: process.version, TAPID_FIXTURE_UNINSTALLER: join(root, "scripts/uninstall.ps1") },
+    });
+    match(result.stdout, /Native Windows fresh-session resolution verified/);
   } finally { await f.cleanup(); }
 });

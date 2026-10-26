@@ -45,9 +45,34 @@ selection; migration to another target set is refused pending implementation.
 Unreceipted two-profile blocks are also refused. Legacy cleanup searches bounded
 default locations with exact payload checks.
 
-Automatic receipt migration, Windows consent/preservation/cleanup, and the
-complete native matrix remain unfinished under issue #37. Local macOS Bash/Zsh/fish
-login and interactive probes launch startup modes without explicit profile
+Windows uses the same opt-in rule through `-ConfigurePath`, with direct literal
+PowerShell activation guidance and no implicit process activation. Comparison
+keys normalize case, slash direction and trailing separators for fully qualified
+paths; stored tokens, empty segments, ordering and registry String/ExpandString
+kinds remain intact. Environment-variable tokens are compared only after a
+successful fully qualified expansion. Relative, malformed and unresolved tokens
+remain opaque. Percent characters in a Windows install directory require manual
+activation; persistence refuses them before installation because environment
+expansion could change their literal meaning.
+
+The Windows receipt has fixed fields: manifest, directory, before, after,
+present, kind, inserted, state. It is staged before the registry write; pending
+before/after snapshots reconcile on retry and completion follows read-back.
+Readers reject unknown fields, unsupported versions, inconsistent snapshots,
+reparse points and foreign ownership. Uninstall restores an exact unchanged
+owned snapshot and preserves pre-existing equivalents. Conflicting edits retain
+the receipt and return an error; remove the conflict before retrying. Missing
+executables do not skip cleanup. Receipt parsers are deliberately repeated in
+the standalone scripts so generated installers need no sibling files.
+
+Automatic Unix receipt migration and the complete native matrix remain
+unfinished under issue #37. The Windows contract CI lane requires a fresh-session
+probe built from persisted machine/user values, with registry restoration in a
+finally block. Local PowerShell tests use isolated persistence snapshots and do
+not establish native Windows registry or process-resolution evidence.
+
+Local macOS POSIX login and Bash/Zsh/fish login and interactive probes launch
+startup modes without explicit profile
 sourcing and resolve a custom fixture executable. Other platforms require their
 own evidence. Read-back and native resolution remain separate claims.
 

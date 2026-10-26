@@ -607,14 +607,15 @@ jobs:
             # shellcheck disable=SC2016
             "$runtime/pwsh" -NoProfile -NonInteractive -Command '$PSVersionTable; [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription; if ([System.Numerics.BigInteger]::One -ne 1) { exit 1 }'
           done
-      - name: Provision native fish installer probes
+      - name: Provision native installer shell probes
         run: |
           sudo apt-get update
-          sudo apt-get install --yes fish
+          sudo apt-get install --yes fish zsh
           fish --version
       - name: Test release helpers and workflows
         env:
           TAPID_REQUIRE_FISH: "1"
+          TAPID_REQUIRE_NATIVE_SHELLS: "1"
         run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/*_test.ts
       - name: Test consumer capability contracts
         run: node --test tests/fixtures/consumer_contract.test.js tests/fixtures/validate_consumer_project.test.js
@@ -696,6 +697,11 @@ jobs:
           $actual = & target/debug/tapid.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($actual -cne "tapid $expected") { throw "Unexpected native version: $actual" }
+      - name: Verify native Windows PATH contract
+        shell: pwsh
+        run: |
+          node --experimental-strip-types --test --test-name-pattern="native Windows PATH persistence" tools/release/installers_test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install and reject archive fixtures
         shell: pwsh
         run: |
