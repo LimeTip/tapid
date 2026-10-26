@@ -4,6 +4,88 @@ The ordinary release flow is GitHub-native. Start preparation, review and merge 
 
 [ADR 0007](adr/0007-one-candidate-one-release-approval.md) changes the approval policy. Deploying the workflow files alone does not prove that the required repository, App, environment, or registry configuration is active. Complete and verify the setup below before using this lane.
 
+## Pre-publication installer investigation (#126)
+
+**Decision (2026-10-26): no implementation for [#126](https://github.com/LimeTip/tapid/issues/126).** The bounded experiment reached the platform-machinery stop condition. This is a scope decision for non-blocking hardening, not successful native installation evidence or acceptance of the original feature. Revisit if a smaller exact-byte transport becomes available.
+
+| Option | Coverage and cost | Decision |
+| --- | --- | --- |
+| Native builds install their own archive | Exercises archive installation, but final generated installers and signed metadata are assembled downstream. Moving those inputs upstream duplicates candidate coordination; synthetic metadata misses the final candidate. | Reject as the primary check. |
+| Existing draft verification installs exact assets | Could exercise final installers, signature verification, installation policy and installed executables. Reuses numeric release/asset downloads and six native runners, but requires HTTPS routing and trust for unchanged URLs. | Preferred location if revisited; reject the present transport approach as too much platform machinery. |
+
+### Findings and scope stop
+
+Inspected source: `b040cef091d6267257b9a1fc5583fa5126924294`.
+[Bootstrap generation](../tools/release/bootstrap.ts) uses candidate archive hashes,
+version and release URL: normal generated bootstrap archives are already among the
+eleven draft assets. A future implementation must validate this for each actual
+handoff, including historical installer differences.
+
+The installers download metadata/signatures from `tapid.dev`, then bootstrap and
+target archives from embedded or signed GitHub URLs. `TAPID_RELEASE_RECORD_URL`
+alone cannot redirect the journey. Rewriting installers or signed records would
+weaken exact-draft evidence and was not used.
+
+A disposable Node HTTPS probe bound only to `127.0.0.1` on an ephemeral port. It
+served one exact host/path GET mapping and rejected an unmapped query with 404;
+its TLS client rejected untrusted and wrong-host certificates. The actual curl
+command shape from `scripts/install.sh` fetched exact synthetic bytes using
+child-only `CURL_HOME` configuration (`connect-to`, `cacert`, `noproxy`). OpenSSL
+provided a one-day self-signed certificate for `draft.invalid`. TLS verification
+stayed enabled. The probe used no credentials, forwarding, system trust changes,
+hosts edits, installer modifications or candidate execution. Requests had bounded
+timeouts; connections, server and temporary files were cleaned up. It did not
+exercise every routing failure or prove isolation against arbitrary candidate code.
+
+The Windows downloader constructs a fresh `HttpClientHandler`/`HttpClient`; it
+has no curl configuration hook. Microsoft's [handler proxy contract](https://learn.microsoft.com/en-us/dotnet/api/system.net.http.httpclienthandler.proxy)
+describes handler/system proxy configuration. The draft workflow uses Windows
+PowerShell, so modern .NET proxy-environment behavior is not evidence of support.
+Direct routing would require hosts-file mapping of public hostnames, a port-443
+listener, temporary OS certificate trust, proxy bypass, and restoration after
+exceptions/timeouts. Installation also requires restoring Windows user PATH.
+The proxy alternative requires HTTPS interception. Neither was implemented or
+tested. Temporary runner changes were allowed; they are not claimed to be
+impossible or forbidden. Adding privileged routing and OS-specific trust/recovery
+is judged too much machinery for this small check. This is an early scope stop,
+not a failed Windows experiment or sandbox limitation.
+
+### Measurements and retained change
+
+One local synthetic transport sample: macOS arm64, Node 22.23.3, curl 8.7.1
+(SecureTransport). Child curl configuration plus HTTPS fetch: **22.4 ms**. Final
+probe test including certificate generation and TLS negative checks: **105.1 ms**;
+test-runner total: **177.7 ms**. The initial test failed with the missing module,
+then passed after implementation. No build or hosted queue was involved.
+
+**Exact-candidate native installation samples: zero on all six targets.** No
+candidate identity, numeric release/asset IDs, hosted run URL, per-phase installer
+timings, slowest native platform or added critical-path measurement exists. The
+under-ten-added-minutes target remains unproven. These transport timings establish
+no Ubuntu/Windows, candidate-installation or percentile claim. Existing extraction
+and native binary/signature checks do not fill the canonical-installer gap.
+
+The scratch probe was removed at the scope stop; no experimental module or
+workflow integration remains. Retained changes are this decision and the
+[distribution-runbook cross-reference](release-distribution.md#4-review-the-draft-by-numeric-release-id).
+Added production dependencies, jobs, permissions, credentials, approvals and
+operator steps: **zero**. Scratch dependencies were Node built-ins, curl and
+OpenSSL. The implementation handoff records actual changed lines.
+
+No new success receipt or release gate exists. Existing identity, checksum,
+signature, native-execution failures and fail-closed promotion ordering remain
+unchanged. The proposed provenance handoff and installer failure-path tests were
+not added after the scope stop. No release was created or mutated.
+
+Validation: release-tooling suite **287 passed, 6 skipped, 0 failed** (293 tests,
+22.51 s); all skips require unavailable PowerShell. `sh -n scripts/install.sh`
+passed. PowerShell parser/native checks remain with existing Windows CI. The
+removed transport probe is separate synthetic evidence, not a candidate receipt.
+
+Post-publication public installer and upgrade smoke remains unchanged. Even a
+successful fixture would not prove public DNS, redirects, endpoint routing,
+availability, discovery or upgrade behavior.
+
 ## One-time setup
 
 1. Merge the reviewed automation changes and pass the required checks on protected `main`.

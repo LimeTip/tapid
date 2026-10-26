@@ -170,6 +170,8 @@ Warnings and notices are evidence, not harmless decoration. Inspect the workflow
 
 ### 4. Review the draft by numeric release ID
 
+The [pre-publication installer investigation](release-automation.md#pre-publication-installer-investigation-126) records why an exact-byte installer fixture was not added. Draft binary execution does not establish canonical installer execution; public endpoint smoke remains separate.
+
 A draft is not public and some tag-based REST endpoints return 404 for drafts. List releases, including drafts, identify exactly one matching tag, and retain its numeric ID. Use that ID for subsequent API reads and asset downloads.
 
 The expected asset set is exactly:
