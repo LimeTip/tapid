@@ -6,6 +6,14 @@ Tapid 0.0.11 completed the first signed-record and generated-installer rollout. 
 
 ## Scope and sources of truth
 
+The Unix installer now requires `--configure-path` to modify startup files. Smoke
+checks that exercise PATH persistence must opt in explicitly; binary-only installs
+remain valid without it and print a direct activation command. Current persistence
+covers default-directory Bash/POSIX login profiles and Zsh `.zprofile`; startup-mode
+selection, custom-directory persistence, receipts, fish, and the Windows consent
+contract remain unfinished under issue #37. Read-back and native new-shell evidence
+must remain distinct from a successful executable installation.
+
 This document is the operator runbook for releasing the Tapid command-line client. The implementation sources of truth are:
 
 - `.github/workflows/release-publication.yml` for binary builds and draft GitHub releases;

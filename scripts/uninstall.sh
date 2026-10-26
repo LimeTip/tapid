@@ -63,10 +63,12 @@ remove_path_block() {
   [ "$begin_count" -eq 1 ] && [ "$end_count" -eq 1 ] || return 1
   path_tmp="$(mktemp "$PATH_RC.tapid.XXXXXX")" || return 1
   if ! awk -v begin="$PATH_MARKER_BEGIN" -v end="$PATH_MARKER_END" '
-    $0 == begin { if (inside != 0) bad=1; inside++; next }
-    $0 == end { if (inside != 1) bad=1; inside=0; next }
+    $0 == begin { if (inside != 0 || seen) bad=1; inside=1; seen=1; next }
+    $0 == end { if (inside != 2) bad=1; inside=0; next }
+    inside == 1 { if ($0 != "export PATH=\"$HOME/.local/bin:$PATH\"") bad=1; inside=2; next }
+    inside == 2 { bad=1; next }
     !inside { print }
-    END { if (inside != 0) bad=1; exit bad }
+    END { if (inside != 0 || !seen) bad=1; exit bad }
   ' "$PATH_RC" > "$path_tmp"; then
     rm -f "$path_tmp"; return 1
   fi
@@ -80,15 +82,19 @@ remove_path_block() {
 if [ -e "$BINARY" ] || [ -L "$BINARY" ]; then
   [ -L "$BINARY" ] && { printf 'uninstaller: refusing to remove symlink: %s\n' "$BINARY" >&2; exit 1; }
   [ -f "$BINARY" ] || { printf 'uninstaller: refusing to remove non-regular path: %s\n' "$BINARY" >&2; exit 1; }
-  rm -f "$BINARY"
-  printf 'Removed %s\n' "$BINARY"
-else
-  printf 'Tapid is not installed at %s\n' "$BINARY"
 fi
 
 if ! remove_path_block; then
   printf 'uninstaller: refusing unsafe or unsupported shell startup file\n' >&2
   exit 1
 fi
+
+if [ -e "$BINARY" ]; then
+  rm -f "$BINARY"
+  printf 'Removed %s\n' "$BINARY"
+else
+  printf 'Tapid is not installed at %s\n' "$BINARY"
+fi
+
 [ -e "$MARKER" ] || [ -L "$MARKER" ] || exit 0
 rm -f "$MARKER"

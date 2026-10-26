@@ -96,7 +96,7 @@ esac
     installShell: (args: string[] = [], additions: Record<string, string> = {}) =>
       run(shell, [shellPath(installer), "--install-dir", shellPath(install), ...args], { env: { ...env, ...additions } }),
     defaultInstallShell: (home: string, additions: Record<string, string> = {}) =>
-      run(shell, ["-c", 'PATH="$INSTALLER_FIXTURE/bin:$PATH"; export PATH; exec /bin/sh "$1"', "installer", shellPath(installer)], { env: { ...env, HOME: shellPath(home), SHELL: "/bin/zsh", ...additions } }),
+      run(shell, ["-c", 'PATH="$INSTALLER_FIXTURE/bin:$PATH"; export PATH; exec /bin/sh "$1" --configure-path', "installer", shellPath(installer)], { env: { ...env, HOME: shellPath(home), SHELL: "/bin/zsh", ...additions } }),
     requests: async () => (await readFile(join(directory, "requests"), "utf8"))
       .split("\n")
       .filter((request: string) => request && !request.endsWith(".sig") && !request.startsWith("https://bootstrap.example/"))
@@ -137,6 +137,76 @@ test("Unix single-file installer authenticates its native bootstrap before execu
   } finally { await f.cleanup(); }
 });
 
+test("Unix installer requires consent before changing startup files", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "consent-home");
+  try {
+    await mkdir(home);
+    const profile = join(home, ".profile");
+    await writeFile(profile, "# user configuration\n");
+    const result = await f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--shell", "posix"], { HOME: shellPath(home) });
+    equal(await readFile(profile, "utf8"), "# user configuration\n");
+    match(result.stdout, /Persistent PATH was not changed/);
+    match(result.stdout, /export PATH=/);
+  } finally { await f.cleanup(); }
+});
+
+test("Unix activation guidance quotes custom paths and preserves empty PATH segments", shellOptions, async () => {
+  const f = await fixture();
+  const install = join(f.directory, "bin 'quoted' $(touch injected) space");
+  try {
+    const result = await f.installShell(["--install-dir", shellPath(install)]);
+    const command = result.stdout.split("\n").find(line => line.startsWith("To enable Tapid"))!.split("run: ")[1];
+    for (const [setup, expected] of [["unset PATH", shellPath(install)], ["PATH=", `${shellPath(install)}:`], ["PATH=:/other:", `${shellPath(install)}::/other:`]]) {
+      const activated = await run(shell!, ["-c", `${setup}; ${command}; printf '%s' "$PATH"`], { cwd: f.directory, env: f.env });
+      equal(activated.stdout, expected);
+      const repeated = await run(shell!, ["-c", `${setup}; ${command}; ${command}; printf '%s' "$PATH"`], { cwd: f.directory, env: f.env });
+      equal(repeated.stdout, expected);
+    }
+    await rejects(() => readFile(join(f.directory, "injected")), { code: "ENOENT" });
+  } finally { await f.cleanup(); }
+});
+
+test("Unix installer refuses directories that cannot be represented in PATH before downloading", shellOptions, async () => {
+  const f = await fixture();
+  try {
+    for (const suffix of ["colon:path", "line\nbreak", "carriage\rreturn"]) {
+      await rejects(() => f.installShell(["--install-dir", shellPath(join(f.directory, suffix))]), /install directory.*PATH/);
+    }
+    await rejects(() => readFile(join(f.directory, "requests")), { code: "ENOENT" });
+  } finally { await f.cleanup(); }
+});
+
+test("Unix auto selection leaves startup files unchanged for unknown or unset preferences", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "unknown-shell-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# untouched\n");
+    for (const preference of ["", "/bin/unknown-shell"]) {
+      const result = await f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--configure-path"], { HOME: shellPath(home), SHELL: preference });
+      match(result.stdout, /Persistent PATH was not changed/);
+      equal(await readFile(join(home, ".profile"), "utf8"), "# untouched\n");
+    }
+  } finally { await f.cleanup(); }
+});
+
+test("Unix uninstall preserves edited managed blocks and retains the installation for retry", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "edited-block-home");
+  const install = join(home, ".local", "bin");
+  try {
+    await mkdir(home);
+    await f.defaultInstallShell(home, { SHELL: "/bin/sh" });
+    const edited = '# tapid-path-managed-v1\nexport PATH="$HOME/.local/bin:$PATH"\n# user edit\n# end tapid-path-managed-v1\n';
+    await writeFile(join(home, ".profile"), edited);
+    await rejects(() => run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } }), /refusing unsafe/);
+    equal(await readFile(join(home, ".profile"), "utf8"), edited);
+    equal(await readFile(join(install, ".tapid-managed"), "utf8"), "tapid-managed-v1\n");
+    equal((await run(join(install, "tapid"), ["--version"])).stdout.trim(), "tapid 1.2.3");
+  } finally { await f.cleanup(); }
+});
+
 test("explicit Bash selection overrides a misleading SHELL", shellOptions, async () => {
   const f = await fixture();
   const home = join(f.directory, "bash-home");
@@ -144,7 +214,7 @@ test("explicit Bash selection overrides a misleading SHELL", shellOptions, async
     await mkdir(home);
     await writeFile(join(home, ".bash_profile"), "# bash login\n");
     await writeFile(join(home, ".zprofile"), "# zsh login\n");
-    await f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--shell", "bash"], { HOME: shellPath(home), SHELL: "/bin/zsh" });
+    await f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--shell", "bash", "--configure-path"], { HOME: shellPath(home), SHELL: "/bin/zsh" });
     match(await readFile(join(home, ".bash_profile"), "utf8"), /tapid-path-managed-v1/);
     equal(await readFile(join(home, ".zprofile"), "utf8"), "# zsh login\n");
   } finally { await f.cleanup(); }
@@ -168,11 +238,11 @@ test("explicit Bash selection respects login startup precedence", shellOptions, 
     await mkdir(home);
     await writeFile(join(home, ".bash_login"), "# login\n");
     await writeFile(join(home, ".profile"), "# fallback\n");
-    await f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--shell", "bash"], { HOME: shellPath(home) });
+    await f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--shell", "bash", "--configure-path"], { HOME: shellPath(home) });
     match(await readFile(join(home, ".bash_login"), "utf8"), /tapid-path-managed-v1/);
     equal(await readFile(join(home, ".profile"), "utf8"), "# fallback\n");
     await symlink(join(home, ".bash_login"), join(home, ".bash_profile"));
-    await rejects(() => f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--shell", "bash"], { HOME: shellPath(home) }), /could not safely update/);
+    await rejects(() => f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--shell", "bash", "--configure-path"], { HOME: shellPath(home) }), /could not safely update/);
     await rm(join(home, ".bash_profile"));
     await run(shell!, [shellPath(join(root, "scripts", "uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home), SHELL: "/bin/bash" } });
     equal(await readFile(join(home, ".bash_login"), "utf8"), "# login\n");
@@ -294,7 +364,7 @@ test("PowerShell uninstaller preserves a foreign binary and removes a marked bin
     await mkdir(home);
     await mkdir(pathInstall, { recursive: true });
     await writeFile(profile, "export PATH=\"$HOME/bin:$PATH\"\n");
-    const installShell = () => run("/bin/sh", [f.installer, "--install-dir", pathInstall], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
+    const installShell = () => run("/bin/sh", [f.installer, "--install-dir", pathInstall, "--configure-path"], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
     await installShell();
     const first = await readFile(profile, "utf8");
     equal(first, "export PATH=\"$HOME/bin:$PATH\"\n# tapid-path-managed-v1\nexport PATH=\"$HOME/.local/bin:$PATH\"\n# end tapid-path-managed-v1\n");
@@ -318,7 +388,7 @@ test("Unix PATH management refuses symlinked and foreign startup files", { skip:
   try {
     await mkdir(home);
     await mkdir(pathInstall, { recursive: true });
-    const installShell = () => run("/bin/sh", [f.installer, "--install-dir", pathInstall], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
+    const installShell = () => run("/bin/sh", [f.installer, "--install-dir", pathInstall, "--configure-path"], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
     await writeFile(join(f.directory, "foreign-profile"), "export PATH=\"$PATH\"\n");
     await symlink(join(f.directory, "foreign-profile"), profile);
     await rejects(installShell);
@@ -566,6 +636,19 @@ test("Unix PATH management refuses malformed managed blocks without changing the
       await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
       equal(await readFile(profile, "utf8"), original);
     }
+  } finally { await f.cleanup(); }
+});
+
+test("Unix installer verifies profile bytes after replacement before claiming PATH success", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "readback-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# original\n");
+    await writeFile(join(f.directory, "bin", "mv"), '#!/bin/sh\ncase "$3" in */.profile) printf "# altered after staging\\n" > "$3"; /bin/rm -f "$2" ;; *) exec /bin/mv "$@" ;; esac\n');
+    await chmod(join(f.directory, "bin", "mv"), 0o755);
+    await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
+    await rejects(() => readFile(join(home, ".local", "bin", "tapid")), { code: "ENOENT" });
   } finally { await f.cleanup(); }
 });
 

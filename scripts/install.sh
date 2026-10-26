@@ -15,6 +15,7 @@ PATH_UPDATED=0
 PATH_RC=""
 PATH_COMMAND=""
 PATH_SHELL="auto"
+CONFIGURE_PATH=0
 PATH_MARKER_BEGIN="# tapid-path-managed-v1"
 PATH_MARKER_END="# end tapid-path-managed-v1"
 MAX_RECORD_BYTES=262144
@@ -68,6 +69,7 @@ Options:
   --source-ref REF      Build from a source branch, tag, or commit (development)
   --install-dir DIR     Install the binary into DIR (default: ~/.local/bin)
   --shell SHELL         PATH shell preference: auto|bash|zsh|posix (fish unavailable)
+  --configure-path      Opt in to persistent shell startup-file changes
   --repo OWNER/REPO     Use the legacy GitHub release layout for this repository
   -h, --help            Show this help
 
@@ -109,6 +111,7 @@ valid_path_block() {
 
 # Stage and verify an owned startup profile before atomically adding Tapid's PATH block.
 configure_path() {
+  [ "$CONFIGURE_PATH" -eq 1 ] || return 0
   [ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0
   shell_name="$PATH_SHELL"
   if [ "$shell_name" = auto ]; then
@@ -124,7 +127,7 @@ configure_path() {
       PATH_COMMAND=". \"$PATH_RC\""
       ;;
     posix|sh|dash|ksh) PATH_RC="$HOME/.profile"; PATH_COMMAND=". \"$PATH_RC\"" ;;
-    *) return 1 ;;
+    *) return 0 ;;
   esac
   path_line='export PATH="$HOME/.local/bin:$PATH"'
   if [ -L "$PATH_RC" ] || { [ -e "$PATH_RC" ] && { [ ! -f "$PATH_RC" ] || [ ! -O "$PATH_RC" ] || [ ! -r "$PATH_RC" ] || [ ! -w "$PATH_RC" ]; }; }; then
@@ -155,17 +158,24 @@ configure_path() {
     } >> "$path_tmp" || ! valid_path_block "$path_tmp"; then
       rm -f "$path_tmp"; return 1
     fi
+    path_expected_hash="$(sha256_file "$path_tmp")" || { rm -f "$path_tmp"; return 1; }
     mv -f "$path_tmp" "$PATH_RC" || { rm -f "$path_tmp"; return 1; }
+    [ ! -L "$PATH_RC" ] && [ -f "$PATH_RC" ] && [ -O "$PATH_RC" ] || return 1
+    [ "$(sha256_file "$PATH_RC")" = "$path_expected_hash" ] || return 1
   fi
   PATH="$INSTALL_DIR${PATH:+:$PATH}"; export PATH; PATH_UPDATED=1
 }
 
 print_path_guidance() {
+  # Quote a literal directory, including apostrophes, without evaluating it.
+  quoted_install="$(printf '%s' "$INSTALL_DIR" | sed "s/'/'\\\\''/g")"
+  PATH_COMMAND="case :\${PATH-}: in *:'$quoted_install':*) ;; *) export PATH='$quoted_install'\${PATH+:\$PATH} ;; esac"
   if [ "$PATH_UPDATED" -eq 1 ]; then
-    printf 'Tapid was installed and PATH was configured in %s.\n' "$PATH_RC"
+    printf 'Tapid was installed and PATH persistence was verified in %s.\n' "$PATH_RC"
     printf 'To enable it in the current shell, run: %s\n' "$PATH_COMMAND"
-  elif [ "$INSTALL_DIR" != "$HOME/.local/bin" ]; then
-    printf 'Add this directory to PATH before running Tapid: %s\n' "$INSTALL_DIR"
+  else
+    printf 'Persistent PATH was not changed.\n'
+    printf 'To enable Tapid in a POSIX-compatible shell, run: %s\n' "$PATH_COMMAND"
   fi
 }
 
@@ -175,6 +185,7 @@ while [ "$#" -gt 0 ]; do
     --source-ref) [ "$#" -ge 2 ] || fail "--source-ref requires a value"; SOURCE_REF="$2"; SOURCE_REF_SET=1; shift 2 ;;
     --install-dir) [ "$#" -ge 2 ] || fail "--install-dir requires a value"; INSTALL_DIR="$2"; shift 2 ;;
     --shell) [ "$#" -ge 2 ] || fail "--shell requires a value"; PATH_SHELL="$2"; shift 2 ;;
+    --configure-path) CONFIGURE_PATH=1; shift ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a value"; REPO="$2"; LEGACY_RELEASE=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown option: $1" ;;
@@ -191,6 +202,10 @@ case "$REPO" in ''|*[!A-Za-z0-9_./-]*|/*|*/|*/*/*) fail "repository must be OWNE
 case "$REPO" in */*) ;; *) fail "repository must be OWNER/REPO" ;; esac
 [ "$VERSION_SET" -eq 0 ] || [ "$SOURCE_REF_SET" -eq 0 ] || fail "use either --version or --source-ref, not both"
 case "$INSTALL_DIR" in /*) ;; *) fail "install directory must be an absolute path" ;; esac
+case "$INSTALL_DIR" in
+  *:*|*'
+'*|*"$(printf '\r')"*) fail "install directory cannot contain PATH delimiters or line breaks" ;;
+esac
 mkdir -p "$INSTALL_DIR"
 if [ -e "$INSTALL_DIR/tapid" ] || [ -L "$INSTALL_DIR/tapid" ]; then
   [ -f "$INSTALL_DIR/tapid" ] && [ ! -L "$INSTALL_DIR/tapid" ] || fail "existing Tapid destination must be a regular file"

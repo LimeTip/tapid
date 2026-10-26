@@ -34,7 +34,7 @@ Windows PowerShell:
 iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
-These install the latest published development release. Open a new terminal, or follow the PATH instructions printed by the installer, before using `tapid`.
+These install the latest published development release. On Unix, run the activation command printed by the installer before using `tapid`; persistent PATH changes require `--configure-path`. On Windows, open a new terminal or follow the printed PATH instructions.
 
 For specific versions, source builds, verification, upgrades, and uninstall instructions, see the [installation details](#installation-details). For release readiness, see [Development status](#development-status).
 
@@ -180,9 +180,11 @@ Invoke-WebRequest https://tapid.dev/install.ps1 -OutFile $installer
 Remove-Item $installer
 ```
 
-The Unix installer accepts `--shell auto|bash|zsh|posix`; explicit selection overrides the `$SHELL` preference used by `auto`. Fish selection is currently rejected before installation. Bash login selection uses the first existing `.bash_profile`, `.bash_login`, or `.profile`, creating `.profile` if none exists; an unsafe higher-precedence file is rejected. Startup-mode selection, explicit persistence consent, and receipt-backed cleanup remain pending; this is not the complete durable PATH contract. Until receipts are implemented, uninstall still uses the current `$SHELL`, which must match the selected installation shell.
+The Unix installer accepts `--shell auto|bash|zsh|posix`; explicit selection overrides the `$SHELL` preference used by `auto`. Persistent startup-file changes require `--configure-path`. Without it, startup files remain unchanged and the installer prints a literal activation command. Unknown or unset auto preferences also leave startup files unchanged. Fish selection is currently rejected before installation. Bash login selection uses the first existing `.bash_profile`, `.bash_login`, or `.profile`, creating `.profile` if none exists; an unsafe higher-precedence file is rejected. Startup-mode selection and receipt-backed cleanup remain pending; this is not the complete durable PATH contract. Until receipts are implemented, uninstall still uses the current `$SHELL`, which must match the selected installation shell.
 
-The Unix installer manages only `~/.local/bin` through a versioned `tapid-path-managed-v1` block in an owned, writable Bash or POSIX startup file (`$HOME/.bash_profile`, `$HOME/.bash_login`, or `$HOME/.profile`). Repeated installs are idempotent; uninstall removes only that exact Tapid block and preserves unrelated PATH entries. Symlinked, non-regular, foreign, or unwritable startup files are rejected. For a custom `--install-dir`, the installer prints the directory that must be added manually. PowerShell updates the user-level Windows PATH. Open a new terminal, or follow the command printed by the installer, before using `tapid`. Other Unix shells remain outside this slice.
+With consent, the Unix installer manages only `~/.local/bin` through a versioned `tapid-path-managed-v1` block in an owned, writable Bash or POSIX startup file (`$HOME/.bash_profile`, `$HOME/.bash_login`, or `$HOME/.profile`), or Zsh's `.zprofile`. Repeated installs are idempotent; uninstall removes only that exact Tapid block and preserves unrelated PATH entries. Edited blocks are preserved with an error, retaining the installation marker and binary for retry. Symlinked, non-regular, foreign, or unwritable startup files are rejected. Custom `--install-dir` values receive a safely quoted manual activation command; colon and line-break characters are rejected before installation. Activation guidance preserves existing empty PATH segments. PowerShell still updates the user-level Windows PATH automatically; its consent and ownership contract remains pending. Other Unix shell modes remain outside this slice.
+
+For example, opt in to Bash login configuration with `sh install.sh --configure-path --shell bash` after downloading the installer. The printed activation command updates the current shell directly; it does not source your entire startup file. Persistence alone does not prove resolution in every future shell mode.
 
 Remove the Tapid CLI binary and its managed PATH block on Unix:
 
