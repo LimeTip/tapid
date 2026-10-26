@@ -536,7 +536,7 @@ fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
     let runtime = trusted.join("node");
     fs::write(
             &runtime,
-            b"#!/bin/sh\ncase \"$*\" in *second-node*) printf verified > second-node ;; *detached-node*) printf verified > detached-node ;; esac\n",
+            b"#!/bin/sh\ncase \"$*\" in *second-node*) printf verified > second-node ;; *detached-node*) { sleep 0.2; printf verified; } > detached-node ;; esac\n",
         )
         .unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
@@ -586,7 +586,8 @@ fn project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime() {
     }
     assert!(
         project.join("descendant-done").exists(),
-        "detached node did not finish successfully"
+        "detached node did not finish successfully: {}",
+        fs::read_to_string(project.join("descendant.stderr")).unwrap_or_default()
     );
     let resolution = outcome.enforcement().executable_resolution().unwrap();
     let private = PathBuf::from(OsString::from_vec(
