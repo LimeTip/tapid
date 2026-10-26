@@ -243,7 +243,7 @@ Cleaning refuses competing replay or publication operations. Installed projects 
 - Vulnerability intelligence, package malware scanning, publisher/provenance verification, and human audit attestations are not implemented. A verified archive is not necessarily safe or vulnerability-free.
 - Dependency lifecycle scripts are denied by default. Exact checked-in approvals can run supported hooks through Linux ManagedTree; see [policy and platform requirements](docs/dependency-lifecycle.md).
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
-- CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
+- CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu, macOS, and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
 - ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock and seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. Linux ManagedTree and resource-limit profiles require delegated cgroup v2 and private namespaces. macOS ManagedTree, Windows native containment, and the broader platform probe matrix remain unsupported or pending. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
 
 ## Contributing
@@ -259,11 +259,15 @@ Start with the [contributing guide](CONTRIBUTING.md) and [open issues](https://g
 
 ## Development
 
-Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later. Run Cargo through the development wrapper to reuse build artifacts across worktrees. See the [testing guide](docs/testing.md) for focused checks and the full local lane.
+Use Git, Rust with rustfmt and Clippy, and a supported Node.js major (26 preferred, 24, or 22). Run Cargo through the development wrapper to reuse build artifacts across worktrees. See the [testing guide](docs/testing.md) for focused checks and the full local lane.
 
 Rust owns Tapid behavior and security verification. TypeScript owns developer
 scripts, release orchestration, documentation checks, and website/consumer
 fixtures, with tests run by Node. Python and uv are not project prerequisites.
+
+Tapid supports every released Node.js major in Current, Active LTS, or Maintenance LTS status according to the [official Node.js release lifecycle](https://nodejs.org/en/about/previous-releases). End-of-life versions and prereleases are outside the support policy. The current supported majors are 26 (preferred), 24, and 22. Tapid itself is a Rust binary and does not require Node.js for installation commands.
+
+Consumer CI checks use the latest release of every supported major on Linux, macOS, and Windows, with `check-latest: true` to avoid stale runner versions. Update the CI major-version matrix when Node.js releases a new Current version or a supported major reaches end of life.
 
 ```text
 node --experimental-strip-types tools/check_architecture.ts
