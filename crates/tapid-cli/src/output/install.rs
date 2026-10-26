@@ -94,6 +94,9 @@ impl Reporter {
                 self.started.elapsed().as_secs_f64()
             );
         }
+        for line in Self::lifecycle_lines(&report.outcome) {
+            println!("{line}");
+        }
         if let Some(changes) = &report.package_changes {
             println!(
                 "Lock selections: {} added, {} changed, {} reused, {} removed",
@@ -123,6 +126,30 @@ impl Reporter {
         }
     }
 
+    fn lifecycle_lines(outcome: &crate::application::outcome::OperationOutcome) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(report) = &outcome.lifecycle {
+            lines.push(format!("Dependency lifecycle: {} hook(s) executed, {} authenticated output(s) reused, {} hook(s) skipped.", report.executed, report.reused, report.skipped));
+            for package in &report.packages {
+                for hook in &package.hooks {
+                    if matches!(hook.disposition, "executed" | "reused") {
+                        let (identity, _) = super::json::text(&package.identity);
+                        let (name, _) = super::json::text(&hook.hook);
+                        lines.push(format!(
+                            "Dependency hook {name} for {identity}: {}.",
+                            hook.disposition
+                        ));
+                    }
+                }
+            }
+            if report.omitted_packages > 0 || outcome.omitted_warnings > 0 {
+                lines.push(format!("Lifecycle details incomplete: {} package(s) and {} warning occurrence(s) omitted.", report.omitted_packages, outcome.omitted_warnings));
+            }
+            lines.push(format!("Hook discovery: {} ({} package(s) inspected). Application readiness is not established.", report.coverage, report.inspected_packages));
+        }
+        lines
+    }
+
     pub(crate) fn failure(&self, mut failure: OperationFailure) {
         let phase = match failure.error.kind {
             ErrorKind::InvalidRequest
@@ -147,6 +174,9 @@ impl Reporter {
             ErrorKind::InvalidData => "install validation",
         };
         eprintln!("Install failed during {phase}.");
+        for line in Self::lifecycle_lines(&failure.outcome) {
+            eprintln!("{line}");
+        }
         failure.outcome.warnings = self.remaining_warnings(&failure.outcome.warnings);
         super::report_failure(&failure);
         match failure.outcome.state {
