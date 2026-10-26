@@ -5,6 +5,20 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::release_record::{MAX_BYTES, verify_signature};
 
+pub(crate) fn inspect_archive(path: &Path, executable: &str) -> Result<(), String> {
+    const LIMIT: usize = 512 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    File::open(path)
+        .map_err(|e| e.to_string())?
+        .take((LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > LIMIT {
+        return Err("release archive exceeds the size limit".into());
+    }
+    tapid_archive::inspect_release_archive(&bytes, executable).map_err(|e| e.to_string())
+}
+
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     File::open(path)

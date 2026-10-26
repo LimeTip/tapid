@@ -4,6 +4,8 @@
 
 mod tree_validation;
 pub use tree_validation::validate_tree;
+mod release;
+pub use release::inspect_release_archive;
 
 use sha2::{Digest, Sha256};
 use std::cell::Cell;

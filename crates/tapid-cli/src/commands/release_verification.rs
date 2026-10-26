@@ -1,6 +1,23 @@
 use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, clap::Args)]
+pub(crate) struct ArchiveArgs {
+    archive: PathBuf,
+    executable: String,
+}
+
+pub(crate) fn inspect_archive(args: ArchiveArgs) -> ExitCode {
+    match crate::application::release_verification::inspect_archive(&args.archive, &args.executable)
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("release archive inspection failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
 pub(crate) struct Args {
     record: PathBuf,
     sidecar: PathBuf,

@@ -84,3 +84,30 @@ fn native_verifier_authenticates_old_records_and_rejects_invalid_inputs() {
         .unwrap();
     assert!(!String::from_utf8_lossy(&help.stdout).contains("__verify-release-record"));
 }
+
+#[test]
+fn native_release_archive_inspection_is_read_only_and_target_specific() {
+    let project = TempProject::new("release-archive-inspection").unwrap();
+    let home = TempHome::new("release-archive-inspection").unwrap();
+    // Deterministic gzip/ustar fixture containing regular executable tapid.
+    let bytes = base64::engine::general_purpose::STANDARD.decode("H4sIAAAAAAAAEytJLMhMYaAtMAACc1NTMA0E6DQQmCGxQeJm5uYGDAoGNHYXGJQWlyQWAa2kh12DECRl5iUWVQ60K0bBKBgFo2AU0BsAALAgbeUACAAA").unwrap();
+    let archive = project.write("release.tar.gz", &bytes).unwrap();
+    for (name, success) in [("tapid", true), ("tapid.exe", false)] {
+        let result = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .env_clear()
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .arg("__inspect-release-archive")
+            .arg(&archive)
+            .arg(name)
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(fs::read(&archive).unwrap(), bytes);
+    }
+}
