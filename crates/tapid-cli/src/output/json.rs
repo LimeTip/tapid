@@ -223,9 +223,12 @@ pub(crate) fn information(operation: &str, data: Value) -> ExitCode {
     emit(result, 0)
 }
 
-pub(crate) fn operation_error(operation: &str, code: &str) -> ExitCode {
+/// Emit a schema-v1 operation failure envelope and return exit status 1.
+/// Callers must supply bounded, non-sensitive structured context rather than raw
+/// capability diagnostics.
+pub(crate) fn operation_error(operation: &str, code: &str, context: Option<Value>) -> ExitCode {
     let mut result = envelope(operation, "failure", None);
-    result["errors"] = json!([{"code": code, "phase": "operation", "context": null}]);
+    result["errors"] = json!([{"code": code, "phase": "operation", "context": context}]);
     emit(result, 1)
 }
 
