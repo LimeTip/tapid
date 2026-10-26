@@ -59,3 +59,62 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+## Native persisted graph observations
+
+`GraphSnapshot::from_bytes` validates an explicit native snapshot using
+`Lockfile::from_json`. `inspect` inventories every persisted instance, including
+disconnected records. `compare` compares exact identities and recorded selection
+sites. These library operations perform no filesystem, store, registry, resolver,
+installation, recovery, or script operations. Imported schema 8 is not yet
+supported by this interface; it fails with `SnapshotError::UnsupportedFormat`.
+The existing `ImportedNpmLockfile` interface is unchanged.
+
+Instances retain the full source-qualified key, including peer/platform contexts,
+workspace identity and copied file/Git pins. Stable `instance-v1-` SHA-256
+references hash a domain-separated full identity; display strings never determine
+identity. Snapshot digests identify the original bytes, so whitespace can change a
+snapshot digest without changing its semantic comparison.
+
+Named root bindings correspond by local name. Dependency sites correspond only
+through the same exact parent identity and local name. Replaced parents do not
+pair their children by package name. Unnamed root membership compares as an exact
+set. Root or binding dimensions unavailable on either side are omitted from
+relationship differences and exposed through per-side availability. Recording
+previously absent alias metadata therefore does not establish a selection change.
+
+Instance deltas, named selection-site changes and relationship deltas are
+overlapping views; do not sum them as independent upgrades. Evidence differences
+are separate: declaration digests, source/artifact fields (including historical
+unpacked evidence), and derived outputs. Attestations are compared but exposed
+only as a change indication. A changed declaration digest cannot identify an
+edited requirement. Missing evidence is not equality. Exact scripts, host
+toolchains, declaration requirements, native peer-provider targets and imported
+verification receipts are unavailable in this native interface. Observations do
+not approve execution or certify package safety.
+
+Inputs are limited to 32 MiB, 100,000 instances and 500,000 recorded relationships.
+A streaming structural pass counts native package entries, roots, bindings and
+dependencies before typed parsing and graph normalization; typed validation
+remains authoritative. Nesting is limited to 128, with stricter parser recursion
+limits retained. Input/analysis failures produce no graph or complete summary.
+
+`inspect_scope` and `compare_scope` accept `GraphScope::Packages` (actual names)
+or `GraphScope::Instances` (opaque references). At most 64 values of 4,096 UTF-8
+bytes each are accepted before sorting and deduplication. Values form a union;
+unknown values select nothing. Inspection includes incident edges without
+expanding the selected instance set. Comparison retains full retargets when
+either side touches scope. Root declaration-digest evidence remains explicitly
+global. Coverage records total and excluded counts after examining complete
+inputs; filtered results say nothing about excluded instances.
+
+Instances sort by full identity. Relationships sort by root membership, named
+root bindings, then dependencies, followed by full parent identity, local name,
+and full target identity. Evidence sorts by declarations, source/artifact, then
+derived outputs, with full subject identity within each category.
+
+These are library observations, not a CLI JSON rendering contract. Public display
+metadata is untrusted and unsanitized: consumers must apply their existing path,
+credential, scalar and output-size protections. CLI readers must enforce the
+input limit while reading. Imported comparisons, CLI commands and bounded detail
+pagination remain follow-up implementation work for issue #300.
