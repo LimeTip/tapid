@@ -9,7 +9,7 @@ fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, serde_
     let home = TempHome::new("json-result").unwrap();
     let output = command(project, &home, args).output().unwrap();
     let value = serde_json::from_slice(&output.stdout).expect("one JSON result on stdout");
-    assert!(output.stderr.is_empty(), "{:?}", output);
+    assert!(output.stderr.is_empty(), "{output:?}");
     (output, value)
 }
 
@@ -1389,7 +1389,7 @@ fn candidate_exclusions_survive_install_preview_and_replay() {
             )
             .output()
             .unwrap();
-            assert!(output.status.success(), "{:?}", output);
+            assert!(output.status.success(), "{output:?}");
             assert!(!String::from_utf8_lossy(&output.stdout).contains("excluded"));
             assert!(!String::from_utf8_lossy(&output.stderr).contains("excluded"));
         }
