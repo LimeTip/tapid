@@ -14,6 +14,20 @@ Use `tapid-test-support` for integration-test setup:
 
 Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, or a user-specific home. Never use the network or real credentials. Fixture writers reject absolute paths and parent-directory components.
 
+The runtime temporary directory must permit direct execution of test-created
+files. Unix installer, verified-tool, and package-bin tests execute their shell
+fixtures directly after setting executable permissions; a `noexec` temporary
+mount produces `PermissionDenied` before those assertions can run. In isolated
+Linux validation workers, provision an executable temporary mount and export
+`TMPDIR` before starting Node and Cargo. If the workspace mount permits execution,
+an isolated worktree-local directory can be selected with
+`mkdir -p target/validation-tmp` followed by
+`TMPDIR="$PWD/target/validation-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test --workspace --all-features --locked`.
+Confirm execution is permitted in the worker itself; a successful host run does
+not prove the worker mount policy. Keep direct execution assertions intact rather
+than invoking an interpreter to bypass an execution restriction. Native sandbox
+prerequisites remain separate from temporary-filesystem execution permissions.
+
 ## Development prerequisites and build reuse
 
 Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later.
