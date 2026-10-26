@@ -40,8 +40,16 @@ execute receipt data, and reject unknown fields or unsafe filesystem objects.
 Retries accept exact pending before/after snapshots and refuse conflicting edits.
 Uninstall uses recorded locations independently of the current shell, including
 after missing binary or interrupted executable activation, and preserves unowned
-exports. Legacy one-profile receipts remain supported with the same target
-selection; migration to another target set is refused pending implementation.
+exports. Legacy one-profile receipts expand to Bash/Zsh both-mode when their
+recorded target matches either selected profile. The original record is copied
+without changing its payload, ownership or snapshots, and both targets are
+rechecked before publication. A private `.tapid-path-previous-v1` receipt bridges
+the two publication renames. Retry or uninstall restores the old receipt if
+publication stopped in the gap; after publication, it verifies that the old
+record exactly matches a new numbered record before retiring the recovery copy
+by rename. Profile writes start only after this reconciliation. Interrupted
+staging/retirement may leave private temporary directories, which are never
+used as ownership evidence. Other target-set changes remain refused.
 Unreceipted two-profile blocks are also refused. Legacy cleanup searches bounded
 default locations with exact payload checks.
 
@@ -65,8 +73,7 @@ the receipt and return an error; remove the conflict before retrying. Missing
 executables do not skip cleanup. Receipt parsers are deliberately repeated in
 the standalone scripts so generated installers need no sibling files.
 
-Automatic Unix receipt migration and the complete native matrix remain
-unfinished under issue #37. The Windows contract CI lane requires a fresh-session
+The complete native matrix still requires Windows CI evidence under issue #37. The Windows contract CI lane requires a fresh-session
 probe built from persisted machine/user values, with registry restoration in a
 finally block. Local PowerShell tests use isolated persistence snapshots and do
 not establish native Windows registry or process-resolution evidence.

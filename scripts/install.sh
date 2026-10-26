@@ -173,6 +173,33 @@ read_path_receipt() {
   fi
 }
 
+# A migration publishes a complete replacement receipt before touching profiles.
+# Keep the old receipt at a fixed recovery location across the two renames.
+recover_path_migration() (
+  migration_root="$INSTALL_DIR/.tapid-path-v1"
+  migration_previous="$INSTALL_DIR/.tapid-path-previous-v1"
+  [ -e "$migration_previous" ] || [ -L "$migration_previous" ] || exit 0
+  PATH_RECEIPT="$migration_previous"
+  read_profile_receipt || exit 1
+  if [ ! -e "$migration_root" ] && [ ! -L "$migration_root" ]; then
+    mv "$migration_previous" "$migration_root"
+    exit $?
+  fi
+  PATH_RECEIPT="$migration_root"
+  read_path_receipt && [ "$receipt_records" -eq 2 ] || exit 1
+  migration_match=0
+  for migration_record in 1 2; do
+    if (for migration_field in manifest install target payload before after state; do
+      cmp -s "$migration_previous/$migration_field" "$migration_root/$migration_record/$migration_field" || exit 1
+    done); then migration_match=1; fi
+  done
+  [ "$migration_match" -eq 1 ] || exit 1
+  # Retire by rename so interruption during deletion cannot corrupt recovery.
+  migration_retired="$(mktemp -d "$INSTALL_DIR/.tapid-path-retired.XXXXXX")" || exit 1
+  mv "$migration_previous" "$migration_retired/receipt" || { rmdir "$migration_retired"; exit 1; }
+  rm -rf "$migration_retired"
+)
+
 read_profile_receipt() {
   [ -d "$PATH_RECEIPT" ] && [ ! -L "$PATH_RECEIPT" ] && [ -O "$PATH_RECEIPT" ] || return 1
   safe_path_ancestors "$PATH_RECEIPT" || return 1
@@ -328,6 +355,18 @@ configure_profile_path() {
   PATH="$INSTALL_DIR${PATH:+:$PATH}"; export PATH; PATH_UPDATED=1
 }
 
+# Reconcile only exact pending snapshots or a still-valid completed block.
+profile_receipt_matches_target() {
+  read_profile_receipt && preflight_profile "$receipt_target" || return 1
+  if [ "$receipt_state" = pending ]; then
+    profile_matches_snapshot "$receipt_target" "$PATH_RECEIPT/before" || cmp -s "$receipt_target" "$PATH_RECEIPT/after"
+  elif [ "$receipt_state" = preexisting ]; then
+    grep -Fqx "$receipt_payload" "$receipt_target" || { [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && grep -Fqx 'export PATH="$HOME/.local/bin:$PATH"' "$receipt_target"; }
+  else
+    path_line="$receipt_payload"; valid_path_block "$receipt_target"
+  fi
+}
+
 # Preflight the entire selected set before preparing or applying any record.
 preflight_profile() {
   safe_path_ancestors "$1" || return 1
@@ -342,6 +381,7 @@ preflight_profile() {
 
 configure_path() {
   [ "$CONFIGURE_PATH" -eq 1 ] || return 0
+  recover_path_migration || return 1
   login_profile="$HOME/.profile"
   case "$selected_shell" in
     bash)
@@ -367,6 +407,44 @@ configure_path() {
   if [ "$PATH_MODE" != both ]; then configure_profile_path; return $?; fi
   preflight_profile "$interactive_profile" || return 1
   PATH_RECEIPT="$INSTALL_DIR/.tapid-path-v1"
+  if [ -e "$PATH_RECEIPT" ] || [ -L "$PATH_RECEIPT" ]; then
+    read_path_receipt || return 1
+    if [ "$receipt_records" -eq 1 ]; then
+      migration_old="$PATH_RECEIPT"
+      migration_old_target="$receipt_target"
+      case "$migration_old_target" in
+        "$login_profile") migration_slot=1; migration_new="$interactive_profile" ;;
+        "$interactive_profile") migration_slot=2; migration_new="$login_profile" ;;
+        *) return 1 ;;
+      esac
+      # Validate every current target before publishing migration state.
+      (PATH_RECEIPT="$migration_old"; profile_receipt_matches_target) || return 1
+      if [ -e "$migration_new" ] && { grep -Fqx "$PATH_MARKER_BEGIN" "$migration_new" || grep -Fqx "$PATH_MARKER_END" "$migration_new"; }; then return 1; fi
+      multi_stage="$(mktemp -d "$INSTALL_DIR/.tapid-path-stage.XXXXXX")" || return 1
+      if ! (
+        umask 077
+        printf 'tapid-path-v1\nunix\ninstall\n2\n' > "$multi_stage/manifest" &&
+        mkdir "$multi_stage/$migration_slot" &&
+        cp "$migration_old/manifest" "$migration_old/install" "$migration_old/target" "$migration_old/payload" "$migration_old/before" "$migration_old/after" "$migration_old/state" "$multi_stage/$migration_slot/" &&
+        (SELECTED_PROFILE="$migration_new"; RECORD_RECEIPT="$multi_stage/$((3 - migration_slot))"; PREPARE_PATH=1; configure_profile_path)
+      ); then rm -rf "$multi_stage"; return 1; fi
+      (PATH_RECEIPT="$multi_stage"; read_path_receipt) || { rm -rf "$multi_stage"; return 1; }
+      # Recheck the source receipt and both targets after staging.
+      (PATH_RECEIPT="$migration_old"; read_profile_receipt) || { rm -rf "$multi_stage"; return 1; }
+      for migration_field in manifest install target payload before after state; do
+        cmp -s "$migration_old/$migration_field" "$multi_stage/$migration_slot/$migration_field" || { rm -rf "$multi_stage"; return 1; }
+      done
+      for record in 1 2; do
+        (PATH_RECEIPT="$multi_stage/$record"; profile_receipt_matches_target) || { rm -rf "$multi_stage"; return 1; }
+      done
+      migration_previous="$INSTALL_DIR/.tapid-path-previous-v1"
+      [ ! -e "$migration_previous" ] && [ ! -L "$migration_previous" ] || { rm -rf "$multi_stage"; return 1; }
+      mv "$migration_old" "$migration_previous" || { rm -rf "$multi_stage"; return 1; }
+      mv "$multi_stage" "$migration_old" || return 1
+      recover_path_migration || return 1
+      PATH_RECEIPT="$migration_old"
+    fi
+  fi
   if [ ! -e "$PATH_RECEIPT" ] && [ ! -L "$PATH_RECEIPT" ]; then
     multi_stage="$(mktemp -d "$INSTALL_DIR/.tapid-path-stage.XXXXXX")" || return 1
     # Unreceipted blocks require explicit legacy migration, never adoption.
@@ -391,9 +469,7 @@ configure_path() {
   printf '%s' "$interactive_profile" | cmp -s - "$multi_root/2/target" || return 1
   # Validate both records and current targets before resuming either write.
   for record in 1 2; do
-    (PATH_RECEIPT="$multi_root/$record"; read_profile_receipt &&
-      preflight_profile "$receipt_target" &&
-      { if [ "$receipt_state" = pending ]; then profile_matches_snapshot "$receipt_target" "$PATH_RECEIPT/before" || cmp -s "$receipt_target" "$PATH_RECEIPT/after"; elif [ "$receipt_state" = preexisting ]; then grep -Fqx "$receipt_payload" "$receipt_target" || { [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && grep -Fqx 'export PATH="$HOME/.local/bin:$PATH"' "$receipt_target"; }; else path_line="$receipt_payload"; valid_path_block "$receipt_target"; fi; }) || return 1
+    (PATH_RECEIPT="$multi_root/$record"; profile_receipt_matches_target) || return 1
   done
   (SELECTED_PROFILE="$login_profile"; RECORD_RECEIPT="$multi_root/1"; configure_profile_path) || return 1
   (SELECTED_PROFILE="$interactive_profile"; RECORD_RECEIPT="$multi_root/2"; configure_profile_path) || return 1

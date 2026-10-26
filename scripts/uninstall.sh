@@ -94,6 +94,33 @@ read_path_receipt() {
   fi
 }
 
+# A migration publishes a complete replacement receipt before touching profiles.
+# Keep the old receipt at a fixed recovery location across the two renames.
+recover_path_migration() (
+  migration_root="$INSTALL_DIR/.tapid-path-v1"
+  migration_previous="$INSTALL_DIR/.tapid-path-previous-v1"
+  [ -e "$migration_previous" ] || [ -L "$migration_previous" ] || exit 0
+  PATH_RECEIPT="$migration_previous"
+  read_profile_receipt || exit 1
+  if [ ! -e "$migration_root" ] && [ ! -L "$migration_root" ]; then
+    mv "$migration_previous" "$migration_root"
+    exit $?
+  fi
+  PATH_RECEIPT="$migration_root"
+  read_path_receipt && [ "$receipt_records" -eq 2 ] || exit 1
+  migration_match=0
+  for migration_record in 1 2; do
+    if (for migration_field in manifest install target payload before after state; do
+      cmp -s "$migration_previous/$migration_field" "$migration_root/$migration_record/$migration_field" || exit 1
+    done); then migration_match=1; fi
+  done
+  [ "$migration_match" -eq 1 ] || exit 1
+  # Retire by rename so interruption during deletion cannot corrupt recovery.
+  migration_retired="$(mktemp -d "$INSTALL_DIR/.tapid-path-retired.XXXXXX")" || exit 1
+  mv "$migration_previous" "$migration_retired/receipt" || { rmdir "$migration_retired"; exit 1; }
+  rm -rf "$migration_retired"
+)
+
 read_profile_receipt() {
   [ -d "$PATH_RECEIPT" ] && [ ! -L "$PATH_RECEIPT" ] && [ -O "$PATH_RECEIPT" ] || return 1
   safe_path_ancestors "$PATH_RECEIPT" || return 1
@@ -193,6 +220,9 @@ remove_profile_block() {
       !inside { printf "%s%s", $0, (NR == lines && final != 10 ? "" : "\n") }
       END { if (inside != 0 || !seen) bad=1; exit bad }
     ' "$path_original" > "$path_tmp" || exit 1
+    if [ "$receipt_present" -eq 1 ] && cmp -s "$path_original" "$PATH_RECEIPT/after"; then
+      cat "$PATH_RECEIPT/before" > "$path_tmp" || exit 1
+    fi
     safe_path_ancestors "$PATH_RC" && [ -f "$PATH_RC" ] && [ -O "$PATH_RC" ] && cmp -s "$PATH_RC" "$path_original" || exit 1
     cat "$path_tmp" > "$path_original" || exit 1
     mv -f "$path_tmp" "$PATH_RC" || exit 1
@@ -201,6 +231,7 @@ remove_profile_block() {
   ! grep -Fqx "$PATH_MARKER_BEGIN" "$PATH_RC" && ! grep -Fqx "$PATH_MARKER_END" "$PATH_RC"
 }
 
+recover_path_migration || { printf 'uninstaller: refusing inconsistent PATH migration\n' >&2; exit 1; }
 PATH_RECEIPT="$INSTALL_DIR/.tapid-path-v1"
 if [ ! -e "$MARKER" ] && [ ! -L "$MARKER" ] && [ ! -e "$BINARY" ] && [ ! -L "$BINARY" ]; then
   # PATH writes precede executable activation. A valid receipt alone permits

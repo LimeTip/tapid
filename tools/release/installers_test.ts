@@ -620,7 +620,8 @@ for (const [name, original, preserved] of [
       await install();
       equal(await readFile(profile, "utf8"), first);
       await run(shell, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(join(home, ".local", "bin"))], { env: { ...f.env, HOME: shellPath(home) } });
-      equal(await readFile(profile, "utf8"), preserved);
+      // Receipted profiles restore their exact original bytes, including EOF.
+      equal(await readFile(profile, "utf8"), name === "existing managed block" ? preserved : original);
     } finally { await f.cleanup(); }
   });
 }
@@ -830,6 +831,144 @@ test("Bash shell-mode both records and cleans both startup files", shellOptions,
     await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home), SHELL: "/bin/sh" } });
     equal(await readFile(join(home, ".bash_login"), "utf8"), "# login\n");
     equal(await readFile(join(home, ".bashrc"), "utf8"), "# interactive\n");
+  } finally { await f.cleanup(); }
+});
+
+
+test("Unix one-profile receipt migrates to Bash both without adopting user configuration", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "migration-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# login without newline");
+    await writeFile(join(home, ".bashrc"), "# interactive\n");
+    const args = ["--install-dir", shellPath(join(home, ".local", "bin")), "--configure-path", "--shell", "bash", "--shell-mode"];
+    await f.installShell([...args, "login"], { HOME: shellPath(home) });
+    const login = await readFile(join(home, ".profile"), "utf8");
+    await f.installShell([...args, "both"], { HOME: shellPath(home) });
+    equal(await readFile(join(home, ".profile"), "utf8"), login);
+    const receipt = join(home, ".local", "bin", ".tapid-path-v1");
+    equal(await readFile(join(receipt, "manifest"), "utf8"), "tapid-path-v1\nunix\ninstall\n2\n");
+    equal(await readFile(join(receipt, "1", "before"), "utf8"), "# login without newline");
+    await f.installShell([...args, "both"], { HOME: shellPath(home) });
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home), SHELL: "/bin/fish" } });
+    equal(await readFile(join(home, ".profile"), "utf8"), "# login without newline");
+    equal(await readFile(join(home, ".bashrc"), "utf8"), "# interactive\n");
+  } finally { await f.cleanup(); }
+});
+
+
+test("Unix receipt migration recovers publication and profile-write interruptions", shellOptions, async () => {
+  for (const transition of ["backup", "publish", "retire", "first", "second", "uninstall-gap", "uninstall-published"]) {
+    const f = await fixture();
+    const home = join(f.directory, "migration-recovery-home");
+    try {
+      await mkdir(home);
+      await writeFile(join(home, ".profile"), "# login\n");
+      await writeFile(join(home, ".bashrc"), "# interactive\n");
+      const install = join(home, ".local", "bin");
+      const receipt = join(install, ".tapid-path-v1");
+      const args = ["--install-dir", shellPath(install), "--configure-path", "--shell", "bash", "--shell-mode"];
+      await f.installShell([...args, "login"], { HOME: shellPath(home) });
+      // Include the original legacy payload and pending-before state.
+      if (transition === "first") {
+        const payload = 'export PATH="$HOME/.local/bin:$PATH"\n';
+        await writeFile(join(receipt, "payload"), payload);
+        await writeFile(join(receipt, "after"), "# login\n# tapid-path-managed-v1\n" + payload + "# end tapid-path-managed-v1\n");
+        await writeFile(join(receipt, "state"), "pending\n");
+        await writeFile(join(home, ".profile"), "# login\n");
+      }
+      const refusal = transition === "backup" ? 'case "$2" in */.tapid-path-previous-v1) exit 1 ;; esac'
+        : ["publish", "uninstall-gap"].includes(transition) ? 'case "$1:$2" in */.tapid-path-stage.*:*/.tapid-path-v1) exit 1 ;; esac'
+        : ["retire", "uninstall-published"].includes(transition) ? 'case "$1:$2" in */.tapid-path-previous-v1:*/receipt) exit 1 ;; esac'
+        : 'case "$3" in */.tapid-path-v1/' + (transition === "first" ? "1" : "2") + '/state) exit 1 ;; esac';
+      await writeFile(join(f.directory, "bin", "mv"), '#!/bin/sh\n' + refusal + '\nexec /bin/mv "$@"\n');
+      await chmod(join(f.directory, "bin", "mv"), 0o755);
+      await rejects(() => f.installShell([...args, "both"], { HOME: shellPath(home) }), /could not safely update/);
+      await rm(join(f.directory, "bin", "mv"));
+      if (transition === "retire") {
+        const previous = join(install, ".tapid-path-previous-v1");
+        await writeFile(join(previous, "unexpected"), "foreign data");
+        await rejects(() => f.installShell([...args, "both"], { HOME: shellPath(home) }), /could not safely update/);
+        await rejects(() => run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } }), /inconsistent PATH migration/);
+        await rm(join(previous, "unexpected"));
+        const target = await readFile(join(previous, "target"));
+        await writeFile(join(previous, "target"), shellPath(join(home, "unowned")));
+        await rejects(() => f.installShell([...args, "both"], { HOME: shellPath(home) }), /could not safely update/);
+        await rejects(() => run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } }), /inconsistent PATH migration/);
+        equal(await readFile(join(home, ".bashrc"), "utf8"), "# interactive\n");
+        await writeFile(join(previous, "target"), target);
+      }
+      if (!transition.startsWith("uninstall")) {
+        await f.installShell([...args, "both"], { HOME: shellPath(home) });
+        for (const name of [".profile", ".bashrc"]) equal((await readFile(join(home, name), "utf8")).split("# tapid-path-managed-v1").length, 2);
+      }
+      await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } });
+      equal(await readFile(join(home, ".profile"), "utf8"), "# login\n");
+      equal(await readFile(join(home, ".bashrc"), "utf8"), "# interactive\n");
+      await rejects(() => access(join(install, ".tapid-path-previous-v1")), { code: "ENOENT" });
+    } finally { await f.cleanup(); }
+  }
+});
+
+test("Unix receipt migration preflights conflicts and preserves unmarked equivalent exports", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "migration-conflict-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# login\n");
+    const install = join(home, ".local", "bin");
+    const args = ["--install-dir", shellPath(install), "--configure-path", "--shell", "bash", "--shell-mode"];
+    await f.installShell([...args, "interactive"], { HOME: shellPath(home) });
+    const interactive = await readFile(join(home, ".bashrc"), "utf8");
+    const edited = interactive.replace("# end tapid-path-managed-v1", "# user edit\n# end tapid-path-managed-v1");
+    await writeFile(join(home, ".bashrc"), edited);
+    await rejects(() => f.installShell([...args, "both"], { HOME: shellPath(home) }), /could not safely update/);
+    equal(await readFile(join(home, ".profile"), "utf8"), "# login\n");
+    equal(await readFile(join(home, ".bashrc"), "utf8"), edited);
+    await writeFile(join(home, ".bashrc"), interactive);
+    await rm(join(home, ".profile"));
+    await symlink(join(home, ".bashrc"), join(home, ".profile"));
+    await rejects(() => f.installShell([...args, "both"], { HOME: shellPath(home) }), /could not safely update/);
+    equal(await readFile(join(home, ".bashrc"), "utf8"), interactive);
+    await rm(join(home, ".profile"));
+    const preexisting = 'export PATH="$HOME/.local/bin:$PATH"\n';
+    await writeFile(join(home, ".profile"), preexisting);
+    await f.installShell([...args, "both"], { HOME: shellPath(home) });
+    equal(await readFile(join(install, ".tapid-path-v1", "1", "state"), "utf8"), "preexisting\n");
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } });
+    equal(await readFile(join(home, ".profile"), "utf8"), preexisting);
+    equal(await readFile(join(home, ".bashrc"), "utf8"), "");
+  } finally { await f.cleanup(); }
+});
+
+
+test("Unix migration rejects unsafe recovery receipts and preserves edits during staging", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "migration-safety-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# login\n");
+    await writeFile(join(home, ".bashrc"), "# interactive\n");
+    const install = join(home, ".local", "bin");
+    const receipt = join(install, ".tapid-path-v1");
+    const previous = join(install, ".tapid-path-previous-v1");
+    const args = ["--install-dir", shellPath(install), "--configure-path", "--shell", "bash", "--shell-mode"];
+    await f.installShell([...args, "login"], { HOME: shellPath(home) });
+    const login = await readFile(join(home, ".profile"), "utf8");
+    await symlink(receipt, previous);
+    await rejects(() => f.installShell([...args, "both"], { HOME: shellPath(home) }), /could not safely update/);
+    await rejects(() => run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } }), /inconsistent PATH migration/);
+    equal(await readFile(join(home, ".profile"), "utf8"), login);
+    await rm(previous);
+    // Change the old receipt target after it was copied into the staged receipt.
+    await writeFile(join(f.directory, "bin", "cp"), '#!/bin/sh\n/bin/cp "$@" || exit 1\nprintf "# concurrent edit\\n" > "$HOME/.profile"\n');
+    await chmod(join(f.directory, "bin", "cp"), 0o755);
+    await rejects(() => f.installShell([...args, "both"], { HOME: shellPath(home) }), /could not safely update/);
+    equal(await readFile(join(home, ".profile"), "utf8"), "# concurrent edit\n");
+    equal(await readFile(join(home, ".bashrc"), "utf8"), "# interactive\n");
+    equal(await readFile(join(receipt, "manifest"), "utf8"), "tapid-path-v1\nunix\ninstall\n1\n");
+    await rm(join(f.directory, "bin", "cp"));
   } finally { await f.cleanup(); }
 });
 
