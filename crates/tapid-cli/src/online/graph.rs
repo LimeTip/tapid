@@ -248,6 +248,10 @@ pub(super) fn resolve_package_graph(
             return Ok(records.clone());
         }
         metadata_lookups += 1;
+        #[cfg(test)]
+        crate::application::dependency_edit_evaluation::observe(|counts| {
+            counts.metadata_retrievals += 1
+        });
         let records = if registry.registry().is_none() {
             copied_records
                 .values()

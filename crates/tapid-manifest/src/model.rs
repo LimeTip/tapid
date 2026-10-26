@@ -118,6 +118,46 @@ impl PackageManifest {
         self.set_dependency(kind, name, requirement)
     }
 
+    /// Insert or update only the selected section, preserving overlapping declarations.
+    pub fn insert_dependency_kind(
+        mut self,
+        kind: DependencyKind,
+        name: &str,
+        requirement: &str,
+    ) -> Result<Self, ManifestError> {
+        Self::validate_dependency_name(name)?;
+        self.dependency_section_mut(kind)
+            .1
+            .insert(name.to_owned(), requirement.to_owned());
+        Ok(self)
+    }
+
+    /// Remove an existing declaration only from the selected section.
+    pub fn remove_dependency_kind(
+        mut self,
+        kind: DependencyKind,
+        name: &str,
+    ) -> Result<Self, ManifestError> {
+        Self::validate_dependency_name(name)?;
+        let (field, dependencies) = self.dependency_section_mut(kind);
+        dependencies
+            .remove(name)
+            .ok_or_else(|| ManifestError::DependencyNotDeclared {
+                field,
+                name: name.to_owned(),
+            })?;
+        Ok(self)
+    }
+
+    fn validate_dependency_name(name: &str) -> Result<(), ManifestError> {
+        name.strip_prefix("npm:")
+            .or_else(|| name.strip_prefix("jsr:"))
+            .unwrap_or(name)
+            .parse::<PackageName>()
+            .map(|_| ())
+            .map_err(ManifestError::InvalidPackageName)
+    }
+
     /// Update an existing declaration in one section, preserving all other sections.
     pub fn update_dependency_kind(
         mut self,
@@ -156,13 +196,7 @@ impl PackageManifest {
         name: &str,
         requirement: &str,
     ) -> Result<Self, ManifestError> {
-        let validation_name = name
-            .strip_prefix("npm:")
-            .or_else(|| name.strip_prefix("jsr:"))
-            .unwrap_or(name);
-        validation_name
-            .parse::<PackageName>()
-            .map_err(ManifestError::InvalidPackageName)?;
+        Self::validate_dependency_name(name)?;
         for dependencies in [
             &mut self.dependencies,
             &mut self.dev_dependencies,
@@ -178,13 +212,7 @@ impl PackageManifest {
 
     /// Remove a dependency from every manifest section.
     pub fn without_dependency(mut self, name: &str) -> Result<Self, ManifestError> {
-        let validation_name = name
-            .strip_prefix("npm:")
-            .or_else(|| name.strip_prefix("jsr:"))
-            .unwrap_or(name);
-        validation_name
-            .parse::<PackageName>()
-            .map_err(ManifestError::InvalidPackageName)?;
+        Self::validate_dependency_name(name)?;
         for dependencies in [
             &mut self.dependencies,
             &mut self.dev_dependencies,

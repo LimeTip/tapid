@@ -709,6 +709,8 @@ fn perform_install(
             .mark_committed()
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
         session.committed = true;
+        #[cfg(test)]
+        super::dependency_edit_evaluation::observe(|counts| counts.durable_decisions += 1);
         session.outcome.state = ChangeState::Committed;
         crate::filesystem::activation::test_crash_at("commit_decision");
         publication.commit().map_err(|error| {
@@ -1095,6 +1097,8 @@ fn materialize_with_lock(
                 crate::filesystem::lifecycle_journal::validate_member_root(project_dir, root)
                     .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
             }
+            #[cfg(test)]
+            super::dependency_edit_evaluation::observe(|counts| counts.activations += 1);
             crate::filesystem::activation::activate_node_modules_with_preflight(
                 root,
                 stage,
@@ -1126,6 +1130,8 @@ fn stage_layout(
     activation_lock: &ActivationLock,
     mut progress: impl FnMut(Progress),
 ) -> Result<PathBuf, OperationalError> {
+    #[cfg(test)]
+    outcome_tests::checkpoint("before_stage", workspace_root, activation_lock.owner_line())?;
     if project != workspace_root {
         crate::filesystem::lifecycle_journal::validate_member_root(workspace_root, project)
             .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
@@ -1142,6 +1148,8 @@ fn stage_layout(
     let stage = activation_lock
         .create_stage(project)
         .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
+    #[cfg(test)]
+    super::dependency_edit_evaluation::observe(|counts| counts.materializations += 1);
     if let Err(error) = crate::filesystem::tree::materialize_stage_with_workspace_links(
         &stage,
         &plan,
