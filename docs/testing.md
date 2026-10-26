@@ -14,6 +14,16 @@ Use `tapid-test-support` for integration-test setup:
 
 Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, or a user-specific home. Never use the network or real credentials. Fixture writers reject absolute paths and parent-directory components.
 
+Unix validation workers must permit execution from the platform temporary directory.
+Installer, verified-tool, and package-bin tests execute temporary scripts after
+setting their executable permissions. A `noexec` temporary mount can therefore
+produce `Permission denied` even when the permission bits are correct. Configure
+the worker's `TMPDIR` to a private writable directory on an executable filesystem
+before starting Cargo, and verify direct execution of a temporary script there.
+Retain the execution assertions; invoking the scripts through a shell would bypass
+the behavior these tests verify. This prerequisite does not replace native
+containment setup or establish macOS or Windows enforcement on a Linux worker.
+
 ## Development prerequisites and build reuse
 
 Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later.
