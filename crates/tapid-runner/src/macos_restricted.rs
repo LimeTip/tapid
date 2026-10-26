@@ -1,5 +1,8 @@
 //! Experimental macOS Restricted backend using deprecated/private native Seatbelt APIs.
 
+#[cfg(test)]
+use super::unix_output::spawn_live_sink;
+use super::unix_output::{LiveSinks, POLL_INTERVAL, set_nonblocking, write_live_output};
 use super::{
     AssuranceLevel, BackendIdentity, CleanupConfidence, CompletionEvidence, ContainmentSupport,
     EnforcementDimensions, EnforcementReceipt, ExecutionBackend, ExecutionError,
@@ -11,9 +14,9 @@ use super::{
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -24,8 +27,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const INTERNAL_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 const PIPE_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
-const LIVE_SINK_BACKPRESSURE_GRACE: Duration = Duration::from_millis(250);
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const LIMITATIONS: &[&str] = &[
     "sampled positive/negative syscall controls are not an exhaustive proof of Seatbelt semantics",
     "experimental backend uses deprecated/private native Seatbelt APIs and path-based CanonicalPath grants",
@@ -1232,7 +1233,10 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
         let overflow = Arc::new(AtomicBool::new(false));
         let sink_backpressure = Arc::new(AtomicBool::new(false));
         let output_bytes = Arc::new(AtomicUsize::new(0));
-        let (mut sinks, stdout_sink, stderr_sink) = LiveSinks::spawn()?;
+        let (mut sinks, [stdout_sink, stderr_sink]) = LiveSinks::spawn(
+            [std::io::stdout().as_fd(), std::io::stderr().as_fd()],
+            || sanitize_descriptors(false),
+        )?;
         let stdout_reader = spawn_reader(
             stdout,
             Arc::clone(&stop),
@@ -1333,11 +1337,7 @@ impl ExecutionLifecycle for MacosLifecycle<'_> {
                 CleanupConfidence::NotGuaranteed
             },
         )?;
-        let termination = if let Some(code) = status.code() {
-            Termination::Exited(code)
-        } else {
-            Termination::Signaled(status.signal().unwrap_or(0))
-        };
+        let termination = Termination::from_process_status(status);
         Ok(Box::new(ExecutionOutcome::checked(
             termination,
             stdout,
@@ -1454,22 +1454,6 @@ fn configure_child(command: &mut Command) {
     }
 }
 
-fn set_nonblocking<T: std::os::fd::AsRawFd>(value: &T) -> Result<(), ExecutionError> {
-    let fd = value.as_raw_fd();
-    // SAFETY: fd is owned and live for both fcntl calls; no pointer arguments are involved.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(ExecutionError::new(
-            ExecutionErrorCategory::Internal,
-            format!(
-                "cannot make output pipe nonblocking: {}",
-                std::io::Error::last_os_error()
-            ),
-        ));
-    }
-    Ok(())
-}
-
 fn spawn_reader<R: Read + Send + 'static>(
     mut reader: R,
     stop: Arc<AtomicBool>,
@@ -1528,166 +1512,6 @@ fn spawn_reader<R: Read + Send + 'static>(
         }
         Ok(captured)
     })
-}
-
-fn write_live_output(
-    sink: &mut ChildStdin,
-    bytes: &[u8],
-    stop: &AtomicBool,
-    backpressure: &AtomicBool,
-) -> Result<(), ExecutionError> {
-    let mut written = 0;
-    let mut blocked_since = None;
-    while written < bytes.len() {
-        if stop.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        match sink.write(&bytes[written..]) {
-            Ok(0) => {
-                backpressure.store(true, Ordering::Release);
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::Internal,
-                    "live output sink closed before accepting child output",
-                ));
-            }
-            Ok(count) => {
-                written += count;
-                blocked_since = None;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                let since = blocked_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= LIVE_SINK_BACKPRESSURE_GRACE {
-                    backpressure.store(true, Ordering::Release);
-                    return Err(ExecutionError::new(
-                        ExecutionErrorCategory::Internal,
-                        "live output sink remained backpressured past the bounded grace period",
-                    ));
-                }
-                thread::sleep(POLL_INTERVAL);
-            }
-            Err(error) => {
-                backpressure.store(true, Ordering::Release);
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::Internal,
-                    format!("cannot stream child output: {error}"),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-struct LiveSinks {
-    children: Vec<Child>,
-}
-
-impl LiveSinks {
-    fn spawn() -> Result<(Self, ChildStdin, ChildStdin), ExecutionError> {
-        let (stdout_child, stdout_input) = spawn_live_sink(libc::STDOUT_FILENO)?;
-        let (stderr_child, stderr_input) = match spawn_live_sink(libc::STDERR_FILENO) {
-            Ok(sink) => sink,
-            Err(error) => {
-                let mut child = stdout_child;
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
-        Ok((
-            Self {
-                children: vec![stdout_child, stderr_child],
-            },
-            stdout_input,
-            stderr_input,
-        ))
-    }
-
-    fn finish(&mut self) -> Result<(), ExecutionError> {
-        let deadline = Instant::now() + LIVE_SINK_BACKPRESSURE_GRACE;
-        loop {
-            let mut complete = true;
-            for child in &mut self.children {
-                match child.try_wait() {
-                    Ok(Some(status)) if status.success() => {}
-                    Ok(Some(_)) => {
-                        return Err(ExecutionError::new(
-                            ExecutionErrorCategory::Internal,
-                            "live output sink failed",
-                        ));
-                    }
-                    Ok(None) => complete = false,
-                    Err(error) => {
-                        return Err(ExecutionError::new(
-                            ExecutionErrorCategory::Internal,
-                            format!("cannot supervise live output sink: {error}"),
-                        ));
-                    }
-                }
-            }
-            if complete {
-                self.children.clear();
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(ExecutionError::new(
-                    ExecutionErrorCategory::Internal,
-                    "live output sink remained backpressured past the bounded grace period",
-                ));
-            }
-            thread::sleep(POLL_INTERVAL);
-        }
-    }
-}
-
-impl Drop for LiveSinks {
-    fn drop(&mut self) {
-        for child in &mut self.children {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-fn spawn_live_sink(destination: i32) -> Result<(Child, ChildStdin), ExecutionError> {
-    // SAFETY: duplicate the caller's live stream descriptor into independent ownership.
-    let duplicate = unsafe { libc::fcntl(destination, libc::F_DUPFD_CLOEXEC, 3) };
-    if duplicate < 0 {
-        return Err(ExecutionError::new(
-            ExecutionErrorCategory::Internal,
-            format!(
-                "cannot duplicate live output sink: {}",
-                std::io::Error::last_os_error()
-            ),
-        ));
-    }
-    // SAFETY: `duplicate` is a newly owned descriptor.
-    let output = unsafe { OwnedFd::from_raw_fd(duplicate) };
-    let mut command = Command::new("/bin/cat");
-    command
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::from(output))
-        .stderr(Stdio::null());
-    // SAFETY: std has installed the relay's assigned stdio before this closure runs.
-    // Mark every remaining descriptor close-on-exec, including Rust's spawn-error channel;
-    // that channel must survive until exec and is closed atomically by a successful exec.
-    unsafe {
-        command.pre_exec(|| sanitize_descriptors(false));
-    }
-    let mut child = command.spawn().map_err(|error| {
-        ExecutionError::new(
-            ExecutionErrorCategory::Internal,
-            format!("cannot start bounded live output sink: {error}"),
-        )
-    })?;
-    let input = child.stdin.take().ok_or_else(|| {
-        ExecutionError::new(
-            ExecutionErrorCategory::Internal,
-            "live output sink input is unavailable",
-        )
-    })?;
-    set_nonblocking(&input)?;
-    Ok((child, input))
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]

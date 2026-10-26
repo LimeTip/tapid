@@ -5,9 +5,9 @@ mod artifact;
 mod client;
 mod errors;
 mod jsr;
-mod metadata;
 mod models;
 mod npm;
+mod response;
 mod transport;
 
 pub use artifact::download_artifact;

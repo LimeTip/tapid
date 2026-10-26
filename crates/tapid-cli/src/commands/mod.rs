@@ -14,6 +14,8 @@ mod npm_import;
 mod release_verification;
 pub(crate) mod run;
 mod sandbox;
+mod status;
+
 mod tool;
 pub(crate) mod upgrade;
 pub(crate) mod why;
@@ -53,6 +55,13 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Inspect local project readiness without installing or recovering.
+    #[command(
+        long_about = "Inspect project/workspace selection, manifest and lock agreement, installation ownership, pending project recovery, registry configuration, and local compatibility blockers. Offline and read-only. Does not verify installed trees, inspect the shared store, assess runner assurance, or exclude concurrent writers. Exit 0 means no local blockers were found; complete compatibility remains unchecked.",
+        after_help = "Examples:\n  tapid status\n  tapid --json status --workspace web\n  tapid status --project-dir ./app"
+    )]
+    Status(status::Args),
+
     /// Install and manage standalone npm tools in separate locked environments.
     #[command(
         long_about = "Install standalone npm commands without a project. Each tool has its own locked environment and shares the verified package cache. Lifecycle scripts never run. Add the reported bin directory to PATH once; Tapid does not edit shell profiles. JavaScript commands require an existing Node runtime. Commands run with your user permissions, independently of tapid run containment. Additional package-specific runtime setup must be invoked explicitly.",
@@ -184,6 +193,8 @@ pub(crate) enum Command {
 impl Command {
     fn operation(&self) -> &'static str {
         match self {
+            Self::Status(_) => "status",
+
             Self::Tool(_) => "tool",
             Self::ToolExec(_) => "__tool-exec",
             Self::Explain(_) => "explain",
@@ -217,7 +228,8 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         && !matches!(
             command,
             Some(
-                Command::Ci(_)
+                Command::Status(_)
+                    | Command::Ci(_)
                     | Command::Manifest(_)
                     | Command::Lock(_)
                     | Command::ImportPackageLock(_)
@@ -232,6 +244,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
                     | Command::Outdated(_)
                     | Command::Prune(_)
                     | Command::Why(_)
+                    | Command::Init(_)
             )
         )
     {
@@ -242,6 +255,8 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         );
     }
     match command {
+        Some(Command::Status(args)) => status::run(args, json),
+
         Some(Command::Tool(args)) => tool::run(args, json),
         Some(Command::ToolExec(args)) => tool::execute(args),
         Some(Command::Explain(args)) => explain::run(args, json),
@@ -255,7 +270,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
             println!("Run 'tapid --help' for usage");
             ExitCode::SUCCESS
         }
-        Some(Command::Init(args)) => init::run(args),
+        Some(Command::Init(args)) => init::run(args, json),
         Some(Command::ImportPackageLock(args)) => npm_import::run(args, json),
         Some(Command::Manifest(args)) => manifest::run(args, json),
         Some(Command::Lock(args)) => lock::run(args, json),

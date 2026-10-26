@@ -552,20 +552,11 @@ fn windows_launch_limitations(request: &ExecutionRequest) -> &'static [&'static 
 }
 
 fn windows_launch_mechanism(request: &ExecutionRequest) -> String {
-    if request.windows_compatibility.is_some() || request.policy().network() {
-        let description = compatibility::describe();
-        let identity = description.split("; ").next().expect("component identity");
-        let network = if request.policy().network() {
-            "unrestricted IP via private standard-user socket broker with native DNS"
-        } else {
-            "persistent exact-SID WFP v4/v6 bind guard"
-        };
-        format!(
-            "AppContainer/Job; ACLs; stdio; {identity}; app-IAT, READ_ATTRIBUTES ancestors, EOF stdin; {network}; zero network SIDs"
-        )
-    } else {
-        "AppContainer token without network capabilities; explicit ACLs; suspended Job assignment; bounded stdio; persistent exact-SID WFP v4/v6 bind guard".into()
-    }
+    super::windows_evidence::launch_mechanism(
+        (request.windows_compatibility.is_some() || request.policy().network())
+            .then_some(compatibility::COMPONENT),
+        request.policy().network(),
+    )
 }
 struct WindowsExecutionLifecycle<'a> {
     request: ExecutionRequest,
@@ -647,7 +638,7 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             add_node_appcontainer_options(&mut child_environment);
         }
         let environment = windows_environment_block_units(&child_environment)?;
-        let working_directory = process_working_directory(&self.preflight.policy.project_root)?;
+        let working_directory = process_working_directory(self.request.working_directory())?;
         let mut pipes = WindowsStdioPipes::new()?;
         trace_windows_stage("prepare: suspended child");
         self.child = Some(WindowsSuspendedChild::create_with_stdio(

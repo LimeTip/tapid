@@ -103,6 +103,12 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
             .warnings
             .iter()
             .map(|warning| match warning {
+                Warning::UnapprovedDependencyScriptsAllowed => {
+                    "UNAPPROVED_DEPENDENCY_SCRIPTS_ALLOWED"
+                }
+                Warning::DependencyScriptsWithoutContainment => {
+                    "DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT"
+                }
                 Warning::UpdateGraphChange { .. } => "UPDATE_GRAPH_CHANGE",
                 Warning::UnverifiedRegistryArtifactsAllowed => {
                     "UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED"
@@ -134,6 +140,73 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
     })
 }
 
+/// Emit an unchanged-project status envelope with bounded, sanitized report strings.
+/// Output truncation changes the assessment and exit status to failure, so shortening
+/// untrusted metadata cannot silently produce a successful preflight result.
+pub(crate) fn status_result(report: &crate::application::status::StatusReport) -> ExitCode {
+    let outcome = crate::application::outcome::OperationOutcome::unchanged(&report.project);
+    let blocked = report.assessment == "blocked";
+    let mut result = envelope(
+        "status",
+        if blocked { "failure" } else { "success" },
+        Some(&outcome),
+    );
+    let mut data = serde_json::to_value(report).expect("status consists of JSON values");
+    let mut truncated = result["truncated_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    status_text(&mut data, "/data", &mut truncated);
+    let shortened = !truncated.is_empty();
+    if shortened {
+        data["truncated"] = json!(true);
+        data["assessment"] = json!("blocked");
+        result["outcome"] = json!("failure");
+    }
+    result["errors"] = json!(
+        report
+            .blockers
+            .iter()
+            .map(|b| json!({"code": b.code}))
+            .collect::<Vec<_>>()
+    );
+    if report.truncated || shortened {
+        result["errors"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"code": "INSPECTION_TRUNCATED"}));
+    }
+    result["data"] = data;
+    truncated.sort_unstable();
+    result["truncated_fields"] = json!(truncated);
+    emit(result, u8::from(blocked || shortened))
+}
+
+/// Sanitize every report string and record shortened fields by escaped JSON pointer.
+fn status_text(value: &mut Value, pointer: &str, truncated: &mut Vec<String>) {
+    match value {
+        Value::String(text) => *text = recorded_text(&*text, pointer, truncated),
+        Value::Array(values) => {
+            for (index, value) in values.iter_mut().enumerate() {
+                status_text(value, &format!("{pointer}/{index}"), truncated);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                status_text(
+                    value,
+                    &format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1")),
+                    truncated,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 fn emit(result: Value, status: u8) -> ExitCode {
     // One newline-terminated object. A broken output channel is an I/O failure.
     let mut stdout = std::io::stdout().lock();
@@ -150,9 +223,12 @@ pub(crate) fn information(operation: &str, data: Value) -> ExitCode {
     emit(result, 0)
 }
 
-pub(crate) fn operation_error(operation: &str, code: &str) -> ExitCode {
+/// Emit a schema-v1 operation failure envelope and return exit status 1.
+/// Callers must supply bounded, non-sensitive structured context rather than raw
+/// capability diagnostics.
+pub(crate) fn operation_error(operation: &str, code: &str, context: Option<Value>) -> ExitCode {
     let mut result = envelope(operation, "failure", None);
-    result["errors"] = json!([{"code": code, "phase": "operation", "context": null}]);
+    result["errors"] = json!([{"code": code, "phase": "operation", "context": context}]);
     emit(result, 1)
 }
 

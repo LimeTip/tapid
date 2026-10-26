@@ -281,7 +281,11 @@ pub(crate) fn discover_node_runtime(
 }
 
 #[cfg(windows)]
-fn windows_system_directory() -> Result<PathBuf, RunPreparationError> {
+#[allow(
+    unsafe_code,
+    reason = "Windows trusted runtime discovery uses GetSystemDirectoryW"
+)]
+pub(crate) fn windows_system_directory() -> Result<PathBuf, RunPreparationError> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 

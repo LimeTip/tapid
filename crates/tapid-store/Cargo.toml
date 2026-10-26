@@ -10,7 +10,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-tapid-archive = { version = "0.0.5", path = "../tapid-archive" }
+tapid-archive = { version = "0.0.6", path = "../tapid-archive" }
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
 sha2 = "0.10"
 hmac = "0.12"
@@ -24,7 +24,7 @@ libc = "0.2"
 rustix = { version = "1.1", features = ["process", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tapid-test-support = { version = "0.0.3", path = "../tapid-test-support" }

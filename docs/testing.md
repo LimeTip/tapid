@@ -78,6 +78,33 @@ Prose-only documentation changes need link and command review, not Rust compilat
 
 ## CI and periodic checks
 
+The advanced CodeQL workflow in `.github/workflows/codeql.yml` scans Rust,
+JavaScript/TypeScript, and GitHub Actions with the `security-extended` query suite.
+It runs when pull requests open, receive commits, reopen, become ready for review,
+or are edited, including base-branch changes. There are no PR branch or path
+filters. It also runs on pushes to `main`, daily at 03:17 UTC, and manual dispatch.
+Extraction starts at the repository root without path filters or crate selection,
+covering supported source files across crates, nested workspaces, tests, tools,
+scripts, and website fixtures. Rust uses `build-mode: none` rather than selecting
+only crates built for the runner platform. CodeQL does not analyze unsupported
+file types such as shell scripts or Markdown.
+
+Scheduled runs start after the workflow reaches the default branch. When moving
+from GitHub's default CodeQL setup, disable default setup before running this
+advanced workflow so GitHub accepts its analysis results.
+Main's protection rules require all three `Analyze (...)` checks. First-time fork
+contributors require workflow approval under the repository's Actions settings.
+GitHub does not run `pull_request` workflows while a PR has merge conflicts and
+may delay or drop scheduled runs during service load. Public repositories also
+have scheduled workflows disabled after 60 days without repository activity;
+re-enable the workflow if this happens. See GitHub's [schedule event
+documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+These platform limits mean the cron schedule is not a guarantee of a completed
+scan every calendar day.
+Check the first successful PR run and a default-branch run after activation,
+including extraction diagnostics. Source discovery does not guarantee error-free
+extraction or complete semantic analysis of platform-specific code.
+
 Workspace packaging, nextest, coverage, dependency audit, and dependency policy remain required in their existing CI jobs. They are not additional local steps for every code change. Run them locally when investigating their results or changing their configuration:
 
 ```text
@@ -85,7 +112,8 @@ node --experimental-strip-types scripts/dev.ts package --workspace --locked
 node --experimental-strip-types scripts/dev.ts nextest run --workspace --all-features --locked
 node --experimental-strip-types scripts/dev.ts llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
 node --experimental-strip-types scripts/dev.ts deny check
-node --experimental-strip-types scripts/dev.ts audit
+node --experimental-strip-types scripts/dev.ts audit --deny unsound
+node --experimental-strip-types scripts/dev.ts audit --deny unsound --file tests/integration/Cargo.lock
 ```
 
 Coverage writes the CI artifact `lcov.info`. Mutation testing is a focused periodic test-strength check, not a per-change requirement:
@@ -101,6 +129,9 @@ Install optional tools when working on their lanes. Their absence does not block
 The GitHub Actions workflow runs native tests and Clippy on Ubuntu, macOS, and Windows. Source-only formatting and the pinned JavaScript node-semver oracle run once, on the Ubuntu leg of the existing `Test` matrix: both steps use `if: matrix.os == 'ubuntu-latest'`, and neither the job nor these steps permits failure. Main-push and pull-request CI always include that Ubuntu owner; oracle or formatting failures fail the native test job and therefore block dependent packaging. No separate checkout or toolchain job is added. Separate Ubuntu jobs run nextest, generate an LCOV coverage artifact, and enforce dependency policy with `cargo deny check` and `cargo audit`. Packaging waits for both test and security jobs and validates metadata before `cargo package --workspace --locked`.
 
 Standalone nextest and normal Cargo/libtest coverage remain separate required lanes. Per-test process isolation in combined nextest coverage lost execution of a store traversal instantiation despite matching test identities and aggregate source coverage; normal Cargo coverage therefore remains authoritative. Both Ubuntu lanes explicitly install Node.js 22 and require CLI Node assertions (`TAPID_REQUIRE_NODE_ASSERTIONS=1`). Coverage retains the `lcov-coverage` artifact; no combined lane or comparison-only discovery build is retained.
+
+Failed coverage runs also upload raw profiles and the merge input list as
+`failed-coverage-profiles` for one day. A profile merge failure still fails the job.
 
 The oracle uses Node.js 22 and lockfile-pinned `semver` 7.8.5 to validate the authoritative compatibility fixture answers. To reproduce it locally:
 

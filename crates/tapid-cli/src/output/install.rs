@@ -1,7 +1,7 @@
 //! Human install output uses the application's progress and settled outcome.
 use crate::application::{
     install::{InstallReport, Progress},
-    outcome::{ChangeState, ErrorKind, OperationFailure, RetryAdvice},
+    outcome::{ChangeState, ErrorKind, OperationFailure, RetryAdvice, Warning},
 };
 use std::{
     io::IsTerminal,
@@ -13,6 +13,7 @@ pub(crate) struct Reporter {
     last: Option<(u8, Duration, String)>,
     json: bool,
     terminal: bool,
+    reported_warnings: Vec<Warning>,
 }
 
 impl Reporter {
@@ -22,7 +23,23 @@ impl Reporter {
             last: None,
             json,
             terminal: std::io::stderr().is_terminal(),
+            reported_warnings: Vec::new(),
         }
+    }
+
+    pub(crate) fn warnings_before_execution(&mut self, warnings: Vec<Warning>) {
+        if !self.json {
+            super::report_warnings(&warnings);
+            self.reported_warnings.extend(warnings);
+        }
+    }
+
+    fn remaining_warnings(&self, warnings: &[Warning]) -> Vec<Warning> {
+        warnings
+            .iter()
+            .filter(|warning| !self.reported_warnings.contains(warning))
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn progress(&mut self, event: Progress) {
@@ -63,7 +80,7 @@ impl Reporter {
     }
 
     pub(crate) fn summary(&self, report: &InstallReport) {
-        super::report_warnings(&report.outcome.warnings);
+        super::report_warnings(&self.remaining_warnings(&report.outcome.warnings));
         if report.replayed {
             println!(
                 "Replayed lockfile: {} package(s) in {:.2}s",
@@ -106,7 +123,7 @@ impl Reporter {
         }
     }
 
-    pub(crate) fn failure(&self, failure: &OperationFailure) {
+    pub(crate) fn failure(&self, mut failure: OperationFailure) {
         let phase = match failure.error.kind {
             ErrorKind::InvalidRequest
             | ErrorKind::Project
@@ -130,7 +147,8 @@ impl Reporter {
             ErrorKind::InvalidData => "install validation",
         };
         eprintln!("Install failed during {phase}.");
-        super::report_failure(failure);
+        failure.outcome.warnings = self.remaining_warnings(&failure.outcome.warnings);
+        super::report_failure(&failure);
         match failure.outcome.state {
             ChangeState::Unchanged => eprintln!("Project files unchanged."),
             ChangeState::RolledBack => eprintln!("Project changes rolled back."),

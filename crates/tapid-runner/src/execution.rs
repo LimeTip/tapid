@@ -1,5 +1,9 @@
 mod policy_ceiling;
 mod request;
+mod uncontained;
+#[cfg(any(windows, test))]
+#[path = "windows_evidence.rs"]
+mod windows_evidence;
 #[cfg(target_os = "macos")]
 use request::TrustedNodeRuntime;
 #[cfg(any(windows, test))]
@@ -17,8 +21,12 @@ use request::{
 };
 #[cfg(any(windows, test))]
 use request::{serialize_windows_command_line_units, windows_environment_block_units};
+pub use uncontained::execute_uncontained;
 
 mod supervision;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "unix_output.rs"]
+mod unix_output;
 #[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
 use supervision::ExecutionLifecycle;
 use supervision::{
@@ -1195,6 +1203,20 @@ pub enum Termination {
     MemoryLimitExceeded,
     Cancelled,
 }
+impl Termination {
+    fn from_process_status(status: std::process::ExitStatus) -> Self {
+        if let Some(code) = status.code() {
+            return Self::Exited(code);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            Self::Signaled(status.signal().unwrap_or(0))
+        }
+        #[cfg(not(unix))]
+        Self::Exited(1)
+    }
+}
 
 /// Captured execution result paired with an enforcement receipt.
 ///
@@ -1744,11 +1766,16 @@ mod windows_acl;
 #[path = "windows_cancellation.rs"]
 mod windows_cancellation;
 #[cfg(windows)]
+#[path = "windows_integrity.rs"]
+mod windows_integrity;
+#[cfg(windows)]
 #[path = "windows_job.rs"]
 mod windows_job;
 #[cfg(windows)]
 #[path = "windows_write_validation.rs"]
 mod windows_write_validation;
+#[cfg(windows)]
+pub use windows_integrity::prepare_private_dependency_write_tree;
 
 #[cfg(target_os = "macos")]
 #[path = "macos_restricted.rs"]

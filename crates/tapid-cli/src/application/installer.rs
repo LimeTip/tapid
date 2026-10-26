@@ -121,11 +121,8 @@ mod tests {
     fn installer_rejects_rollback_without_prior_state() {
         let (root, archive, destination) = fixture();
         let before = fs::read(&destination).unwrap();
-        assert!(
-            prepare("1.2.2", "1.0.0", &archive, &destination)
-                .unwrap_err()
-                .contains("ReleaseDowngrade")
-        );
+        let error = prepare("1.2.2", "1.0.0", &archive, &destination).unwrap_err();
+        assert!(error.contains("ReleaseDowngrade"), "{error}");
         assert_eq!(fs::read(destination).unwrap(), before);
         assert!(!root.path().join(".tapid-release-state.json").exists());
     }
@@ -133,11 +130,8 @@ mod tests {
     #[test]
     fn installer_rejects_changed_bytes_at_same_installed_version() {
         let (_root, archive, destination) = fixture();
-        assert!(
-            prepare("1.2.3", "1.0.0", &archive, &destination)
-                .unwrap_err()
-                .contains("same release version")
-        );
+        let error = prepare("1.2.3", "1.0.0", &archive, &destination).unwrap_err();
+        assert!(error.contains("same release version"), "{error}");
     }
 
     #[test]

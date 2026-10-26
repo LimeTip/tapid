@@ -293,6 +293,19 @@ pub(super) fn workspace_materialization_with_manifest(
 ) -> Result<WorkspaceMaterialization, OperationalError> {
     let workspace = Workspace::discover_typed(project)
         .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))?;
+    workspace_materialization_from_discovered(project, registry_config, replacement, &workspace)
+}
+
+/// Plan local links, lock receipts, and member declarations from an existing discovery.
+/// `replacement` substitutes one selected manifest for lifecycle planning. This
+/// checks root identity and reads bounded member bytes, but does not fetch packages,
+/// write links, or repeat workspace enumeration.
+pub(crate) fn workspace_materialization_from_discovered(
+    project: &Path,
+    registry_config: &crate::registry::RegistryConfig,
+    replacement: Option<(&Path, &PackageManifest)>,
+    workspace: &Workspace,
+) -> Result<WorkspaceMaterialization, OperationalError> {
     let root = workspace
         .root_path()
         .parent()
@@ -357,9 +370,13 @@ pub(super) fn workspace_materialization_with_manifest(
         let manifest_bytes = if replacement.is_some_and(|(path, _)| path == member.path()) {
             manifest.to_json().into_bytes()
         } else {
-            fs::read(member.path()).map_err(|error| {
+            crate::filesystem::read::read_bounded_file(
+                member.path(),
+                tapid_manifest::MAX_MANIFEST_BYTES,
+            )
+            .map_err(|_| {
                 format!(
-                    "cannot read workspace member manifest {}: {error}",
+                    "workspace member manifest must be a regular file no larger than 32 MiB: {}",
                     member.path().display()
                 )
             })?
