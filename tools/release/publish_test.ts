@@ -467,3 +467,19 @@ test('publication planning reports a development dependency bump when both versi
   assertEquals(plan.blockers, []);
   assertEquals(plan.dependentBumps, [{ dependent: 'tapid', dependency: 'tapid-test-support', requiredVersion: '1.0.0' }]);
 });
+
+test("historical private-registry prerequisites precede resolver and failed read-back stops publication", async () => {
+  const plan = publicationPlan({ packages: [
+    { name: "tapid", version: "0.0.7", dependencies: ["tapid-resolver"] },
+    { name: "tapid-resolver", version: "0.0.6", dependencies: ["tapid-registry-client"] },
+    { name: "tapid-registry-client", version: "0.0.6", dependencies: [] },
+  ] }, new Set());
+  assertEquals(plan.map(pkg => `${pkg.name}@${pkg.version}`), ["tapid-registry-client@0.0.6", "tapid-resolver@0.0.6", "tapid@0.0.7"]);
+  const events: string[] = [];
+  await assertRejects(publishPackages(plan, {
+    isPublished: async () => false,
+    publish: async pkg => { events.push(`publish ${pkg.name}`); },
+    waitForPublished: async pkg => { events.push(`read ${pkg.name}`); throw Error("read-back unavailable"); },
+  }), /read-back unavailable/);
+  assertEquals(events, ["publish tapid-registry-client", "read tapid-registry-client"]);
+});

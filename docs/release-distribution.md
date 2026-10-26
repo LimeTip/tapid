@@ -316,6 +316,22 @@ Inspect skipped prerequisites separately and do not count them as verified.
 
 Do not start crates.io publication until the public release and all three installer jobs are verified against the exact tag commit.
 
+### Registry resolver verification
+
+The current [coordinator flow](release-automation.md) and [ADR 0007](adr/0007-one-candidate-one-release-approval.md) govern authorization; the separate dispatch procedure below is historical. After protected publication succeeds, the coordinator runs this credential-free check before final registry read-back and completion, including when no crates remain missing:
+
+```sh
+node --experimental-strip-types tools/release/verify_registry.ts candidate/signed-result.json candidate/intent.json "$RUNNER_TEMP/tapid-release-source" "$RUNNER_TEMP/registry-verification"
+```
+
+Inputs are the validated signed candidate result, original reviewed intent, and clean detached tagged source. The verifier checks the source SHA and intent digest, derives exact resolver and registry-client versions from tagged Cargo metadata, and cross-checks the resolver's declared requirement and applicable intent entries. Already-published dependencies may be absent from the missing publication plan. Historical 0.0.6 versions are regression fixtures, not defaults for a newer tag.
+
+It runs `cargo package -p tapid-resolver --locked` with normal verification, then resolves and checks an external consumer with exact registry dependencies and a public resolver operation. Packaging validates reviewed source against registry dependencies; the consumer validates published artifacts. Fresh Cargo home and target directories, restricted subprocess environments, and ancestor Cargo configuration checks prevent inherited substitutions. Only the repository's simple build target-directory configuration is allowed; registry replacements, patches, wrappers, and other config fail closed. Metadata must show both exact versions from crates.io and the resolver's actual edge to the intended registry-client node.
+
+`registry-verification/verification.json` records tag, source SHA, candidate fingerprint, expected and resolved versions, sources, dependency edge, command arguments, attempts, output, and success or failure. `metadata.json` and the consumer `Cargo.lock` are retained when available. Temporary execution directories are removed. The workflow uploads available evidence on failure as well as success, without supplying publication credentials.
+
+Only identified registry acquisition/index propagation failures retry: at most six attempts, separated by 10, 20, 30, 40, and 50 seconds. Semantic mismatches, compilation, package-verification failures, and unclassified failures terminate immediately. Exhaustion blocks completion and never triggers another publication. Preserve diagnostics, independently read back crates.io, and recover using the current coordinator's renewed whole-candidate authorization and exact approved-suffix checks; preserve original candidate bytes. Do not edit the tag or blindly republish an uncertain version.
+
 ### 8. Verify and dispatch crates.io publication separately
 
 Run the publication planner from the tagged source tree (or pass that tree with `--workspace`):
@@ -508,6 +524,7 @@ Record the following for every release in the release issue, pull request, or op
 - release coordinator run ID and independent candidate approval state;
 - published package/version set;
 - clean registry installation command and binary output;
+- registry resolver verification artifact, candidate fingerprint, tagged source SHA, exact versions, registry sources, dependency edge, packaging/check commands, consumer metadata and lockfile, and attempt diagnostics;
 - final public endpoint and repository-state verification.
 
 Replace credentials, tokens, cookies, signing material, and secret values with `[REDACTED]`. Do not store them in the evidence ledger.
