@@ -705,3 +705,275 @@ fn network_fixture_response_rejects_invalid_framing() {
         std::io::ErrorKind::InvalidData
     );
 }
+
+#[test]
+fn run_preflight_is_read_only_and_never_collects_environment_values() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    project.write("tapid.toml", b"[run.scripts.probe]\nread=['.']\nwrite=['.']\nenvironment=['TAPID_FLAG_VISIBLE']\nsubprocess=true\n").unwrap();
+    project
+        .write(
+            "probe.js",
+            b"require('node:fs').writeFileSync('child-marker','ran')",
+        )
+        .unwrap();
+    project
+        .write(".tapid-lifecycle-journal.json", b"pending journal sentinel")
+        .unwrap();
+    let command = isolated_command(project.path(), &[], true);
+    let home = PathBuf::from(
+        command
+            .get_envs()
+            .find(|(name, _)| *name == "HOME")
+            .unwrap()
+            .1
+            .unwrap(),
+    );
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    let before = fs::read(project.path().join("tapid.toml")).unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "--json",
+            "run",
+            "probe",
+            "--preflight",
+            "--node-runtime",
+            node.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["operation"], "run-preflight");
+    assert_eq!(value["data"]["contract"], "tapid.run-preflight");
+    assert_eq!(value["data"]["schema_version"], 1);
+    assert_eq!(value["data"]["assessment"], "no_local_blockers");
+    assert_eq!(value["data"]["enforcement_established"], false);
+    assert_eq!(
+        value["data"]["policy_inputs"]["effective"]["environment"],
+        serde_json::json!(["TAPID_FLAG_VISIBLE"])
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("visible-value"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("visible-value"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("writeFileSync"));
+    assert!(!project.path().join("child-marker").exists());
+    assert!(!project.path().join("node_modules").exists());
+    assert_eq!(fs::read(project.path().join("tapid.toml")).unwrap(), before);
+    assert_eq!(
+        fs::read(project.path().join(".tapid-lifecycle-journal.json")).unwrap(),
+        b"pending journal sentinel"
+    );
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 4);
+    assert_eq!(fs::read_dir(home).unwrap().count(), 0);
+}
+
+#[test]
+fn run_preflight_rejects_launch_inputs_without_repair_or_secret_diagnostics() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    for (config, flags, code) in [
+        ("malformed = [secret-value", vec![], "CONFIG_INVALID"),
+        (
+            "[registries.default]\nurl='https://registry.example'\ntoken-env='NPM_TOKEN'\n[run.scripts.probe]\nenvironment=['NPM_TOKEN']\n",
+            vec![],
+            "ENVIRONMENT_INVALID",
+        ),
+        (
+            "",
+            vec!["--allow-env", "CI=secret-value"],
+            "PERMISSIONS_INVALID",
+        ),
+    ] {
+        project.write("tapid.toml", config.as_bytes()).unwrap();
+        let mut arguments = vec![
+            "--json",
+            "run",
+            "probe",
+            "--preflight",
+            "--node-runtime",
+            node.to_str().unwrap(),
+        ];
+        arguments.extend(flags.iter().copied());
+        let output = invoke(project.path(), &arguments);
+        assert!(!output.status.success(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["data"]["blockers"][0]["code"], code);
+        assert_eq!(value["changes"]["state"], "unchanged");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("secret-value"));
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            fs::read(project.path().join("tapid.toml")).unwrap(),
+            config.as_bytes()
+        );
+        assert_eq!(fs::read_dir(project.path()).unwrap().count(), 2);
+        let mut launch = vec!["run", "probe", "--node-runtime", node.to_str().unwrap()];
+        launch.extend(flags);
+        assert!(!invoke(project.path(), &launch).status.success());
+    }
+}
+
+#[test]
+fn run_preflight_conflicts_never_create_result_files_and_ordinary_json_stays_unsupported() {
+    let project = project();
+    let results = tapid_test_support::TempProject::new("preflight-results").unwrap();
+    let destination = results.path().join("result.json");
+    for flags in [
+        vec!["--result-file", destination.to_str().unwrap()],
+        vec!["--receipt-json"],
+    ] {
+        let mut args = vec!["--json", "run", "probe", "--preflight"];
+        args.extend(flags);
+        let output = invoke(project.path(), &args);
+        assert!(!output.status.success());
+        assert!(!destination.exists());
+    }
+    let output = invoke(project.path(), &["--json", "run", "probe"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["errors"][0]["code"], "JSON_UNSUPPORTED_COMMAND");
+}
+
+#[test]
+fn run_preflight_reports_selected_member_runtime_and_policy_ceiling_failures() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    project.write("package.json", br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"scripts":{"probe":"root-secret-body"}}"#).unwrap();
+    project
+        .write(
+            "packages/web/package.json",
+            br#"{"name":"web","version":"1.0.0","scripts":{"probe":"member-secret-body"}}"#,
+        )
+        .unwrap();
+    project.write("tapid.toml", b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nwrite=[]\nsubprocess=false\n").unwrap();
+    let args = [
+        "--json",
+        "run",
+        "probe",
+        "--preflight",
+        "--workspace",
+        "web",
+        "--node-runtime",
+        node.to_str().unwrap(),
+    ];
+    let output = invoke(project.path(), &args);
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["script"]["workspace"], "web");
+    assert_eq!(
+        value["data"]["script"]["working_directory"],
+        fs::canonicalize(project.path().join("packages/web"))
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(
+        value["data"]["runtime"]["path"],
+        fs::canonicalize(&node).unwrap().to_str().unwrap()
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("secret-body"));
+    let mut escalation = args.to_vec();
+    escalation.extend(["--allow-subprocess"]);
+    let output = invoke(project.path(), &escalation);
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["blockers"][0]["code"], "PREPARATION_FAILED");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_preflight_defers_environment_value_limits_instead_of_collecting_values() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    let args = [
+        "--json",
+        "run",
+        "probe",
+        "--preflight",
+        "--allow-env",
+        "TAPID_PREFLIGHT_LARGE",
+        "--node-runtime",
+        node.to_str().unwrap(),
+    ];
+    let output = isolated_command(project.path(), &args, true)
+        .env(
+            "TAPID_PREFLIGHT_LARGE",
+            "x".repeat(tapid_runner::MAX_ENVIRONMENT_VALUE_UNITS + 1),
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["data"]["checks_not_performed"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(
+                "environment_values_and_value_dependent_limits"
+            ))
+    );
+    assert!(output.stdout.len() < 16 * 1024);
+    assert!(!project.path().join("tapid.toml").exists());
+}
+
+#[test]
+fn run_preflight_missing_runtime_has_an_actionable_typed_reason() {
+    let project = project();
+    let output = invoke(
+        project.path(),
+        &[
+            "--json",
+            "run",
+            "probe",
+            "--preflight",
+            "--allow-read",
+            ".",
+            "--node-runtime",
+            "missing-node",
+        ],
+    );
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["blockers"][0]["code"], "RUNTIME_INVALID");
+    assert_eq!(
+        value["data"]["blockers"][0]["action"]["id"],
+        "select_node_runtime"
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn run_preflight_shortened_metadata_is_a_typed_failure() {
+    let project = project();
+    let name = "s".repeat(5000);
+    project.write("package.json", &serde_json::to_vec(&serde_json::json!({"name":"bounded", "version":"1.0.0", "scripts": {name.clone(): "never-executed"}})).unwrap()).unwrap();
+    let (_runtime, node) = private_node_runtime();
+    let output = invoke(
+        project.path(),
+        &[
+            "--json",
+            "run",
+            &name,
+            "--preflight",
+            "--allow-read",
+            ".",
+            "--node-runtime",
+            node.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["code"] == "INSPECTION_TRUNCATED")
+    );
+    assert_eq!(value["data"]["assessment"], "blocked");
+    assert!(
+        value["truncated_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("/data/script/name"))
+    );
+}

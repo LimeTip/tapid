@@ -33,6 +33,7 @@ Automation clients can use the compact [agent guide v1](../../docs/agent-guide.m
 tapid init [PATH]
 tapid license
 tapid status [--project-dir <PATH>] [--workspace <NAME>] [--json]
+tapid capabilities [--json]
 tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
 tapid lock verify
@@ -53,6 +54,7 @@ tapid tool remove <PACKAGE> [--tools-dir <PATH>]
 tapid cache info [--store-dir <PATH>]
 tapid cache clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid clean [--dry-run | --yes] [--store-dir <PATH>]
+tapid run <SCRIPT> --preflight [--json] [PERMISSION FLAGS] [--workspace <NAME>] [--node-runtime <PATH>]
 tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json | --result-file <PATH>] [-- <ARGS>...]
 ```
 
@@ -482,3 +484,14 @@ unknown. Check `changes.state` for committed files and detail completeness befor
 using the observations; installation success does not establish application
 readiness. See [lifecycle result fields](../../docs/json-results.md#dependency-lifecycle-observations)
 and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installation-results).
+
+Read-only script planning uses `tapid --json run build --preflight`. It shares
+selection and policy/request preparation with launch, reports environment names
+without reading their values, and never starts a child, creates a run result file,
+or recovers a transaction. Actual backend support, enforcement, cleanup and
+value-dependent limits remain unchecked; exit 0 is not launch assurance.
+
+`tapid --json capabilities` discovers command structure, result channels and
+possible effects without reading a project or accessing the network. Schema
+coverage is currently explicitly unpublished. See [JSON results](../../docs/json-results.md)
+for contract/version compatibility and the remaining discovery limits.

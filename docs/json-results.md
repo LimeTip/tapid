@@ -19,7 +19,9 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
 | `init` | Creates `package.json` with committed change state; handled failures return a typed error |
 | `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
-| `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
+| `run --preflight` | Read-only names-only script planning result |
+| `capabilities` | Offline installed-binary discovery |
+| Ordinary `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
 | Private release helpers, no command | `JSON_UNSUPPORTED_COMMAND`, exit 1 |
 | Invalid arguments | `ARGUMENT_INVALID`, exit 2 |
 | `--help`, `-h`, or `help` with `--json` | Successful `help` result, exit 0 |
@@ -484,3 +486,39 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+## Script planning and installed-binary discovery
+
+`tapid --json run build --preflight` emits a `run-preflight` envelope with
+`data.contract: "tapid.run-preflight"` and independent `data.schema_version: 1`.
+It selects the same root/member script, configuration policy, invocation inputs,
+credential-name restrictions, runtime path and checked request preparation as
+launch. Environment entries contain names only. Script bodies and forwarded
+argument values are omitted. `--preflight` conflicts with `--result-file` and
+`--receipt-json`, and branches before either result-file creation or environment
+value collection. It never executes a child or recovers project transactions.
+
+`data.policy_inputs` separates configuration, invocation and effective requests.
+`data.runtime` describes a locally validated runtime path, with identity at launch
+still deferred. `data.blockers` contains stable codes, local input locations and
+typed next actions. Exit 1 reports a local blocker or shortened output. Exit 0
+means only that the listed local checks found no blockers. Backend prerequisites,
+native probes, actual enforcement, descendant cleanup and environment-value
+limits remain explicitly unchecked. The snapshot is not atomic. A successful
+preflight must never be used as permission to bypass checked launch.
+
+`tapid --json capabilities` requires no project, configuration, credentials,
+store or network. Its `tapid.capabilities` contract version 1 reports the actual
+Tapid version separately. Clap supplies public command paths, aliases, argument
+defaults, arity, groups and conflicts. Explicit metadata describes result channels,
+possible effects and additional application constraints. Ordinary run uses its
+separate result/receipt channels; only preflight accepts global JSON.
+
+The discovery implementation currently marks schema coverage
+`not_yet_published` and exposes an empty schema catalog. It does not yet provide
+the complete offline schema export required by issue #195. Consumers must treat
+missing schema coverage, unknown reason/command identifiers and unavailable
+observations as unchecked. Unknown contract versions are unsupported; unknown
+additive fields may be ignored. Contract versions are independent of Tapid release
+versions. These declarations neither prove project compatibility nor establish
+runner assurance.

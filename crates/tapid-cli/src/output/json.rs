@@ -487,3 +487,40 @@ mod tests {
 
 #[cfg(test)]
 mod lifecycle_tests;
+
+/// Bounded read-only inspection projection shared by machine and human output.
+pub(crate) fn inspection_data(mut data: Value) -> (Value, bool) {
+    let mut truncated = Vec::new();
+    status_text(&mut data, "/data", &mut truncated);
+    let shortened = !truncated.is_empty();
+    if shortened {
+        data["assessment"] = json!("blocked");
+        data["blockers"].as_array_mut().expect("inspection blocker list").push(json!({
+            "code": "INSPECTION_TRUNCATED",
+            "action": {"id": "reduce_inspection_input", "description": "Reduce oversized metadata before relying on inspection results."}
+        }));
+    }
+    truncated.sort_unstable();
+    truncated.dedup();
+    data["truncated_fields"] = json!(truncated);
+    (data, shortened)
+}
+
+pub(crate) fn inspection_result(
+    operation: &str,
+    project: &std::path::Path,
+    data: Value,
+) -> ExitCode {
+    let (data, shortened) = inspection_data(data);
+    let blocked = shortened || data["assessment"] == "blocked";
+    let changes = OperationOutcome::unchanged(project);
+    let mut result = envelope(
+        operation,
+        if blocked { "failure" } else { "success" },
+        Some(&changes),
+    );
+    result["errors"] = data["blockers"].clone();
+    result["truncated_fields"] = data["truncated_fields"].clone();
+    result["data"] = data;
+    emit(result, u8::from(blocked))
+}
