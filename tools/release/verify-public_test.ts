@@ -13,7 +13,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     '/repos/LimeTip/tapid/releases': [{ id: 42, tag_name: 'v0.0.11', draft: false, prerelease: false, immutable: true, assets: [] }],
     ...overrides,
   };
-  const transport = new PublicTransport({ fetch: async url => {
+  const transport = new PublicTransport({ delay: async () => {}, fetch: async url => {
     const path = new URL(String(url)).pathname;
     requests.push(path);
     if (path.endsWith('/runs')) return Response.json({ workflow_runs: [] });
