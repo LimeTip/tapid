@@ -14,6 +14,7 @@ STAGED_MARKER=""
 PATH_UPDATED=0
 PATH_RC=""
 PATH_COMMAND=""
+PATH_SHELL="auto"
 PATH_MARKER_BEGIN="# tapid-path-managed-v1"
 PATH_MARKER_END="# end tapid-path-managed-v1"
 MAX_RECORD_BYTES=262144
@@ -66,6 +67,7 @@ Options:
   --version VERSION     Install a specific stable release tag, e.g. v0.1.0
   --source-ref REF      Build from a source branch, tag, or commit (development)
   --install-dir DIR     Install the binary into DIR (default: ~/.local/bin)
+  --shell SHELL         PATH shell preference: auto|bash|zsh|posix (fish unavailable)
   --repo OWNER/REPO     Use the legacy GitHub release layout for this repository
   -h, --help            Show this help
 
@@ -108,14 +110,20 @@ valid_path_block() {
 # Stage and verify an owned startup profile before atomically adding Tapid's PATH block.
 configure_path() {
   [ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0
-  shell_name="${SHELL-}"; shell_name="${shell_name##*/}"
+  shell_name="$PATH_SHELL"
+  if [ "$shell_name" = auto ]; then
+    shell_name="${SHELL-}"; shell_name="${shell_name##*/}"
+  fi
   case "$shell_name" in
     zsh) PATH_RC="$HOME/.zprofile"; PATH_COMMAND=". \"$PATH_RC\"" ;;
     bash)
-      if [ -f "$HOME/.bash_profile" ]; then PATH_RC="$HOME/.bash_profile"; else PATH_RC="$HOME/.bashrc"; fi
+      PATH_RC="$HOME/.profile"
+      for candidate in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+        if [ -e "$candidate" ] || [ -L "$candidate" ]; then PATH_RC="$candidate"; break; fi
+      done
       PATH_COMMAND=". \"$PATH_RC\""
       ;;
-    sh|dash|ksh) PATH_RC="$HOME/.profile"; PATH_COMMAND=". \"$PATH_RC\"" ;;
+    posix|sh|dash|ksh) PATH_RC="$HOME/.profile"; PATH_COMMAND=". \"$PATH_RC\"" ;;
     *) return 1 ;;
   esac
   path_line='export PATH="$HOME/.local/bin:$PATH"'
@@ -166,11 +174,18 @@ while [ "$#" -gt 0 ]; do
     --version) [ "$#" -ge 2 ] || fail "--version requires a value"; VERSION="$2"; VERSION_SET=1; shift 2 ;;
     --source-ref) [ "$#" -ge 2 ] || fail "--source-ref requires a value"; SOURCE_REF="$2"; SOURCE_REF_SET=1; shift 2 ;;
     --install-dir) [ "$#" -ge 2 ] || fail "--install-dir requires a value"; INSTALL_DIR="$2"; shift 2 ;;
+    --shell) [ "$#" -ge 2 ] || fail "--shell requires a value"; PATH_SHELL="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a value"; REPO="$2"; LEGACY_RELEASE=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown option: $1" ;;
   esac
 done
+
+case "$PATH_SHELL" in
+  auto|bash|zsh|posix) ;;
+  fish) fail "fish PATH persistence is not yet supported" ;;
+  *) fail "--shell must be auto, bash, zsh, fish, or posix" ;;
+esac
 
 case "$REPO" in ''|*[!A-Za-z0-9_./-]*|/*|*/|*/*/*) fail "repository must be OWNER/REPO" ;; esac
 case "$REPO" in */*) ;; *) fail "repository must be OWNER/REPO" ;; esac

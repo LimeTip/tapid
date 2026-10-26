@@ -137,6 +137,52 @@ test("Unix single-file installer authenticates its native bootstrap before execu
   } finally { await f.cleanup(); }
 });
 
+test("explicit Bash selection overrides a misleading SHELL", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "bash-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".bash_profile"), "# bash login\n");
+    await writeFile(join(home, ".zprofile"), "# zsh login\n");
+    await f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--shell", "bash"], { HOME: shellPath(home), SHELL: "/bin/zsh" });
+    match(await readFile(join(home, ".bash_profile"), "utf8"), /tapid-path-managed-v1/);
+    equal(await readFile(join(home, ".zprofile"), "utf8"), "# zsh login\n");
+  } finally { await f.cleanup(); }
+});
+
+test("Unix shell selection rejects invalid and unavailable preferences before installation", shellOptions, async () => {
+  const f = await fixture();
+  try {
+    for (const args of [["--shell"], ["--shell", ""], ["--shell", "tcsh"], ["--shell", "fish"]]) {
+      await rejects(() => f.installShell(args), /--shell|fish PATH persistence/);
+      await rejects(() => readFile(join(f.install, "tapid")), { code: "ENOENT" });
+      await rejects(() => readFile(join(f.directory, "requests")), { code: "ENOENT" });
+    }
+  } finally { await f.cleanup(); }
+});
+
+test("explicit Bash selection respects login startup precedence", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "bash-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".bash_login"), "# login\n");
+    await writeFile(join(home, ".profile"), "# fallback\n");
+    await f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--shell", "bash"], { HOME: shellPath(home) });
+    match(await readFile(join(home, ".bash_login"), "utf8"), /tapid-path-managed-v1/);
+    equal(await readFile(join(home, ".profile"), "utf8"), "# fallback\n");
+    await symlink(join(home, ".bash_login"), join(home, ".bash_profile"));
+    await rejects(() => f.installShell(["--install-dir", shellPath(join(home, ".local", "bin")), "--shell", "bash"], { HOME: shellPath(home) }), /could not safely update/);
+    await rm(join(home, ".bash_profile"));
+    await run(shell!, [shellPath(join(root, "scripts", "uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home), SHELL: "/bin/bash" } });
+    equal(await readFile(join(home, ".bash_login"), "utf8"), "# login\n");
+    await writeFile(join(home, ".bashrc"), '# tapid-path-managed-v1\nexport PATH="$HOME/.local/bin:$PATH"\n# end tapid-path-managed-v1\n');
+    await writeFile(join(home, ".local", "bin", ".tapid-managed"), "tapid-managed-v1\n");
+    await run(shell!, [shellPath(join(root, "scripts", "uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home), SHELL: "/bin/bash" } });
+    equal(await readFile(join(home, ".bashrc"), "utf8"), "");
+  } finally { await f.cleanup(); }
+});
+
 test("Unix installer configures the default macOS zsh profile", { skip: platform === "win32" }, async () => {
   const f = await fixture();
   const home = join(f.directory, "home");

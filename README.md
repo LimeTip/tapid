@@ -180,7 +180,9 @@ Invoke-WebRequest https://tapid.dev/install.ps1 -OutFile $installer
 Remove-Item $installer
 ```
 
-The Unix installer manages only `~/.local/bin` through a versioned `tapid-path-managed-v1` block in an owned, writable Bash or POSIX startup file (`$HOME/.bash_profile`, `$HOME/.bashrc`, or `$HOME/.profile`). Repeated installs are idempotent; uninstall removes only that exact Tapid block and preserves unrelated PATH entries. Symlinked, non-regular, foreign, or unwritable startup files are rejected. For a custom `--install-dir`, the installer prints the directory that must be added manually. PowerShell updates the user-level Windows PATH. Open a new terminal, or follow the command printed by the installer, before using `tapid`. Other Unix shells remain outside this slice.
+The Unix installer accepts `--shell auto|bash|zsh|posix`; explicit selection overrides the `$SHELL` preference used by `auto`. Fish selection is currently rejected before installation. Bash login selection uses the first existing `.bash_profile`, `.bash_login`, or `.profile`, creating `.profile` if none exists; an unsafe higher-precedence file is rejected. Startup-mode selection, explicit persistence consent, and receipt-backed cleanup remain pending; this is not the complete durable PATH contract. Until receipts are implemented, uninstall still uses the current `$SHELL`, which must match the selected installation shell.
+
+The Unix installer manages only `~/.local/bin` through a versioned `tapid-path-managed-v1` block in an owned, writable Bash or POSIX startup file (`$HOME/.bash_profile`, `$HOME/.bash_login`, or `$HOME/.profile`). Repeated installs are idempotent; uninstall removes only that exact Tapid block and preserves unrelated PATH entries. Symlinked, non-regular, foreign, or unwritable startup files are rejected. For a custom `--install-dir`, the installer prints the directory that must be added manually. PowerShell updates the user-level Windows PATH. Open a new terminal, or follow the command printed by the installer, before using `tapid`. Other Unix shells remain outside this slice.
 
 Remove the Tapid CLI binary and its managed PATH block on Unix:
 

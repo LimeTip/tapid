@@ -39,12 +39,22 @@ remove_path_block() {
   shell_name="${SHELL-}"; shell_name="${shell_name##*/}"
   case "$shell_name" in
     bash)
-      if [ -f "$HOME/.bash_profile" ]; then PATH_RC="$HOME/.bash_profile"; else PATH_RC="$HOME/.bashrc"; fi
+      PATH_RC="$HOME/.profile"
+      for candidate in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+        if [ -e "$candidate" ] || [ -L "$candidate" ]; then PATH_RC="$candidate"; break; fi
+      done
       ;;
     zsh) PATH_RC="$HOME/.zprofile" ;;
     sh|dash|ksh) PATH_RC="$HOME/.profile" ;;
     *) return 1 ;;
   esac
+  # Older installers selected .bashrc when .bash_profile was absent.
+  # Retain cleanup of that legacy location when the login file has no block.
+  if [ "$shell_name" = bash ] && [ ! -L "$PATH_RC" ] &&
+    { [ ! -e "$PATH_RC" ] || { [ -f "$PATH_RC" ] && ! grep -Fqx "$PATH_MARKER_BEGIN" "$PATH_RC"; }; } &&
+    [ -f "$HOME/.bashrc" ] && [ ! -L "$HOME/.bashrc" ]; then
+    PATH_RC="$HOME/.bashrc"
+  fi
   [ -e "$PATH_RC" ] || return 0
   [ ! -L "$PATH_RC" ] && [ -f "$PATH_RC" ] && [ -O "$PATH_RC" ] && [ -r "$PATH_RC" ] && [ -w "$PATH_RC" ] || return 1
   begin_count="$(grep -Fxc "$PATH_MARKER_BEGIN" "$PATH_RC" || true)"
