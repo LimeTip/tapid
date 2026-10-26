@@ -1620,6 +1620,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tapid-signatures",
+ "tapid-test-support",
  "time",
 ]
 
