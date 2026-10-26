@@ -1139,9 +1139,24 @@ test("Fish startup modes resolve literal custom paths and clean recorded XDG loc
         if (mode === "both") {
           for (const value of ["", undefined]) {
             const emptyEnv = { ...probeEnv, PATH: value };
-            const baseline = await run(executable, ["--no-config", "-c", 'printf "%s" "$PATH"'], { env: emptyEnv });
-            const activated = await run(executable, ["-i", "-c", 'source "$XDG_CONFIG_HOME/fish/config.fish"; printf "%s" "$PATH"; if set -q -U fish_user_paths; exit 9; end; true'], { env: emptyEnv });
-            equal(activated.stdout, shellPath(install) + ":" + baseline.stdout);
+            for (const unrelated of [false, true]) {
+              // Compare activation against the same process's startup state. System
+              // configuration belongs to the automatic startup probes above.
+              const activated = await run(executable, ["--no-config", "-i", "-c", [
+                unrelated ? "set --append PATH /unrelated/startup/bin /another/startup/bin" : "",
+                'printf "%s\\n" "$PATH"',
+                'source "$XDG_CONFIG_HOME/fish/config.fish"',
+                'source "$XDG_CONFIG_HOME/fish/config.fish"',
+                'printf "%s\\n" "$PATH"',
+                "if set -q -U fish_user_paths; exit 9; end; true",
+              ].join("; ")], { env: emptyEnv });
+              const lines = activated.stdout.split("\n");
+              equal(lines.length, 3);
+              const [baseline, after, end] = lines;
+              equal(end, "");
+              if (unrelated) ok(baseline.endsWith("/unrelated/startup/bin:/another/startup/bin"));
+              equal(after, shellPath(install) + ":" + baseline);
+            }
           }
         }
         await run(shell!, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(install)], { env: { ...f.env, HOME: shellPath(home), XDG_CONFIG_HOME: "/unused", SHELL: "/bin/sh" } });
