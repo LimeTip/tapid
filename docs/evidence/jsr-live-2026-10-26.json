@@ -1,10 +1,10 @@
 {
   "cliInstallStderr": "",
-  "cliInstallStdout": "Installed 2 package(s) in 5.62s\nLock selections: 2 added, 0 changed, 0 reused, 0 removed\nChanged: node_modules, tapid.lock\n",
-  "cliSha256": "3413857ece4c2c29d7c3a749508a9264a6e068cbd11a1a8a47c7e4601ee7381a",
+  "cliInstallStdout": "Installed 2 package(s) in 5.97s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 2 added, 0 changed, 0 reused, 0 removed\nChanged: node_modules, tapid.lock\n",
+  "cliSha256": "53f5cdb19185558bbe88ee801add5a9adc6239fbd3b272b5709bdfc9d308deb2",
   "coldProxyAttempts": 3,
   "coldProxyControl": "failed as required",
-  "coldProxyStderr": "Install failed during registry access.\nerror: cannot fetch metadata for https://[redacted]@std/internal: Transport(Http(\"connection failure after 3 attempts: error sending request for url (https://npm.jsr.io/@jsr/std__internal)\"))\ndiagnostic: REGISTRY_TRANSPORT_FAILED\nProject files unchanged.\nCheck the registry address and network connection before retrying.\n",
+  "coldProxyStderr": "Install failed during registry access.\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: not_performed (0 package(s) inspected). Application readiness is not established.\nerror: cannot fetch metadata for https://[redacted]@std/internal: Transport(Http(\"connection failure after 3 attempts: error sending request for url (https://npm.jsr.io/@jsr/std__internal)\"))\ndiagnostic: REGISTRY_TRANSPORT_FAILED\nProject files unchanged.\nCheck the registry address and network connection before retrying.\n",
   "frozenReplay": "passed",
   "install": "passed",
   "lock": {
@@ -411,14 +411,14 @@
       "mode": "--offline",
       "nodeStdout": "TAPID_JSR_NODE_OK\n",
       "stderr": "",
-      "stdout": "Replayed lockfile: 2 package(s) in 0.29s\nLock selections: 0 added, 0 changed, 2 reused, 0 removed\nChanged: node_modules\n"
+      "stdout": "Replayed lockfile: 2 package(s) in 0.28s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 0 added, 0 changed, 2 reused, 0 removed\nChanged: node_modules\n"
     },
     {
       "mode": "--frozen",
       "nodeStdout": "TAPID_JSR_NODE_OK\n",
       "stderr": "",
-      "stdout": "Replayed lockfile: 2 package(s) in 0.35s\nLock selections: 0 added, 0 changed, 2 reused, 0 removed\nChanged: node_modules\n"
+      "stdout": "Replayed lockfile: 2 package(s) in 0.35s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 0 added, 0 changed, 2 reused, 0 removed\nChanged: node_modules\n"
     }
   ],
-  "retrievedAtUnixSeconds": 1793050402
+  "retrievedAtUnixSeconds": 1793051605
 }

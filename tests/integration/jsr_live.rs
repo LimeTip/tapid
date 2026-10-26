@@ -207,7 +207,7 @@ fn jsr_live_install_exports_and_exact_replay() {
         assert_eq!(package["artifactIntegrity"], receipt["declaredIntegrity"]);
         assert_eq!(package["treeDigest"], receipt["treeDigest"]);
     }
-    let probe = "import {join} from '@std/path'; import * as internal from '@std/internal'; import assert from 'node:assert/strict'; assert.ok(Object.keys(internal).length > 0); assert.equal(join('alpha','beta'), 'alpha'+(process.platform==='win32'?'\\\\':'/')+'beta'); console.log('TAPID_JSR_NODE_OK');";
+    let probe = "import {join} from '@std/path'; import * as internal from '@std/internal'; import assert from 'node:assert/strict'; import {sep} from 'node:path'; assert.ok(Object.keys(internal).length > 0); assert.equal(join('alpha','beta'), 'alpha'+sep+'beta'); console.log('TAPID_JSR_NODE_OK');";
     let node_install = checked(
         isolated_command(&node, project.path(), home.path())
             .current_dir(project.path())
