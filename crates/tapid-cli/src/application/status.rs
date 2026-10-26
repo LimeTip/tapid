@@ -26,6 +26,16 @@ const MAX_ENTRIES: usize = 128;
 pub(crate) struct Blocker {
     pub(crate) code: &'static str,
     pub(crate) location: String,
+    pub(crate) operations: &'static [&'static str],
+    pub(crate) action: NextAction,
+}
+
+/// Advice is typed data, never a command assembled from project metadata.
+#[derive(Serialize)]
+pub(crate) struct NextAction {
+    pub(crate) id: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) parameters: Value,
 }
 
 /// Local preflight evidence, including explicit verification gaps and snapshot limits.
@@ -45,6 +55,8 @@ pub(crate) struct StatusReport {
     pub(crate) verification_depth: &'static str,
     pub(crate) checks_not_performed: Vec<&'static str>,
     pub(crate) capabilities: Value,
+    pub(crate) operations: Value,
+    pub(crate) migration_guide: &'static str,
     #[serde(skip)]
     pub(crate) project: PathBuf,
 }
@@ -56,10 +68,100 @@ impl StatusReport {
             self.truncated = true;
             return;
         }
+        let location = location.as_ref().display().to_string();
+        // Only these findings append a pointer to a path. Other locations can
+        // themselves contain '#', so never parse them as field references.
+        let (path, field) = if matches!(code, "UNSUPPORTED_SPEC" | "UNSUPPORTED_OVERRIDE") {
+            location
+                .rsplit_once("#/")
+                .map(|(path, field)| (path, Some(format!("/{field}"))))
+                .unwrap_or((&location, None))
+        } else {
+            (location.as_str(), None)
+        };
+        let (id, description) = match code {
+            "UNSUPPORTED_SPEC"
+            | "UNSUPPORTED_OVERRIDE"
+            | "MANIFEST_COMPATIBILITY_BLOCKER"
+            | "WORKSPACE_COMPATIBILITY_BLOCKER" => (
+                "review_manifest_requirement",
+                "Review the declaration against Tapid's supported specs and workspace requirements.",
+            ),
+            "RECOVERY_REQUIRED" | "RECOVERY_STATE_INVALID" => (
+                "review_recovery_state",
+                "Preserve recovery files and review the project before normal install recovery.",
+            ),
+            "INSTALLATION_NOT_MANAGED" => (
+                "review_installation_ownership",
+                "Preserve the existing installation and review managed-layout requirements before installing.",
+            ),
+            "SNAPSHOT_CHANGED" => (
+                "retry_stable_snapshot",
+                "Retry inspection after concurrent project writers have stopped.",
+            ),
+            "WORKSPACE_DISCOVERY_LIMIT" => (
+                "review_discovery_limits",
+                "Review workspace patterns and inspection limits; member selection does not narrow discovery.",
+            ),
+            "REGISTRY_CONFIGURATION_INVALID" => (
+                "review_registry_configuration",
+                "Review routing origins and credential variable names in tapid.toml.",
+            ),
+            "LOCKFILE_MISSING" => (
+                "select_lockfile_workflow",
+                "Review native resolution or the npm lock import guide before creating a lockfile.",
+            ),
+            "NPM_IMPORT_UNSUPPORTED" | "NPM_IMPORT_UNREADABLE" => (
+                "review_npm_import",
+                "Preserve the npm lock and review supported npm v3 import forms in the migration guide.",
+            ),
+            "LOCKFILE_UNREADABLE"
+            | "LOCKFILE_INVALID"
+            | "LOCK_MANIFEST_MISMATCH"
+            | "LOCK_WORKSPACE_MISMATCH"
+            | "LOCK_ROOT_BINDINGS_INVALID"
+            | "LOCK_REPLAY_UNSUPPORTED" => (
+                "review_lockfile",
+                "Preserve the lockfile and review its format, manifest receipts, and replay requirements.",
+            ),
+            _ => (
+                "review_project_metadata",
+                "Review the selected manifest and workspace declarations at the reported location.",
+            ),
+        };
         self.blockers.push(Blocker {
             code,
-            location: location.as_ref().display().to_string(),
+            operations: affected_operations(code),
+            action: NextAction {
+                id,
+                description,
+                parameters: json!({"path": path, "field": field}),
+            },
+            location,
         });
+    }
+}
+
+fn affected_operations(code: &str) -> &'static [&'static str] {
+    match code {
+        "NPM_IMPORT_UNSUPPORTED" | "NPM_IMPORT_UNREADABLE" => &["npm_import"],
+        "UNSUPPORTED_SPEC"
+        | "UNSUPPORTED_OVERRIDE"
+        | "MANIFEST_COMPATIBILITY_BLOCKER"
+        | "WORKSPACE_COMPATIBILITY_BLOCKER" => &["native_resolution", "dependency_mutation"],
+        "LOCKFILE_MISSING"
+        | "LOCKFILE_UNREADABLE"
+        | "LOCKFILE_INVALID"
+        | "LOCK_MANIFEST_MISMATCH"
+        | "LOCK_WORKSPACE_MISMATCH"
+        | "LOCK_ROOT_BINDINGS_INVALID"
+        | "LOCK_REPLAY_UNSUPPORTED" => &["imported_replay"],
+        _ => &[
+            "npm_import",
+            "imported_replay",
+            "native_resolution",
+            "dependency_mutation",
+        ],
     }
 }
 
@@ -141,12 +243,15 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
             "workspace_selection": "exact_member_name", "workspace_linking": "supported_not_verified",
             "registry_routing": "experimental"
         }),
+        operations: Value::Null,
+        migration_guide: "https://github.com/LimeTip/tapid/blob/main/docs/npm-lockfile-import.md",
         project: project.clone(),
     };
     let mut snapshots = BTreeMap::new();
     for (name, limit) in [
         ("package.json", MAX_FILE_BYTES),
         ("tapid.lock", MAX_FILE_BYTES),
+        ("package-lock.json", MAX_FILE_BYTES),
         ("tapid.toml", 64 * 1024),
     ] {
         let path = project.join(name);
@@ -256,12 +361,46 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
             }
         }
     }
+    // Validate an optional npm input with the owning parser, never the import
+    // command (which publishes state). Its separate layout/routing checks do not
+    // follow from parser acceptance.
+    let npm_path = project.join("package-lock.json");
+    let npm_import = match read(&npm_path, MAX_FILE_BYTES) {
+        Ok(bytes) => {
+            report
+                .checks_not_performed
+                .push("npm_import_workspace_receipts_routing_and_layout");
+            match manifest_bytes.as_ref().ok().and_then(|manifest| {
+                Some((std::str::from_utf8(manifest).ok()?, digest_bytes(manifest)))
+            }) {
+                Some((manifest, digest))
+                    if std::str::from_utf8(&bytes).ok().is_some_and(|input| {
+                        ImportedNpmLockfile::import(input, manifest, &digest).is_ok()
+                    }) =>
+                {
+                    "supported"
+                }
+                Some(_) => {
+                    report.block("NPM_IMPORT_UNSUPPORTED", &npm_path);
+                    "unsupported"
+                }
+                None => "unchecked",
+            }
+        }
+        Err("missing") => "unchecked",
+        Err(_) => {
+            report.block("NPM_IMPORT_UNREADABLE", &npm_path);
+            "unchecked"
+        }
+    };
     let lock_path = project.join("tapid.lock");
+    let mut imported = false;
     match read(&lock_path, MAX_FILE_BYTES) {
         Ok(bytes)
             if serde_json::from_slice::<Value>(&bytes)
                 .is_ok_and(|value| value["lockfileVersion"] == 8) =>
         {
+            imported = true;
             inspect_imported_lock(&bytes, &manifest_bytes, workspace.as_ref(), &mut report);
         }
         Ok(bytes) => match std::str::from_utf8(&bytes)
@@ -325,6 +464,35 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     }
     report.snapshot =
         json!({"consistency": "not_atomic", "changes_detected": changed, "files": files});
+    // These scopes describe only checks actually performed here. Neither a matching
+    // imported receipt nor the absence of native manifest blockers proves resolution.
+    let native_blocked = report.blockers.iter().any(|blocker| {
+        affected_operations(blocker.code) == ["native_resolution", "dependency_mutation"]
+    });
+    let native = json!({
+        "support": if native_blocked { "unsupported" } else { "unchecked" },
+        "scope": "local_manifest_rules",
+        "evidence": if native_blocked { "local_observation" } else { "deferred_check" },
+        "maturity": "experimental"
+    });
+    report.operations = json!({
+        "npm_import": {
+            "support": if changed || report.truncated { "unchecked" } else { npm_import },
+            "scope": "npm_graph_and_root_manifest_only",
+            "evidence": if npm_import == "unchecked" { "deferred_check" } else { "local_observation" },
+            "maturity": "experimental"
+        },
+        "imported_replay": {
+            "support": if imported && !changed && !report.truncated {
+                match report.manifest_lock_agreement { "match" => "supported", "mismatch" => "unsupported", _ => "unchecked" }
+            } else { "unchecked" },
+            "scope": "manifest_receipts_only",
+            "evidence": if imported { "local_observation" } else { "deferred_check" },
+            "maturity": "experimental"
+        },
+        "native_resolution": native,
+        "dependency_mutation": native
+    });
     if !report.blockers.is_empty() || report.truncated {
         report.assessment = "blocked";
     }

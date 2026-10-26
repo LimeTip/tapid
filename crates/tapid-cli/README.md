@@ -436,6 +436,13 @@ locations, registry origins and credential variable names, supported forms, and
 checks not performed. Override checks use only root declarations, matching install
 and replay; member dependency specs are checked independently. Credentials are
 never read. Missing or invalid files and pending transactions remain report data.
+Blockers carry typed next actions and affected operations. The report assesses npm
+import, imported replay receipts, native resolution, and dependency mutation
+separately, with explicit evidence and scope. A present `package-lock.json` is
+checked with the npm import parser without importing it; workspace receipts,
+routing, and layout remain unchecked. A valid imported receipt does not establish
+native resolution or add/update support. The report links to the
+[npm migration guide](../../docs/npm-lockfile-import.md).
 Status never installs, runs scripts,
 opens the shared store, acquires transaction locks, or attempts recovery.
 

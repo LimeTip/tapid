@@ -312,6 +312,27 @@ validators. Their registry routing, platform selection, and ancestor installatio
 layout checks are listed as unperformed.
 The shared store is not inspected. Blockers contain stable `code`
 and bounded `location` fields, using JSON pointers for dependency declarations.
+Each blocker also carries affected `operations` and an `action` with an allowlisted
+`id`, a description, and `parameters.path`/`parameters.field` (null when unavailable).
+Actions are review advice, never executable shell commands or authorization to mutate
+the project. Unknown reasons or actions require conservative handling.
+`migration_guide` links to the maintained npm migration instructions.
+
+`operations` assesses `npm_import`, `imported_replay`, `native_resolution`, and
+`dependency_mutation` independently. Each assessment has `support` (`supported`,
+`unsupported`, or `unchecked`), `scope`, `evidence` (`local_observation` or
+`deferred_check`), and `maturity` (`experimental`). A supported assessment applies
+only to its stated scope: imported replay's `manifest_receipts_only` does not
+establish routing, layout, artifacts, or install readiness. Native manifest
+blockers can coexist with matching imported receipts; their absence leaves
+resolution and dependency mutation unchecked. Never infer compatibility from
+unchecked operations, missing identifiers, or truncated reports.
+When `package-lock.json` is present, status uses the existing npm import parser
+to assess `npm_graph_and_root_manifest_only`. It reads at most 32 MiB and rejects
+non-regular files. Unsupported input reports `NPM_IMPORT_UNSUPPORTED`; unavailable
+input bytes report `NPM_IMPORT_UNREADABLE`. An absent npm lock leaves this operation
+unchecked. Parser acceptance does not establish the import command's separate
+workspace-receipt, routing, or layout requirements; those checks remain unperformed.
 A selected member does not limit full-workspace checks. Registry data includes
 origins, credential variable names, and `credentials: "not_read"`.
 Root peer dependencies remain declarations rather than installable specs; member
@@ -350,6 +371,7 @@ Status blocker codes are `MANIFEST_INVALID_OR_MISSING`, `WORKSPACE_INVALID`, `WO
 `LOCKFILE_INVALID`, `LOCK_MANIFEST_MISMATCH`, `LOCK_WORKSPACE_MISMATCH`,
 `LOCK_ROOT_BINDINGS_INVALID`, `LOCK_REPLAY_UNSUPPORTED`, `INSTALLATION_NOT_MANAGED`,
 `RECOVERY_REQUIRED`, `RECOVERY_STATE_INVALID`, and `SNAPSHOT_CHANGED`.
+Npm input checks also report `NPM_IMPORT_UNSUPPORTED` and `NPM_IMPORT_UNREADABLE`.
 `INSPECTION_TRUNCATED` appears in the envelope's errors when entry or display
 limits prevent a complete report. A lock can agree with manifests and still
 have a replay blocker, such as a legacy schema requiring regeneration or

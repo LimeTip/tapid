@@ -1,5 +1,171 @@
 use super::*;
 
+#[test]
+fn status_reports_actions_and_separates_imported_replay_from_mutation() {
+    let project = tapid_test_support::TempProject::new("status-operation-support").unwrap();
+    let root = r#"{"name":"root","version":"1.0.0","overrides":{"jsr:@std/path":"1"}}"#;
+    project.write("package.json", root.as_bytes()).unwrap();
+    let npm = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":{"name":"root","version":"1.0.0"}
+    }});
+    let lock = tapid_lockfile::ImportedNpmLockfile::import(
+        &npm.to_string(),
+        root,
+        &format!("sha256-{:x}", Sha256::digest(root.as_bytes())),
+    )
+    .unwrap()
+    .to_json()
+    .unwrap();
+    project.write("tapid.lock", lock.as_bytes()).unwrap();
+    let (output, value) = status(project.path(), &[]);
+    assert!(!output.status.success(), "{value}");
+    let data = &value["data"];
+    assert_eq!(data["manifest_lock_agreement"], "match");
+    assert_eq!(
+        data["operations"]["imported_replay"]["support"],
+        "supported"
+    );
+    assert_eq!(
+        data["operations"]["imported_replay"]["scope"],
+        "manifest_receipts_only"
+    );
+    assert_eq!(
+        data["operations"]["native_resolution"]["support"],
+        "unsupported"
+    );
+    assert_eq!(
+        data["operations"]["dependency_mutation"]["support"],
+        "unsupported"
+    );
+    let blocker = data["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["code"] == "UNSUPPORTED_OVERRIDE")
+        .unwrap();
+    assert_eq!(blocker["action"]["id"], "review_manifest_requirement");
+    assert_eq!(blocker["action"]["parameters"]["field"], "/overrides");
+    assert_eq!(
+        blocker["operations"],
+        serde_json::json!(["native_resolution", "dependency_mutation"])
+    );
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        root.as_bytes()
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock.as_bytes()
+    );
+    assert!(!project.path().join("node_modules").exists());
+    let human = run(project.path(), &["status"]);
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("review_manifest_requirement"));
+    assert!(human.contains("Migration guide:"));
+}
+
+#[test]
+fn status_action_paths_preserve_hashes_in_project_names() {
+    let project = tapid_test_support::TempProject::new("status-action-hash").unwrap();
+    project
+        .write(
+            "with#hash/package.json",
+            br#"{"name":"root","version":"1.0.0","overrides":{"jsr:@std/path":"1"}}"#,
+        )
+        .unwrap();
+    let directory = project.path().join("with#hash");
+    let (_, value) = status(&directory, &[]);
+    let blocker = value["data"]["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["code"] == "UNSUPPORTED_OVERRIDE")
+        .unwrap();
+    assert_eq!(
+        blocker["action"]["parameters"]["path"],
+        directory
+            .canonicalize()
+            .unwrap()
+            .join("package.json")
+            .display()
+            .to_string()
+    );
+    assert_eq!(blocker["action"]["parameters"]["field"], "/overrides");
+}
+
+#[test]
+fn status_checks_npm_import_forms_without_importing() {
+    for version in [2, 3] {
+        let project = tapid_test_support::TempProject::new("status-npm-input").unwrap();
+        let root = br#"{"name":"root","version":"1.0.0"}"#;
+        project.write("package.json", root).unwrap();
+        let lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(root))).unwrap();
+        let lock = lock.to_json().unwrap();
+        project.write("tapid.lock", lock.as_bytes()).unwrap();
+        let npm = serde_json::json!({"lockfileVersion":version,"packages":{"":{"name":"root","version":"1.0.0"}}}).to_string();
+        project.write("package-lock.json", npm.as_bytes()).unwrap();
+        let (output, value) = status(project.path(), &[]);
+        assert_eq!(output.status.success(), version == 3, "{value}");
+        assert_eq!(
+            value["data"]["operations"]["npm_import"]["support"],
+            if version == 3 {
+                "supported"
+            } else {
+                "unsupported"
+            }
+        );
+        assert_eq!(
+            value["data"]["operations"]["npm_import"]["scope"],
+            "npm_graph_and_root_manifest_only"
+        );
+        if version == 2 {
+            let blocker = value["data"]["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|b| b["code"] == "NPM_IMPORT_UNSUPPORTED")
+                .unwrap();
+            assert_eq!(blocker["operations"], serde_json::json!(["npm_import"]));
+            assert_eq!(blocker["action"]["id"], "review_npm_import");
+        }
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock.as_bytes()
+        );
+        assert_eq!(
+            fs::read(project.path().join("package-lock.json")).unwrap(),
+            npm.as_bytes()
+        );
+        assert!(!project.path().join("node_modules").exists());
+    }
+}
+
+#[test]
+fn status_rejects_non_utf8_npm_input_without_repair() {
+    let project = tapid_test_support::TempProject::new("status-npm-utf8").unwrap();
+    project
+        .write("package.json", br#"{"name":"root","version":"1.0.0"}"#)
+        .unwrap();
+    project.write("package-lock.json", &[0xff]).unwrap();
+    let (_, value) = status(project.path(), &[]);
+    assert_eq!(
+        value["data"]["operations"]["npm_import"]["support"],
+        "unsupported"
+    );
+    assert!(
+        value["data"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["code"] == "NPM_IMPORT_UNSUPPORTED")
+    );
+    assert_eq!(
+        fs::read(project.path().join("package-lock.json")).unwrap(),
+        [0xff]
+    );
+    assert!(!project.path().join("tapid.lock").exists());
+}
+
 fn status(project: &Path, extra: &[&str]) -> (std::process::Output, serde_json::Value) {
     let mut args = vec!["status", "--json"];
     args.extend_from_slice(extra);
@@ -463,6 +629,7 @@ fn status_rejects_symlink_metadata_without_following_it() {
         .unwrap();
     std::os::unix::fs::symlink("private", project.path().join("package.json")).unwrap();
     std::os::unix::fs::symlink("private", project.path().join("tapid.lock")).unwrap();
+    std::os::unix::fs::symlink("private", project.path().join("package-lock.json")).unwrap();
     std::os::unix::fs::symlink(
         "private",
         project.path().join(".tapid-lifecycle-journal.json"),
@@ -471,6 +638,17 @@ fn status_rejects_symlink_metadata_without_following_it() {
     let (output, value) = status(project.path(), &[]);
     assert!(!output.status.success());
     assert_eq!(value["data"]["recovery"], "unknown");
+    assert!(
+        value["data"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["code"] == "NPM_IMPORT_UNREADABLE")
+    );
+    assert_eq!(
+        value["data"]["operations"]["npm_import"]["support"],
+        "unchecked"
+    );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("secret data"));
     assert_eq!(
         fs::read(project.path().join("private")).unwrap(),
