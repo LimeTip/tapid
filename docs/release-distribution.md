@@ -10,9 +10,20 @@ The Unix installer now requires `--configure-path` to modify startup files. Smok
 checks that exercise PATH persistence must opt in explicitly; binary-only installs
 remain valid without it and print a direct activation command. Current persistence
 covers default-directory Bash/POSIX login profiles and Zsh `.zprofile`; startup-mode
-selection, custom-directory persistence, receipts, fish, and the Windows consent
+selection, custom-directory persistence, multi-profile receipts, fish, and the Windows consent
 contract remain unfinished under issue #37. Read-back and native new-shell evidence
 must remain distinct from a successful executable installation.
+
+New Unix profile writes stage a private `.tapid-path-v1` receipt beside the binary
+before replacing the profile. Its allowlisted files contain version/platform/count,
+installation directory, target, exact payload, before/after snapshots, and a
+pending/completed state. Scalars are bounded at 64 KiB and snapshots at 8 MiB.
+Retries accept only an exact pending snapshot and verify the resulting bytes;
+conflicts retain recovery metadata. Uninstall uses the recorded target regardless
+of the current shell and can clean up before executable activation or after a
+missing binary. Legacy blocks use bounded default-location discovery and exact
+payload checks. This slice records one profile; multi-profile recovery and legacy
+receipt migration still need implementation.
 
 This document is the operator runbook for releasing the Tapid command-line client. The implementation sources of truth are:
 

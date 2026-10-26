@@ -1,7 +1,7 @@
 import { strictEqual as equal, rejects, match, ok } from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { arch, env as processEnv, platform } from "node:process";
@@ -31,7 +31,7 @@ function shellPath(path: string): string {
 /** Build an isolated release fixture with generated installers and local download/verifier stubs. */
 async function fixture() {
   if (!shell) throw new Error("POSIX shell is unavailable");
-  const directory = await mkdtemp(join(tmpdir(), "tapid-record-installer-"));
+  const directory = await mkdtemp(join(await realpath(tmpdir()), "tapid-record-installer-"));
   const payload = join(directory, "payload");
   const bin = join(directory, "bin");
   const install = join(directory, "installed");
@@ -669,3 +669,145 @@ for (const copyStatus of [0, 1]) {
     } finally { await f.cleanup(); }
   });
 }
+
+test("Unix receipt cleanup survives a changed SHELL and missing binary", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "receipt-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# keep\n");
+    await f.defaultInstallShell(home, { SHELL: "/bin/sh" });
+    await rm(join(home, ".local", "bin", "tapid"));
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home), SHELL: "/bin/zsh" } });
+    equal(await readFile(join(home, ".profile"), "utf8"), "# keep\n");
+    await rejects(() => access(join(home, ".local", "bin", ".tapid-path-v1")));
+  } finally { await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test("Unix pending receipt reconciles before and after snapshots without duplicating blocks", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "pending-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# preserved\n");
+    await f.defaultInstallShell(home, { SHELL: "/bin/sh" });
+    const receipt = join(home, ".local", "bin", ".tapid-path-v1");
+    const expected = await readFile(join(home, ".profile"), "utf8");
+    for (const snapshot of ["before", "after"]) {
+      await writeFile(join(receipt, "state"), "pending\n");
+      await writeFile(join(home, ".profile"), await readFile(join(receipt, snapshot)));
+      await f.defaultInstallShell(home, { SHELL: "/bin/sh" });
+      equal(await readFile(join(home, ".profile"), "utf8"), expected);
+      equal(await readFile(join(receipt, "state"), "utf8"), "completed\n");
+    }
+    await writeFile(join(receipt, "state"), "pending\n");
+    await writeFile(join(home, ".profile"), "# concurrent edit\n");
+    await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
+    equal(await readFile(join(home, ".profile"), "utf8"), "# concurrent edit\n");
+  } finally { await f.cleanup(); }
+});
+
+test("Unix receipt parser rejects unknown fields, unsafe files, and inconsistent snapshots", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "invalid-receipt-home");
+  try {
+    await mkdir(home);
+    await f.defaultInstallShell(home, { SHELL: "/bin/sh" });
+    const receipt = join(home, ".local", "bin", ".tapid-path-v1");
+    const profile = join(home, ".profile");
+    const expected = await readFile(profile, "utf8");
+    for (const [field, value] of [["unexpected", "data"], ["manifest", "tapid-path-v2\nunix\ninstall\n1\n"], ["state", "unknown\n"], ["target", profile + "\n"], ["payload", "execute something\n"], ["after", "# arbitrary replacement\n"], ["payload", "x".repeat(65537)], ["before", "x".repeat(8388609)]]) {
+      const original = await readFile(join(receipt, field)).catch(() => undefined);
+      await writeFile(join(receipt, field), value);
+      await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
+      await rejects(() => run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } }), /refusing unsafe/);
+      equal(await readFile(profile, "utf8"), expected);
+      if (original) await writeFile(join(receipt, field), original); else await rm(join(receipt, field));
+    }
+    const original = await readFile(join(receipt, "target"));
+    await writeFile(join(f.directory, "foreign-target"), original);
+    await rm(join(receipt, "target"));
+    await symlink(join(f.directory, "foreign-target"), join(receipt, "target"));
+    await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
+    equal(await readFile(profile, "utf8"), expected);
+  } finally { await f.cleanup(); }
+});
+
+test("Unix uninstall recovers a pending PATH write before executable activation", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "interrupted-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# keep\n");
+    await writeFile(join(f.directory, "bin", "mv"), '#!/bin/sh\ncase "$3" in */.profile) exit 1 ;; *) exec /bin/mv "$@" ;; esac\n');
+    await chmod(join(f.directory, "bin", "mv"), 0o755);
+    await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
+    await rm(join(f.directory, "bin", "mv"));
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home), SHELL: "/unknown" } });
+    equal(await readFile(join(home, ".profile"), "utf8"), "# keep\n");
+    await rejects(() => access(join(home, ".local", "bin", ".tapid-path-v1")));
+  } finally { await f.cleanup(); }
+});
+
+test("Unix receipt cleanup preserves unrelated edits without a final newline", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "edited-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# original\n");
+    await f.defaultInstallShell(home, { SHELL: "/bin/sh" });
+    const profile = join(home, ".profile");
+    await writeFile(profile, await readFile(profile, "utf8") + "# later user edit");
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } });
+    equal(await readFile(profile, "utf8"), "# original\n# later user edit");
+  } finally { await f.cleanup(); }
+});
+
+test("Unix legacy cleanup searches bounded default locations independently of SHELL", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "legacy-home");
+  try {
+    await mkdir(join(home, ".local", "bin"), { recursive: true });
+    await writeFile(join(home, ".local", "bin", ".tapid-managed"), "tapid-managed-v1\n");
+    await writeFile(join(home, ".bash_login"), '# keep\n# tapid-path-managed-v1\nexport PATH="$HOME/.local/bin:$PATH"\n# end tapid-path-managed-v1\n');
+    await writeFile(join(home, ".zprofile"), "# unrelated\n");
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home), SHELL: "/unknown" } });
+    equal(await readFile(join(home, ".bash_login"), "utf8"), "# keep\n");
+    equal(await readFile(join(home, ".zprofile"), "utf8"), "# unrelated\n");
+  } finally { await f.cleanup(); }
+});
+
+test("Unix installer preserves profile edits made while staging its receipt", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "racing-home");
+  try {
+    await mkdir(home);
+    const profile = join(home, ".profile");
+    await writeFile(profile, "# original\n");
+    await writeFile(join(f.directory, "bin", "cat"), '#!/bin/sh\ncase "$1" in */.profile) if [ ! -e "$INSTALLER_FIXTURE/cat-seen" ]; then : > "$INSTALLER_FIXTURE/cat-seen"; else printf "# concurrent edit\\n" > "$1"; fi ;; esac\nexec /bin/cat "$@"\n');
+    await chmod(join(f.directory, "bin", "cat"), 0o755);
+    await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
+    equal(await readFile(profile, "utf8"), "# concurrent edit\n");
+  } finally { await f.cleanup(); }
+});
+
+test("Unix installer retries an interruption after profile read-back before receipt completion", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "completion-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# keep\n");
+    await writeFile(join(f.directory, "bin", "mv"), '#!/bin/sh\ncase "$3" in */.tapid-path-v1/state) exit 1 ;; *) exec /bin/mv "$@" ;; esac\n');
+    await chmod(join(f.directory, "bin", "mv"), 0o755);
+    await rejects(() => f.defaultInstallShell(home, { SHELL: "/bin/sh" }), /could not safely update/);
+    const receipt = join(home, ".local", "bin", ".tapid-path-v1");
+    equal(await readFile(join(receipt, "state"), "utf8"), "pending\n");
+    const expected = await readFile(join(home, ".profile"), "utf8");
+    match(expected, /tapid-path-managed-v1/);
+    await rm(join(f.directory, "bin", "mv"));
+    await f.defaultInstallShell(home, { SHELL: "/bin/sh" });
+    equal(await readFile(join(home, ".profile"), "utf8"), expected);
+    equal(await readFile(join(receipt, "state"), "utf8"), "completed\n");
+    equal((await run(shell!, [shellPath(join(home, ".local", "bin", "tapid")), "--version"], { env: f.env })).stdout, "tapid 1.2.3\n");
+  } finally { await f.cleanup(); }
+});

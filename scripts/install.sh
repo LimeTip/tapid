@@ -109,10 +109,62 @@ valid_path_block() {
   ' "$1"
 }
 
+# Receipt fields are data, never shell input. Keep this parser identical in both
+# standalone scripts; generated installers cannot depend on sibling files.
+safe_path_ancestors() {
+  ancestor="$1"
+  while [ "$ancestor" != / ]; do
+    [ ! -L "$ancestor" ] || return 1
+    ancestor="${ancestor%/*}"; [ -n "$ancestor" ] || ancestor=/
+  done
+}
+
+read_path_receipt() {
+  [ -d "$PATH_RECEIPT" ] && [ ! -L "$PATH_RECEIPT" ] && [ -O "$PATH_RECEIPT" ] || return 1
+  safe_path_ancestors "$PATH_RECEIPT" || return 1
+  receipt_count=0
+  for receipt_file in "$PATH_RECEIPT"/* "$PATH_RECEIPT"/.[!.]* "$PATH_RECEIPT"/..?*; do
+    [ -e "$receipt_file" ] || { [ ! -L "$receipt_file" ] || return 1; continue; }
+    case "${receipt_file##*/}" in manifest|install|target|payload|before|after|state) ;; *) return 1 ;; esac
+    [ -f "$receipt_file" ] && [ ! -L "$receipt_file" ] && [ -O "$receipt_file" ] && [ -r "$receipt_file" ] || return 1
+    receipt_limit=65536
+    case "${receipt_file##*/}" in before|after) receipt_limit=8388608 ;; esac
+    [ "$(wc -c < "$receipt_file" | tr -d '[:space:]')" -le "$receipt_limit" ] || return 1
+    receipt_count=$((receipt_count + 1))
+  done
+  [ "$receipt_count" -eq 7 ] || return 1
+  printf 'tapid-path-v1\nunix\ninstall\n1\n' | cmp -s - "$PATH_RECEIPT/manifest" || return 1
+  printf '%s' "$INSTALL_DIR" | cmp -s - "$PATH_RECEIPT/install" || return 1
+  receipt_target="$(cat "$PATH_RECEIPT/target")"
+  case "$receipt_target" in /*) ;; *) return 1 ;; esac
+  case "$receipt_target" in *'
+'*|*"$(printf '\r')"*) return 1 ;; esac
+  printf '%s' "$receipt_target" | cmp -s - "$PATH_RECEIPT/target" || return 1
+  printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"' | cmp -s - "$PATH_RECEIPT/payload" || return 1
+  # The after snapshot must be exactly the before bytes plus the owned block.
+  # Reject receipts that could otherwise replace a profile with arbitrary bytes.
+  if grep -Fqx "$PATH_MARKER_BEGIN" "$PATH_RECEIPT/before" || grep -Fqx "$PATH_MARKER_END" "$PATH_RECEIPT/before"; then return 1; fi
+  {
+    cat "$PATH_RECEIPT/before" &&
+    { [ ! -s "$PATH_RECEIPT/before" ] || [ "$(tail -c 1 "$PATH_RECEIPT/before" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || printf '\n'; } &&
+    printf '%s\n' "$PATH_MARKER_BEGIN" 'export PATH="$HOME/.local/bin:$PATH"' "$PATH_MARKER_END"
+  } | cmp -s - "$PATH_RECEIPT/after" || return 1
+  if printf 'pending\n' | cmp -s - "$PATH_RECEIPT/state"; then receipt_state=pending
+  elif printf 'completed\n' | cmp -s - "$PATH_RECEIPT/state"; then receipt_state=completed
+  else return 1; fi
+}
+
+complete_path_receipt() {
+  receipt_state_tmp="$(mktemp "$INSTALL_DIR/.tapid-path-state.XXXXXX")" || return 1
+  printf 'completed\n' > "$receipt_state_tmp" && mv -f "$receipt_state_tmp" "$PATH_RECEIPT/state" || { rm -f "$receipt_state_tmp"; return 1; }
+  printf 'completed\n' | cmp -s - "$PATH_RECEIPT/state"
+}
+
 # Stage and verify an owned startup profile before atomically adding Tapid's PATH block.
 configure_path() {
   [ "$CONFIGURE_PATH" -eq 1 ] || return 0
   [ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0
+  PATH_RECEIPT="$INSTALL_DIR/.tapid-path-v1"
   shell_name="$PATH_SHELL"
   if [ "$shell_name" = auto ]; then
     shell_name="${SHELL-}"; shell_name="${shell_name##*/}"
@@ -130,12 +182,31 @@ configure_path() {
     *) return 0 ;;
   esac
   path_line='export PATH="$HOME/.local/bin:$PATH"'
+  if [ -e "$PATH_RECEIPT" ] || [ -L "$PATH_RECEIPT" ]; then
+    read_path_receipt || return 1
+    [ "$PATH_RC" = "$receipt_target" ] || return 1
+  fi
+  safe_path_ancestors "$PATH_RC" && safe_path_ancestors "$INSTALL_DIR" || return 1
+  [ -d "$INSTALL_DIR" ] && [ -O "$INSTALL_DIR" ] && [ -w "$INSTALL_DIR" ] || return 1
+  [ "$(printf %s "$PATH_RC" | wc -c | tr -d '[:space:]')" -le 65536 ] || return 1
+  [ "$(printf %s "$INSTALL_DIR" | wc -c | tr -d '[:space:]')" -le 65536 ] || return 1
   if [ -L "$PATH_RC" ] || { [ -e "$PATH_RC" ] && { [ ! -f "$PATH_RC" ] || [ ! -O "$PATH_RC" ] || [ ! -r "$PATH_RC" ] || [ ! -w "$PATH_RC" ]; }; }; then
     return 1
   fi
   if [ ! -e "$PATH_RC" ]; then
     [ -O "$HOME" ] && [ ! -d "$HOME" -o ! -L "$HOME" ] || return 1
     : > "$PATH_RC" || return 1
+  fi
+  [ "$(wc -c < "$PATH_RC" | tr -d '[:space:]')" -le 8388608 ] || return 1
+  if [ -d "$PATH_RECEIPT" ]; then
+    if [ "$receipt_state" = pending ]; then
+      if cmp -s "$PATH_RC" "$PATH_RECEIPT/before"; then
+        receipt_copy="$(mktemp "$PATH_RC.tapid.XXXXXX")" || return 1
+        cat "$PATH_RECEIPT/after" > "$receipt_copy" && mv -f "$receipt_copy" "$PATH_RC" || { rm -f "$receipt_copy"; return 1; }
+      fi
+      cmp -s "$PATH_RC" "$PATH_RECEIPT/after" || return 1
+      complete_path_receipt || return 1
+    fi
   fi
   begin_count="$(grep -Fxc "$PATH_MARKER_BEGIN" "$PATH_RC" || true)"
   end_count="$(grep -Fxc "$PATH_MARKER_END" "$PATH_RC" || true)"
@@ -159,9 +230,31 @@ configure_path() {
       rm -f "$path_tmp"; return 1
     fi
     path_expected_hash="$(sha256_file "$path_tmp")" || { rm -f "$path_tmp"; return 1; }
+    receipt_stage="$(mktemp -d "$INSTALL_DIR/.tapid-path-stage.XXXXXX")" || { rm -f "$path_tmp"; return 1; }
+    if ! (
+      umask 077
+      printf 'tapid-path-v1\nunix\ninstall\n1\n' > "$receipt_stage/manifest" &&
+      printf '%s' "$INSTALL_DIR" > "$receipt_stage/install" &&
+      printf '%s' "$PATH_RC" > "$receipt_stage/target" &&
+      printf '%s\n' "$path_line" > "$receipt_stage/payload" &&
+      cat "$PATH_RC" > "$receipt_stage/before" &&
+      cat "$path_tmp" > "$receipt_stage/after" &&
+      printf 'pending\n' > "$receipt_stage/state"
+    ); then rm -rf "$receipt_stage"; rm -f "$path_tmp"; return 1; fi
+    PATH_RECEIPT="$receipt_stage"
+    if ! read_path_receipt; then
+      rm -rf "$receipt_stage"; rm -f "$path_tmp"; return 1
+    fi
+    PATH_RECEIPT="$INSTALL_DIR/.tapid-path-v1"
+    if [ -e "$PATH_RECEIPT" ] || [ -L "$PATH_RECEIPT" ]; then
+      rm -rf "$receipt_stage"; rm -f "$path_tmp"; return 1
+    fi
+    mv "$receipt_stage" "$PATH_RECEIPT" || { rm -rf "$receipt_stage"; rm -f "$path_tmp"; return 1; }
+    safe_path_ancestors "$PATH_RC" && cmp -s "$PATH_RC" "$PATH_RECEIPT/before" || { rm -f "$path_tmp"; return 1; }
     mv -f "$path_tmp" "$PATH_RC" || { rm -f "$path_tmp"; return 1; }
     [ ! -L "$PATH_RC" ] && [ -f "$PATH_RC" ] && [ -O "$PATH_RC" ] || return 1
     [ "$(sha256_file "$PATH_RC")" = "$path_expected_hash" ] || return 1
+    complete_path_receipt || return 1
   fi
   PATH="$INSTALL_DIR${PATH:+:$PATH}"; export PATH; PATH_UPDATED=1
 }
