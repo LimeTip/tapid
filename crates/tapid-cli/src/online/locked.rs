@@ -51,12 +51,13 @@ pub(crate) fn hydrate_locked(
     config: &crate::registry::RegistryConfig,
     fixture_path: Option<&Path>,
     project: &Path,
+    frozen: bool,
 ) -> Result<Option<StoreTransaction>, OperationalError> {
     let mut transports = BTreeMap::new();
     let allowed_origins = config.configured_origins();
     // Load fixtures only if an archive is actually missing.
     let mut fixture_packages = None;
-    hydrate_with_fetch(lock, store, |key, url| {
+    hydrate_with_fetch(lock, store, frozen, |key, url| {
         if let Some(source) = key.source.copied() {
             return copied::fetch_pinned(project, source, fixture_path);
         }
@@ -109,8 +110,12 @@ pub(crate) fn hydrate_locked(
 fn hydrate_with_fetch(
     lock: &Lockfile,
     store: &Store,
+    frozen: bool,
     mut fetch: impl FnMut(&LockfilePackageKey, &str) -> Result<Vec<u8>, OperationalError>,
 ) -> Result<Option<StoreTransaction>, OperationalError> {
+    if frozen && preflight_jsr_replay(lock, store)? {
+        return Ok(None);
+    }
     let mut transaction = store.transaction();
     let mut staged = BTreeSet::new();
     for (key, package) in lock.packages_typed()? {
@@ -213,6 +218,34 @@ fn hydrate_with_fetch(
     Ok((!staged.is_empty()).then_some(transaction))
 }
 
+// A mixed JSR graph replays as one local unit. Check all trees before a caller
+// can fetch an npm dependency or publish any hydrated content.
+fn preflight_jsr_replay(lock: &Lockfile, store: &Store) -> Result<bool, OperationalError> {
+    let packages = lock.packages_typed()?;
+    if !packages.iter().any(|(key, _)| {
+        key.source
+            .registry()
+            .is_some_and(|origin| origin.as_str() == JSR)
+    }) {
+        return Ok(false);
+    }
+    for (key, package) in packages {
+        let digest: ArtifactDigest =
+            package
+                .tree_digest()
+                .parse()
+                .map_err(|error: tapid_core::DomainError| {
+                    OperationalError::from_source(ErrorKind::Lockfile, error)
+                })?;
+        store.verified_tree_path(&digest).map_err(|error| {
+            OperationalError::from(error)
+                .context("JSR locked replay requires every selected tree locally verified")
+                .for_package((&key).into())
+        })?;
+    }
+    Ok(true)
+}
+
 pub(super) fn locked_records(
     lock: &Lockfile,
     fixture_records: &BTreeMap<PackageRecordKey, PackageRecord>,
@@ -296,6 +329,120 @@ mod tests {
     use super::*;
 
     #[test]
+    fn jsr_mixed_graph_replay_rejects_missing_trees_without_fetching() {
+        let project = tapid_test_support::TempProject::new("jsr-local-replay").unwrap();
+        let store = Store::new(project.path().join("store"));
+        let digest = format!("sha256-{}", "0".repeat(64));
+        let mut lock = Lockfile::new(&digest).unwrap();
+        for (registry, name, url) in [
+            (NPM, "aaa", "https://registry.npmjs.org/aaa/-/aaa-1.0.0.tgz"),
+            (
+                JSR,
+                "@std/path",
+                "https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz",
+            ),
+        ] {
+            let mut package = LockedPackage::new_with_provenance(
+                registry,
+                name,
+                "1.0.0",
+                &integrity(b"archive").to_string(),
+                &digest,
+                RegistryIntegrityProvenance::RegistryDeclared,
+            )
+            .unwrap();
+            package.set_artifact_url(url).unwrap();
+            lock.insert_package(package).unwrap();
+        }
+        lock.set_roots(lock.packages().keys().cloned().collect::<Vec<_>>())
+            .unwrap();
+        let before = lock.to_json().unwrap();
+        let mut fetches = 0;
+        let result = hydrate_with_fetch(&lock, &store, true, |_, _| {
+            fetches += 1;
+            Err(OperationalError::new(
+                ErrorKind::RegistryTransport,
+                "network forbidden",
+            ))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            fetches, 0,
+            "mixed JSR replay must preflight before fetching npm"
+        );
+        assert_eq!(lock.to_json().unwrap(), before);
+        // Ordinary online replay retains pinned hydration rather than adopting
+        // the frozen-only local-content restriction.
+        assert!(
+            hydrate_with_fetch(&lock, &store, false, |_, _| {
+                fetches += 1;
+                Err(OperationalError::new(
+                    ErrorKind::RegistryTransport,
+                    "unavailable artifact",
+                ))
+            })
+            .is_err()
+        );
+        assert_eq!(fetches, 1);
+    }
+
+    #[test]
+    fn jsr_warm_replay_and_corrupt_npm_transitive_never_fetch() {
+        let project = tapid_test_support::TempProject::new("jsr-warm-replay").unwrap();
+        let store = Store::new(project.path().join("store"));
+        let mut lock = Lockfile::new(&format!("sha256-{}", "0".repeat(64))).unwrap();
+        let mut npm_tree = None;
+        for (registry, name, directory) in [(NPM, "aaa", "npm"), (JSR, "@std/path", "jsr")] {
+            project
+                .write(format!("{directory}/index.js"), directory.as_bytes())
+                .unwrap();
+            let source = project.path().join(directory);
+            let digest: ArtifactDigest = canonical_tree_digest(&source).unwrap().parse().unwrap();
+            let tree = store.activate_verified_tree(&digest, &source).unwrap();
+            if registry == NPM {
+                npm_tree = Some(tree);
+            }
+            let mut package = LockedPackage::new_with_provenance(
+                registry,
+                name,
+                "1.0.0",
+                &integrity(b"archive").to_string(),
+                digest.as_str(),
+                RegistryIntegrityProvenance::RegistryDeclared,
+            )
+            .unwrap();
+            if registry == JSR {
+                package
+                    .add_dependency("aaa", lock.packages().keys().next().unwrap())
+                    .unwrap();
+            }
+            let root = package.key();
+            lock.insert_package(package).unwrap();
+            if registry == JSR {
+                lock.set_roots([root]).unwrap();
+            }
+        }
+        let before = lock.to_json().unwrap();
+        let mut fetches = 0;
+        let mut fetch = |_: &LockfilePackageKey, _: &str| {
+            fetches += 1;
+            Err(OperationalError::new(
+                ErrorKind::RegistryTransport,
+                "network forbidden",
+            ))
+        };
+        assert!(
+            hydrate_with_fetch(&lock, &store, true, &mut fetch)
+                .unwrap()
+                .is_none()
+        );
+        fs::write(npm_tree.unwrap().join("index.js"), b"tampered").unwrap();
+        assert!(hydrate_with_fetch(&lock, &store, true, &mut fetch).is_err());
+        assert_eq!(fetches, 0);
+        assert_eq!(lock.to_json().unwrap(), before);
+    }
+
+    #[test]
     fn hydration_fetches_a_shared_tree_once_across_locked_contexts() {
         let project = tapid_test_support::TempProject::new("hydrate-shared-contexts").unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -341,7 +488,7 @@ mod tests {
             lock.insert_package(package).unwrap();
         }
         let mut fetches = 0;
-        let transaction = hydrate_with_fetch(&lock, &store, |_, _| {
+        let transaction = hydrate_with_fetch(&lock, &store, true, |_, _| {
             fetches += 1;
             if fetches > 1 {
                 return Err(OperationalError::new(
@@ -452,6 +599,7 @@ pub(crate) fn prepare_locked_install(
     project: &Path,
     report_progress: impl FnMut(usize, usize),
 ) -> LockedInstallOutput {
+    let local_only = preflight_jsr_replay(lock, store)?;
     store.cleanup_stale_replay_snapshots().map_err(|error| {
         OperationalError::from(error).context("cannot recover stale replay snapshots")
     })?;
@@ -478,6 +626,11 @@ pub(crate) fn prepare_locked_install(
                     let path = snapshot.path().to_owned();
                     snapshots.push(snapshot);
                     return Ok(path);
+                }
+                Err(error @ tapid_store::IngestError::TreeMissing(_)) if local_only => {
+                    return Err(OperationalError::from(error).context(
+                        "JSR locked replay requires every selected tree locally verified",
+                    ));
                 }
                 Err(tapid_store::IngestError::TreeMissing(_)) => {}
                 Err(error) => return Err(OperationalError::from(error)),

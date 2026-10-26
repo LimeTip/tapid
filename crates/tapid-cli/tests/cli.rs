@@ -2471,6 +2471,49 @@ fn workspace_member_jsr_dependency_uses_stripped_local_name_and_replays() {
         );
         assert!(dir.join("node_modules/@s/foo/package.json").is_file());
     }
+    let manifest_before = fs::read(dir.join("package.json")).unwrap();
+    let member_before = fs::read(member_dir.join("package.json")).unwrap();
+    let lock_before = fs::read(dir.join("tapid.lock")).unwrap();
+    let active_before = fs::read(dir.join("node_modules/@s/foo/package.json")).unwrap();
+    fs::remove_dir_all(store.join("trees")).unwrap();
+    for (command, mode) in [
+        ("install", "--frozen"),
+        ("install", "--offline"),
+        ("ci", "--offline"),
+        ("ci", ""),
+    ] {
+        let mut args = vec![command];
+        if !mode.is_empty() {
+            args.push(mode);
+        }
+        args.extend([
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ]);
+        let replay = run(&dir, &args);
+        assert!(
+            !replay.status.success(),
+            "{command} {mode} hydrated a cold JSR lock"
+        );
+        assert!(
+            String::from_utf8_lossy(&replay.stderr).contains("tree"),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest_before);
+        assert_eq!(
+            fs::read(member_dir.join("package.json")).unwrap(),
+            member_before
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_before);
+        assert_eq!(
+            fs::read(dir.join("node_modules/@s/foo/package.json")).unwrap(),
+            active_before
+        );
+        assert!(!store.join("trees").exists());
+    }
     cleanup(dir);
 }
 

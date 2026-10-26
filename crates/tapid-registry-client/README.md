@@ -41,6 +41,13 @@ Every usable version must declare valid SHA-512 `dist.integrity` and a canonical
 
 Live JSR installation remains experimental and unverified. Compatibility metadata parsing and archive identity validation alone do not establish supported transitive installation or local-only frozen replay. Fixture tests are not live acceptance evidence.
 
+[Acquisition receipts from 2026-10-26](../../docs/evidence/jsr-2026-10-26.json)
+record official metadata and downloaded archive SHA-512 agreement for
+`@std/path@1.1.6` and `@std/internal@1.0.14`, including generated manifests and
+revision pins. The path metadata declares `@jsr/std__internal: ^1.0.14`.
+These receipts establish artifact
+acquisition only; they do not establish Tapid installation or runtime replay.
+
 ## Transport contract
 
 The crate-level `download_artifact` operation accepts canonical HTTPS URLs, uses an injected transport, and requires HTTP 200. The npm and JSR convenience methods delegate to it. `HttpsTransport` allows only configured exact origins, permits at most 10 same-origin redirect hops, rejects cross-origin and credentialed redirects, and bounds response bodies. `authenticated_metadata` and `authenticated_artifact` accept caller-supplied bearer credentials bound to exact configured origins; credentials are never forwarded to another origin. Standard metadata reads are limited to 32 MiB and archive reads are separately limited to 512 MiB. Idempotent GETs use at most three attempts with deterministic 100 ms and 200 ms delays for timeouts, connection or request failures, response-read failures, HTTP 429, and selected transient HTTP 5xx responses. Permanent status, origin, redirect-policy, and response-limit failures are not broadened into unbounded retries. The standard origins include npmjs.org, jsr.io, and npm.jsr.io. Malformed JSON, URLs, identities, dependencies, and integrity values are rejected.
