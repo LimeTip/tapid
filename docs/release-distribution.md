@@ -9,12 +9,22 @@ Tapid 0.0.11 completed the first signed-record and generated-installer rollout. 
 The Unix installer requires `--configure-path` to modify startup files. Smoke
 checks that exercise persistence must opt in; binary-only installs print a direct
 activation command. `--shell-mode login|interactive|both` defaults to both for
-Bash/Zsh and login for POSIX (which rejects other modes). Bash discovers login
+Bash/Zsh/fish and login for POSIX (which rejects other modes). Bash discovers login
 files in `.bash_profile`, `.bash_login`, `.profile` order and uses `.bashrc`
 for interactive startup. Zsh uses `.zprofile`/`.zshrc`, honoring an absolute
 exported `ZDOTDIR` without executing existing startup files. Default and custom
 absolute install directories use literal, duplicate-safe blocks that preserve
 empty PATH segments. Delimiters and line breaks are rejected before installation.
+
+Fish uses a single marked block in `$XDG_CONFIG_HOME/fish/config.fish` (default
+`$HOME/.config/fish/config.fish`), requiring an absolute non-empty override.
+The installer probes `fish_add_path --path --prepend` without user startup files
+before downloading. Mode guards select login, interactive, or their union;
+manual guidance omits the guard so it activates the current shell directly.
+No universal variables are written. Fish normalizes empty PATH segments to
+`.` and supplies defaults for unset PATH; its native representation is preserved.
+An existing fish receipt with a different mode is refused until uninstall.
+The existing release-contract CI lane provisions fish and requires native probes.
 
 New profile writes stage a private `.tapid-path-v1` receipt beside the binary.
 A one-profile receipt retains its original seven-file layout. A two-profile
@@ -35,8 +45,8 @@ selection; migration to another target set is refused pending implementation.
 Unreceipted two-profile blocks are also refused. Legacy cleanup searches bounded
 default locations with exact payload checks.
 
-Fish, automatic receipt migration, Windows consent/preservation/cleanup, and the
-complete native matrix remain unfinished under issue #37. Local macOS Bash/Zsh
+Automatic receipt migration, Windows consent/preservation/cleanup, and the
+complete native matrix remain unfinished under issue #37. Local macOS Bash/Zsh/fish
 login and interactive probes launch startup modes without explicit profile
 sourcing and resolve a custom fixture executable. Other platforms require their
 own evidence. Read-back and native resolution remain separate claims.

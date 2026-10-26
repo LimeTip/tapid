@@ -223,7 +223,7 @@ test("explicit Bash selection overrides a misleading SHELL", shellOptions, async
 test("Unix shell selection rejects invalid and unavailable preferences before installation", shellOptions, async () => {
   const f = await fixture();
   try {
-    for (const args of [["--shell"], ["--shell", ""], ["--shell", "tcsh"], ["--shell", "fish"]]) {
+    for (const args of [["--shell"], ["--shell", ""], ["--shell", "tcsh"]]) {
       await rejects(() => f.installShell(args), /--shell|fish PATH persistence/);
       await rejects(() => readFile(join(f.install, "tapid")), { code: "ENOENT" });
       await rejects(() => readFile(join(f.directory, "requests")), { code: "ENOENT" });
@@ -958,5 +958,129 @@ test("Bash both recovers an unwritten second target and rejects malformed record
     await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } });
     equal(await readFile(join(home, ".profile"), "utf8"), "");
     equal(await readFile(join(home, ".bashrc"), "utf8"), "");
+  } finally { await f.cleanup(); }
+});
+
+test("Fish selection rejects missing capabilities before downloading", shellOptions, async () => {
+  const f = await fixture();
+  try {
+    await writeFile(join(f.directory, "bin", "fish"), '#!/bin/sh\nexit 1\n');
+    await chmod(join(f.directory, "bin", "fish"), 0o755);
+    await rejects(() => f.installShell(["--shell", "fish", "--configure-path"]), /fish_add_path/);
+    await rejects(() => readFile(join(f.directory, "requests")), { code: "ENOENT" });
+  } finally { await f.cleanup(); }
+});
+
+test("Fish startup modes resolve literal custom paths and clean recorded XDG locations", { skip: platform === "win32" }, async (context) => {
+  const executable = await run("/bin/sh", ["-c", "command -v fish"]).then(result => result.stdout.trim(), () => "");
+  if (!executable) { equal(processEnv.TAPID_REQUIRE_FISH, undefined, "required native fish is unavailable"); context.skip("fish is unavailable"); return; }
+  for (const mode of ["login", "interactive", "both"]) {
+    await context.test(mode, async () => {
+      const f = await fixture();
+      const home = join(f.directory, "fish-home");
+      const config = join(home, "xdg config");
+      const install = join(home, "custom ' dollar$ backslash\\ bin");
+      const profile = join(config, "fish", "config.fish");
+      const additions = { HOME: shellPath(home), XDG_CONFIG_HOME: shellPath(config), SHELL: "/bin/bash" };
+      try {
+        await mkdir(join(config, "fish"), { recursive: true });
+        await writeFile(profile, "# keep fish config\n");
+        const args = ["--install-dir", shellPath(install), "--configure-path", "--shell", "fish", "--shell-mode", mode];
+        await f.installShell(args, additions);
+        const original = await readFile(profile, "utf8");
+        match(original, /fish_add_path --path/);
+        await f.installShell(args, additions);
+        equal(await readFile(profile, "utf8"), original);
+        const probeEnv = { ...f.env, ...additions, PATH: "/usr/bin:/bin" };
+        for (const [flags, active] of [[["-l"], mode !== "interactive"], [["-i"], mode !== "login"], [[], false]] as const) {
+          const probe = await run(executable, [...flags, "-c", "command -s tapid; or true; if set -q -U fish_user_paths; exit 9; end; true"], { env: probeEnv });
+          equal(probe.stdout.trim(), active ? shellPath(join(install, "tapid")) : "");
+        }
+        if (mode === "both") {
+          for (const value of ["", undefined]) {
+            const emptyEnv = { ...probeEnv, PATH: value };
+            const baseline = await run(executable, ["--no-config", "-c", 'printf "%s" "$PATH"'], { env: emptyEnv });
+            const activated = await run(executable, ["-i", "-c", 'source "$XDG_CONFIG_HOME/fish/config.fish"; printf "%s" "$PATH"; if set -q -U fish_user_paths; exit 9; end; true'], { env: emptyEnv });
+            equal(activated.stdout, shellPath(install) + ":" + baseline.stdout);
+          }
+        }
+        await run(shell!, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(install)], { env: { ...f.env, HOME: shellPath(home), XDG_CONFIG_HOME: "/unused", SHELL: "/bin/sh" } });
+        equal(await readFile(profile, "utf8"), "# keep fish config\n");
+      } finally { await f.cleanup(); }
+    });
+  }
+});
+
+test("Fish no-consent guidance activates the current shell independently of startup mode", { skip: platform === "win32" }, async (context) => {
+  const executable = await run("/bin/sh", ["-c", "command -v fish"]).then(result => result.stdout.trim(), () => "");
+  if (!executable) { equal(processEnv.TAPID_REQUIRE_FISH, undefined, "required native fish is unavailable"); context.skip("fish is unavailable"); return; }
+  const f = await fixture();
+  try {
+    const result = await f.installShell(["--shell", "fish", "--shell-mode", "login"], { XDG_CONFIG_HOME: join(f.directory, "untouched") });
+    await rejects(() => readFile(join(f.directory, "untouched", "fish", "config.fish")), { code: "ENOENT" });
+    const command = result.stdout.split("\n").find(line => line.startsWith("To enable Tapid"))!.split("run: ")[1];
+    const probe = await run(executable, ["--no-config", "-c", command + "; command -s tapid"], { env: { ...f.env, PATH: "/usr/bin:/bin" } });
+    equal(probe.stdout.trim(), shellPath(join(f.install, "tapid")));
+  } finally { await f.cleanup(); }
+});
+
+test("Fish XDG discovery rejects unsafe targets and preserves edited owned blocks", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "fish-safety-home");
+  const config = join(home, ".config");
+  try {
+    await mkdir(home);
+    // Capability boundary stub: configuration safety does not require a native fish.
+    await writeFile(join(f.directory, "bin", "fish"), "#!/bin/sh\nexit 0\n");
+    await chmod(join(f.directory, "bin", "fish"), 0o755);
+    const args = ["--configure-path", "--shell", "fish"];
+    for (const value of ["", "relative", "/line\nbreak", "/line\rbreak"]) {
+      await rejects(() => f.installShell(args, { HOME: shellPath(home), XDG_CONFIG_HOME: value }), /XDG_CONFIG_HOME/);
+    }
+    await rejects(() => readFile(join(f.directory, "requests")), { code: "ENOENT" });
+    await mkdir(config);
+    await symlink(join(f.directory, "installed"), join(config, "fish"));
+    await rejects(() => f.installShell(args, { HOME: shellPath(home), XDG_CONFIG_HOME: shellPath(config) }), /could not safely update/);
+    await rm(join(config, "fish"));
+    const environment = { ...f.env, HOME: shellPath(home) };
+    delete environment.XDG_CONFIG_HOME;
+    await run(shell!, [shellPath(f.installer), "--install-dir", shellPath(f.install), ...args], { env: environment });
+    const profile = join(config, "fish", "config.fish");
+    const original = await readFile(profile, "utf8");
+    match(original, /status is-login; or status is-interactive/);
+    await rejects(() => f.installShell([...args, "--shell-mode", "login"], { HOME: shellPath(home), XDG_CONFIG_HOME: shellPath(config) }), /could not safely update/);
+    equal(await readFile(profile, "utf8"), original);
+    await writeFile(profile, original.replace("fish_add_path", "echo user-edited"));
+    await rejects(() => run(shell!, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(f.install)], { env: environment }), /refusing unsafe/);
+    match(await readFile(profile, "utf8"), /user-edited/);
+    await writeFile(profile, original);
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(f.install)], { env: environment });
+    equal(await readFile(profile, "utf8"), "");
+  } finally { await f.cleanup(); }
+});
+
+test("Fish pending receipts recover and uninstall without the binary or current fish preference", shellOptions, async () => {
+  const f = await fixture();
+  const config = join(f.directory, "fish-recovery-config");
+  try {
+    await writeFile(join(f.directory, "bin", "fish"), "#!/bin/sh\nexit 0\n");
+    await chmod(join(f.directory, "bin", "fish"), 0o755);
+    await writeFile(join(f.directory, "bin", "mv"), '#!/bin/sh\ncase "$3" in */.tapid-path-v1/state) exit 1 ;; *) exec /bin/mv "$@" ;; esac\n');
+    await chmod(join(f.directory, "bin", "mv"), 0o755);
+    const args = ["--configure-path", "--shell", "auto"];
+    const additions = { SHELL: "/usr/bin/fish", XDG_CONFIG_HOME: shellPath(config) };
+    await rejects(() => f.installShell(args, additions), /could not safely update/);
+    const receipt = join(f.install, ".tapid-path-v1");
+    equal(await readFile(join(receipt, "state"), "utf8"), "pending\n");
+    const profile = join(config, "fish", "config.fish");
+    const original = await readFile(profile, "utf8");
+    await rm(join(f.directory, "bin", "mv"));
+    await f.installShell(args, additions);
+    equal(await readFile(profile, "utf8"), original);
+    equal(await readFile(join(receipt, "state"), "utf8"), "completed\n");
+    await rm(join(f.install, "tapid"));
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(f.install)], { env: { ...f.env, SHELL: "/bin/sh", XDG_CONFIG_HOME: "/unused" } });
+    equal(await readFile(profile, "utf8"), "");
+    await rejects(() => access(receipt), { code: "ENOENT" });
   } finally { await f.cleanup(); }
 });

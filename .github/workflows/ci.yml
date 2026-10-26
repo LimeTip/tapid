@@ -607,7 +607,14 @@ jobs:
             # shellcheck disable=SC2016
             "$runtime/pwsh" -NoProfile -NonInteractive -Command '$PSVersionTable; [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription; if ([System.Numerics.BigInteger]::One -ne 1) { exit 1 }'
           done
+      - name: Provision native fish installer probes
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fish
+          fish --version
       - name: Test release helpers and workflows
+        env:
+          TAPID_REQUIRE_FISH: "1"
         run: node --experimental-strip-types --test tools/check_architecture_test.ts tools/release/*_test.ts
       - name: Test consumer capability contracts
         run: node --test tests/fixtures/consumer_contract.test.js tests/fixtures/validate_consumer_project.test.js

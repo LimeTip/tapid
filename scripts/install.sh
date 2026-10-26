@@ -69,9 +69,9 @@ Options:
   --version VERSION     Install a specific stable release tag, e.g. v0.1.0
   --source-ref REF      Build from a source branch, tag, or commit (development)
   --install-dir DIR     Install the binary into DIR (default: ~/.local/bin)
-  --shell SHELL         PATH shell preference: auto|bash|zsh|posix (fish unavailable)
+  --shell SHELL         PATH shell preference: auto|bash|zsh|fish|posix
   --shell-mode MODE     Startup mode: login|interactive|both
-                        Default: both for Bash/Zsh; login for POSIX
+                        Default: both for Bash/Zsh/fish; login for POSIX
   --configure-path      Opt in to persistent shell startup-file changes
   --repo OWNER/REPO     Use the legacy GitHub release layout for this repository
   -h, --help            Show this help
@@ -115,8 +115,28 @@ valid_path_block() {
 
 # Produce literal, duplicate-safe POSIX activation without evaluating the path.
 path_payload() {
+  if [ "${selected_shell-}" = fish ]; then fish_path_payload "$PATH_MODE"; return; fi
   quoted_install="$(printf '%s' "$INSTALL_DIR" | sed "s/'/'\\\\''/g")"
   printf "case :\$%s: in *:'%s':*) ;; *) export PATH='%s'\$%s ;; esac" '{PATH-}' "$quoted_install" "$quoted_install" '{PATH+:$PATH}'
+}
+
+
+fish_path_payload() {
+  fish_quoted="$(printf '%s' "$INSTALL_DIR" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g")"
+  case "$1" in
+    login) fish_guard='status is-login' ;;
+    interactive) fish_guard='status is-interactive' ;;
+    both) fish_guard='status is-login; or status is-interactive' ;;
+  esac
+  printf "if %s; fish_add_path --path --prepend -- '%s'; end" "$fish_guard" "$fish_quoted"
+}
+
+valid_receipt_payload() {
+  [ "$receipt_payload" = "$(path_payload)" ] && return 0
+  for fish_mode in login interactive both; do
+    [ "$receipt_payload" != "$(fish_path_payload "$fish_mode")" ] || return 0
+  done
+  [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && [ "$receipt_payload" = 'export PATH="$HOME/.local/bin:$PATH"' ]
 }
 
 # Receipt fields are data, never shell input. Keep this parser identical in both
@@ -175,9 +195,7 @@ read_profile_receipt() {
 '*|*"$(printf '\r')"*) return 1 ;; esac
   printf '%s' "$receipt_target" | cmp -s - "$PATH_RECEIPT/target" || return 1
   receipt_payload="$(cat "$PATH_RECEIPT/payload")"
-  if [ "$receipt_payload" != "$(path_payload)" ]; then
-    [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && [ "$receipt_payload" = 'export PATH="$HOME/.local/bin:$PATH"' ] || return 1
-  fi
+  valid_receipt_payload || return 1
   printf '%s\n' "$receipt_payload" | cmp -s - "$PATH_RECEIPT/payload" || return 1
   # The after snapshot must be exactly the before bytes plus the owned block.
   # Reject receipts that could otherwise replace a profile with arbitrary bytes.
@@ -224,6 +242,7 @@ configure_profile_path() {
   if [ -e "$PATH_RECEIPT" ] || [ -L "$PATH_RECEIPT" ]; then
     read_profile_receipt || return 1
     [ "$PATH_RC" = "$receipt_target" ] || return 1
+    if [ "$selected_shell" = fish ]; then [ "$path_line" = "$receipt_payload" ] || return 1; fi
     path_line="$receipt_payload"
   fi
   safe_path_ancestors "$PATH_RC" && safe_path_ancestors "$INSTALL_DIR" || return 1
@@ -331,6 +350,13 @@ configure_path() {
       done
       interactive_profile="$HOME/.bashrc" ;;
     zsh) login_profile="$zsh_directory/.zprofile"; interactive_profile="$zsh_directory/.zshrc" ;;
+    fish)
+      safe_path_ancestors "$fish_directory" || return 1
+      mkdir -p "$fish_directory/fish" || return 1
+      SELECTED_PROFILE="$fish_directory/fish/config.fish"
+      preflight_profile "$SELECTED_PROFILE" || return 1
+      printf 'PATH preference: fish; startup mode: %s\n' "$PATH_MODE"
+      configure_profile_path; return $? ;;
     posix) ;;
     *) return 0 ;;
   esac
@@ -376,12 +402,16 @@ configure_path() {
 
 print_path_guidance() {
   PATH_COMMAND="$(path_payload)"
+  if [ "$selected_shell" = fish ]; then
+    fish_path_payload "$PATH_MODE" >/dev/null
+    PATH_COMMAND="fish_add_path --path --prepend -- '$fish_quoted'"
+  fi
   if [ "$PATH_UPDATED" -eq 1 ]; then
     printf 'Tapid was installed and PATH persistence was verified in %s.\n' "$PATH_RC"
     printf 'To enable it in the current shell, run: %s\n' "$PATH_COMMAND"
   else
     printf 'Persistent PATH was not changed.\n'
-    printf 'To enable Tapid in a POSIX-compatible shell, run: %s\n' "$PATH_COMMAND"
+    printf 'To enable Tapid in the selected shell (POSIX if unknown), run: %s\n' "$PATH_COMMAND"
   fi
 }
 
@@ -400,8 +430,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$PATH_SHELL" in
-  auto|bash|zsh|posix) ;;
-  fish) fail "fish PATH persistence is not yet supported" ;;
+  auto|bash|zsh|fish|posix) ;;
   *) fail "--shell must be auto, bash, zsh, fish, or posix" ;;
 esac
 
@@ -416,10 +445,22 @@ if [ "$selected_shell" = zsh ] && [ "${ZDOTDIR+x}" = x ]; then
   zsh_directory="$ZDOTDIR"
 fi
 case "$PATH_MODE" in
-  '') case "$selected_shell" in bash|zsh) PATH_MODE=both ;; *) PATH_MODE=login ;; esac ;;
-  login|interactive|both) case "$selected_shell" in bash|zsh) ;; posix) [ "$PATH_MODE" = login ] || fail "POSIX supports only login mode" ;; *) fail "--shell-mode requires a supported shell" ;; esac ;;
+  '') case "$selected_shell" in bash|zsh|fish) PATH_MODE=both ;; *) PATH_MODE=login ;; esac ;;
+  login|interactive|both) case "$selected_shell" in bash|zsh|fish) ;; posix) [ "$PATH_MODE" = login ] || fail "POSIX supports only login mode" ;; *) fail "--shell-mode requires a supported shell" ;; esac ;;
   *) fail "--shell-mode must be login, interactive, or both" ;;
 esac
+
+if [ "$selected_shell" = fish ]; then
+  fish_directory="${XDG_CONFIG_HOME-$HOME/.config}"
+  case "$fish_directory" in /*) ;; *) fail "XDG_CONFIG_HOME must be an absolute non-empty directory" ;; esac
+  case "$fish_directory" in *'
+'*|*"$(printf '\r')"*) fail "XDG_CONFIG_HOME cannot contain line breaks" ;; esac
+  if [ "$CONFIGURE_PATH" -eq 1 ]; then
+    command -v fish >/dev/null 2>&1 &&
+      fish --no-config -c 'functions -q fish_add_path; and fish_add_path --path --prepend -- /; and contains -- / $PATH' >/dev/null 2>&1 ||
+      fail "fish requires fish_add_path with --path and --prepend support"
+  fi
+fi
 
 case "$REPO" in ''|*[!A-Za-z0-9_./-]*|/*|*/|*/*/*) fail "repository must be OWNER/REPO" ;; esac
 case "$REPO" in */*) ;; *) fail "repository must be OWNER/REPO" ;; esac

@@ -41,6 +41,25 @@ path_payload() {
   printf "case :\$%s: in *:'%s':*) ;; *) export PATH='%s'\$%s ;; esac" '{PATH-}' "$quoted_install" "$quoted_install" '{PATH+:$PATH}'
 }
 
+
+fish_path_payload() {
+  fish_quoted="$(printf '%s' "$INSTALL_DIR" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g")"
+  case "$1" in
+    login) fish_guard='status is-login' ;;
+    interactive) fish_guard='status is-interactive' ;;
+    both) fish_guard='status is-login; or status is-interactive' ;;
+  esac
+  printf "if %s; fish_add_path --path --prepend -- '%s'; end" "$fish_guard" "$fish_quoted"
+}
+
+valid_receipt_payload() {
+  [ "$receipt_payload" = "$(path_payload)" ] && return 0
+  for fish_mode in login interactive both; do
+    [ "$receipt_payload" != "$(fish_path_payload "$fish_mode")" ] || return 0
+  done
+  [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && [ "$receipt_payload" = 'export PATH="$HOME/.local/bin:$PATH"' ]
+}
+
 # Receipt fields are data, never shell input. Keep this parser identical in both
 # standalone scripts; generated installers cannot depend on sibling files.
 safe_path_ancestors() {
@@ -97,9 +116,7 @@ read_profile_receipt() {
 '*|*"$(printf '\r')"*) return 1 ;; esac
   printf '%s' "$receipt_target" | cmp -s - "$PATH_RECEIPT/target" || return 1
   receipt_payload="$(cat "$PATH_RECEIPT/payload")"
-  if [ "$receipt_payload" != "$(path_payload)" ]; then
-    [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && [ "$receipt_payload" = 'export PATH="$HOME/.local/bin:$PATH"' ] || return 1
-  fi
+  valid_receipt_payload || return 1
   printf '%s\n' "$receipt_payload" | cmp -s - "$PATH_RECEIPT/payload" || return 1
   # The after snapshot must be exactly the before bytes plus the owned block.
   # Reject receipts that could otherwise replace a profile with arbitrary bytes.
