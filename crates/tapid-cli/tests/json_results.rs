@@ -9,7 +9,7 @@ fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, serde_
     let home = TempHome::new("json-result").unwrap();
     let output = command(project, &home, args).output().unwrap();
     let value = serde_json::from_slice(&output.stdout).expect("one JSON result on stdout");
-    assert!(output.stderr.is_empty(), "{:?}", output);
+    assert!(output.stderr.is_empty(), "{output:?}");
     (output, value)
 }
 
