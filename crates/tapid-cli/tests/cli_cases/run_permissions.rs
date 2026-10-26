@@ -274,7 +274,7 @@ fn run_permissions_flag_only_baseline_has_no_implicit_project_or_subprocess_gran
 #[cfg(windows)]
 #[test]
 fn run_permissions_network_grant_serves_http_through_real_cli() {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::time::{Duration, Instant};
 
@@ -291,7 +291,7 @@ fn run_permissions_network_grant_serves_http_through_real_cli() {
             )
             .unwrap();
         project.write("probe.js", format!(
-        "const http=require('node:http');const s=http.createServer((q,r)=>{{r.end('TAPID_HTTP_OK');s.close();}});s.listen({},'127.0.0.1',()=>console.log('READY'));", address.port()
+        "const http=require('node:http');const s=http.createServer((q,r)=>{{r.sendDate=false;r.writeHead(200,{{'Content-Length':12,'Connection':'close'}});r.end('TAPID_HTTP_OK');s.close();}});s.listen({},'127.0.0.1',()=>console.log('READY'));", address.port()
     ).as_bytes()).unwrap();
         if flags {
             project.write("tapid.toml", b"[run.defaults]\nread=['.']\nnetwork=true\nsubprocess=true\nenvironment=['SystemRoot']\ntimeout_seconds=5\n").unwrap();
@@ -338,7 +338,7 @@ fn run_permissions_network_grant_serves_http_through_real_cli() {
                 stream
                     .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
                     .unwrap();
-                stream.read_to_string(&mut response).unwrap();
+                response = read_network_fixture_response(&mut stream).unwrap();
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -346,7 +346,7 @@ fn run_permissions_network_grant_serves_http_through_real_cli() {
         let output = worker.join().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stderr}");
-        assert!(response.contains("TAPID_HTTP_OK"), "{response}; {stderr}");
+        assert_eq!(response, "TAPID_HTTP_OK", "{stderr}");
         assert_eq!(output.stdout, b"READY\n");
         let receipt: serde_json::Value =
             serde_json::from_str(stderr.lines().find(|line| line.starts_with('{')).unwrap())
@@ -627,4 +627,81 @@ fn run_result_file_covers_project_manifest_and_workspace_failures() {
     );
     assert_eq!(output.status.code(), Some(2));
     assert!(!path.exists());
+}
+
+/// A peer may reset after its response; delivery still requires every framed byte.
+#[test]
+fn network_fixture_response_completes_before_reset() {
+    struct Reset;
+    impl std::io::Read for Reset {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::ConnectionReset.into())
+        }
+    }
+    use std::io::Read;
+    let response =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nTAPID_HTTP_OK";
+    assert_eq!(
+        read_network_fixture_response(&mut response.as_slice().chain(Reset)).unwrap(),
+        "TAPID_HTTP_OK"
+    );
+}
+
+/// Read this fixture's fixed, length-framed HTTP response without waiting for EOF.
+/// Header and body bytes must match in full; truncation and early resets propagate.
+fn read_network_fixture_response(reader: &mut impl std::io::Read) -> std::io::Result<String> {
+    const RESPONSE: &[u8] =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nTAPID_HTTP_OK";
+    let mut bytes = [0; RESPONSE.len()];
+    reader.read_exact(&mut bytes)?;
+    if bytes != RESPONSE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected network fixture HTTP response",
+        ));
+    }
+    Ok("TAPID_HTTP_OK".to_owned())
+}
+
+#[test]
+fn network_fixture_response_rejects_truncated_body() {
+    let mut response =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nTAPID_HTTP_".as_slice();
+    assert_eq!(
+        read_network_fixture_response(&mut response)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
+}
+
+#[test]
+fn network_fixture_response_rejects_early_reset() {
+    struct Reset;
+    impl std::io::Read for Reset {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::ConnectionReset.into())
+        }
+    }
+    use std::io::Read;
+    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nTAPID_";
+    assert_eq!(
+        read_network_fixture_response(&mut response.as_slice().chain(Reset))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::ConnectionReset
+    );
+}
+
+#[test]
+fn network_fixture_response_rejects_invalid_framing() {
+    let mut response =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nTAPID_HTTP_OK"
+            .as_slice();
+    assert_eq!(
+        read_network_fixture_response(&mut response)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidData
+    );
 }
