@@ -2,7 +2,7 @@
 name = "tapid-linker"
 readme = "README.md"
 description = "Deterministic node_modules layout planning for Tapid"
-version = "0.0.7"
+version = "0.0.8"
 edition.workspace = true
 license.workspace = true
 license-file.workspace = true
@@ -15,5 +15,5 @@ path = "src/lib.rs"
 
 [dependencies]
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
-tapid-manifest = { version = "0.0.9", path = "../tapid-manifest" }
+tapid-manifest = { version = "0.0.10", path = "../tapid-manifest" }
 sha2 = "0.10"
