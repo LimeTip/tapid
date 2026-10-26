@@ -8,9 +8,15 @@ use std::{
 use tapid_archive::{ArchiveFormat, ArchiveLimits, extract_to};
 
 pub(crate) fn unique_nonce() -> u128 {
-    std::time::SystemTime::now()
+    // Wall-clock resolution can be coarser than concurrent calls, especially on
+    // macOS. Keep names distinct even within one clock tick or after clock rollback.
+    static LAST_NONCE: std::sync::Mutex<u128> = std::sync::Mutex::new(0);
+    let mut last = LAST_NONCE.lock().unwrap_or_else(|error| error.into_inner());
+    let clock = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos())
+        .map_or(0, |d| d.as_nanos());
+    *last = clock.max(*last + 1);
+    *last
 }
 
 pub(crate) fn materialize_artifact(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
@@ -279,6 +285,29 @@ mod tests {
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn temporary_nonces_are_unique_under_concurrent_calls() {
+        let batches = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..10_000)
+                            .map(|_| super::unique_nonce())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut seen = std::collections::HashSet::new();
+        for nonce in batches.into_iter().flatten() {
+            assert!(seen.insert(nonce), "temporary nonce was reused: {nonce}");
+        }
+    }
 
     #[cfg(unix)]
     #[test]
