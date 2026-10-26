@@ -85,6 +85,171 @@ fn private_node_runtime() -> (tapid_test_support::TempProject, PathBuf) {
     (runtime, node)
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_managed_tree_cli_preserves_invocation_environment_and_checked_results() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let project = project();
+    let results = tapid_test_support::TempProject::new("managed-cli-results").unwrap();
+    let outside = tapid_test_support::TempProject::new("managed-cli-outside").unwrap();
+    outside
+        .write("secret", b"synthetic outside secret")
+        .unwrap();
+    let (_runtime, node) = private_node_runtime();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"managed-cli","version":"1.0.0","scripts":{"probe":"tapid-local-probe"}}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "tapid.toml",
+            br#"
+[run.scripts.probe]
+assurance = "managed-tree"
+read = ["."]
+write = ["writable"]
+environment = ["TAPID_FLAG_VISIBLE", "TAPID_FLAG_ABSENT"]
+network = false
+subprocess = true
+timeout_seconds = 15
+max_output_bytes = 65536
+max_processes = 64
+max_memory_bytes = 536870912
+"#,
+        )
+        .unwrap();
+    fs::create_dir(project.path().join("writable")).unwrap();
+    symlink(outside.path(), project.path().join("outside-link")).unwrap();
+    for (name, script) in [
+        (
+            "tapid-local-probe",
+            "#!/bin/sh\nexec node probe.js \"$@\"\n",
+        ),
+        ("node", "#!/bin/sh\necho substituted-node; exit 91\n"),
+    ] {
+        let path = project
+            .write(format!("node_modules/.bin/{name}"), script.as_bytes())
+            .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    project.write("probe.js", br#"
+const a = require('node:assert/strict'), fs = require('node:fs');
+function authority() {
+  a.equal(process.env.TAPID_FLAG_VISIBLE, 'visible-value');
+  for (const name of ['TAPID_FLAG_SECRET', 'TAPID_FLAG_ABSENT', 'HOME', 'NODE_OPTIONS', 'HTTP_PROXY', 'SSH_AUTH_SOCK']) a.equal(process.env[name], undefined, name);
+  a.throws(() => fs.readFileSync('outside-link/secret'), {code:'EACCES'});
+  a.throws(() => fs.writeFileSync('denied', 'escape'), e => ['EACCES', 'EROFS'].includes(e.code));
+  fs.writeFileSync('writable/' + (process.argv[2] === 'child' ? 'child' : 'root'), 'allowed');
+}
+authority();
+if (process.argv[2] !== 'child') {
+  const child = require('node:child_process').spawnSync(process.execPath, ['probe.js', 'child'], {encoding:'utf8'});
+  a.equal(child.status, 0, child.stderr);
+  console.log(JSON.stringify({node:fs.realpathSync(process.execPath), cwd:fs.realpathSync('.'), args:process.argv.slice(2)}));
+  process.exitCode = Number(process.argv.at(-1));
+}
+"#).unwrap();
+    let forwarded = [
+        "",
+        "two words",
+        "'quoted'",
+        "λ",
+        "--leading",
+        "; touch escaped",
+        "$(touch escaped)",
+    ];
+    for code in ["0", "37"] {
+        let result_path = results.path().join(format!("result-{code}.json"));
+        let mut arguments = vec![
+            "run",
+            "probe",
+            "--node-runtime",
+            node.to_str().unwrap(),
+            "--result-file",
+            result_path.to_str().unwrap(),
+            "--",
+        ];
+        arguments.extend(forwarded);
+        arguments.push(code);
+        let output = isolated_command(project.path(), &arguments, true)
+            .env("TAPID_FLAG_VISIBLE", "visible-value")
+            .env("TAPID_FLAG_SECRET", "synthetic-secret")
+            .env("NODE_OPTIONS", "--trace-warnings")
+            .env("HTTP_PROXY", "http://synthetic.invalid:9")
+            .env("SSH_AUTH_SOCK", outside.path().join("synthetic-agent"))
+            .env("PATH", outside.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code.parse().unwrap()),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            actual["node"],
+            fs::canonicalize(&node).unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            actual["cwd"],
+            fs::canonicalize(project.path()).unwrap().to_str().unwrap()
+        );
+        let mut expected = forwarded.to_vec();
+        expected.push(code);
+        assert_eq!(actual["args"], serde_json::json!(expected));
+        let result: serde_json::Value =
+            serde_json::from_slice(&fs::read(result_path).unwrap()).unwrap();
+        assert_eq!(result["outcome"], "completed");
+        let receipt = &result["receipt"];
+        assert_eq!(receipt["assurance"], "ManagedTree");
+        assert_eq!(receipt["termination"], format!("Exited({code})"));
+        assert_eq!(
+            receipt["completion"]["cleanup_confidence"],
+            "KernelOwnedComplete"
+        );
+        assert_eq!(receipt["requested"], receipt["enforced"]);
+        assert_eq!(receipt["configured_limits"]["max_processes"], 64);
+        eprintln!("Linux ManagedTree CLI checked receipt: {receipt}");
+        assert_eq!(
+            fs::read(project.path().join("writable/root")).unwrap(),
+            b"allowed"
+        );
+        assert_eq!(
+            fs::read(project.path().join("writable/child")).unwrap(),
+            b"allowed"
+        );
+        assert!(!project.path().join("escaped").exists());
+        assert!(!project.path().join("denied").exists());
+    }
+    fs::remove_file(project.path().join("writable/root")).unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "run",
+            "probe",
+            "--node-runtime",
+            node.to_str().unwrap(),
+            "--unknown-tapid-argument",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
+    assert!(!project.path().join("writable/root").exists());
+    eprintln!(
+        "Linux ManagedTree CLI invocation, descendant authority and checked-result assertions executed"
+    );
+    eprintln!(
+        "Linux ManagedTree CLI policy: {}",
+        fs::read_to_string(project.path().join("tapid.toml")).unwrap()
+    );
+}
+
 #[test]
 fn run_permissions_enforce_scoped_writes_environment_and_descendants_without_persisting_config() {
     let project = project();

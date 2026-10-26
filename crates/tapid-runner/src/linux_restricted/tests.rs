@@ -452,6 +452,40 @@ fn managed_tree_stays_fail_closed_before_target_execution() {
 }
 
 #[test]
+fn managed_tree_requires_private_launcher_with_otherwise_valid_limits() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-missing-launcher").unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::new(Some(5), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let mut req = request(project.path(), "echo uncontained > marker", policy);
+    // Model a consumer that did not install private launcher dispatch. Keep
+    // every policy dimension valid so missing limits cannot mask this failure.
+    req.launcher = None;
+    let error = execute(&req).unwrap_err();
+    assert_eq!(
+        error.category(),
+        ExecutionErrorCategory::UnsupportedContainment
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("private launcher was not initialized"),
+        "{error}"
+    );
+    assert!(error.completion().is_none());
+    assert!(!project.path().join("marker").exists());
+}
+
+#[test]
 fn seccomp_denies_process_memory_and_pidfds_even_for_self() {
     // Self-targets need no Yama permission. This proves seccomp supplies the
     // denial independently of host tracing policy.
@@ -518,7 +552,7 @@ fn seccomp_denies_process_memory_and_pidfds_even_for_self() {
 }
 
 #[test]
-fn managed_tree_enforces_output_process_and_memory_limits() {
+fn managed_tree_enforces_output_and_process_limits() {
     if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
         return;
     }
@@ -531,10 +565,6 @@ fn managed_tree_enforces_output_process_and_memory_limits() {
         (
             "while :; do sleep 10 & done",
             Termination::ProcessLimitExceeded,
-        ),
-        (
-            "python3 -c 'a=bytearray(256*1024*1024); print(len(a))'",
-            Termination::MemoryLimitExceeded,
         ),
     ] {
         let policy = SandboxPolicy::new(
@@ -552,6 +582,91 @@ fn managed_tree_enforces_output_process_and_memory_limits() {
             result.completion().cleanup_confidence(),
             CleanupConfidence::KernelOwnedComplete
         );
+    }
+}
+
+#[test]
+fn managed_tree_enforces_memory_limit_with_rust_workload() {
+    const WORKLOAD: &str = "TAPID_MANAGED_MEMORY_WORKLOAD";
+    if std::env::var_os(WORKLOAD).is_some() {
+        // Commit pages rather than only reserving virtual address space. Keep
+        // every allocation live until the cgroup's memory controller intervenes.
+        let mut chunks = Vec::new();
+        for _ in 0..256 {
+            let mut chunk = vec![0u8; 1024 * 1024];
+            for offset in (0..chunk.len()).step_by(4096) {
+                unsafe { std::ptr::write_volatile(chunk.as_mut_ptr().add(offset), 1) };
+            }
+            chunks.push(chunk);
+            std::hint::black_box(&chunks);
+        }
+        panic!("memory workload escaped its 64 MiB ceiling");
+    }
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-memory-limit").unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+        false,
+        vec![WORKLOAD.into()],
+        true,
+        ExecutionLimits::new(Some(10), Some(4096), Some(32), Some(64 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let req = ExecutionRequest::builder(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "execution::platform_backend::tests::managed_tree_enforces_memory_limit_with_rust_workload",
+            "--nocapture",
+        ])
+        .env(WORKLOAD, "1")
+        .project_root(project.path())
+        .executable_search_paths(["/usr/bin"])
+        .policy(policy)
+        .build()
+        .unwrap();
+    let result = execute(&req).unwrap();
+    assert_eq!(result.termination(), &Termination::MemoryLimitExceeded);
+    assert_eq!(
+        result.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+}
+
+#[test]
+fn managed_tree_preserves_exit_codes_and_cleans_descendants_on_root_exit() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    for code in [0, 37] {
+        let project = tapid_test_support::TempProject::new("managed-root-exit").unwrap();
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(Some(10), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap();
+        let script = format!(
+            "setsid sh -c 'sh -c \"echo started > started; sleep 2; echo escaped > escaped\" & wait' & while [ ! -f started ]; do sleep 0.01; done; exit {code}"
+        );
+        let result = execute(&request(project.path(), &script, policy)).unwrap();
+        assert_eq!(result.termination(), &Termination::Exited(code));
+        assert!(project.path().join("started").exists());
+        assert_eq!(
+            result.enforcement().assurance(),
+            AssuranceLevel::ManagedTree
+        );
+        assert_eq!(
+            result.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        assert!(!project.path().join("escaped").exists());
     }
 }
 

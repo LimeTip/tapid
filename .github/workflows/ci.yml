@@ -17,6 +17,76 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  linux-managed-tree:
+    name: Linux ManagedTree (Ubuntu 24.04 x86_64, Node 22)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: target
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Build native acceptance executables
+        run: |
+          node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked --no-run
+          node --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked --no-run
+      - name: Require native ManagedTree execution in a delegated host context
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_bin=$(node -p 'process.execPath')
+          test "$(uname -m)" = x86_64
+          test "$(node -p 'process.versions.node.split(".")[0]')" = 22
+          git rev-parse HEAD > "$RUNNER_TEMP/linux-managed-source.txt"
+          # Delegate only this transient unit. Move the driver into a leaf so
+          # memory/pids can be enabled for sibling execution boundaries. No
+          # host-wide sysctl, cgroup remount or privileged container is needed.
+          sudo -n systemd-run --wait --pipe --collect \
+            --unit="tapid-managed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --property=Delegate=yes --property=KillMode=control-group \
+            --working-directory="$PWD" \
+            --setenv="PATH=$PATH" \
+            --setenv="CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            --setenv="RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            --setenv="CARGO_TARGET_DIR=$PWD/target" \
+            --setenv="RUSTFLAGS=$RUSTFLAGS" \
+            --setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1 \
+            --setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1 \
+            --setenv="TAPID_TEST_NODE=$node_bin" \
+            /bin/bash -euo pipefail -c '
+              uname -a
+              "$TAPID_TEST_NODE" --version
+              rustc --version
+              group=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
+              mkdir "$group/driver"
+              echo $$ > "$group/driver/cgroup.procs"
+              echo "+memory +pids" > "$group/cgroup.subtree_control"
+              cat "$group/cgroup.controllers" "$group/cgroup.subtree_control" /proc/self/cgroup
+              unshare --mount --pid --fork --mount-proc /bin/true
+              "$TAPID_TEST_NODE" --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked managed_tree_enforces_timeout_and_cleans_detached_descendants -- --nocapture
+              "$TAPID_TEST_NODE" --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked managed_ -- --nocapture
+              "$TAPID_TEST_NODE" --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked linux_managed_tree_cli_ -- --nocapture
+              test -z "$(find "$group" -mindepth 1 -maxdepth 1 -name "tapid-managed-*" -print -quit)"
+            ' 2>&1 | tee "$RUNNER_TEMP/linux-managed-acceptance.log"
+      - name: Retain exact-source native acceptance logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: linux-managed-acceptance
+          path: |
+            ${{ runner.temp }}/linux-managed-source.txt
+            ${{ runner.temp }}/linux-managed-acceptance.log
+          retention-days: 30
+          if-no-files-found: error
+
   news-site-consumer:
     name: News-site Tapid scripts (Ubuntu 24.04)
     runs-on: ubuntu-24.04

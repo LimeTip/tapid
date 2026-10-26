@@ -123,6 +123,48 @@ The reserved-Node lifecycle regression launches a detached descendant with redir
 
 ## Linux ManagedTree development validation
 
+### Issue 156 acceptance coverage
+
+The `linux-managed-tree` CI job targets Ubuntu 24.04 x86_64 with externally
+supplied Node 22. It requires `TAPID_REQUIRE_MANAGED_ASSERTIONS=1` and
+`TAPID_REQUIRE_NODE_ASSERTIONS=1`; unavailable prerequisites fail the job.
+A transient systemd unit owns the delegation, moves its trusted driver into a
+leaf, enables memory/pids controllers for sibling execution boundaries, and
+actually attempts private PID/mount namespace creation. It does not remount the
+host cgroup filesystem or change host-wide namespace policy. The runner still
+performs its own request-specific checks before target execution. Logs retain
+the checkout SHA, kernel/architecture, runtime/toolchain versions, controller
+observations, and test results. This configured job is **not** native acceptance
+evidence until it executes successfully on the candidate source.
+
+The current acceptance map is below. Runner names refer to
+`crates/tapid-runner/src/linux_restricted/tests.rs`; the CLI invocation probe is
+in `crates/tapid-cli/tests/cli_cases/run_permissions.rs`. Presence in this table
+does not imply a non-skipped native pass.
+
+| Criterion | Existing or added probe | Remaining acceptance work |
+| --- | --- | --- |
+| Positive execution, Node identity, local tool lookup, argument order, empty/quoted/Unicode/metacharacter arguments, exit codes | `linux_managed_tree_cli_preserves_invocation_environment_and_checked_results` | Execute required lane; extend local-tool collision controls if changing PATH precedence |
+| Working directory, allowlisted and absent values, synthetic secret non-inheritance, Node options/proxy/agent filtering, descendant writes and denied symlink reads | Same CLI probe; existing Restricted permission tests remain separate | Detached/re-parented authority, absolute/parent/sibling paths, native loader and descriptor controls |
+| Timeout and detached descendant termination | `managed_tree_enforces_timeout_and_cleans_detached_descendants` | Execute required lane |
+| Normal/nonzero root exit and session-changing descendant cleanup | `managed_tree_preserves_exit_codes_and_cleans_descendants_on_root_exit` | Execute required lane; cancellation and supervisor failure remain separate |
+| Combined output and task ceilings | `managed_tree_enforces_output_and_process_limits` | Execute required lane; assert retained/forwarded combined output bounds externally |
+| Cgroup memory ceiling | `managed_tree_enforces_memory_limit_with_rust_workload` | Execute required lane; workload commits real pages and no longer requires Python |
+| Read-only metadata and kernel-control grant rejection | `managed_tree_denies_metadata_mutation_outside_write_grants`, `managed_tree_rejects_kernel_control_filesystem_write_grants` | Execute required lane |
+| Private procfs compatibility | `managed_tree_memory_stats_opt_in_uses_read_only_private_procfs` | Execute required lane, then establish fixture build compatibility |
+| Caller crash | `managed_tree_caller_crash_kills_double_forked_descendants` | Supplement delayed-marker control with authoritative post-crash accounting |
+| Clone3/cgroup reassignment and Unix socket controls | `managed_filter_denies_clone3_and_reconnectable_unix_socketpairs` | Full target/descendant positive and negative network controls |
+| Missing prerequisites | `managed_tree_stays_fail_closed_before_target_execution`, `managed_tree_requires_private_launcher_with_otherwise_valid_limits` | Otherwise-valid requests independently denying remaining prerequisites and checking partial-setup cleanup |
+| Reference fixture build/test/start and cancellation | Existing news-site job uses Restricted | Separate ManagedTree policy, measured limits, isolated fixture orchestration, HTTP marker and authoritative cancellation cleanup |
+
+Reconciliation of the supplied historical PR #176 concerns: current ManagedTree
+capture has a finite combined ceiling (at most 16 MiB), and the existing
+Restricted news-site job uses project-local TMPDIR. The new native job attempts
+host delegation and namespace operations directly instead of importing the old
+container/remount design. Successful target execution and fixture compatibility
+remain unverified. No support claim, dependency-hook gate, or Windows evidence is
+changed by this coverage inventory.
+
 Issue 155 adds a separate managed backend. Local uncommitted-tree tests use Linux x86_64 kernel 6.8.0-117-generic in an isolated container with explicit namespace privileges and delegated memory/pids controllers. `TAPID_REQUIRE_MANAGED_ASSERTIONS=1` requires real native execution of the managed tests rather than treating unavailable host setup as acceptance. All 132 runner-library tests passed, including real timeout/output/process/memory enforcement, read-only metadata denial, detached-descendant cleanup, caller-crash cleanup, clone3/Unix-socket escape controls, and rejection of writable kernel-control filesystems. The CLI native fixture passed generated-file creation, GCC compilation, credential non-inheritance, immutable source storage, authenticated offline/frozen replay, forged-output rejection, changed-policy rejection, and failed-hook rollback. The build used Rust 1.99.0 and a temporary SHA-256 optimization override; execution used Node 20.19.2 and GCC 14.2.0. These results are development evidence, not a clean-commit acceptance record or a completed common probe matrix. See [ADR 0008](adr/0008-dependency-lifecycle-derived-trees.md) and [dependency lifecycle scripts](dependency-lifecycle.md).
 
 On a Linux host with the documented namespace privileges and cgroup delegation, require the native assertions with:
