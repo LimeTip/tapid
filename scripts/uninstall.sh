@@ -35,6 +35,12 @@ case "$INSTALL_DIR" in
   *) printf 'uninstaller: install directory must be an absolute path\n' >&2; exit 1 ;;
 esac
 
+# Produce literal, duplicate-safe POSIX activation without evaluating the path.
+path_payload() {
+  quoted_install="$(printf '%s' "$INSTALL_DIR" | sed "s/'/'\\\\''/g")"
+  printf "case :\$%s: in *:'%s':*) ;; *) export PATH='%s'\$%s ;; esac" '{PATH-}' "$quoted_install" "$quoted_install" '{PATH+:$PATH}'
+}
+
 # Receipt fields are data, never shell input. Keep this parser identical in both
 # standalone scripts; generated installers cannot depend on sibling files.
 safe_path_ancestors() {
@@ -45,7 +51,31 @@ safe_path_ancestors() {
   done
 }
 
+# A two-profile receipt contains two independently recoverable v1 records.
 read_path_receipt() {
+  if printf 'tapid-path-v1\nunix\ninstall\n2\n' | cmp -s - "$PATH_RECEIPT/manifest"; then
+    multi_root="$PATH_RECEIPT"
+    [ -d "$multi_root" ] && [ ! -L "$multi_root" ] && [ -O "$multi_root" ] || return 1
+    safe_path_ancestors "$multi_root" || return 1
+    multi_count=0
+    for multi_entry in "$multi_root"/* "$multi_root"/.[!.]* "$multi_root"/..?*; do
+      [ -e "$multi_entry" ] || { [ ! -L "$multi_entry" ] || return 1; continue; }
+      case "${multi_entry##*/}" in manifest) [ -f "$multi_entry" ] && [ ! -L "$multi_entry" ] && [ -O "$multi_entry" ] || return 1 ;; 1|2) ;; *) return 1 ;; esac
+      multi_count=$((multi_count + 1))
+    done
+    [ "$multi_count" -eq 3 ] || return 1
+    PATH_RECEIPT="$multi_root/1"; read_profile_receipt || return 1
+    first_target="$receipt_target"
+    PATH_RECEIPT="$multi_root/2"; read_profile_receipt || return 1
+    [ "$first_target" != "$receipt_target" ] || return 1
+    PATH_RECEIPT="$multi_root"; receipt_records=2
+  else
+    read_profile_receipt || return 1
+    receipt_records=1
+  fi
+}
+
+read_profile_receipt() {
   [ -d "$PATH_RECEIPT" ] && [ ! -L "$PATH_RECEIPT" ] && [ -O "$PATH_RECEIPT" ] || return 1
   safe_path_ancestors "$PATH_RECEIPT" || return 1
   receipt_count=0
@@ -66,14 +96,24 @@ read_path_receipt() {
   case "$receipt_target" in *'
 '*|*"$(printf '\r')"*) return 1 ;; esac
   printf '%s' "$receipt_target" | cmp -s - "$PATH_RECEIPT/target" || return 1
-  printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"' | cmp -s - "$PATH_RECEIPT/payload" || return 1
+  receipt_payload="$(cat "$PATH_RECEIPT/payload")"
+  if [ "$receipt_payload" != "$(path_payload)" ]; then
+    [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && [ "$receipt_payload" = 'export PATH="$HOME/.local/bin:$PATH"' ] || return 1
+  fi
+  printf '%s\n' "$receipt_payload" | cmp -s - "$PATH_RECEIPT/payload" || return 1
   # The after snapshot must be exactly the before bytes plus the owned block.
   # Reject receipts that could otherwise replace a profile with arbitrary bytes.
   if grep -Fqx "$PATH_MARKER_BEGIN" "$PATH_RECEIPT/before" || grep -Fqx "$PATH_MARKER_END" "$PATH_RECEIPT/before"; then return 1; fi
+  if printf 'preexisting\n' | cmp -s - "$PATH_RECEIPT/state"; then
+    cmp -s "$PATH_RECEIPT/before" "$PATH_RECEIPT/after" || return 1
+    grep -Fqx "$receipt_payload" "$PATH_RECEIPT/before" || { [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && grep -Fqx 'export PATH="$HOME/.local/bin:$PATH"' "$PATH_RECEIPT/before"; } || return 1
+    receipt_state=preexisting
+    return 0
+  fi
   {
     cat "$PATH_RECEIPT/before" &&
     { [ ! -s "$PATH_RECEIPT/before" ] || [ "$(tail -c 1 "$PATH_RECEIPT/before" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || printf '\n'; } &&
-    printf '%s\n' "$PATH_MARKER_BEGIN" 'export PATH="$HOME/.local/bin:$PATH"' "$PATH_MARKER_END"
+    printf '%s\n' "$PATH_MARKER_BEGIN" "$receipt_payload" "$PATH_MARKER_END"
   } | cmp -s - "$PATH_RECEIPT/after" || return 1
   if printf 'pending\n' | cmp -s - "$PATH_RECEIPT/state"; then receipt_state=pending
   elif printf 'completed\n' | cmp -s - "$PATH_RECEIPT/state"; then receipt_state=completed
@@ -89,8 +129,15 @@ remove_path_block() {
   fi
   [ "$receipt_present" -eq 1 ] || [ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0
   if [ "$receipt_present" -eq 1 ]; then
-    PATH_RC="$receipt_target"
-    remove_profile_block
+    if [ "$receipt_records" -eq 2 ]; then
+      cleanup_root="$PATH_RECEIPT"
+      for record in 1 2; do
+        (PATH_RECEIPT="$cleanup_root/$record"; read_profile_receipt && PATH_RC="$receipt_target" && remove_profile_block) || return 1
+      done
+    else
+      PATH_RC="$receipt_target"
+      remove_profile_block
+    fi
   else
     # Legacy installers had no receipt. Limit discovery to their default files;
     # exact payload validation below is still required before removing anything.
@@ -101,6 +148,7 @@ remove_path_block() {
 }
 
 remove_profile_block() {
+  [ "${receipt_state-}" != preexisting ] || return 0
   safe_path_ancestors "$PATH_RC" || return 1
   [ -e "$PATH_RC" ] || return 0
   [ ! -L "$PATH_RC" ] && [ -f "$PATH_RC" ] && [ -O "$PATH_RC" ] && [ -r "$PATH_RC" ] && [ -w "$PATH_RC" ] || return 1
@@ -120,10 +168,10 @@ remove_profile_block() {
     cat "$PATH_RC" > "$path_original" && cmp -s "$PATH_RC" "$path_original" || exit 1
     final_byte="$(tail -c 1 "$path_original" | od -An -tu1 | tr -d '[:space:]')"
     line_count="$(awk 'END { print NR }' "$path_original")"
-    awk -v begin="$PATH_MARKER_BEGIN" -v end="$PATH_MARKER_END" -v final="$final_byte" -v lines="$line_count" '
+    TAPID_PATH_PAYLOAD="${receipt_payload:-export PATH=\"\$HOME/.local/bin:\$PATH\"}" awk -v begin="$PATH_MARKER_BEGIN" -v end="$PATH_MARKER_END" -v final="$final_byte" -v lines="$line_count" '
       $0 == begin { if (inside != 0 || seen) bad=1; inside=1; seen=1; next }
       $0 == end { if (inside != 2) bad=1; inside=0; next }
-      inside == 1 { if ($0 != "export PATH=\"$HOME/.local/bin:$PATH\"") bad=1; inside=2; next }
+      inside == 1 { if ($0 != ENVIRON["TAPID_PATH_PAYLOAD"]) bad=1; inside=2; next }
       inside == 2 { bad=1; next }
       !inside { printf "%s%s", $0, (NR == lines && final != 10 ? "" : "\n") }
       END { if (inside != 0 || !seen) bad=1; exit bad }
@@ -165,7 +213,16 @@ fi
 
 if [ -d "$PATH_RECEIPT" ]; then
   read_path_receipt || exit 1
-  rm -f "$PATH_RECEIPT/manifest" "$PATH_RECEIPT/install" "$PATH_RECEIPT/target" "$PATH_RECEIPT/payload" "$PATH_RECEIPT/before" "$PATH_RECEIPT/after" "$PATH_RECEIPT/state"
-  rmdir "$PATH_RECEIPT"
+  if [ "$receipt_records" -eq 2 ]; then
+    for record in 1 2; do
+      rm -f "$PATH_RECEIPT/$record/manifest" "$PATH_RECEIPT/$record/install" "$PATH_RECEIPT/$record/target" "$PATH_RECEIPT/$record/payload" "$PATH_RECEIPT/$record/before" "$PATH_RECEIPT/$record/after" "$PATH_RECEIPT/$record/state"
+      rmdir "$PATH_RECEIPT/$record"
+    done
+    rm -f "$PATH_RECEIPT/manifest"
+    rmdir "$PATH_RECEIPT"
+  else
+    rm -f "$PATH_RECEIPT/manifest" "$PATH_RECEIPT/install" "$PATH_RECEIPT/target" "$PATH_RECEIPT/payload" "$PATH_RECEIPT/before" "$PATH_RECEIPT/after" "$PATH_RECEIPT/state"
+    rmdir "$PATH_RECEIPT"
+  fi
 fi
 rm -f "$MARKER"

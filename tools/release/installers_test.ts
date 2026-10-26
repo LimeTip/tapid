@@ -262,7 +262,7 @@ test("Unix installer configures the default macOS zsh profile", { skip: platform
     await mkdir(home);
     await f.defaultInstallShell(home);
     equal((await run(join(pathInstall, "tapid"), ["--version"])).stdout.trim(), "tapid 1.2.3");
-    equal(await readFile(profile, "utf8"), "# tapid-path-managed-v1\nexport PATH=\"$HOME/.local/bin:$PATH\"\n# end tapid-path-managed-v1\n");
+    match(await readFile(profile, "utf8"), /^# tapid-path-managed-v1\ncase .*\n# end tapid-path-managed-v1\n$/);
   } finally { await f.cleanup(); }
 });
 
@@ -277,6 +277,9 @@ test("Unix installer accepts an existing unmarked default PATH export", { skip: 
     await writeFile(profile, existing);
     await f.defaultInstallShell(home, { PATH: `${pathInstall}:${f.env.PATH}` });
     equal((await run(join(pathInstall, "tapid"), ["--version"])).stdout.trim(), "tapid 1.2.3");
+    equal(await readFile(profile, "utf8"), existing);
+    await f.defaultInstallShell(home);
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } });
     equal(await readFile(profile, "utf8"), existing);
   } finally { await f.cleanup(); }
 });
@@ -367,7 +370,8 @@ test("PowerShell uninstaller preserves a foreign binary and removes a marked bin
     const installShell = () => run("/bin/sh", [f.installer, "--install-dir", pathInstall, "--configure-path"], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
     await installShell();
     const first = await readFile(profile, "utf8");
-    equal(first, "export PATH=\"$HOME/bin:$PATH\"\n# tapid-path-managed-v1\nexport PATH=\"$HOME/.local/bin:$PATH\"\n# end tapid-path-managed-v1\n");
+    equal(first.replace(/# tapid-path-managed-v1\n[^\n]*\n# end tapid-path-managed-v1\n/, ""), 'export PATH="$HOME/bin:$PATH"\n');
+    match(first, /# tapid-path-managed-v1\ncase /);
     const resolved = await run("/bin/sh", ["-c", ". \"$HOME/.profile\"; command -v tapid"], { env: { ...f.env, HOME: home, SHELL: "/bin/sh" } });
     equal(resolved.stdout, `${pathInstall}/tapid\n`);
     await installShell();
@@ -514,7 +518,6 @@ Write-Output "Validated $($cases.Count) cases"
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-
 test("Unix installer rejects a native signature failure before replacing an installation", { skip: platform === "win32" }, async () => {
   const f = await fixture();
   try {
@@ -609,8 +612,9 @@ for (const [name, original, preserved] of [
       const install = () => f.defaultInstallShell(home, { SHELL: "/bin/sh" });
       await install();
       const first = await readFile(profile, "utf8");
-      const managed = '# tapid-path-managed-v1\nexport PATH="$HOME/.local/bin:$PATH"\n# end tapid-path-managed-v1\n';
-      equal(first, name === "existing managed block" ? original : preserved + managed);
+      equal(first.replace(/# tapid-path-managed-v1\n[^\n]*\n# end tapid-path-managed-v1\n/, ""), preserved);
+      equal(first.split("# tapid-path-managed-v1").length, 2);
+      if (name === "existing managed block") equal(first, original);
       const resolved = await run(shell, ["-c", '. "$HOME/.profile"; command -v tapid'], { env: { ...f.env, HOME: shellPath(home) } });
       equal(resolved.stdout, shellPath(join(home, ".local", "bin", "tapid")) + "\n");
       await install();
@@ -809,5 +813,150 @@ test("Unix installer retries an interruption after profile read-back before rece
     equal(await readFile(join(home, ".profile"), "utf8"), expected);
     equal(await readFile(join(receipt, "state"), "utf8"), "completed\n");
     equal((await run(shell!, [shellPath(join(home, ".local", "bin", "tapid")), "--version"], { env: f.env })).stdout, "tapid 1.2.3\n");
+  } finally { await f.cleanup(); }
+});
+
+test("Bash shell-mode both records and cleans both startup files", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "both-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".bash_login"), "# login\n");
+    await writeFile(join(home, ".bashrc"), "# interactive\n");
+    const args = ["--install-dir", shellPath(join(home, ".local", "bin")), "--configure-path", "--shell", "bash", "--shell-mode", "both"];
+    await f.installShell(args, { HOME: shellPath(home), SHELL: "/bin/zsh" });
+    for (const name of [".bash_login", ".bashrc"]) match(await readFile(join(home, name), "utf8"), /tapid-path-managed-v1/);
+    await f.installShell(args, { HOME: shellPath(home) });
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home), SHELL: "/bin/sh" } });
+    equal(await readFile(join(home, ".bash_login"), "utf8"), "# login\n");
+    equal(await readFile(join(home, ".bashrc"), "utf8"), "# interactive\n");
+  } finally { await f.cleanup(); }
+});
+
+test("Bash both preflights all targets and recovers per-profile completion", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "both-recovery-home");
+  try {
+    await mkdir(home);
+    await writeFile(join(home, ".profile"), "# preserved\n");
+    await symlink(join(home, ".profile"), join(home, ".bashrc"));
+    const args = ["--install-dir", shellPath(join(home, ".local", "bin")), "--configure-path", "--shell", "bash", "--shell-mode", "both"];
+    await rejects(() => f.installShell(args, { HOME: shellPath(home) }), /could not safely update/);
+    equal(await readFile(join(home, ".profile"), "utf8"), "# preserved\n");
+    await rm(join(home, ".bashrc"));
+    await writeFile(join(f.directory, "bin", "mv"), '#!/bin/sh\ncase "$3" in */.tapid-path-v1/2/state) exit 1 ;; *) exec /bin/mv "$@" ;; esac\n');
+    await chmod(join(f.directory, "bin", "mv"), 0o755);
+    await rejects(() => f.installShell(args, { HOME: shellPath(home) }), /could not safely update/);
+    const receipt = join(home, ".local", "bin", ".tapid-path-v1");
+    equal(await readFile(join(receipt, "1", "state"), "utf8"), "completed\n");
+    equal(await readFile(join(receipt, "2", "state"), "utf8"), "pending\n");
+    await rm(join(f.directory, "bin", "mv"));
+    await f.installShell(args, { HOME: shellPath(home) });
+    for (const name of [".profile", ".bashrc"]) equal((await readFile(join(home, name), "utf8")).split("# tapid-path-managed-v1").length, 2);
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } });
+    equal(await readFile(join(home, ".profile"), "utf8"), "# preserved\n");
+    equal(await readFile(join(home, ".bashrc"), "utf8"), "");
+  } finally { await f.cleanup(); }
+});
+
+test("Unix custom directory blocks preserve literal paths and repeated activation", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "custom-home");
+  const install = join(home, "custom ' dollar$ and backslash\\ bin");
+  try {
+    await mkdir(home);
+    await f.installShell(["--install-dir", shellPath(install), "--configure-path", "--shell", "posix"], { HOME: shellPath(home) });
+    const profile = await readFile(join(home, ".profile"), "utf8");
+    match(profile, /tapid-path-managed-v1/);
+    const probe = await run(shell!, ["-c", '. "$HOME/.profile"; . "$HOME/.profile"; printf "%s" "$PATH"'], { env: { ...f.env, HOME: shellPath(home), PATH: "" } });
+    equal(probe.stdout, shellPath(install) + ":");
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(install)], { env: { ...f.env, HOME: shellPath(home) } });
+    equal(await readFile(join(home, ".profile"), "utf8"), "");
+  } finally { await f.cleanup(); }
+});
+
+test("Unix startup modes reject invalid selections before downloading", shellOptions, async () => {
+  const f = await fixture();
+  try {
+    for (const args of [["--shell-mode"], ["--shell", "bash", "--shell-mode", ""], ["--shell", "bash", "--shell-mode", "other"], ["--shell", "posix", "--shell-mode", "both"], ["--shell", "auto", "--shell-mode", "login"]]) {
+      await rejects(() => f.installShell(args, { SHELL: "" }), /shell-mode|POSIX supports/);
+    }
+    await rejects(() => readFile(join(f.directory, "requests")), { code: "ENOENT" });
+  } finally { await f.cleanup(); }
+});
+
+test("Zsh modes honor an absolute ZDOTDIR and reject ambiguous directories", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "zdot-home");
+  const config = join(home, "zsh config");
+  try {
+    await mkdir(config, { recursive: true });
+    const args = ["--install-dir", shellPath(join(home, ".local", "bin")), "--configure-path", "--shell", "zsh", "--shell-mode", "interactive"];
+    for (const value of ["", "relative"]) await rejects(() => f.installShell(args, { HOME: shellPath(home), ZDOTDIR: value }), /ZDOTDIR/);
+    await rejects(() => readFile(join(f.directory, "requests")), { code: "ENOENT" });
+    await f.installShell(args, { HOME: shellPath(home), ZDOTDIR: shellPath(config) });
+    match(await readFile(join(config, ".zshrc"), "utf8"), /tapid-path-managed-v1/);
+    await rejects(() => readFile(join(config, ".zprofile")), { code: "ENOENT" });
+    await rejects(() => readFile(join(home, ".zshrc")), { code: "ENOENT" });
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home), ZDOTDIR: "/unused", SHELL: "/bin/sh" } });
+    equal(await readFile(join(config, ".zshrc"), "utf8"), "");
+  } finally { await f.cleanup(); }
+});
+
+test("Native Bash and Zsh startup modes resolve a custom installation automatically", { skip: platform === "win32" }, async (context) => {
+  for (const selected of ["bash", "zsh"]) {
+    await context.test(selected, async (context) => {
+      const executable = await run("/bin/sh", ["-c", "command -v " + selected]).then(result => result.stdout.trim(), () => "");
+      if (!executable) { context.skip(selected + " is unavailable"); return; }
+      const f = await fixture();
+      const home = join(f.directory, selected + "-native-home");
+      const install = join(home, "custom bin");
+      try {
+        await mkdir(home);
+        const args = ["--install-dir", shellPath(install), "--configure-path", "--shell", selected, "--shell-mode", "both"];
+        await f.installShell(args, { HOME: shellPath(home), ZDOTDIR: shellPath(home) });
+        const probeEnv = { ...f.env, HOME: shellPath(home), ZDOTDIR: shellPath(home), PATH: "/usr/bin:/bin", BASH_ENV: "", ENV: "" };
+        for (const mode of ["-l", "-i"]) {
+          const probe = await run(executable, [mode, "-c", "command -v tapid"], { env: probeEnv });
+          equal(probe.stdout.trim(), shellPath(join(install, "tapid")));
+        }
+        await run(shell!, [shellPath(join(root, "scripts/uninstall.sh")), "--install-dir", shellPath(install)], { env: { ...f.env, HOME: shellPath(home) } });
+        for (const mode of ["-l", "-i"]) {
+          const probe = await run(executable, [mode, "-c", 'printf "%s" "$PATH"'], { env: probeEnv });
+          ok(!probe.stdout.split(":").includes(shellPath(install)));
+        }
+      } finally { await f.cleanup(); }
+    });
+  }
+});
+
+test("Bash both recovers an unwritten second target and rejects malformed records", shellOptions, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "both-unwritten-home");
+  try {
+    await mkdir(home);
+    const args = ["--install-dir", shellPath(join(home, ".local", "bin")), "--configure-path", "--shell", "bash", "--shell-mode", "both"];
+    await writeFile(join(f.directory, "bin", "mv"), '#!/bin/sh\ncase "$3" in */.bashrc) exit 1 ;; *) exec /bin/mv "$@" ;; esac\n');
+    await chmod(join(f.directory, "bin", "mv"), 0o755);
+    await rejects(() => f.installShell(args, { HOME: shellPath(home) }), /could not safely update/);
+    const receipt = join(home, ".local", "bin", ".tapid-path-v1");
+    equal(await readFile(join(receipt, "1", "state"), "utf8"), "completed\n");
+    equal(await readFile(join(receipt, "2", "state"), "utf8"), "pending\n");
+    await rejects(() => readFile(join(home, ".bashrc")), { code: "ENOENT" });
+    await rm(join(f.directory, "bin", "mv"));
+    const first = await readFile(join(home, ".profile"), "utf8");
+    await writeFile(join(home, ".bashrc"), "# concurrent edit\n");
+    await rejects(() => f.installShell(args, { HOME: shellPath(home) }), /could not safely update/);
+    equal(await readFile(join(home, ".profile"), "utf8"), first);
+    equal(await readFile(join(home, ".bashrc"), "utf8"), "# concurrent edit\n");
+    await rm(join(home, ".bashrc"));
+    await f.installShell(args, { HOME: shellPath(home) });
+    await writeFile(join(receipt, "2", "unexpected"), "foreign field\n");
+    await rejects(() => run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } }), /refusing unsafe/);
+    equal(await readFile(join(home, ".profile"), "utf8"), first);
+    await rm(join(receipt, "2", "unexpected"));
+    await run(shell!, [shellPath(join(root, "scripts/uninstall.sh"))], { env: { ...f.env, HOME: shellPath(home) } });
+    equal(await readFile(join(home, ".profile"), "utf8"), "");
+    equal(await readFile(join(home, ".bashrc"), "utf8"), "");
   } finally { await f.cleanup(); }
 });

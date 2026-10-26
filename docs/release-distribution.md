@@ -6,24 +6,40 @@ Tapid 0.0.11 completed the first signed-record and generated-installer rollout. 
 
 ## Scope and sources of truth
 
-The Unix installer now requires `--configure-path` to modify startup files. Smoke
-checks that exercise PATH persistence must opt in explicitly; binary-only installs
-remain valid without it and print a direct activation command. Current persistence
-covers default-directory Bash/POSIX login profiles and Zsh `.zprofile`; startup-mode
-selection, custom-directory persistence, multi-profile receipts, fish, and the Windows consent
-contract remain unfinished under issue #37. Read-back and native new-shell evidence
-must remain distinct from a successful executable installation.
+The Unix installer requires `--configure-path` to modify startup files. Smoke
+checks that exercise persistence must opt in; binary-only installs print a direct
+activation command. `--shell-mode login|interactive|both` defaults to both for
+Bash/Zsh and login for POSIX (which rejects other modes). Bash discovers login
+files in `.bash_profile`, `.bash_login`, `.profile` order and uses `.bashrc`
+for interactive startup. Zsh uses `.zprofile`/`.zshrc`, honoring an absolute
+exported `ZDOTDIR` without executing existing startup files. Default and custom
+absolute install directories use literal, duplicate-safe blocks that preserve
+empty PATH segments. Delimiters and line breaks are rejected before installation.
 
-New Unix profile writes stage a private `.tapid-path-v1` receipt beside the binary
-before replacing the profile. Its allowlisted files contain version/platform/count,
-installation directory, target, exact payload, before/after snapshots, and a
-pending/completed state. Scalars are bounded at 64 KiB and snapshots at 8 MiB.
-Retries accept only an exact pending snapshot and verify the resulting bytes;
-conflicts retain recovery metadata. Uninstall uses the recorded target regardless
-of the current shell and can clean up before executable activation or after a
-missing binary. Legacy blocks use bounded default-location discovery and exact
-payload checks. This slice records one profile; multi-profile recovery and legacy
-receipt migration still need implementation.
+New profile writes stage a private `.tapid-path-v1` receipt beside the binary.
+A one-profile receipt retains its original seven-file layout. A two-profile
+receipt has a manifest declaring count 2 and numbered directories `1` and `2`,
+each containing the same seven allowlisted fields: manifest, install, target,
+payload, before, after, state. Both targets are preflighted and both records
+published before writing either block. Each record independently advances from
+pending to completed after read-back; a preexisting state records an unmarked
+export without claiming ownership. Scalars are bounded at 64 KiB and snapshots
+at 8 MiB. Parsers verify exact expected payloads and snapshot consistency, never
+execute receipt data, and reject unknown fields or unsafe filesystem objects.
+
+Retries accept exact pending before/after snapshots and refuse conflicting edits.
+Uninstall uses recorded locations independently of the current shell, including
+after missing binary or interrupted executable activation, and preserves unowned
+exports. Legacy one-profile receipts remain supported with the same target
+selection; migration to another target set is refused pending implementation.
+Unreceipted two-profile blocks are also refused. Legacy cleanup searches bounded
+default locations with exact payload checks.
+
+Fish, automatic receipt migration, Windows consent/preservation/cleanup, and the
+complete native matrix remain unfinished under issue #37. Local macOS Bash/Zsh
+login and interactive probes launch startup modes without explicit profile
+sourcing and resolve a custom fixture executable. Other platforms require their
+own evidence. Read-back and native resolution remain separate claims.
 
 This document is the operator runbook for releasing the Tapid command-line client. The implementation sources of truth are:
 
