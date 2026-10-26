@@ -79,3 +79,37 @@ An online install can reuse matching verified outputs or build missing outputs. 
 Imported npm schema 8 locks retain their separate pinned-artifact workflow and never execute dependency hooks. Approved builds require ordinary online resolution and a schema 9 lock. `tapid ci` can fetch missing source archives but requires authenticated derived outputs already present in the store; it never rebuilds them.
 
 Approved mutable executables are read from a held file, checked against their pinned digest, and copied into the private tools directory. Replacing the original path after verification does not change the bytes launched. The explicit uncontained macOS path may retain a canonical system executable only when its held file reports a kernel read-only root filesystem, because relocation can invalidate its signature. This assumes trusted host administration; administrative remounts and host mutation remain outside the boundary. Mutable original paths never receive this exception.
+
+## Reading installation results
+
+Human output identifies skipped dependency hooks and reports executed hooks
+separately from reused authenticated outputs. JSON preserves each skipped-hook
+warning occurrence, exact lock instance context, discovery knowledge, authorization,
+and observed disposition. See the [JSON result contract](json-results.md#dependency-lifecycle-observations).
+Failed discovery and discovery that was not performed remain unknown; an empty
+successful discovery is a different result. Reports do not run hooks or grant
+approval to obtain information. Installed dependency files do not establish that
+an application builds, tests, or runs. A later rollback can preserve observations
+of execution while removing its staged output; check transaction state.
+
+Imported schema-8 locks do not execute hooks and report discovery as unperformed.
+Before authoring an execution policy, account for conversion to native resolution:
+explicit dependency mutations can change imported selections, native peer support
+is narrower than npm ancestor lookup, and live workspace packages cannot be
+exposed to dependency hooks. See [npm migration limits](npm-lockfile-import.md)
+and the [compatibility matrix](compatibility.md#compatibility-matrix).
+
+Cold CI needs the exact eligible derived output and valid store-local attestation
+state, as well as the source archives and checked policy/toolchain prerequisites.
+Copying generated tree bytes alone does not enable authenticated frozen/offline
+reuse. Do not export the store's secret authentication key as a project artifact.
+An empty or independently initialized store must obtain eligible authenticated
+outputs through its approved build workflow on a supported host. Changed source
+bytes, original script bytes, policy, or toolchain invalidate old approval/output
+reuse; old observations never grant permission for a changed input.
+
+Linux execution evidence does not establish native Windows or macOS support.
+Windows identity/integrated acceptance and native macOS feasibility remain
+separate platform work; no Linux VM fallback is implied. Representative native
+build/generated-code usability and external pilots remain adoption acceptance,
+independent of a truthful installation report.
