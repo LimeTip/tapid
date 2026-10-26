@@ -122,6 +122,7 @@ fn npm_import_frozen_installs_an_empty_graph_without_a_registry() {
     let store = project.path().join("store");
     let output = invoke(&[
         "install",
+        "--json",
         "--frozen",
         "--store-dir",
         store.to_str().unwrap(),
@@ -131,6 +132,10 @@ fn npm_import_frozen_installs_an_empty_graph_without_a_registry() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["coverage"], "not_performed");
+    assert_eq!(result["lifecycle"]["reason"], "imported_lock");
+    assert_eq!(result["lifecycle"]["hooks_executed"], 0);
     assert!(project.path().join("node_modules").is_dir());
 }
 
