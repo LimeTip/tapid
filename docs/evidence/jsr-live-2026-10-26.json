@@ -1,6 +1,6 @@
 {
   "cliInstallStderr": "",
-  "cliInstallStdout": "Installed 2 package(s) in 5.97s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 2 added, 0 changed, 0 reused, 0 removed\nChanged: node_modules, tapid.lock\n",
+  "cliInstallStdout": "Installed 2 package(s) in 6.00s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 2 added, 0 changed, 0 reused, 0 removed\nChanged: node_modules, tapid.lock\n",
   "cliSha256": "53f5cdb19185558bbe88ee801add5a9adc6239fbd3b272b5709bdfc9d308deb2",
   "coldProxyAttempts": 3,
   "coldProxyControl": "failed as required",
@@ -411,14 +411,14 @@
       "mode": "--offline",
       "nodeStdout": "TAPID_JSR_NODE_OK\n",
       "stderr": "",
-      "stdout": "Replayed lockfile: 2 package(s) in 0.28s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 0 added, 0 changed, 2 reused, 0 removed\nChanged: node_modules\n"
+      "stdout": "Replayed lockfile: 2 package(s) in 0.26s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 0 added, 0 changed, 2 reused, 0 removed\nChanged: node_modules\n"
     },
     {
       "mode": "--frozen",
       "nodeStdout": "TAPID_JSR_NODE_OK\n",
       "stderr": "",
-      "stdout": "Replayed lockfile: 2 package(s) in 0.35s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 0 added, 0 changed, 2 reused, 0 removed\nChanged: node_modules\n"
+      "stdout": "Replayed lockfile: 2 package(s) in 0.30s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 0 added, 0 changed, 2 reused, 0 removed\nChanged: node_modules\n"
     }
   ],
-  "retrievedAtUnixSeconds": 1793051605
+  "retrievedAtUnixSeconds": 1793058628
 }
