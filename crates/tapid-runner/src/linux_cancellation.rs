@@ -31,11 +31,18 @@ struct Registration {
 extern "C" fn interrupt(_: libc::c_int) {
     // AtomicUsize is lock-free on the supported Linux targets. No allocation,
     // I/O, mutex, or non-signal-safe runtime operation occurs in this handler.
-    if STATE
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
-            (state & ACTIVE != 0).then(|| state.wrapping_add(2))
-        })
-        .is_err()
+    let mut state = STATE.load(Ordering::SeqCst);
+    while state & ACTIVE != 0 {
+        match STATE.compare_exchange_weak(
+            state,
+            state.wrapping_add(2),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return,
+            Err(current) => state = current,
+        }
+    }
     {
         // A handler already dispatched on another thread can arrive after the
         // final scope relinquishes ownership. Preserve the default event rather
