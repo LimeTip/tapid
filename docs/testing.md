@@ -36,7 +36,8 @@ supply native containment prerequisites or establish native platform support.
 
 ## Development prerequisites and build reuse
 
-Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later.
+Use Git, Rust with rustfmt and Clippy, and a supported Node.js major (26 preferred,
+24, or 22), following the [repository support policy](../README.md#development).
 Rust owns package-manager behavior and security verification. TypeScript owns
 developer scripts, release orchestration, documentation checks, and website/consumer
 fixtures. Python and uv are not required to develop or test Tapid.
