@@ -433,12 +433,16 @@ test('native and public smoke verification can be called with exact release iden
   }
 });
 const handoffName = 'ci-cli-${{ github.run_id }}-${{ github.run_attempt }}-windows-latest-Windows-X64-default-debug';
+/** Enforce single-producer, same-run Windows artifact ownership and verification before execution; retain failure cleanup. */
 function assertWindowsHandoff(ci: string) {
   assertSourceOnlyOwners(ci);
   const producer = job(ci, 'platform-consumer-validation');
   const verifier = job(ci, 'windows-installer-contract');
   assert.match(verifier, /name: Windows installer contract\n    runs-on: windows-latest\n    needs: \[platform-consumer-validation\]\n    if: \$\{\{ always\(\) && !cancelled\(\) \}\}\n    steps:/);
-  assert.match(producer, /name: Consumer validation \(\$\{\{ matrix.os \}\}\)/);
+  assert.match(producer, /name: Consumer validation \(\$\{\{ matrix.os \}\}, Node \$\{\{ matrix.node-version \}\}\)/);
+  assert.match(producer, /os: \[ubuntu-latest, macos-latest, windows-latest\]/);
+  assert.match(producer, /node-version: \['26', '24', '22'\]/);
+  assert.match(step(producer, 'Install Node.js fixture runtime'), /node-version: \$\{\{ matrix.node-version \}\}\n          check-latest: true\n/);
   assert.match(producer, /fail-fast: false/);
   assert(producer.includes('    outputs:\n      windows-image-version: ${{ steps.windows-cli-provenance.outputs.image-version }}\n'));
   assert.match(step(producer, 'Build Tapid binary'), /run: cargo build --bin tapid --locked\n/);
@@ -449,7 +453,9 @@ function assertWindowsHandoff(ci: string) {
   ] as const) assert.equal(step(producer, name), `      - name: ${name}\n        if: ${condition}\n${timeout}        run: node tests/fixtures/validate_consumer_project.js\n`);
   const prepare = step(producer, 'Prepare same-run Windows CLI handoff');
   const upload = step(producer, 'Retain same-run Windows CLI');
-  for (const s of [prepare, upload]) assert.match(s, /if: runner.os == 'Windows'\n/);
+  for (const s of [prepare, upload, step(producer, 'Record Windows handoff artifact identity')]) {
+    assert.match(s, /if: runner.os == 'Windows' && matrix.node-version == '26'\n/);
+  }
   assert.match(prepare, /id: windows-cli-provenance\n/);
   assert(prepare.includes('node --experimental-strip-types tools/release/ci_binary.ts prepare --directory "$env:RUNNER_TEMP/tapid-ci-cli" --binary target/debug/tapid.exe\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n          "image-version=$env:ImageVersion" >> $env:GITHUB_OUTPUT\n'));
   assert(producer.indexOf(prepare) > producer.indexOf(step(producer, 'Verify native Restricted child, forwarding and exit codes (macOS)')));
@@ -485,10 +491,14 @@ test('Windows handoff contract rejects ownership, stale-attempt, bypass and fixt
   const producer = job(ci, 'platform-consumer-validation'); const verifier = job(ci, 'windows-installer-contract');
   const upload = step(producer, 'Retain same-run Windows CLI');
   const mutations = [
+    ci.replace("os: [ubuntu-latest, macos-latest, windows-latest]\n        # Keep", "os: [ubuntu-latest, windows-latest]\n        # Keep"),
+    ci.replace("node-version: ['26', '24', '22']", "node-version: ['26', '24']"),
+    ci.replace('check-latest: true', 'check-latest: false'),
+    ci.replaceAll(" && matrix.node-version == '26'", ''),
     ci.replace(verifier, ''), ci.replace(verifier, verifier.replace('    steps:', '    continue-on-error: true\n    steps:')),
     ci.replace('always() && !cancelled()', "needs.platform-consumer-validation.result == 'success'"),
     ci.replace('always() && !cancelled()', 'always()'),
-    ci.replace('    needs: [platform-consumer-validation]\n', ''),
+    ci.replace(verifier, verifier.replace('    needs: [platform-consumer-validation]\n', '')),
     ci.replace(verifier, verifier.replace('    steps:', '    if: false\n    steps:')),
     ci.replace('digest-mismatch: error', 'digest-mismatch: warn'),
     ci.replaceAll('${{ github.run_attempt }}-', ''),
@@ -577,4 +587,54 @@ test('previous-release upgrade uses that release installer beneath the current r
   assert(windowsUpgrade.includes('-fsSL $env:PREVIOUS_INSTALLER_URL --output $previousInstaller'));
   assert(windowsUpgrade.includes('& $previousInstaller -Version $env:PREVIOUS_TAG'));
   assert(!windowsUpgrade.includes('& $installer -Version $env:PREVIOUS_TAG'));
+});
+
+/** Preserve stable required contexts that fail unless the complete native consumer matrix succeeds. */
+function assertConsumerCompatibility(ci: string) {
+  const compatibility = job(ci, 'consumer-validation');
+  assert.match(compatibility, /name: Consumer validation \(\$\{\{ matrix.os \}\}\)\n/);
+  assert.equal(ci.match(/name: Consumer validation \(\$\{\{ matrix.os \}\}\)\n/g)?.length, 1);
+  assert.match(compatibility, /needs: \[platform-consumer-validation\]\n/);
+  assert.match(compatibility, /if: \$\{\{ always\(\) \}\}\n/);
+  assert.match(compatibility, /runs-on: ubuntu-latest\n/);
+  assert.match(compatibility, /matrix:\n        os: \[ubuntu-latest, windows-latest\]\n/);
+  assert.doesNotMatch(compatibility, /continue-on-error:|exclude:|include:/);
+  assert.equal(step(compatibility, 'Require all native consumer legs to succeed').trimEnd(), `      - name: Require all native consumer legs to succeed
+        shell: bash
+        env:
+          CONSUMER_RESULT: \${{ needs.platform-consumer-validation.result }}
+        run: test "$CONSUMER_RESULT" = success`);
+  assert.match(job(ci, 'platform-consumer-validation'), /name: Consumer validation \(\$\{\{ matrix.os \}\}, Node /);
+}
+
+test('stable consumer contexts require successful completion of every native leg', async () => {
+  assertConsumerCompatibility(await workflow('ci'));
+});
+
+test('stable consumer context contract rejects renamed checks and fail-open aggregation', async () => {
+  const ci = await workflow('ci');
+  const owner = job(ci, 'consumer-validation');
+  for (const replacement of [
+    owner.replace('name: Consumer validation (', 'name: Compatibility ('),
+    owner.replace('os: [ubuntu-latest, windows-latest]', 'os: [ubuntu-latest]'),
+    owner.replace('    needs: [platform-consumer-validation]\n', ''),
+    owner.replace('    if: ${{ always() }}\n', ''),
+    owner.replace('run: test "$CONSUMER_RESULT" = success', 'run: true'),
+    owner.replace('run: test "$CONSUMER_RESULT" = success', 'run: test "$CONSUMER_RESULT" != failure'),
+    owner.replace('run: test "$CONSUMER_RESULT" = success', 'run: test "$CONSUMER_RESULT" = success || true'),
+    owner.replace('        shell: bash', '        continue-on-error: true\n        shell: bash'),
+    ...['failure', 'cancelled', 'skipped'].map(result => owner.replace('= success', `= ${result}`)),
+  ]) {
+    assert.notEqual(replacement, owner, 'compatibility mutation must not be vacuous');
+    assert.throws(() => assertConsumerCompatibility(ci.replace(owner, replacement)));
+  }
+});
+
+test('stable consumer shell gate rejects failure cancellation skipped and absent results', async () => {
+  const gate = step(job(await workflow('ci'), 'consumer-validation'), 'Require all native consumer legs to succeed');
+  const command = gate.match(/        run: (.+)\n/)![1];
+  await execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: 'success' } });
+  for (const result of ['failure', 'cancelled', 'skipped', '']) {
+    await assert.rejects(execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: result } }));
+  }
 });
