@@ -150,6 +150,10 @@ fn stage(
     )
     .map_err(|failure| *failure.error)?;
     outcome.warnings.extend(report.outcome.warnings);
+    outcome.omitted_warnings += report.outcome.omitted_warnings;
+    outcome
+        .omitted_warning_codes
+        .extend(report.outcome.omitted_warning_codes);
     let package_root = environment.join("node_modules").join(name);
     state::check_path(&package_root)?;
     let installed =

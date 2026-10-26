@@ -6,6 +6,83 @@ Tapid 0.0.11 completed the first signed-record and generated-installer rollout. 
 
 ## Scope and sources of truth
 
+The Unix installer requires `--configure-path` to modify startup files. Smoke
+checks that exercise persistence must opt in; binary-only installs print a direct
+activation command. `--shell-mode login|interactive|both` defaults to both for
+Bash/Zsh/fish and login for POSIX (which rejects other modes). Bash discovers login
+files in `.bash_profile`, `.bash_login`, `.profile` order and uses `.bashrc`
+for interactive startup. Zsh uses `.zprofile`/`.zshrc`, honoring an absolute
+exported `ZDOTDIR` without executing existing startup files. Default and custom
+absolute install directories use literal, duplicate-safe blocks that preserve
+empty PATH segments. Delimiters and line breaks are rejected before installation.
+
+Fish uses a single marked block in `$XDG_CONFIG_HOME/fish/config.fish` (default
+`$HOME/.config/fish/config.fish`), requiring an absolute non-empty override.
+The installer probes `fish_add_path --path --prepend` without user startup files
+before downloading. Mode guards select login, interactive, or their union;
+manual guidance omits the guard so it activates the current shell directly.
+No universal variables are written. Fish normalizes empty PATH segments to
+`.` and supplies defaults for unset PATH; its native representation is preserved.
+An existing fish receipt with a different mode is refused until uninstall.
+The existing release-contract CI lane provisions fish and requires native probes.
+
+New profile writes stage a private `.tapid-path-v1` receipt beside the binary.
+A one-profile receipt retains its original seven-file layout. A two-profile
+receipt has a manifest declaring count 2 and numbered directories `1` and `2`,
+each containing the same seven allowlisted fields: manifest, install, target,
+payload, before, after, state. Both targets are preflighted and both records
+published before writing either block. Each record independently advances from
+pending to completed after read-back; a preexisting state records an unmarked
+export without claiming ownership. Scalars are bounded at 64 KiB and snapshots
+at 8 MiB. Parsers verify exact expected payloads and snapshot consistency, never
+execute receipt data, and reject unknown fields or unsafe filesystem objects.
+
+Retries accept exact pending before/after snapshots and refuse conflicting edits.
+Uninstall uses recorded locations independently of the current shell, including
+after missing binary or interrupted executable activation, and preserves unowned
+exports. Legacy one-profile receipts expand to Bash/Zsh both-mode when their
+recorded target matches either selected profile. The original record is copied
+without changing its payload, ownership or snapshots, and both targets are
+rechecked before publication. A private `.tapid-path-previous-v1` receipt bridges
+the two publication renames. Retry or uninstall restores the old receipt if
+publication stopped in the gap; after publication, it verifies that the old
+record exactly matches a new numbered record before retiring the recovery copy
+by rename. Profile writes start only after this reconciliation. Interrupted
+staging/retirement may leave private temporary directories, which are never
+used as ownership evidence. Other target-set changes remain refused.
+Unreceipted two-profile blocks are also refused. Legacy cleanup searches bounded
+default locations with exact payload checks.
+
+Windows uses the same opt-in rule through `-ConfigurePath`, with direct literal
+PowerShell activation guidance and no implicit process activation. Comparison
+keys normalize case, slash direction and trailing separators for fully qualified
+paths; stored tokens, empty segments, ordering and registry String/ExpandString
+kinds remain intact. Environment-variable tokens are compared only after a
+successful fully qualified expansion. Relative, malformed and unresolved tokens
+remain opaque. Percent characters in a Windows install directory require manual
+activation; persistence refuses them before installation because environment
+expansion could change their literal meaning.
+
+The Windows receipt has fixed fields: manifest, directory, before, after,
+present, kind, inserted, state. It is staged before the registry write; pending
+before/after snapshots reconcile on retry and completion follows read-back.
+Readers reject unknown fields, unsupported versions, inconsistent snapshots,
+reparse points and foreign ownership. Uninstall restores an exact unchanged
+owned snapshot and preserves pre-existing equivalents. Conflicting edits retain
+the receipt and return an error; remove the conflict before retrying. Missing
+executables do not skip cleanup. Receipt parsers are deliberately repeated in
+the standalone scripts so generated installers need no sibling files.
+
+The complete native matrix still requires Windows CI evidence under issue #37. The Windows contract CI lane requires a fresh-session
+probe built from persisted machine/user values, with registry restoration in a
+finally block. Local PowerShell tests use isolated persistence snapshots and do
+not establish native Windows registry or process-resolution evidence.
+
+Local macOS POSIX login and Bash/Zsh/fish login and interactive probes launch
+startup modes without explicit profile
+sourcing and resolve a custom fixture executable. Other platforms require their
+own evidence. Read-back and native resolution remain separate claims.
+
 This document is the operator runbook for releasing the Tapid command-line client. The implementation sources of truth are:
 
 - `.github/workflows/release-publication.yml` for binary builds and draft GitHub releases;
@@ -593,10 +670,10 @@ pwsh -NoProfile -NonInteractive -File 'C:\Reviewed installers\detect-version.ps1
 
 | Operation | Scope, effects, and result |
 | --- | --- |
-| Install selected version | Executing user's context. Explicit absolute destination avoids reliance on PATH discovery. Unix default installation may update the selected shell profile; a custom destination does not configure PATH. Windows can update the executing user's PATH, including for a custom destination, and report PATH failure after installing bytes. No input prompt or dedicated silent switch. |
+| Install selected version | Executing user's context. Explicit absolute destination avoids reliance on PATH discovery. PATH persistence requires explicit `--configure-path` on Unix or `-ConfigurePath` on Windows, for default or custom destinations. Without consent, installers print activation guidance. Windows can report persistence failure after installing bytes. No input prompt or dedicated silent switch. |
 | Repeat install | Selected-version fixtures preserve managed executable and marker bytes. Native policy rejects changed bytes at the same version. This is not a universal package-manager idempotency guarantee. |
 | Upgrade / inspect | Invoke the installed executable by absolute path. Application success/failure is 0/1; argument parsing errors use the CLI parser's separate nonzero behavior. Dry-run does not replace the executable or persist recovery state. An unchanged verified upgrade reports already current. |
-| Uninstall | Existing [shell](../scripts/uninstall.sh) and [PowerShell](../scripts/uninstall.ps1) scripts require an owned marker. Successful removal deletes the executable and marker, preserving durable release state and project files. Unix profile cleanup can fail after binary removal and before marker removal; repair the profile and retry cleanup. After successful cleanup, another uninstall rejects the missing marker. Uninstall is not transactional. |
+| Uninstall | Existing [shell](../scripts/uninstall.sh) and [PowerShell](../scripts/uninstall.ps1) scripts require an owned marker for an installed binary. On Unix, a valid PATH receipt also permits cleanup after interrupted activation when both binary and marker are absent. Successful removal deletes the executable and marker, preserving durable release state and project files. Unix profile cleanup runs before binary removal; unsafe profile state preserves the installation and receipt; restore the exact receipted profile snapshot and retry cleanup. Conflicting edits retain the receipt and fail closed. After successful cleanup, another uninstall rejects the missing marker. Uninstall is not transactional. |
 | Detect selected version | Offline exact-path invocation only; no configuration/feed lookup or file creation. Exit 0 is an exact match; exit 1 covers invalid arguments, missing/relative path, failed invocation, nonzero native status, malformed output or mismatch. Diagnostics are stderr-only; success emits nothing. |
 | Downgrade | Running-version and durable release floors reject earlier releases. There is no supported administrator downgrade procedure. Removing durable state or uninstalling is not a supported bypass. |
 | Recover | Discovery unavailability may restore the exact verified cached release. Output reports inability to check latest; recovery does not claim freshness and is distinct from intentional downgrade. Invalid received metadata/artifacts fail closed instead of using recovery. |
@@ -634,8 +711,8 @@ covers signature/digest rejection, delegated ownership-policy failure and an
 invalid destination-parent shape. Native policy is stubbed there: the durable
 state is a sentinel, not proof of real verifier behavior. Existing malformed
 record, signature, rollback-policy and profile-validation cases complement it.
-`Unix uninstall reports profile cleanup failure after removal and rejects repetition`
-proves partial cleanup and retry. Invalid filesystem shapes exercise write failure
+`Unix uninstall preserves installation on profile cleanup failure and supports retry`
+proves installation preservation and receipt-backed retry after restoring the exact installed profile snapshot. Invalid filesystem shapes exercise write failure
 without depending on chmod behavior under privileged runners. Existing PowerShell
 parser/policy/uninstall fixtures do not prove end-to-end unattended Windows
 installation, user PATH persistence isolation, or MDM behavior; those need native
