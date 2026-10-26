@@ -529,7 +529,7 @@ test("installers verify signed release records before parsing", async () => {
   assert(shell.includes("MAX_ARCHIVE_BYTES="));
   assert(shell.includes("MAX_BINARY_BYTES="));
   assert(shell.includes("tar -xOzf"));
-  assert(shell.includes('[ "$INSTALL_DIR" = "$HOME/.local/bin" ] || return 0'));
+  assert(shell.includes('[ "$CONFIGURE_PATH" -eq 1 ] || return 0'));
   assert(shell.includes("configure_path || fail 'could not safely update the selected shell startup file'"));
   assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\n  mv -f "$STAGED_MARKER"'));
   assert(!shell.includes('mv -f "$STAGED_BINARY" "$INSTALL_DIR/tapid"; STAGED_BINARY=""\nmv -f "$STAGED_MARKER"'));

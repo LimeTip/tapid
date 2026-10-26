@@ -461,3 +461,12 @@ not excluded, workspace membership can change during discovery, and a change
 followed by restoration can escape detection. Do not treat the report as a
 verified consistent snapshot or authorization to bypass later command checks.
 The result and capability summary are experimental.
+
+Installation results preserve lifecycle observations on success and failure.
+`--json` adds per-occurrence `warning_details` and a `lifecycle` report separating
+hook discovery, exact policy approval or invocation authorization, execution,
+authenticated output reuse, and skipping. Unperformed or failed discovery stays
+unknown. Check `changes.state` for committed files and detail completeness before
+using the observations; installation success does not establish application
+readiness. See [lifecycle result fields](../../docs/json-results.md#dependency-lifecycle-observations)
+and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installation-results).
