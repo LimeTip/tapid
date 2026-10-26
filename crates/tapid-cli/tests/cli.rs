@@ -66,7 +66,7 @@ fn license_prints_complete_apache_text_without_accessing_a_project() {
         command.env("LLVM_PROFILE_FILE", profile_file);
     }
     let output = command.output().unwrap();
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty());
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let packaged_license = manifest_dir.join("LICENSE");
@@ -200,7 +200,7 @@ fn install_output_summarizes_changes_and_replay() {
         .write("package.json", br#"{"name":"output","version":"1.0.0"}"#)
         .unwrap();
     let output = run(project.path(), &["install"]);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Installed 0 package(s) in "), "{stdout}");
     assert!(
@@ -212,9 +212,9 @@ fn install_output_summarizes_changes_and_replay() {
         stdout.contains("Lock selections: 0 added, 0 changed, 0 reused, 0 removed"),
         "{stdout}"
     );
-    assert!(output.stderr.is_empty(), "{:?}", output);
+    assert!(output.stderr.is_empty(), "{output:?}");
     let output = run(project.path(), &["install", "--offline", "--frozen"]);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Replayed lockfile: 0 package(s) in "),
@@ -238,16 +238,15 @@ fn install_output_counts_exact_lock_selections() {
         "Lock selections: 0 added, 0 changed, 1 reused, 0 removed",
     ] {
         let output = run(project.path(), &args);
-        assert!(output.status.success(), "{:?}", output);
+        assert!(output.status.success(), "{output:?}");
         assert!(
             String::from_utf8_lossy(&output.stdout).contains(expected),
-            "{:?}",
-            output
+            "{output:?}"
         );
-        assert!(output.stderr.is_empty(), "{:?}", output);
+        assert!(output.stderr.is_empty(), "{output:?}");
     }
     let output = run(project.path(), &["install", "--offline", "--frozen"]);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stdout)
             .contains("Lock selections: 0 added, 0 changed, 1 reused, 0 removed")
@@ -261,12 +260,11 @@ fn install_output_counts_exact_lock_selections() {
         .write("tapid.lock", &serde_json::to_vec(&lock).unwrap())
         .unwrap();
     let output = run(project.path(), &args);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stdout)
             .contains("Lock selections: 0 added, 0 changed, 1 reused, 0 removed"),
-        "{:?}",
-        output
+        "{output:?}"
     );
     project
         .write(
@@ -275,12 +273,11 @@ fn install_output_counts_exact_lock_selections() {
         )
         .unwrap();
     let output = run(project.path(), &args);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stdout)
             .contains("Lock selections: 1 added, 0 changed, 0 reused, 1 removed"),
-        "{:?}",
-        output
+        "{output:?}"
     );
 }
 
@@ -8699,7 +8696,7 @@ fn why_reports_an_incomplete_empty_search_as_success() {
                 &format!("package-{index}"),
                 "1.0.0",
                 &format!("sha512-{}==", "A".repeat(86)),
-                &format!("sha256-{:064x}", index),
+                &format!("sha256-{index:064x}"),
                 RegistryIntegrityProvenance::RegistryDeclared,
             )
             .unwrap()
@@ -8865,7 +8862,7 @@ fn sandbox_help_exposes_one_time_guard_management() {
     let output = isolated_command(project.path(), &["sandbox", "--help"], true)
         .output()
         .unwrap();
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     let help = String::from_utf8(output.stdout).unwrap();
     for command in ["install", "status", "uninstall"] {
         assert!(help.contains(command), "{help}");
@@ -8881,8 +8878,7 @@ fn sandbox_json_rejects_install_before_privileged_management() {
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("JSON_UNSUPPORTED_COMMAND"),
-        "{:?}",
-        output
+        "{output:?}"
     );
 }
 #[path = "cli_cases/preview.rs"]
