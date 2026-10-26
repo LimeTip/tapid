@@ -60,15 +60,15 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
 
-## Native persisted graph observations
+## Persisted graph observations
 
-`GraphSnapshot::from_bytes` validates an explicit native snapshot using
-`Lockfile::from_json`. `inspect` inventories every persisted instance, including
+`GraphSnapshot::from_bytes` validates an explicit native or imported snapshot using
+`Lockfile::from_json` or `ImportedNpmLockfile::from_json`. `inspect` inventories every persisted instance, including
 disconnected records. `compare` compares exact identities and recorded selection
 sites. These library operations perform no filesystem, store, registry, resolver,
-installation, recovery, or script operations. Imported schema 8 is not yet
-supported by this interface; it fails with `SnapshotError::UnsupportedFormat`.
-The existing `ImportedNpmLockfile` interface is unchanged.
+installation, recovery, or script operations. Imported schema 8 reuses the existing cached all-placement graph, without
+platform selection. Other formats remain unsupported; raw npm locks are never
+implicitly imported.
 
 Instances retain the full source-qualified key, including peer/platform contexts,
 workspace identity and copied file/Git pins. Stable `instance-v1-` SHA-256
@@ -89,8 +89,8 @@ are separate: declaration digests, source/artifact fields (including historical
 unpacked evidence), and derived outputs. Attestations are compared but exposed
 only as a change indication. A changed declaration digest cannot identify an
 edited requirement. Missing evidence is not equality. Exact scripts, host
-toolchains, declaration requirements, native peer-provider targets and imported
-verification receipts are unavailable in this native interface. Observations do
+toolchains, declaration requirements, native peer-provider targets and
+verification receipts are unavailable for native snapshots. Observations do
 not approve execution or certify package safety.
 
 Inputs are limited to 32 MiB, 100,000 instances and 500,000 recorded relationships.
@@ -113,8 +113,33 @@ root bindings, then dependencies, followed by full parent identity, local name,
 and full target identity. Evidence sorts by declarations, source/artifact, then
 derived outputs, with full subject identity within each category.
 
+Imported exact identities encode a versioned tuple of placement, name, version,
+registry, recorded peer targets and platform/optional constraints. URLs, integrity
+and verification receipts remain evidence. Placement records provide stable
+selection sites; named incoming edges remain separate overlapping observations.
+Imported `imported_entry` relationships describe the importer's root entry-point
+set, including hoisted member entry points, rather than claiming every entry is a
+root declaration. Member edges and workspace links preserve their recorded scope.
+The importer does not expose dependency kinds/ranges as selected edges; persisted
+root/member requirement fields are compared independently as declaration evidence.
+Member digest additions are declaration evidence, never a package upgrade.
+
+Native/imported comparison sets `selected_graph_supported = false` with reason
+`cross_format_selection_equivalence`. Graph delta fields are unavailable in that
+case, even though their containers are empty. Only root declaration digest evidence
+is compared independently; no graph equality or zero-change claim is established.
+Imported/imported comparisons preserve artifact and receipt changes separately.
+Receipt absence means verification is unrecorded, not that an artifact failed or is
+safe. Exact hook scripts and host toolchains remain unavailable in both formats.
+
+Streaming preflight also bounds nested imported npm package entries (including
+root and workspace-link entries) and declared dependency/optional/peer fields.
+These structural bounds can reject a lock before normalization even when some
+entries would merge into one selected edge. Normalized instances and relationships,
+including placement records, are checked against the same analysis limits.
+
 These are library observations, not a CLI JSON rendering contract. Public display
 metadata is untrusted and unsanitized: consumers must apply their existing path,
 credential, scalar and output-size protections. CLI readers must enforce the
-input limit while reading. Imported comparisons, CLI commands and bounded detail
-pagination remain follow-up implementation work for issue #300.
+input limit while reading. The CLI exposes bounded detail pages through `lock inspect` and `lock compare`;
+see [the JSON contract](../../docs/json-results.md#persisted-lock-graph-observations).

@@ -1,3 +1,6 @@
+#[path = "json_cases/lock_graph.rs"]
+mod lock_graph;
+
 #[path = "json_cases/outdated.rs"]
 mod outdated;
 

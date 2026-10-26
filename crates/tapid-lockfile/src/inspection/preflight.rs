@@ -75,10 +75,13 @@ impl<'de> Visitor<'de> for Node<'_> {
         while let Some(key) = map.next_key::<String>()? {
             self.count()?;
             let role = match (self.role, key.as_str()) {
+                (Role::Root, "npmLock") => Role::Root,
                 (Role::Root, "packages" | "workspacePackages") => Role::Instances,
                 (Role::Root, "roots" | "rootBindings") => Role::Relationships,
                 (Role::Instances, _) => Role::Instance,
-                (Role::Instance, "dependencies") => Role::Relationships,
+                (Role::Instance, "dependencies" | "optionalDependencies" | "peerDependencies") => {
+                    Role::Relationships
+                }
                 _ => Role::Other,
             };
             map.next_value_seed(Node {

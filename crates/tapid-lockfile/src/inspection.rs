@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use crate::{Lockfile, LockfilePackageKey};
 
 mod comparison;
+mod imported;
 mod preflight;
 pub use comparison::{GraphComparison, GraphEvidenceChange, GraphRelationshipChange};
 
@@ -39,10 +40,24 @@ impl std::error::Error for SnapshotError {}
 
 /// Validated persisted snapshot, independent of manifests and installed state.
 pub struct GraphSnapshot {
-    lock: Lockfile,
+    lock: SnapshotLock,
     schema: u32,
     named_root_bindings: bool,
     digest: String,
+}
+
+enum SnapshotLock {
+    Native(Lockfile),
+    Imported(crate::ImportedNpmLockfile),
+}
+
+impl GraphSnapshot {
+    fn native(&self) -> &Lockfile {
+        match &self.lock {
+            SnapshotLock::Native(lock) => lock,
+            SnapshotLock::Imported(_) => unreachable!("native adapter only"),
+        }
+    }
 }
 
 impl std::fmt::Debug for GraphSnapshot {
@@ -55,18 +70,20 @@ impl std::fmt::Debug for GraphSnapshot {
 }
 
 /// An exact persisted instance. Display metadata is untrusted and unsanitized.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct GraphInstance {
     pub reference: String,
     pub identity: String,
     pub name: String,
     pub version: String,
+    /// Stable imported placement; absent for native exact-key correspondence.
+    pub placement: Option<String>,
 }
 
 /// Recorded relationship; native peer-provider placements are never inferred.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub struct GraphRelationship {
-    /// `root`, `root_binding`, or `dependency`.
+    /// Recorded or adapted edge kind, retaining imported placement/peer/optional distinctions.
     pub kind: String,
     /// None denotes the project root; otherwise an exact instance reference.
     pub parent: Option<String>,
@@ -75,8 +92,8 @@ pub struct GraphRelationship {
     pub target: String,
 }
 
-/// Complete inventory of a validated native snapshot, including disconnected records.
-#[derive(Debug)]
+/// Complete inventory of a validated snapshot, including disconnected records.
+#[derive(Debug, serde::Serialize)]
 pub struct GraphInspection {
     pub schema: u32,
     pub snapshot_digest: String,
@@ -88,9 +105,9 @@ pub struct GraphInspection {
     pub relationships: Vec<GraphRelationship>,
 }
 
-/// Whether a native snapshot represents each dimension. False means unavailable,
+/// Whether a snapshot represents each dimension. False means unavailable,
 /// not unchanged. Scripts and host toolchains are never reconstructed.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct GraphAvailability {
     pub explicit_roots: bool,
     pub named_root_bindings: bool,
@@ -102,8 +119,48 @@ pub struct GraphAvailability {
     pub peer_provider_targets: bool,
 }
 
+impl GraphAvailability {
+    /// Stable per-dimension reasons; absence means represented, never verified safe.
+    pub fn unavailable_reasons(&self) -> std::collections::BTreeMap<&'static str, &'static str> {
+        [
+            (self.explicit_roots, "explicit_roots", "not_recorded"),
+            (
+                self.named_root_bindings,
+                "named_root_bindings",
+                "not_recorded",
+            ),
+            (self.exact_scripts, "exact_scripts", "not_recorded"),
+            (self.host_toolchain, "host_toolchain", "not_recorded"),
+            (
+                self.derived_outputs,
+                "derived_outputs",
+                "format_does_not_record",
+            ),
+            (
+                self.verification_receipts,
+                "verification_receipts",
+                "format_does_not_record",
+            ),
+            (
+                self.declaration_requirements,
+                "declaration_requirements",
+                "digest_evidence_only",
+            ),
+            (
+                self.peer_provider_targets,
+                "peer_provider_targets",
+                "context_does_not_identify_provider_placement",
+            ),
+        ]
+        .into_iter()
+        .filter(|(available, _, _)| !available)
+        .map(|(_, dimension, reason)| (dimension, reason))
+        .collect()
+    }
+}
+
 /// Whole-input examination, separate from any later CLI detail pagination.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct GraphCoverage {
     pub analysis_complete: bool,
     pub total_instances: usize,
@@ -114,7 +171,8 @@ pub struct GraphCoverage {
 
 /// Explicit selection, without dependency-closure expansion. Multiple values
 /// form a union. Package names are actual names, independent of local aliases.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+#[serde(tag = "kind", content = "values", rename_all = "snake_case")]
 pub enum GraphScope {
     #[default]
     All,
@@ -167,11 +225,14 @@ impl GraphSnapshot {
         let schema = format
             .lockfile_version
             .ok_or(SnapshotError::UnsupportedFormat)?;
-        if !matches!(schema, 4..=7 | 9 | 10) {
+        if !matches!(schema, 4..=10) {
             return Err(SnapshotError::UnsupportedFormat);
         }
         preflight::check(bytes)?;
         let input = std::str::from_utf8(bytes).map_err(|_| SnapshotError::InvalidSnapshot)?;
+        if schema == 8 {
+            return Self::from_imported(input, bytes);
+        }
         let lock = Lockfile::from_json(input).map_err(|_| SnapshotError::InvalidSnapshot)?;
         let instances = lock.packages().len() + lock.workspace_packages().len();
         let relationships = lock.roots().len()
@@ -190,7 +251,7 @@ impl GraphSnapshot {
             return Err(SnapshotError::AnalysisLimit);
         }
         Ok(Self {
-            lock,
+            lock: SnapshotLock::Native(lock),
             schema,
             named_root_bindings: format.root_bindings.is_some(),
             digest: format!("sha256-{:x}", Sha256::digest(bytes)),
@@ -199,15 +260,18 @@ impl GraphSnapshot {
 
     /// Inventory all persisted instances. This does not apply host-platform filters.
     pub fn inspect(&self) -> GraphInspection {
+        if let SnapshotLock::Imported(lock) = &self.lock {
+            return self.inspect_imported(lock);
+        }
         let mut instances = Vec::new();
         let mut relationships = Vec::new();
         for (identity, dependencies) in self
-            .lock
+            .native()
             .packages()
             .iter()
             .map(|(key, package)| (key, package.dependencies()))
             .chain(
-                self.lock
+                self.native()
                     .workspace_packages()
                     .iter()
                     .map(|(key, package)| (key, package.dependencies())),
@@ -220,6 +284,7 @@ impl GraphSnapshot {
                 identity: identity.clone(),
                 name: key.name.to_string(),
                 version: key.version.to_string(),
+                placement: None,
             });
             for (name, target) in dependencies {
                 relationships.push(GraphRelationship {
@@ -231,7 +296,7 @@ impl GraphSnapshot {
             }
         }
         instances.sort_by(|a, b| a.identity.cmp(&b.identity));
-        for target in self.lock.roots() {
+        for target in self.native().roots() {
             relationships.push(GraphRelationship {
                 kind: "root".into(),
                 parent: None,
@@ -239,7 +304,7 @@ impl GraphSnapshot {
                 target: reference(target),
             });
         }
-        for (name, target) in self.lock.root_bindings() {
+        for (name, target) in self.native().root_bindings() {
             relationships.push(GraphRelationship {
                 kind: "root_binding".into(),
                 parent: None,
@@ -253,7 +318,7 @@ impl GraphSnapshot {
             snapshot_digest: self.digest.clone(),
             scope: GraphScope::All,
             availability: GraphAvailability {
-                explicit_roots: self.schema >= 5 || !self.lock.roots().is_empty(),
+                explicit_roots: self.schema >= 5 || !self.native().roots().is_empty(),
                 named_root_bindings: self.named_root_bindings,
                 exact_scripts: false,
                 host_toolchain: false,
@@ -329,8 +394,14 @@ fn relationship_order<'a>(
 }
 
 fn reference(identity: &str) -> String {
+    reference_for("native", identity)
+}
+
+fn reference_for(format: &str, identity: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"tapid-lock-graph-instance-v1\0native\0");
+    digest.update(b"tapid-lock-graph-instance-v1\0");
+    digest.update(format.as_bytes());
+    digest.update(b"\0");
     digest.update(identity.as_bytes());
     format!("instance-v1-{:x}", digest.finalize())
 }

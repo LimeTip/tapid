@@ -6,8 +6,11 @@ use super::{
 };
 
 /// Observed differences. Counts describe overlapping views, never upgrade counts.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct GraphComparison {
+    /// False means graph delta fields are unavailable, never zero-change evidence.
+    pub selected_graph_supported: bool,
+    pub unsupported_reason: Option<&'static str>,
     pub scope: GraphScope,
     pub before_digest: String,
     pub after_digest: String,
@@ -23,14 +26,14 @@ pub struct GraphComparison {
 }
 
 /// A named site retarget, or an added/removed relationship.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct GraphRelationshipChange {
     pub before: Option<GraphRelationship>,
     pub after: Option<GraphRelationship>,
 }
 
 /// An independently observed evidence change, not a selected package upgrade.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct GraphEvidenceChange {
     pub dimension: String,
     pub subject: Option<String>,
@@ -45,9 +48,38 @@ impl GraphSnapshot {
     /// Compare exact native identities and recorded selection sites. Replaced
     /// parents do not establish correspondence between their descendants.
     pub fn compare(&self, after: &Self) -> GraphComparison {
-        let evidence_changes = evidence_changes(self, after);
+        let supported = (self.schema == 8) == (after.schema == 8);
+        let mut evidence_changes = evidence_changes(self, after);
         let before = self.inspect();
         let after = after.inspect();
+        if !supported {
+            return GraphComparison {
+                selected_graph_supported: false,
+                unsupported_reason: Some("cross_format_selection_equivalence"),
+                scope: GraphScope::All,
+                before_digest: before.snapshot_digest,
+                after_digest: after.snapshot_digest,
+                before_availability: before.availability,
+                after_availability: after.availability,
+                before_coverage: before.coverage,
+                after_coverage: after.coverage,
+                added_instances: Vec::new(),
+                removed_instances: Vec::new(),
+                changed_selections: 0,
+                relationship_changes: Vec::new(),
+                evidence_changes,
+            };
+        }
+        let placements: BTreeMap<_, _> = before
+            .instances
+            .iter()
+            .chain(after.instances.iter())
+            .filter_map(|p| {
+                p.placement
+                    .as_ref()
+                    .map(|path| (p.reference.clone(), path.clone()))
+            })
+            .collect();
         let old: BTreeMap<_, _> = before.instances.iter().map(|p| (&p.identity, p)).collect();
         let new: BTreeMap<_, _> = after.instances.iter().map(|p| (&p.identity, p)).collect();
         let added_instances = new
@@ -65,7 +97,9 @@ impl GraphSnapshot {
         let site = |edge: &GraphRelationship| {
             (
                 edge.kind.clone(),
-                edge.parent.clone(),
+                edge.parent
+                    .as_ref()
+                    .map(|p| placements.get(p).unwrap_or(p).clone()),
                 edge.local_name.clone(),
                 if edge.local_name.is_none() {
                     Some(edge.target.clone())
@@ -134,7 +168,28 @@ impl GraphSnapshot {
                 &identities,
             ))
         });
+        evidence_changes.sort_by(|a, b| {
+            let key = |change: &GraphEvidenceChange| {
+                (
+                    match change.dimension.as_str() {
+                        "declarations" => 0,
+                        "source_artifact" => 1,
+                        "verification_receipts" => 2,
+                        _ => 3,
+                    },
+                    change
+                        .subject
+                        .as_deref()
+                        .and_then(|p| identities.get(p))
+                        .copied()
+                        .unwrap_or(""),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
         GraphComparison {
+            selected_graph_supported: true,
+            unsupported_reason: None,
             scope: GraphScope::All,
             before_digest: before.snapshot_digest,
             after_digest: after.snapshot_digest,
@@ -206,6 +261,30 @@ impl GraphSnapshot {
 }
 
 fn evidence_changes(before: &GraphSnapshot, after: &GraphSnapshot) -> Vec<GraphEvidenceChange> {
+    if let (super::SnapshotLock::Imported(left), super::SnapshotLock::Imported(right)) =
+        (&before.lock, &after.lock)
+    {
+        return super::imported::evidence(left, right);
+    }
+    if (before.schema == 8) != (after.schema == 8) {
+        let digest = |snapshot: &GraphSnapshot| match &snapshot.lock {
+            super::SnapshotLock::Native(lock) => lock.root_manifest_digest().to_owned(),
+            super::SnapshotLock::Imported(lock) => lock.root_manifest_digest().to_owned(),
+        };
+        let old = digest(before);
+        let new = digest(after);
+        return if old == new {
+            Vec::new()
+        } else {
+            vec![GraphEvidenceChange {
+                dimension: "declarations".into(),
+                subject: None,
+                before: [("manifest_digest".into(), old)].into(),
+                after: [("manifest_digest".into(), new)].into(),
+                attestation_changed: false,
+            }]
+        };
+    }
     let mut changes = Vec::new();
     let mut record = |dimension: &str,
                       subject: Option<String>,
@@ -227,18 +306,18 @@ fn evidence_changes(before: &GraphSnapshot, after: &GraphSnapshot) -> Vec<GraphE
         None,
         [(
             "manifest_digest".into(),
-            before.lock.root_manifest_digest().into(),
+            before.native().root_manifest_digest().into(),
         )]
         .into(),
         [(
             "manifest_digest".into(),
-            after.lock.root_manifest_digest().into(),
+            after.native().root_manifest_digest().into(),
         )]
         .into(),
         false,
     );
-    for (key, package) in before.lock.workspace_packages() {
-        if let Some(new) = after.lock.workspace_packages().get(key) {
+    for (key, package) in before.native().workspace_packages() {
+        if let Some(new) = after.native().workspace_packages().get(key) {
             record(
                 "declarations",
                 Some(super::reference(key)),
@@ -248,8 +327,8 @@ fn evidence_changes(before: &GraphSnapshot, after: &GraphSnapshot) -> Vec<GraphE
             );
         }
     }
-    for (key, package) in before.lock.packages() {
-        if let Some(new) = after.lock.packages().get(key) {
+    for (key, package) in before.native().packages() {
+        if let Some(new) = after.native().packages().get(key) {
             record(
                 "source_artifact",
                 Some(super::reference(key)),
@@ -259,8 +338,8 @@ fn evidence_changes(before: &GraphSnapshot, after: &GraphSnapshot) -> Vec<GraphE
             );
         }
     }
-    for (key, package) in before.lock.packages() {
-        if let Some(new) = after.lock.packages().get(key) {
+    for (key, package) in before.native().packages() {
+        if let Some(new) = after.native().packages().get(key) {
             let attestation_changed = package
                 .derived_hooks()
                 .iter()

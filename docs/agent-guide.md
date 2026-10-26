@@ -53,6 +53,14 @@ pins. `update` re-resolves the entire graph, even with a package selection;
 has unknown metadata, not proof that dependencies are current. Why reads local
 files only. It exits 1 for a confirmed absent package, with `data.not_found` true.
 
+To inspect saved results, copy explicit before/after locks around an operation,
+then use `tapid --json lock compare before.lock after.lock --limit 1`.
+`tapid --json lock inspect before.lock` inventories the saved graph. These commands
+are read-only and require no project/store. Receipt changes are evidence, not
+upgrades. Only complete unfiltered analysis can establish that unrelated represented
+selections stayed unchanged; pages and filters alone cannot. Native/imported graph
+equivalence is unsupported. Follow continuation tokens for omitted details.
+
 ## Decide whether to continue
 
 Read one JSON object from stdout and the process exit status. Handled JSON

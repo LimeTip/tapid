@@ -36,6 +36,8 @@ tapid status [--project-dir <PATH>] [--workspace <NAME>] [--json]
 tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
 tapid lock verify
+tapid --json lock inspect <SNAPSHOT> [--package <NAME> | --instance <REF>] [--limit <N>] [--cursor <TOKEN>]
+tapid --json lock compare <BEFORE> <AFTER> [--package <NAME> | --instance <REF>] [--limit <N>] [--cursor <TOKEN>]
 tapid import-package-lock <PATH>
 tapid install [OPTIONS]
 tapid ci [OPTIONS]
@@ -57,6 +59,19 @@ tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json | 
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
+
+`lock inspect` and `lock compare` require explicit snapshot files and JSON mode.
+They observe persisted graphs without loading manifests, registry configuration,
+stores, recovery state or scripts. Same-format comparisons separate exact instance
+and selection-site changes from declaration, artifact, verification-receipt and
+derived-output evidence. Cross-format graph equivalence is unsupported. A comparison
+is an observation of saved results, whereas a preview predicts a future operation.
+Inputs are bounded to 32 MiB each; pages default to 100 records, accept at most
+1,000, and the entire response is bounded to 1 MiB. Complete analysis precedes
+paging. Filters select names or opaque references without expanding dependencies;
+filtered results say nothing about excluded instances. See the
+[JSON contract](../../docs/json-results.md#persisted-lock-graph-observations)
+for ordering, availability, cursors, limits and exit codes.
 
 `tapid manifest validate` rejects symlinks and other non-regular files before
 parsing. Root scripts perform the same check before loading run policy or
