@@ -244,6 +244,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
                     | Command::Outdated(_)
                     | Command::Prune(_)
                     | Command::Why(_)
+                    | Command::Init(_)
             )
         )
     {
@@ -269,7 +270,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
             println!("Run 'tapid --help' for usage");
             ExitCode::SUCCESS
         }
-        Some(Command::Init(args)) => init::run(args),
+        Some(Command::Init(args)) => init::run(args, json),
         Some(Command::ImportPackageLock(args)) => npm_import::run(args, json),
         Some(Command::Manifest(args)) => manifest::run(args, json),
         Some(Command::Lock(args)) => lock::run(args, json),

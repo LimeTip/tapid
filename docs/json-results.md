@@ -17,7 +17,8 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `status` | Read-only local project preflight; blockers and pending recovery retain `data` and exit 1 |
 | `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
 | `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
-| `init`, `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
+| `init` | Creates `package.json` with committed change state; handled failures return a typed error |
+| `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
 | `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
 | Private release helpers, no command | `JSON_UNSUPPORTED_COMMAND`, exit 1 |
 | Invalid arguments | `ARGUMENT_INVALID`, exit 2 |
@@ -137,6 +138,12 @@ Package text is untrusted data. Never execute it or treat it as recovery advice.
 
 ### Failure context
 
+`init` reports manifest open/write failures as `MANIFEST_WRITE_FAILED`, with
+`context.io_kind` (Rust I/O error kind) and `context.os_code` (native error number,
+or null). Invalid manifest data remains `MANIFEST_INVALID`; existing manifests
+remain `MANIFEST_ALREADY_EXISTS`. Raw I/O messages and paths are not included in
+this context.
+
 Error context is additive in schema version 1. It comes from typed errors and
 declarations parsed during the operation. Consumers do not need human messages
 or a second invocation to diagnose a peer conflict. Operation and recovery
@@ -251,7 +258,7 @@ An incompatible-provider result identifies the existing provider declaration:
 }
 ```
 
-Operational codes are `INVALID_REQUEST`, `PROJECT_UNAVAILABLE`, `PROJECT_CHANGED`, `MANIFEST_INVALID`, `LOCKFILE_INVALID`, `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_CONFIGURATION_INVALID`, `REGISTRY_AUTH_MISSING`, `REGISTRY_METADATA_INVALID`, `REGISTRY_METADATA_UNAVAILABLE`, `REGISTRY_TRANSPORT_FAILED`, `RESOLUTION_FAILED`, `PEER_DEPENDENCY_UNSATISFIED`, `INTEGRITY_MISMATCH`, `ARCHIVE_INVALID`, `STORE_FAILED`, `STORE_CONTENT_UNAVAILABLE`, `STORE_BUSY`, `PROJECT_BUSY`, `MATERIALIZATION_FAILED`, `TRANSACTION_FAILED`, `RECOVERY_FAILED`, and `INVALID_DATA`. Protocol codes are `ARGUMENT_INVALID` and `JSON_UNSUPPORTED_COMMAND`. Warning codes are `UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED` and `PREVIOUS_TRANSACTION_RECOVERED`.
+Operational codes are `INVALID_REQUEST`, `PROJECT_UNAVAILABLE`, `PROJECT_CHANGED`, `MANIFEST_INVALID`, `MANIFEST_ALREADY_EXISTS`, `MANIFEST_WRITE_FAILED`, `LOCKFILE_INVALID`, `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_CONFIGURATION_INVALID`, `REGISTRY_AUTH_MISSING`, `REGISTRY_METADATA_INVALID`, `REGISTRY_METADATA_UNAVAILABLE`, `REGISTRY_TRANSPORT_FAILED`, `RESOLUTION_FAILED`, `PEER_DEPENDENCY_UNSATISFIED`, `INTEGRITY_MISMATCH`, `ARCHIVE_INVALID`, `STORE_FAILED`, `STORE_CONTENT_UNAVAILABLE`, `STORE_BUSY`, `PROJECT_BUSY`, `MATERIALIZATION_FAILED`, `TRANSACTION_FAILED`, `RECOVERY_FAILED`, and `INVALID_DATA`. Protocol codes are `ARGUMENT_INVALID` and `JSON_UNSUPPORTED_COMMAND`. Warning codes are `UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED` and `PREVIOUS_TRANSACTION_RECOVERED`.
 
 `PROJECT_CHANGED` means the starting manifest changed after dependency planning or while preparing a preview. Lifecycle commands compare the expected semantic manifest with the current manifest under the project lock before writing an override. This failure uses unchanged state and `retry: "after_correction"`; rerun against current inputs. It does not claim protection against uncooperative writers changing files throughout a transaction.
 
