@@ -11,7 +11,6 @@ use tapid_manifest::{DependencyKind, PackageManifest, Workspace};
 use tapid_registry_client::{HttpsTransport, JsrRegistry, NpmRegistry};
 use tapid_resolver::Requirement;
 
-#[cfg(test)]
 pub(crate) mod batch;
 
 #[allow(dead_code)]

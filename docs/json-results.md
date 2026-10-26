@@ -445,3 +445,70 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+## Structured dependency edits
+
+`tapid --json edit-dependencies --file edits.json` accepts one regular UTF-8 JSON
+file, limited to 1,048,576 bytes and 1–256 edits. Version 1 has exactly `version`
+and `edits` fields. Duplicate keys, unknown fields, unsupported versions,
+operations and sections, and malformed edit shapes fail before project recovery.
+Project and workspace selection use `--project-dir` and `--workspace`; they are
+not request fields. Existing store, fixture and integrity-compatibility options
+apply. This command does not accept offline, frozen or dry-run modes.
+
+```json
+{"version":1,"edits":[
+  {"op":"add","section":"dependencies","spec":"react@^19"},
+  {"op":"add","section":"devDependencies","spec":"typescript@^5"},
+  {"op":"remove","section":"dependencies","name":"old"},
+  {"op":"move","name":"tool","from":"dependencies","to":"devDependencies"}
+]}
+```
+
+Sections are `dependencies`, `devDependencies`, `optionalDependencies` and
+`peerDependencies`. Add inserts or updates only its section, using ordinary
+add's supported package-spec grammar. Remove requires an existing exact
+section/name declaration. Move preserves the exact requirement and alias key,
+requires an existing source and empty destination, and cannot use the same
+section twice. Edits describe a combined desired state, not an ordered script.
+Repeated normalized targets, overlapping move endpoints and add/remove
+relocations across sections are rejected. Independent additions of one name in
+different sections are allowed. One selected manifest is edited; the containing
+workspace graph is installed once. Unsupported copied member dependencies and
+workspace protocols retain their existing restrictions.
+
+For a decoded request, `data.edits` contains every edit in original order, with
+its request fields, zero-based `index`, and `disposition`. `committed` means the
+batch's desired declarations reached durable commit, including requests that
+retain an existing value. `not_committed` covers rejected and rolled-back
+batches; `unknown` means recovery is required. Global `changes.state` and `retry`
+remain authoritative, including a failure after commit. Validation errors carry
+`errors[].context.edit_indices` when the offending edit is known; conflicts
+identify both indices. A decoding failure has no accepted edit records.
+
+`data.graph` compares the actual before/after installation locks without another
+resolution. Its `changes` array contains `kind: "package"` and `kind: "workspace"`
+records with an exact lock `identity` and `action` (`added`, `removed`, or
+`changed`), plus `kind: "root"` records with `name`, `before` and `after` binding
+identities. Package identities preserve source, version, peer and platform
+contexts. Retained records with changed dependency targets or integrity evidence
+are `changed`; version/context changes remove and add distinct records.
+Unchanged records are omitted. Root records expose promotion of an existing
+transitive package even when no package record changes.
+
+At most 256 graph records are emitted, in deterministic package, workspace, then
+root order. `omitted` counts additional records and `complete` is false if any
+record is omitted or any graph scalar is truncated. If no lock comparison is
+available (including installation failure), `complete` is false, `changes` is
+empty and `omitted` is null, rather than claiming an empty graph delta. Existing
+4096-byte scalar sanitization and `truncated_fields` pointers apply to request
+and graph presentation. Every edit record is retained even when a scalar is
+shortened; displayed identities are not lossless mutation handles.
+
+Complete validation precedes write-capable recovery. Before durable commit,
+handled failure rolls back through the existing project/store transaction;
+unsettled rollback requires recovery. After commit, recovery finishes the new
+state and cleanup/reporting failure does not undo it. This is recoverability,
+not simultaneous visibility to unrelated readers or rollback of external script
+effects. Existing verified objects are preserved; newly published objects follow
+the existing journal's rollback/settlement behavior.

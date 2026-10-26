@@ -89,3 +89,15 @@ Global JSON rejects it before launch. Its `--receipt-json` writes a receipt to
 stderr alongside arbitrary child output; it is not the single-object protocol.
 Child programs can be interactive. See [compatibility](compatibility.md) and
 [script execution](../crates/tapid-cli/README.md#commands) before using it.
+
+For mixed dependency sections, prepare a version-1 JSON file and call
+`tapid --json edit-dependencies --file edits.json`. Use explicit `section` values
+for add/remove and `from`/`to` for moves. This applies one combined plan and one
+recoverable install; ordinary multi-package add remains sufficient for a single
+section. Requests are limited to 1 MiB and 256 edits for one selected manifest.
+File preparation adds an automation action. See
+[the request and result contract](json-results.md#structured-dependency-edits).
+Correlate `data.edits` by `index`, check the global change state before retrying,
+and inspect `data.graph.complete` and `omitted` before treating graph detail as
+complete evidence. Use move for relocation; remove-plus-add for one declaration
+is deliberately rejected.

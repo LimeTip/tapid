@@ -1,7 +1,7 @@
 use crate::application::dependency_edit_evaluation::measure;
 use crate::application::{
     install::{self, InstallMode, InstallRequest, ManifestMutation},
-    lifecycle::batch::{self, Edit},
+    lifecycle::batch::Edit,
 };
 use crate::commands::lifecycle::{AddArgs, CommonArgs, RemoveArgs, add, remove};
 use std::{fs, path::Path, time::Instant};
@@ -37,21 +37,34 @@ fn ordinary_add(
                 peer: false,
                 common: common(project, home, workspace),
             },
-            false
+            true
         ),
         std::process::ExitCode::SUCCESS
     );
 }
 
 fn candidate(project: &TempProject, home: &TempHome, workspace: bool, edits: &[Edit<'_>]) {
-    batch::run(
-        project.path(),
-        workspace.then_some("member"),
-        &home.path().join("store"),
-        &project.path().join("registry.json"),
-        edits,
-    )
-    .unwrap();
+    let edits = edits.iter().map(|edit| match edit {
+        Edit::Add { section, spec } => serde_json::json!({"op":"add", "section":section.field_name(), "spec":spec}),
+        Edit::Remove { section, name } => serde_json::json!({"op":"remove", "section":section.field_name(), "name":name}),
+        Edit::Move { name, from, to } => serde_json::json!({"op":"move", "name":name, "from":from.field_name(), "to":to.field_name()}),
+    }).collect::<Vec<_>>();
+    let file = project
+        .write(
+            "dependency-edits.json",
+            &serde_json::to_vec(&serde_json::json!({"version":1,"edits":edits})).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        crate::commands::dependency_edits::run(
+            crate::commands::dependency_edits::Args {
+                file,
+                common: common(project, home, workspace),
+            },
+            true
+        ),
+        std::process::ExitCode::SUCCESS
+    );
 }
 
 fn initialize(project: &TempProject, workspace: bool, empty: bool) {
@@ -168,7 +181,7 @@ fn control(project: &TempProject, home: &TempHome, case: &str) {
                         packages: vec!["old".to_owned()],
                         common: common(project, home, false)
                     },
-                    false
+                    true
                 ),
                 std::process::ExitCode::SUCCESS
             );
@@ -284,7 +297,7 @@ fn dependency_edit_measurement_matrix() {
                     assert_eq!(counts.durable_decisions, counts.graph_operations);
                     assert_eq!(
                         counts.command_entries,
-                        if proposed { 0 } else { counts.graph_operations }
+                        if proposed { 1 } else { counts.graph_operations }
                     );
                     assert_eq!(counts.batch_entries, usize::from(proposed));
                     println!(

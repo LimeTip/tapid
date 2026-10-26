@@ -2444,3 +2444,108 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
         );
     }
 }
+
+#[test]
+fn dependency_edit_graph_evidence_is_bounded_at_exact_record_limit() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+    let digest = format!("sha256-{}", "0".repeat(64));
+    let mut lock = Lockfile::new(&digest).unwrap();
+    for index in 0..=MAX_GRAPH_CHANGES {
+        if index == MAX_GRAPH_CHANGES {
+            let exact = PackageChanges::between(None, &lock).unwrap();
+            assert_eq!(exact.records.len(), 256);
+            assert_eq!(exact.omitted, 0);
+        }
+        let package = LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org",
+            &format!("package{index}"),
+            "1.0.0",
+            INTEGRITY,
+            &digest,
+            RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        lock.insert_package(package).unwrap();
+    }
+    lock.set_roots(lock.packages().keys().cloned().collect::<Vec<_>>())
+        .unwrap();
+    let extra = PackageChanges::between(None, &lock).unwrap();
+    assert_eq!(extra.added, 257);
+    assert_eq!(extra.records.len(), 256);
+    assert_eq!(extra.omitted, 1);
+    let unchanged =
+        PackageChanges::between(Some(lock.to_json().unwrap().as_bytes()), &lock).unwrap();
+    assert!(unchanged.records.is_empty());
+    assert_eq!(unchanged.omitted, 0);
+    let removed = PackageChanges::between(
+        Some(lock.to_json().unwrap().as_bytes()),
+        &Lockfile::new(&digest).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(removed.removed, 257);
+    assert_eq!(removed.omitted, 1);
+}
+
+#[test]
+fn dependency_edit_graph_preserves_origin_peer_platform_and_root_only_changes() {
+    use tapid_core::{PeerContext, PlatformContext};
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+    let digest = format!("sha256-{}", "0".repeat(64));
+    let mut lock = Lockfile::new(&digest).unwrap();
+    let peer = PeerContext::default().with("react".parse().unwrap(), "18.2.0".parse().unwrap());
+    let plain = PeerContext::default();
+    let any = PlatformContext::new(None, None, None).unwrap();
+    let linux = PlatformContext::new(Some("linux"), Some("x86_64"), None).unwrap();
+    for (origin, peers, platform) in [
+        ("https://registry.npmjs.org", &plain, &any),
+        ("https://other.example.test", &plain, &any),
+        ("https://registry.npmjs.org", &peer, &any),
+        ("https://registry.npmjs.org", &plain, &linux),
+    ] {
+        lock.insert_package(
+            LockedPackage::new_with_context_and_provenance(
+                origin,
+                "same",
+                "1.0.0",
+                INTEGRITY,
+                &digest,
+                (peers, platform),
+                RegistryIntegrityProvenance::RegistryDeclared,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let changes = PackageChanges::between(None, &lock).unwrap();
+    let identities = changes
+        .records
+        .iter()
+        .map(|record| match record {
+            GraphChange::Package { identity, .. } => identity.clone(),
+            _ => panic!("unexpected record"),
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(identities.len(), 4);
+    assert_eq!(identities, lock.packages().keys().cloned().collect());
+    lock.set_roots(lock.packages().keys().cloned().collect::<Vec<_>>())
+        .unwrap();
+    let before = lock.to_json().unwrap();
+    let bindings = lock
+        .packages()
+        .keys()
+        .enumerate()
+        .map(|(index, key)| (format!("alias{index}"), key.clone()))
+        .collect();
+    lock.set_root_bindings(bindings).unwrap();
+    let roots = PackageChanges::between(Some(before.as_bytes()), &lock).unwrap();
+    assert_eq!(roots.reused, 4);
+    assert_eq!(roots.records.len(), 4);
+    assert!(roots.records.iter().all(|record| matches!(
+        record,
+        GraphChange::Root {
+            before: None,
+            after: Some(_),
+            ..
+        }
+    )));
+}

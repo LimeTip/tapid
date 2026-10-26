@@ -1,4 +1,4 @@
-//! Private evaluation planner. No public command or input protocol is registered.
+//! Complete dependency-edit planning before write-capable installation.
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -18,6 +18,7 @@ pub(crate) enum Edit<'a> {
     },
 }
 
+#[cfg(test)]
 pub(crate) fn run(
     project: &Path,
     workspace: Option<&str>,
@@ -63,6 +64,7 @@ pub(crate) fn plan(
     let mut targets = BTreeMap::new();
     let mut actions = BTreeMap::<_, Vec<(usize, bool)>>::new();
     for (index, edit) in edits.iter().enumerate() {
+        let invalid = |message| invalid(message).at_edit(index);
         let (name, sections, adding) = match *edit {
             Edit::Add { section, spec } => {
                 (crate::package_spec::parse(spec).0, vec![section], true)
@@ -83,7 +85,8 @@ pub(crate) fn plan(
             {
                 return Err(invalid(format!(
                     "edit {index} conflicts with edit {previous}: repeated declaration target"
-                )));
+                ))
+                .at_edit(previous));
             }
         }
         let prior = actions.entry(identity).or_default();
@@ -92,7 +95,8 @@ pub(crate) fn plan(
             return Err(invalid(format!(
                 "edit {index} conflicts with edit {}: use one explicit move for relocation",
                 prior[0].0
-            )));
+            ))
+            .at_edit(prior[0].0));
         }
         if !matches!(edit, Edit::Move { .. }) {
             prior.push((index, adding));
@@ -106,6 +110,7 @@ pub(crate) fn plan(
     };
     let mut candidate = original.clone();
     for (index, edit) in edits.iter().enumerate() {
+        let invalid = |message| invalid(message).at_edit(index);
         let result = match *edit {
             Edit::Add { section, spec } => {
                 let (name, requirement) = crate::package_spec::parse(spec);
@@ -138,6 +143,24 @@ pub(crate) fn plan(
     // any installer acquisition can recover a pending journal or write state.
     for (kind, values) in candidate.dependency_sections() {
         for (name, requirement) in values {
+            let invalid = |message| {
+                let mut error = invalid(message);
+                for (index, edit) in edits.iter().enumerate() {
+                    let matches = match edit {
+                        Edit::Add { section, spec } => {
+                            *section == kind && crate::package_spec::parse(spec).0 == name
+                        }
+                        Edit::Move {
+                            name: moved, to, ..
+                        } => *to == kind && moved == name,
+                        Edit::Remove { .. } => false,
+                    };
+                    if matches {
+                        error = error.at_edit(index);
+                    }
+                }
+                error
+            };
             crate::online::dep_parts(name).map_err(invalid)?;
             if requirement.starts_with("workspace:") {
                 return Err(invalid(format!(
