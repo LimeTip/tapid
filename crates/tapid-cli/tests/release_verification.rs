@@ -84,3 +84,40 @@ fn native_verifier_authenticates_old_records_and_rejects_invalid_inputs() {
         .unwrap();
     assert!(!String::from_utf8_lossy(&help.stdout).contains("__verify-release-record"));
 }
+
+#[test]
+fn native_archive_verifier_checks_foreign_target_without_executing() {
+    let project = TempProject::new("native-archive-verifier").unwrap();
+    let home = TempHome::new("native-archive-verifier").unwrap();
+    project.write("tapid.exe", b"x").unwrap();
+    let path = project.path().join("release.tar.gz");
+    assert!(
+        Command::new("tar")
+            .arg("--format=ustar")
+            .arg("-czf")
+            .arg(&path)
+            .arg("-C")
+            .arg(project.path())
+            .arg("tapid.exe")
+            .status()
+            .unwrap()
+            .success()
+    );
+    for (name, success) in [("tapid.exe", true), ("tapid", false), ("../tapid", false)] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .env_clear()
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .arg("__verify-release-archive")
+            .arg(&path)
+            .arg(name)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

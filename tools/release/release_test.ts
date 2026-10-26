@@ -404,7 +404,7 @@ test("public installers exercise explicit and latest discovery plus supported up
   assert(workflow.includes('raw.githubusercontent.com/LimeTip/tapid/$previous_sha/scripts/install.sh'));
   assert(workflow.includes('raw.githubusercontent.com/LimeTip/tapid/$previous_sha/scripts/install.ps1'));
   const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
-  const windows = workflow.slice(workflow.indexOf("  windows:"));
+  const windows = workflow.slice(workflow.indexOf("  windows:"), workflow.indexOf("  report:"));
   for (const job of [unix, windows]) {
     assert(job.includes("Check the public website installer with an explicit version"));
     assert(job.includes("Check previous-version upgrade and repeat upgrade through the public service"));
@@ -434,8 +434,10 @@ test("public installers exercise explicit and latest discovery plus supported up
 test("public smoke validates ancestry before detaching the resolved trusted runner", async () => {
   const workflow = await text(".github/workflows/release-public-smoke.yml");
   const unix = workflow.slice(workflow.indexOf("  unix:"), workflow.indexOf("  windows:"));
-  const windows = workflow.slice(workflow.indexOf("  windows:"));
-  for (const job of [unix, windows]) {
+  const windows = workflow.slice(workflow.indexOf("  windows:"), workflow.indexOf("  report:"));
+  const inventory = workflow.slice(workflow.indexOf("  public-readback:"), workflow.indexOf("  unix:"));
+  const report = workflow.slice(workflow.indexOf("  report:"));
+  for (const job of [unix, windows, inventory, report]) {
     const checkouts = [...job.matchAll(/uses: actions\/checkout@(\S+)/g)];
     assertEquals(checkouts.length, 1);
     assertEquals(checkouts[0][1], "d23441a48e516b6c34aea4fa41551a30e30af803");
@@ -452,6 +454,8 @@ test("public smoke validates ancestry before detaching the resolved trusted runn
   for (const [job, validation, ancestry, detach, execution] of [
     [unix, bashValidation, bashAncestry, bashDetach, 'sh "$RUNNER_TEMP/install.sh"'],
     [windows, psValidation, psAncestry, psDetach, '& $installer -Version'],
+    [inventory, bashValidation, bashAncestry, bashDetach, 'scripts/dev.ts build'],
+    [report, bashValidation, bashAncestry, bashDetach, 'tools/release/public_smoke_report.ts aggregate'],
   ]) {
     assert(job.indexOf(validation) >= 0);
     assert(job.indexOf(validation) < job.indexOf(ancestry));
