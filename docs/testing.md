@@ -14,6 +14,21 @@ Use `tapid-test-support` for integration-test setup:
 
 Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, or a user-specific home. Never use the network or real credentials. Fixture writers reject absolute paths and parent-directory components.
 
+The temporary filesystem must permit execution of generated fixture files. Unix
+installer, package-bin, and verified-tool tests deliberately execute scripts after
+setting their executable permissions. A `noexec` mount or worker execution policy
+can return `PermissionDenied` even when the mode bits are correct. Do not skip
+these tests or invoke their scripts through an interpreter: direct execution is
+part of their contract.
+
+For an isolated Linux validation worker, provision a private writable temporary
+directory on an execution-enabled filesystem and export its absolute path as
+`TMPDIR` before starting Cargo. Check the mount options and execution policy in
+that worker if generated fixtures cannot launch; a passing host run cannot prove
+the worker's configuration. Keep validation inside the isolated worker, without
+host credentials or an unsandboxed host fallback. Linux results do not establish
+native macOS or Windows containment behavior.
+
 ## Development prerequisites and build reuse
 
 Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later.
