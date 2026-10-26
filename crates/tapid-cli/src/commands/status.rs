@@ -76,6 +76,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     }
     println!("Experimental capabilities: {}", report.capabilities);
     println!("Operation assessments: {}", report.operations);
+    println!("Lifecycle evidence: {}", report.lifecycle);
     println!("Migration guide: {}", report.migration_guide);
     println!("Checks not performed:");
     for check in &report.checks_not_performed {

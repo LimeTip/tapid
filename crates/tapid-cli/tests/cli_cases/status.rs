@@ -1,6 +1,166 @@
 use super::*;
 
 #[test]
+fn status_reports_lifecycle_hook_evidence_without_assurance() {
+    let project = tapid_test_support::TempProject::new("status-hook-evidence").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0","scripts":{"postinstall":"SECRET_SCRIPT_BODY","test":"ignored"}}"#;
+    project.write("package.json", manifest).unwrap();
+    let (_, value) = status(project.path(), &[]);
+    let lifecycle = &value["data"]["lifecycle"];
+    assert_eq!(
+        lifecycle["manifest_declarations"][0]["hooks"],
+        serde_json::json!(["postinstall"])
+    );
+    assert_eq!(
+        lifecycle["manifest_declarations"][0]["evidence"],
+        "local_observation"
+    );
+    assert_eq!(lifecycle["dependency_source_discovery"], "unchecked");
+    assert_eq!(lifecycle["completeness"], "incomplete");
+    assert_eq!(
+        lifecycle["backend_and_toolchain_prerequisites"],
+        "unchecked"
+    );
+    assert_eq!(lifecycle["enforcement"], "not_established");
+    assert!(!value.to_string().contains("SECRET_SCRIPT_BODY"));
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!project.path().join("node_modules").exists());
+    let human = run(project.path(), &["status"]);
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("postinstall"));
+    assert!(human.contains("backend_and_toolchain_prerequisites"));
+    assert!(!human.contains("SECRET_SCRIPT_BODY"));
+}
+
+#[test]
+fn status_reports_recorded_derived_hooks_as_unverified_lock_metadata() {
+    let project = tapid_test_support::TempProject::new("status-recorded-hooks").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    let mut lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let package = tapid_lockfile::LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "native-package",
+        "1.0.0",
+        &format!("sha512-{}", STANDARD.encode([1; 64])),
+        &digest,
+        tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let key = package.key();
+    lock.insert_package(package).unwrap();
+    lock.set_roots(vec![key.clone()]).unwrap();
+    lock.set_derived_hooks(
+        &key,
+        vec![
+            tapid_lockfile::DerivedHookOutput::new(
+                "install",
+                &digest,
+                &digest,
+                &format!("hmac-sha256-{}", "b".repeat(64)),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    let (_, value) = status(project.path(), &[]);
+    let recorded = &value["data"]["lifecycle"]["recorded_derived_hooks"][0];
+    assert_eq!(recorded["hook"], "install");
+    assert_eq!(recorded["package"], key);
+    assert_eq!(recorded["source"], "lockfile_metadata");
+    assert_eq!(recorded["verification"], "unchecked");
+    assert!(!value.to_string().contains("hmac-sha256-"));
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        bytes.as_bytes()
+    );
+    assert!(!project.path().join("node_modules").exists());
+}
+
+#[test]
+fn status_bounds_recorded_hook_evidence_and_marks_it_incomplete() {
+    let project = tapid_test_support::TempProject::new("status-hook-bound").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    let mut lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let output = tapid_lockfile::DerivedHookOutput::new(
+        "install",
+        &digest,
+        &digest,
+        &format!("hmac-sha256-{}", "b".repeat(64)),
+    )
+    .unwrap();
+    let mut roots = Vec::new();
+    for index in 0..129 {
+        let package = tapid_lockfile::LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org",
+            &format!("package-{index}"),
+            "1.0.0",
+            &format!("sha512-{}", STANDARD.encode([1; 64])),
+            &digest,
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        let key = package.key();
+        lock.insert_package(package).unwrap();
+        lock.set_derived_hooks(&key, vec![output.clone()]).unwrap();
+        roots.push(key);
+    }
+    lock.set_roots(roots).unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    let (output, value) = status(project.path(), &[]);
+    assert!(!output.status.success());
+    assert_eq!(
+        value["data"]["lifecycle"]["recorded_derived_hooks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        128
+    );
+    assert_eq!(value["data"]["lifecycle"]["completeness"], "truncated");
+    assert_eq!(value["data"]["truncated"], true);
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        bytes.as_bytes()
+    );
+}
+
+#[test]
+fn status_lifecycle_facts_cover_members_without_treating_absence_as_verified() {
+    let project = tapid_test_support::TempProject::new("status-member-hooks").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/web/package.json",
+            br#"{"name":"web","version":"1.0.0","scripts":{"prepare":"PRIVATE_HOOK_COMMAND"}}"#,
+        )
+        .unwrap();
+    let (_, value) = status(project.path(), &["--workspace", "web"]);
+    let facts = value["data"]["lifecycle"]["manifest_declarations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0]["hooks"], serde_json::json!([]));
+    assert_eq!(facts[1]["hooks"], serde_json::json!(["prepare"]));
+    assert_eq!(value["data"]["lifecycle"]["completeness"], "incomplete");
+    assert!(!value.to_string().contains("PRIVATE_HOOK_COMMAND"));
+    assert!(!project.path().join("node_modules").exists());
+}
+
+#[test]
 fn status_reports_actions_and_separates_imported_replay_from_mutation() {
     let project = tapid_test_support::TempProject::new("status-operation-support").unwrap();
     let root = r#"{"name":"root","version":"1.0.0","overrides":{"jsr:@std/path":"1"}}"#;

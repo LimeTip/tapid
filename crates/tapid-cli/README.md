@@ -445,6 +445,11 @@ native resolution or add/update support. The report links to the
 [npm migration guide](../../docs/npm-lockfile-import.md).
 Status never installs, runs scripts,
 opens the shared store, acquires transaction locks, or attempts recovery.
+Lifecycle evidence lists local manifest hook names and unverified derived-hook
+records from native lock metadata, with bounded collections and no script bodies.
+Dependency-source discovery, lifecycle approvals, generated-output verification,
+and backend/toolchain prerequisites remain unchecked. These observations do not
+establish enforcement or absence of dependency hooks.
 
 Exit 0 means no local blockers were found. It does not establish complete
 compatibility or successful installation, replay, or script execution. Exit 1

@@ -327,6 +327,23 @@ establish routing, layout, artifacts, or install readiness. Native manifest
 blockers can coexist with matching imported receipts; their absence leaves
 resolution and dependency mutation unchecked. Never infer compatibility from
 unchecked operations, missing identifiers, or truncated reports.
+
+`lifecycle.manifest_declarations` lists only lifecycle hook names from bounded
+root/member manifest inspection, using the manifest parser's hook rules. Each
+entry identifies its path, `project_manifest` source, `declared_scripts_only`
+scope, and `local_observation` evidence. Script bodies are omitted. An empty
+list does not establish absence of dependency hooks or implicit native builds.
+`recorded_derived_hooks` exposes names and package identities from validated native
+lock metadata, with `verification: "unchecked"`; it does not authenticate those
+records or verify generated trees. Both lists are limited to 128 entries, with
+the report marked truncated if further records are omitted.
+Lifecycle `completeness` remains `incomplete` even when no hooks are found,
+or `truncated` when lifecycle records exceeded their collection bound.
+`dependency_source_discovery`, `backend_and_toolchain_prerequisites`, and
+`approvals_and_derived_outputs` remain `unchecked`; `enforcement` is
+`not_established`. Manifest discovery errors and snapshot limits still apply.
+These facts do not approve hooks, inspect package trees, or launch backend probes.
+
 When `package-lock.json` is present, status uses the existing npm import parser
 to assess `npm_graph_and_root_manifest_only`. It reads at most 32 MiB and rejects
 non-regular files. Unsupported input reports `NPM_IMPORT_UNSUPPORTED`; unavailable

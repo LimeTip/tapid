@@ -56,6 +56,7 @@ pub(crate) struct StatusReport {
     pub(crate) checks_not_performed: Vec<&'static str>,
     pub(crate) capabilities: Value,
     pub(crate) operations: Value,
+    pub(crate) lifecycle: Value,
     pub(crate) migration_guide: &'static str,
     #[serde(skip)]
     pub(crate) project: PathBuf,
@@ -244,6 +245,15 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
             "registry_routing": "experimental"
         }),
         operations: Value::Null,
+        lifecycle: json!({
+            "manifest_declarations": [],
+            "recorded_derived_hooks": [],
+            "completeness": "incomplete",
+            "dependency_source_discovery": "unchecked",
+            "backend_and_toolchain_prerequisites": "unchecked",
+            "approvals_and_derived_outputs": "unchecked",
+            "enforcement": "not_established"
+        }),
         migration_guide: "https://github.com/LimeTip/tapid/blob/main/docs/npm-lockfile-import.md",
         project: project.clone(),
     };
@@ -408,6 +418,28 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
             .and_then(|text| Lockfile::from_json(text).ok())
         {
             Some(lock) => {
+                // These records have passed format validation only. Authenticity,
+                // output bytes, approvals and host prerequisites remain unchecked.
+                'packages: for (key, package) in lock.packages() {
+                    for output in package.derived_hooks() {
+                        let records = report.lifecycle["recorded_derived_hooks"]
+                            .as_array_mut()
+                            .unwrap();
+                        if records.len() == MAX_ENTRIES {
+                            report.truncated = true;
+                            report.lifecycle["completeness"] = json!("truncated");
+                            break 'packages;
+                        }
+                        records.push(json!({
+                            "path": lock_path.display().to_string(),
+                            "package": key,
+                            "hook": output.hook(),
+                            "source": "lockfile_metadata",
+                            "evidence": "local_observation",
+                            "verification": "unchecked"
+                        }));
+                    }
+                }
                 if let (Some(manifest), Ok(bytes)) = (&manifest, &manifest_bytes) {
                     let root_matches = match lock.validate_replay(&digest_bytes(bytes)) {
                         Ok(()) => true,
@@ -634,6 +666,28 @@ fn inspect_manifest(
     workspace: &Workspace,
     report: &mut StatusReport,
 ) {
+    // Reuse the manifest capability's hook selection rules. Only names leave
+    // this boundary; command bodies are neither evidence nor safe diagnostics.
+    if report.lifecycle["manifest_declarations"]
+        .as_array()
+        .is_some_and(|entries| entries.len() < MAX_ENTRIES)
+    {
+        let hooks = tapid_manifest::dependency_lifecycle_hooks(&manifest.to_json())
+            .expect("parsed manifest has a valid script map");
+        report.lifecycle["manifest_declarations"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "path": path.display().to_string(),
+                "hooks": hooks,
+                "scope": "declared_scripts_only",
+                "source": "project_manifest",
+                "evidence": "local_observation"
+            }));
+    } else {
+        report.truncated = true;
+        report.lifecycle["completeness"] = json!("truncated");
+    }
     for (kind, dependencies) in manifest.dependency_sections() {
         if kind == tapid_manifest::DependencyKind::PeerDependencies && path == workspace.root_path()
         {
