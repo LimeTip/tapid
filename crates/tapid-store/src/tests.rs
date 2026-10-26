@@ -349,6 +349,7 @@ fn existing_wrong_bytes_are_rejected() {
 }
 
 #[test]
+/// Reject a mismatched publication winner, preserving its bytes and cleaning staging.
 fn racing_wrong_artifact_is_rejected_and_preserved() {
     let root = root();
     let store = Store::new(&root);
@@ -361,6 +362,7 @@ fn racing_wrong_artifact_is_rejected_and_preserved() {
         inserted: bool,
     }
     impl Read for CompetingReader {
+        /// Insert mismatched bytes on the first read, after lookup and before publication.
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             if !self.inserted {
                 fs::create_dir_all(self.destination.parent().unwrap())?;
@@ -396,6 +398,7 @@ fn racing_wrong_artifact_is_rejected_and_preserved() {
 }
 
 #[test]
+/// Accept a verified matching publication winner and clean the losing staging file.
 fn racing_matching_artifact_is_accepted_and_preserved() {
     let root = root();
     let store = Store::new(&root);
@@ -408,6 +411,7 @@ fn racing_matching_artifact_is_accepted_and_preserved() {
         inserted: bool,
     }
     impl Read for CompetingReader {
+        /// Insert matching bytes on the first read, deterministically forcing a collision.
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             if !self.inserted {
                 fs::create_dir_all(self.destination.parent().unwrap())?;
@@ -440,6 +444,7 @@ fn racing_matching_artifact_is_accepted_and_preserved() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Recognize unavailable Windows symlink support, including missing privilege 1314.
 fn symlink_creation_unavailable(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -448,12 +453,14 @@ fn symlink_creation_unavailable(error: &io::Error) -> bool {
 }
 
 #[test]
+/// Keep Windows privilege error 1314 eligible for the symlink probe skip.
 fn windows_symlink_privilege_error_is_unavailable() {
     let error = io::Error::from_raw_os_error(1314);
     assert!(symlink_creation_unavailable(&error));
 }
 
 #[test]
+/// Reject a competing symlink without changing it or its target, and clean staging.
 fn racing_symlink_artifact_is_rejected_and_preserved() {
     let root = root();
     let store = Store::new(&root);
@@ -483,6 +490,7 @@ fn racing_symlink_artifact_is_rejected_and_preserved() {
         inserted: bool,
     }
     impl Read for CompetingReader {
+        /// Insert the symlink on the first read, after lookup and before publication.
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             if !self.inserted {
                 fs::create_dir_all(self.destination.parent().unwrap())?;
@@ -538,6 +546,7 @@ fn racing_symlink_artifact_is_rejected_and_preserved() {
 
 #[cfg(unix)]
 #[test]
+/// Ensure the Unix no-follow open rejects the final symlink.
 fn no_follow_artifact_open_rejects_symlink() {
     let root = root();
     fs::create_dir_all(&root).unwrap();
@@ -554,6 +563,7 @@ fn no_follow_artifact_open_rejects_symlink() {
 
 #[cfg(unix)]
 #[test]
+/// Use a subprocess deadline to prove FIFO verification rejects without blocking.
 fn fifo_artifact_open_does_not_block() {
     if let Some(path) = std::env::var_os("TAPID_TEST_FIFO_PATH") {
         let expected = digest(b"artifact");

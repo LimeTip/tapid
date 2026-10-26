@@ -443,7 +443,9 @@ impl Store {
 
     /// Stream bytes into a private staging file, verify SHA-256, then atomically
     /// activate it under the digest path. Existing activated bytes are never
-    /// replaced: the filesystem is the source of truth for idempotency.
+    /// replaced: the filesystem is the source of truth for idempotency. Both an
+    /// initially present destination and a competing publication must be regular
+    /// files whose verified digest matches before returning `AlreadyPresent`.
     pub fn ingest<R: Read>(
         &self,
         expected: &ArtifactDigest,
@@ -836,6 +838,8 @@ fn create_staging_file(dir: &Path) -> io::Result<(PathBuf, File)> {
     ))
 }
 
+/// Check regular-file metadata and hash the same no-follow handle, avoiding a
+/// pathname reopen between validation and hashing. Propagate I/O and digest errors.
 fn verify_existing_artifact(path: &Path, expected: &ArtifactDigest) -> Result<(), IngestError> {
     let mut file = open_artifact_without_following_links(path)?;
     if !file.metadata()?.file_type().is_file() {
@@ -855,6 +859,8 @@ fn verify_existing_artifact(path: &Path, expected: &ArtifactDigest) -> Result<()
     Ok(())
 }
 
+/// Open without following the final symlink on Unix and Windows. Unix opens are
+/// nonblocking so FIFOs reach the caller's file-type check without waiting.
 fn open_artifact_without_following_links(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -872,6 +878,8 @@ fn open_artifact_without_following_links(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+/// Hash bytes from the reader's current position to EOF as `sha256-<hex>`,
+/// propagating read failures rather than accepting a partial digest.
 fn digest_reader(file: &mut impl Read) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
