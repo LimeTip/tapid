@@ -1350,6 +1350,14 @@ fn candidate_exclusions_survive_install_preview_and_replay() {
             assert!(!project.path().join("tapid.lock").exists());
             assert!(!project.path().join("node_modules").exists());
         } else {
+            assert_eq!(result["lifecycle"]["coverage"], "complete", "{result}");
+            assert_eq!(result["lifecycle"]["selected_packages"], 1);
+            assert_eq!(result["lifecycle"]["inspected_packages"], 1);
+            assert_eq!(result["lifecycle"]["packages"][0]["discovery"], "succeeded");
+            assert_eq!(
+                result["lifecycle"]["packages"][0]["hooks"],
+                serde_json::json!([])
+            );
             let (output, replay) = invoke(&project, &args);
             assert!(output.status.success(), "{replay}");
             assert_eq!(replay["data"]["replayed"], true);

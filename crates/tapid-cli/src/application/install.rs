@@ -92,7 +92,11 @@ impl InstallSession {
             journal: None,
             lock_backup: None,
             lock: None,
-            outcome: OperationOutcome::unchanged(project),
+            outcome: {
+                let mut outcome = OperationOutcome::unchanged(project);
+                outcome.lifecycle = Some(super::outcome::LifecycleReport::new());
+                outcome
+            },
             mutated: false,
             committed: false,
             package_changes: None,
@@ -546,6 +550,9 @@ fn perform_install(
     } else {
         false
     };
+    if imported.is_some() {
+        session.outcome.lifecycle.as_mut().unwrap().reason = Some("imported_lock");
+    }
     if imported.is_some() || !offline && !frozen && !replay_existing {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
@@ -586,6 +593,13 @@ fn perform_install(
             )?
         };
         session.candidate_exclusions = candidate_exclusions;
+
+        session
+            .outcome
+            .lifecycle
+            .as_mut()
+            .unwrap()
+            .selected_packages = Some(lock.packages().len());
         if let (Some(request), Some(previous)) = (update, previous_lock.as_ref()) {
             session
                 .outcome
@@ -622,22 +636,20 @@ fn perform_install(
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
         let mut lifecycle_snapshots = Vec::new();
         if imported.is_none() {
-            session
-                .outcome
-                .warnings
-                .extend(super::dependency_scripts::apply(
-                    &project_dir,
-                    &lifecycle_policy,
-                    overrides,
-                    &mut session.hook_stages,
-                    &mut lock,
-                    &mut input,
-                    &mut trees,
-                    &store,
-                    Some(&mut store_transaction),
-                    activation_lock,
-                    &mut lifecycle_snapshots,
-                )?);
+            super::dependency_scripts::apply(
+                &project_dir,
+                &lifecycle_policy,
+                overrides,
+                &mut session.hook_stages,
+                &mut lock,
+                &mut input,
+                &mut trees,
+                &store,
+                Some(&mut store_transaction),
+                activation_lock,
+                &mut lifecycle_snapshots,
+                &mut session.outcome,
+            )?;
         }
         let lock_json = if let Some(imported) = imported.as_ref() {
             imported
@@ -774,6 +786,12 @@ fn perform_install(
         &lock,
     )?;
     crate::application::replay::validate_root_bindings(&lock, &root_manifest, &registry_config)?;
+    session
+        .outcome
+        .lifecycle
+        .as_mut()
+        .unwrap()
+        .selected_packages = Some(lock.packages().len());
     if ci {
         online::validate_locked_artifact_sources(&lock, registry_fixture)?;
     }
@@ -836,22 +854,20 @@ fn perform_install(
             |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         )?;
         let mut lifecycle_snapshots = Vec::new();
-        session
-            .outcome
-            .warnings
-            .extend(super::dependency_scripts::apply(
-                &project_dir,
-                &lifecycle_policy,
-                overrides,
-                &mut session.hook_stages,
-                &mut lock.clone(),
-                &mut input,
-                &mut trees,
-                &store,
-                None,
-                activation_lock,
-                &mut lifecycle_snapshots,
-            )?);
+        super::dependency_scripts::apply(
+            &project_dir,
+            &lifecycle_policy,
+            overrides,
+            &mut session.hook_stages,
+            &mut lock.clone(),
+            &mut input,
+            &mut trees,
+            &store,
+            None,
+            activation_lock,
+            &mut lifecycle_snapshots,
+            &mut session.outcome,
+        )?;
         session.mutated = true;
         let publication = transaction
             .publish_for_lifecycle(&journal.coordinator_path())
@@ -924,7 +940,7 @@ fn perform_install(
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         publication.as_ref(),
     )?;
-    let hook_warnings = super::dependency_scripts::apply(
+    super::dependency_scripts::apply(
         &project_dir,
         &lifecycle_policy,
         overrides,
@@ -936,8 +952,8 @@ fn perform_install(
         None,
         activation_lock,
         &mut snapshots,
-    );
-    session.outcome.warnings.extend(hook_warnings?);
+        &mut session.outcome,
+    )?;
     session.mutated = true;
     session
         .outcome
