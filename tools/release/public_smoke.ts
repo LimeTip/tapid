@@ -37,11 +37,12 @@ export async function verifyPublicSmoke(transport: PublicTransport, identity: { 
   if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(identity.publishedAt) || !Number.isFinite(Date.parse(identity.publishedAt))) throw Error('invalid public release publication time');
   const candidates: { run: Record<string, unknown>; workflow: keyof typeof REVIEWED }[] = [];
   for (const workflow of ['release-public-smoke.yml', 'crates-publication.yml'] as const) {
-    const runs = await transport.list(`${API}/actions/workflows/${workflow}/runs`, 'workflow_runs');
+    const runs = await transport.list(`${API}/actions/workflows/${workflow}/runs?head_sha=${identity.commit}`, 'workflow_runs');
     for (const value of runs) {
       const run = object(value);
       if (!positive(run.id) || !positive(run.run_attempt) || typeof run.head_sha !== 'string' || !/^[a-f0-9]{40}$/.test(run.head_sha)) throw Error('malformed public smoke run identity');
-      if (run.path !== `.github/workflows/${workflow}`) throw Error('inconsistent public smoke workflow identity');
+      const [path, ref, ...extra] = typeof run.path === 'string' ? run.path.split('@') : [];
+      if (path !== `.github/workflows/${workflow}` || extra.length || ref !== undefined && !/^[^\s]+$/.test(ref)) throw Error('inconsistent public smoke workflow identity');
       if (run.status === 'completed' && run.conclusion === 'success') candidates.push({ run, workflow });
     }
   }
@@ -74,7 +75,7 @@ export async function verifyPublicSmoke(transport: PublicTransport, identity: { 
         const matching = jobs.filter(job => job.name === (coordinator ? `smoke / ${name}` : name));
         if (matching.length !== 1) break;
         const job = matching[0];
-        if (job.run_id !== run.id || job.run_attempt !== run.run_attempt || job.head_sha !== run.head_sha || job.status !== 'completed' || job.conclusion !== 'success') break;
+        if (job.run_id !== run.id || (job.run_attempt !== undefined && job.run_attempt !== run.run_attempt) || job.head_sha !== run.head_sha || job.status !== 'completed' || job.conclusion !== 'success') break;
         // The current immutable release must already exist when the resolver
         // reads it. This excludes smoke for an older, deleted release sharing
         // the same tag and source commit.

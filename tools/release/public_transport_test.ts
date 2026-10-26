@@ -117,3 +117,40 @@ test('accepts the bounded GitHub asset redirect route with Azure download parame
   assert.equal(Buffer.from(await transport.bytes('https://github.com/LimeTip/tapid/releases/download/v0.0.11/SHA256SUMS', 100)).toString(), 'fixture');
   assert.equal(calls, 2);
 });
+
+test('preserves exact commit filters across bounded workflow discovery pages', async () => {
+  const commit = 'b'.repeat(40);
+  let calls = 0;
+  const transport = new PublicTransport({ fetch: async input => {
+    const url = new URL(String(input));
+    assert.equal(url.searchParams.get('head_sha'), commit);
+    assert.equal(url.searchParams.get('page'), String(++calls));
+    return Response.json({ workflow_runs: calls === 1 ? Array(100).fill({}) : [] });
+  } });
+  await transport.list(`https://api.github.com/repos/LimeTip/tapid/actions/workflows/release-public-smoke.yml/runs?head_sha=${commit}`, 'workflow_runs');
+  assert.equal(calls, 2);
+});
+
+test('rejects malformed, duplicate, and misplaced discovery parameters before requesting', async () => {
+  const root = 'https://api.github.com/repos/LimeTip/tapid';
+  const runs = root + '/actions/workflows/release-public-smoke.yml/runs';
+  const hash = 'b'.repeat(40);
+  const transport = new PublicTransport({ fetch: async () => { assert.fail('unsafe request'); } });
+  for (const url of [
+    runs + '?head_sha=abc', runs + '?head_sha=' + hash.toUpperCase(),
+    runs + '?head_sha=' + hash + '&head_sha=' + hash,
+    runs + '?page=1&page=2', runs + '?unknown=1',
+    root + '/releases?head_sha=' + hash,
+    root + '/actions/runs/77/attempts/2/jobs?head_sha=' + hash,
+  ]) await assert.rejects(transport.json(url), /disallowed/);
+});
+
+test('filtered discovery still rejects page-limit exhaustion', async () => {
+  let calls = 0;
+  const transport = new PublicTransport({ fetch: async () => {
+    calls++;
+    return Response.json({ workflow_runs: Array(100).fill({}) });
+  } });
+  await assert.rejects(transport.list('https://api.github.com/repos/LimeTip/tapid/actions/workflows/crates-publication.yml/runs?head_sha=' + 'b'.repeat(40), 'workflow_runs'), /page limit/);
+  assert.equal(calls, 10);
+});

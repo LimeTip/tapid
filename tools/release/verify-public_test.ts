@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { verifyPublicRelease } from './verify-public.ts';
 import { PublicTransport } from './public_transport.ts';
 
@@ -76,7 +77,7 @@ test('identical evidence produces byte-identical JSON with no temporary paths', 
 test('JSON CLI reserves stdout for the report and exits nonzero for invalid tags', async () => {
   const { execFile } = await import('node:child_process');
   const result = await new Promise<{ code: number; stdout: string; stderr: string }>(resolve => {
-    execFile(process.execPath, ['--experimental-strip-types', new URL('./verify-public.ts', import.meta.url).pathname, 'v01.0.0', '--json'], { env: {}, timeout: 10_000 }, (error, stdout, stderr) => resolve({ code: Number(error?.code ?? 0), stdout, stderr }));
+    execFile(process.execPath, ['--experimental-strip-types', fileURLToPath(new URL('./verify-public.ts', import.meta.url)), 'v01.0.0', '--json'], { env: {}, timeout: 10_000 }, (error, stdout, stderr) => resolve({ code: Number(error?.code ?? 0), stdout, stderr }));
   });
   assert.equal(result.code, 1);
   assert.equal(JSON.parse(result.stdout).checks[0].status, 'fail');
@@ -120,4 +121,22 @@ test('command inspects all six target-specific archives before reporting archive
   }) });
   assert.equal(rejected.checks.find(check => check.name === 'archives')?.status, 'fail');
   assert.equal(rejected.ok, false);
+});
+
+test('JSON CLI test executes from a checkout path containing spaces', async () => {
+  const { cp, mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const directory = await mkdtemp(join(tmpdir(), 'tapid spaced checkout '));
+  try {
+    const release = join(directory, 'tools', 'release');
+    await cp(fileURLToPath(new URL('./', import.meta.url)), release, { recursive: true });
+    await promisify(execFile)(process.execPath, [
+      '--experimental-strip-types', '--test',
+      '--test-name-pattern=^JSON CLI reserves stdout',
+      join(release, 'verify-public_test.ts'),
+    ], { env: {}, timeout: 20_000 });
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

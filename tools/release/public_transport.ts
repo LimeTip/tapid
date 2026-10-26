@@ -36,8 +36,9 @@ function publicUrl(input: string): URL {
   if (url.hostname === 'api.github.com' && /^\/repos\/LimeTip\/tapid\/git\/trees\/[a-f0-9]{40}$/.test(url.pathname)
     && url.search === '?recursive=1') return url;
   if (url.hostname === 'crates.io' && !url.search && /^\/api\/v1\/crates\/[A-Za-z0-9][A-Za-z0-9_-]*\/[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?$/.test(url.pathname)) return url;
-  if (api && query.every(([key, value]) =>
-    (key === 'per_page' && value === '100') || (key === 'page' && /^(?:[1-9]|10)$/.test(value)))) return url;
+  const workflowRuns = /^\/repos\/LimeTip\/tapid\/actions\/workflows\/(?:release-public-smoke|crates-publication)\.yml\/runs$/.test(url.pathname);
+  if (api && new Set(query.map(([key]) => key)).size === query.length && query.every(([key, value]) =>
+    (key === 'head_sha' && workflowRuns && /^[a-f0-9]{40}$/.test(value)) || (key === 'per_page' && value === '100') || (key === 'page' && /^(?:[1-9]|10)$/.test(value)))) return url;
   if (url.hostname === 'tapid.dev' && !url.search && /^\/releases\/v1\/v[0-9]+\.[0-9]+\.[0-9]+\.tsv(?:\.sig)?$/.test(url.pathname)) return url;
   if (url.hostname === 'raw.githubusercontent.com' && !url.search
     && /^\/LimeTip\/tapid\/[a-f0-9]{40}\/(?:[A-Za-z0-9_.-]+\/)*(?:Cargo\.toml|Cargo\.lock|[A-Za-z0-9_.-]+\.rs)$/.test(url.pathname)
