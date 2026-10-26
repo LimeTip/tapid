@@ -7,7 +7,7 @@ import { mkdtemp, writeFile, rm, copyFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checksumLines, releaseRecord } from './release.ts';
-import { renderInstallers } from './bootstrap.ts';
+import { renderInstallers, templatesForCommit } from './bootstrap.ts';
 import { candidateFingerprint, selectCandidate, attestCandidate, attestUnsignedCandidate, validateUnsignedCandidate, unwrapCandidate, createDraftCandidate, downloadCandidate, publishCandidate, validateReleaseIntent, type ReleaseAdapter, type ReleaseState } from './candidate.ts';
 
 const commit = 'a'.repeat(40), object = 'b'.repeat(40);
@@ -188,6 +188,8 @@ test('CLI unsigned output roundtrips as verified envelope and refuses forged fin
   const f=await fixture();const manifest=f.plan+'.candidate.json';try{
     const cli=fileURLToPath(new URL('./candidate.ts',import.meta.url));
     const actualCommit=(await execFileAsync('git',['rev-parse','HEAD'])).stdout.trim();
+    // The CLI attests committed templates; use those same inputs for this fixture.
+    await renderInstallers(f.directory,'0.0.12',`https://github.com/${repository}/releases/download/${tag}`,await templatesForCommit(actualCommit));
     const {stdout}=await execFileAsync(process.execPath,['--experimental-strip-types',cli,'unsigned',f.directory,f.notes,f.plan,tag,actualCommit,object],{env:{...process.env,GITHUB_REPOSITORY:repository}});
     const envelope=JSON.parse(stdout);await writeFile(manifest,stdout);
     assert.equal(unwrapCandidate(envelope).schema,'tapid-release-unsigned-candidate-v1');

@@ -86,7 +86,14 @@ pub(super) fn apply(
     mut transaction: Option<&mut tapid_store::StoreTransaction>,
     activation: &crate::filesystem::activation::ActivationLock,
     snapshots: &mut Vec<tapid_store::VerifiedTreeSnapshot>,
-) -> Result<Vec<Warning>, OperationalError> {
+    outcome: &mut super::outcome::OperationOutcome,
+) -> Result<(), OperationalError> {
+    outcome.lifecycle = Some(super::outcome::LifecycleReport::new());
+    outcome
+        .lifecycle
+        .as_mut()
+        .unwrap()
+        .begin(lock.packages().len());
     let source_graph = lock.source_graph().to_json().map_err(error)?;
     let online = transaction.is_some();
     let cached = if online {
@@ -96,7 +103,6 @@ pub(super) fn apply(
     } else {
         Some(lock.clone())
     };
-    let mut warnings = Vec::new();
     let mut instance_indices = BTreeMap::new();
     for (index, instance) in input.instances.iter().enumerate() {
         let key = tapid_linker::InstanceKey::from(instance);
@@ -133,9 +139,27 @@ pub(super) fn apply(
             .filter(|&&index| trees.get(&key) == Some(&input.instances[index].tree.root))
             .ok_or_else(|| error("lifecycle package mapping lost"))?;
         let source = input.instances[index].tree.root.clone();
+        let observation = outcome
+            .lifecycle
+            .as_mut()
+            .unwrap()
+            .package(super::outcome::LifecycleIdentity::new(&key, &package));
         let hooks = match commands(&source) {
-            Ok(hooks) => hooks,
+            Ok(hooks) => {
+                outcome
+                    .lifecycle
+                    .as_mut()
+                    .unwrap()
+                    .discovered(observation, true);
+                hooks
+            }
             Err(discovery_error) => {
+                outcome
+                    .lifecycle
+                    .as_mut()
+                    .unwrap()
+                    .discovered(observation, false);
+                outcome.lifecycle.as_mut().unwrap().reason = Some("discovery_failed");
                 if policy
                     .approvals()
                     .iter()
@@ -144,8 +168,8 @@ pub(super) fn apply(
                 {
                     return Err(discovery_error);
                 }
-                warnings.push(Warning::DependencyLifecycleDiscoveryFailed {
-                    package: format!("{}@{}", package.name(), package.version()),
+                outcome.lifecycle_warning(Warning::DependencyLifecycleDiscoveryFailed {
+                    package: Box::new(super::outcome::LifecycleIdentity::new(&key, &package)),
                 });
                 Default::default()
             }
@@ -155,7 +179,12 @@ pub(super) fn apply(
         let mut private = None;
         let mut bypassed = false;
         let requires_install = hooks.requires_install();
-        for (hook, script) in hooks.into_commands() {
+        let commands = hooks.into_commands();
+        let observations = commands
+            .iter()
+            .map(|(hook, _)| outcome.lifecycle.as_mut().unwrap().hook(observation, hook))
+            .collect::<Vec<_>>();
+        for ((hook, script), observed_hook) in commands.into_iter().zip(observations) {
             let selected = policy.approval_for(
                 package.name(),
                 package.version(),
@@ -166,14 +195,29 @@ pub(super) fn apply(
             let selected = if overrides.allow_unapproved {
                 selected.ok().flatten()
             } else {
-                selected.map_err(error)?
+                selected.map_err(|e| {
+                    let report = outcome.lifecycle.as_mut().unwrap();
+                    report.authorization(observed_hook, "rejected");
+                    report.disposition(observed_hook, "blocked", Some("approval_rejected"));
+                    error(e)
+                })?
             };
             let invocation_policy;
             let approval = if let Some(approval) = selected {
+                outcome
+                    .lifecycle
+                    .as_mut()
+                    .unwrap()
+                    .authorization(observed_hook, "exact_policy");
                 approval
             } else if overrides.allow_unapproved
                 && matches!(hook.as_str(), "preinstall" | "install" | "postinstall")
             {
+                outcome
+                    .lifecycle
+                    .as_mut()
+                    .unwrap()
+                    .authorization(observed_hook, "invocation_override");
                 invocation_policy = invocation_approval(
                     &package,
                     &hook,
@@ -182,20 +226,45 @@ pub(super) fn apply(
                 )?;
                 &invocation_policy.approvals()[0]
             } else {
+                outcome
+                    .lifecycle
+                    .as_mut()
+                    .unwrap()
+                    .authorization(observed_hook, "not_approved");
                 if requires_install && hook == "install" {
+                    outcome.lifecycle.as_mut().unwrap().disposition(
+                        observed_hook,
+                        "blocked",
+                        Some("required_hook_unapproved"),
+                    );
                     return Err(error(format!(
                         "required dependency lifecycle hook install for {}@{} is not approved; approve its exact bytes in tapid.lifecycle.toml or explicitly accept the risk with --allow-unapproved-dependency-scripts; containment remains required unless --unsafe-no-dependency-sandbox is also explicitly selected",
                         package.name(),
                         package.version()
                     )));
                 }
-                warnings.push(Warning::DependencyLifecycleHookSkipped {
-                    package: format!("{}@{}", package.name(), package.version()),
+                outcome.lifecycle.as_mut().unwrap().disposition(
+                    observed_hook,
+                    "skipped",
+                    Some("default_denial"),
+                );
+                outcome.lifecycle_warning(Warning::DependencyLifecycleHookSkipped {
+                    package: Box::new(super::outcome::LifecycleIdentity::new(&key, &package)),
                     hook,
                 });
                 continue;
             };
+            outcome.lifecycle.as_mut().unwrap().disposition(
+                observed_hook,
+                "blocked",
+                Some("processing_stopped"),
+            );
             if !package.has_declared_registry_integrity() {
+                outcome.lifecycle.as_mut().unwrap().disposition(
+                    observed_hook,
+                    "blocked",
+                    Some("missing_declared_integrity"),
+                );
                 return Err(error(
                     "approved dependency scripts require registry-declared archive integrity",
                 ));
@@ -213,6 +282,12 @@ pub(super) fn apply(
                 if !bypassed {
                     copy_build_source(&current, &stage.0.join("package"))?;
                 }
+                outcome.lifecycle.as_mut().unwrap().disposition(
+                    observed_hook,
+                    "blocked",
+                    Some("execution_or_output_failed"),
+                );
+                let mut failure_reason = "execution_or_output_failed";
                 run_hook(
                     stage,
                     approval,
@@ -222,17 +297,52 @@ pub(super) fn apply(
                     lock,
                     overrides.without_containment,
                     selected.is_none() && requires_install && hook == "install",
-                )?;
+                    &mut failure_reason,
+                )
+                .inspect_err(|_| {
+                    outcome.lifecycle.as_mut().unwrap().disposition(
+                        observed_hook,
+                        "blocked",
+                        Some(failure_reason),
+                    );
+                })?;
                 validate_output(&stage.0.join("package"))?;
+                outcome
+                    .lifecycle
+                    .as_mut()
+                    .unwrap()
+                    .disposition(observed_hook, "executed", None);
                 current = stage.0.join("package");
                 bypassed = true;
                 continue;
             }
             if system_identity.is_none() {
-                system_identity =
-                    Some(tapid_runner::dependency_toolchain_identity().map_err(containment_error)?);
+                system_identity = Some(tapid_runner::dependency_toolchain_identity().map_err(
+                    |cause| {
+                        let reason = if cause.category()
+                            == tapid_runner::ExecutionErrorCategory::UnsupportedContainment
+                        {
+                            "containment_unavailable"
+                        } else {
+                            "tool_verification_failed"
+                        };
+                        outcome.lifecycle.as_mut().unwrap().disposition(
+                            observed_hook,
+                            "blocked",
+                            Some(reason),
+                        );
+                        containment_error(cause)
+                    },
+                )?);
             }
-            let toolchain = tool_identity(approval, system_identity.as_ref().unwrap())?;
+            let toolchain = tool_identity(approval, system_identity.as_ref().unwrap())
+                .inspect_err(|_| {
+                    outcome.lifecycle.as_mut().unwrap().disposition(
+                        observed_hook,
+                        "blocked",
+                        Some("tool_verification_failed"),
+                    );
+                })?;
             let graph =
                 serde_json::to_string(&(&source_graph, &completed, &outputs)).map_err(error)?;
             let recipe = policy.derived_key(approval, &toolchain, &graph);
@@ -263,9 +373,19 @@ pub(super) fn apply(
                 };
                 snapshots.push(snapshot);
                 outputs.push(previous.clone());
+                outcome
+                    .lifecycle
+                    .as_mut()
+                    .unwrap()
+                    .disposition(observed_hook, "reused", None);
                 continue;
             }
             if !online {
+                outcome.lifecycle.as_mut().unwrap().disposition(
+                    observed_hook,
+                    "blocked",
+                    Some("authenticated_output_missing_or_mismatched"),
+                );
                 return Err(error(format!(
                     "missing or mismatched verified lifecycle output for {}@{} {hook}; run an approved online install",
                     package.name(),
@@ -278,8 +398,36 @@ pub(super) fn apply(
             let stage = private.as_ref().unwrap();
             let build = stage.0.join("package");
             copy_build_source(&current, &build)?;
-            run_hook(stage, approval, &script, input, trees, lock, false, false)?;
+            outcome.lifecycle.as_mut().unwrap().disposition(
+                observed_hook,
+                "blocked",
+                Some("execution_or_output_failed"),
+            );
+            let mut failure_reason = "execution_or_output_failed";
+            run_hook(
+                stage,
+                approval,
+                &script,
+                input,
+                trees,
+                lock,
+                false,
+                false,
+                &mut failure_reason,
+            )
+            .inspect_err(|_| {
+                outcome.lifecycle.as_mut().unwrap().disposition(
+                    observed_hook,
+                    "blocked",
+                    Some(failure_reason),
+                );
+            })?;
             validate_output(&build)?;
+            outcome
+                .lifecycle
+                .as_mut()
+                .unwrap()
+                .disposition(observed_hook, "executed", None);
             let digest = tapid_archive::canonical_tree_digest(&build).map_err(error)?;
             let staged = transaction
                 .as_deref_mut()
@@ -318,7 +466,8 @@ pub(super) fn apply(
             .map_err(error)?;
         completed.insert(key, outputs);
     }
-    Ok(warnings)
+    outcome.lifecycle.as_mut().unwrap().finish();
+    Ok(())
 }
 
 fn dependency_order(lock: &Lockfile) -> Result<Vec<String>, OperationalError> {
@@ -484,13 +633,16 @@ fn run_hook(
     lock: &Lockfile,
     without_containment: bool,
     implicit_node_gyp: bool,
+    failure_reason: &mut &'static str,
 ) -> Result<(), OperationalError> {
     let tools = stage.0.join(".tools");
     if tools.exists() {
         fs::remove_dir_all(&tools).map_err(error)?;
     }
     fs::create_dir(&tools).map_err(error)?;
+    *failure_reason = "tool_verification_failed";
     let prepared_tools = prepare_tools(&tools, approval.tools(), without_containment)?;
+    *failure_reason = "execution_or_output_failed";
     let script = if implicit_node_gyp {
         let node = approval
             .tools()
@@ -655,7 +807,13 @@ fn run_hook(
         }
         return Ok(());
     }
-    let outcome = tapid_runner::execute(&request).map_err(containment_error)?;
+    let outcome = tapid_runner::execute(&request).map_err(|error| {
+        if error.category() == tapid_runner::ExecutionErrorCategory::UnsupportedContainment {
+            *failure_reason = "containment_unavailable";
+        }
+        containment_error(error)
+    })?;
+
     if outcome.termination() != &tapid_runner::Termination::Exited(0)
         || outcome.completion().cleanup_confidence()
             != tapid_runner::CleanupConfidence::KernelOwnedComplete
@@ -852,9 +1010,10 @@ mod tests {
                 None,
                 &guard,
                 &mut Vec::new(),
+                &mut super::super::outcome::OperationOutcome::unchanged(project.path()),
             );
             if accepted {
-                assert!(result.unwrap().is_empty());
+                result.unwrap();
             } else {
                 assert!(
                     result
