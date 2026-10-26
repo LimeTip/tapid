@@ -13,7 +13,7 @@ mod transport;
 pub use artifact::download_artifact;
 pub use client::{RegistryClient, RegistryTransport};
 pub use errors::{ClientError, MetadataError, RegistryClientError, TransportError};
-pub use jsr::JsrRegistry;
+pub use jsr::{JsrRegistry, validate_jsr_artifact_manifest};
 pub use models::{
     FetchMode, PackageMetadata, RawPackageMetadata, RawRegistrySnapshot, RegistryArtifact,
     RegistryKind, RegistryPackageId, RegistrySnapshot,

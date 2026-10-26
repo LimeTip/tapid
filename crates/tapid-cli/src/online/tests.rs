@@ -1244,3 +1244,95 @@ fn imported_workspace_manifest_failure_kinds() {
         }
     }
 }
+
+#[test]
+fn jsr_valid_integrity_cannot_authenticate_an_unrelated_archive_identity() {
+    let project = tapid_test_support::TempProject::new("jsr-artifact-identity").unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/npm-import/registry.json"
+    ))
+    .unwrap();
+    let bytes = STANDARD
+        .decode(
+            fixture["packages"][0]["artifact"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("base64:")
+                .unwrap(),
+        )
+        .unwrap();
+    let mut record = named_record("@std/path", "1.0.0", &[]);
+    record.registry = JSR.parse().unwrap();
+    record.artifact = "https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz".into();
+    record.integrity = Some(integrity(&bytes));
+    record.copied_archive = Some(bytes.into());
+    let id = tapid_registry_client::RegistryPackageId::from_source(
+        record.registry.clone(),
+        record.name.clone(),
+        record.version.clone(),
+    );
+    let store = Store::new(project.path().join("store"));
+    fs::create_dir_all(store.root()).unwrap();
+    let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+    let mut transaction = store.transaction();
+    let mut fetcher = artifact::ArtifactFetcher {
+        store: &store,
+        config: &config,
+        transports: BTreeMap::new(),
+        allowed_origins: config.configured_origins(),
+    };
+    let error = fetcher
+        .prepare(&id, &record, None, &mut transaction)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("JSR archive does not match selected artifact"),
+        "{error}"
+    );
+    drop(transaction);
+    assert!(!store.root().join("trees").exists());
+}
+
+#[test]
+fn jsr_generated_archive_is_verified_before_store_publication() {
+    let project = tapid_test_support::TempProject::new("jsr-valid-artifact").unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/jsr-generated-manifest.json"
+    ))
+    .unwrap();
+    let bytes = STANDARD
+        .decode(fixture["artifact"].as_str().unwrap())
+        .unwrap();
+    let mut record = named_record("@std/path", "1.0.0", &[]);
+    record.registry = JSR.parse().unwrap();
+    record.artifact = "https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz".into();
+    record.integrity = Some(integrity(&bytes));
+    record.copied_archive = Some(bytes.into());
+    let id = tapid_registry_client::RegistryPackageId::from_source(
+        record.registry.clone(),
+        record.name.clone(),
+        record.version.clone(),
+    );
+    let store = Store::new(project.path().join("store"));
+    fs::create_dir_all(store.root()).unwrap();
+    let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+    let mut transaction = store.transaction();
+    let mut fetcher = artifact::ArtifactFetcher {
+        store: &store,
+        config: &config,
+        transports: BTreeMap::new(),
+        allowed_origins: config.configured_origins(),
+    };
+    let (_, digest, tree) = fetcher
+        .prepare(&id, &record, None, &mut transaction)
+        .unwrap();
+    assert!(tree.join("package/package.json").is_file());
+    assert!(store.verified_tree_path(&digest).is_err());
+    transaction.publish().unwrap().commit().unwrap();
+    let stored = store.verified_tree_path(&digest).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(stored.join("package/package.json")).unwrap()).unwrap();
+    assert_eq!(manifest["name"], "@jsr/std__path");
+    assert_eq!(manifest["_jsr_revision"], 11);
+}

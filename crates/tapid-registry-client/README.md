@@ -33,9 +33,13 @@ unverified and do not establish artifact, provenance, or vulnerability freshness
 
 ## JSR
 
-`JsrRegistry` accepts scoped names such as `@std/path` and the current `/{scope}/{name}/meta.json` shape. Version keys must be strict semver. It preserves `manifest.dependencies` and `manifest.peerDependencies` as separate metadata maps. An artifact is returned only when metadata explicitly supplies an HTTPS `npm.tarball` and valid SHA-512 `npm.integrity`; integrity is never derived from the package name, version, URL, or response transport. Missing or unusable integrity returns `UnsupportedIntegrity`.
+`JsrRegistry` accepts public scoped names such as `@std/path` with logical origin `https://jsr.io`. It requests official npm compatibility metadata at `https://npm.jsr.io/@jsr/std__path`, checks both package and version identities, and retains logical JSR identity in returned artifacts. Dependencies, peers, optional dependencies, and platform constraints use the same validated metadata parsing as npm.
 
-Live JSR installation and live integrity behavior are not verified. Local fixtures exercise the parser and fail-closed contract only.
+Every usable version must declare valid SHA-512 `dist.integrity` and a canonical artifact URL of the form `https://npm.jsr.io/~/REVISION/@jsr/SCOPE__NAME/VERSION.tgz`. The artifact origin, generated name, and version must agree with the request. Revision comes from the selected record, not a hardcoded upstream revision. Native file checksums and locally computed hashes do not substitute for declared archive integrity. Missing integrity fails closed.
+
+`validate_jsr_artifact_manifest` checks the safely extracted generated `package.json` name, version, and numeric `_jsr_revision` against the selected artifact. Callers must verify compressed archive bytes against the declared integrity first. Online CLI preparation applies this check before staging live JSR trees; deterministic CLI registry fixtures remain a separate test input contract.
+
+Live JSR installation remains experimental and unverified. Compatibility metadata parsing and archive identity validation alone do not establish supported transitive installation or local-only frozen replay. Fixture tests are not live acceptance evidence.
 
 ## Transport contract
 

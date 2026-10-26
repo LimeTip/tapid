@@ -239,7 +239,7 @@ fn parse_npm(
     parse_npm_object(origin, name, root, allow_missing_integrity)
 }
 
-fn parse_npm_object(
+pub(super) fn parse_npm_object(
     origin: &RegistryOrigin,
     name: &PackageName,
     root: serde_json::Map<String, serde_json::Value>,
