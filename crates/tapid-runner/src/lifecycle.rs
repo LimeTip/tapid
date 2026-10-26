@@ -468,16 +468,18 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
     }
 
     #[test]
-    fn approvals_require_an_exact_shell_name() {
+    fn approvals_require_an_exact_pinned_shell_name() {
+        let document = document();
         for name in ["sh", "cmd"] {
-            let input = document().replace("name = \"sh\"", &format!("name = \"{name}\""));
+            let input = document.replace("name = \"sh\"", &format!("name = \"{name}\""));
             assert!(DependencyLifecyclePolicy::parse(input.as_bytes()).is_ok());
         }
-        for name in ["node", "SH", "cmd.exe"] {
-            let input = document().replace("name = \"sh\"", &format!("name = \"{name}\""));
+        for name in ["node", "SH", "CMD", "sh.exe", "cmd.exe"] {
+            let input = document.replace("name = \"sh\"", &format!("name = \"{name}\""));
             assert_eq!(
                 DependencyLifecyclePolicy::parse(input.as_bytes()).unwrap_err(),
-                "lifecycle tools must pin sh or cmd"
+                "lifecycle tools must pin sh or cmd",
+                "accepted tool {name} without a pinned shell"
             );
         }
     }
