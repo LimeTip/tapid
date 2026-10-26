@@ -104,29 +104,56 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
         changes
             .warnings
             .iter()
+            .map(Warning::code)
+            .collect::<Vec<_>>()
+    });
+    let mut warning_details = changes.map_or_else(Vec::new, |changes| {
+        changes
+            .warnings
+            .iter()
+            .take(1024)
             .map(|warning| match warning {
-                Warning::UnapprovedDependencyScriptsAllowed => {
-                    "UNAPPROVED_DEPENDENCY_SCRIPTS_ALLOWED"
+                Warning::DependencyLifecycleHookSkipped { package, hook } => json!({
+                    "code": "DEPENDENCY_LIFECYCLE_HOOK_SKIPPED",
+                    "package": lifecycle_identity(package), "hook": hook,
+                }),
+                Warning::DependencyLifecycleDiscoveryFailed { package } => json!({
+                    "code": "DEPENDENCY_LIFECYCLE_DISCOVERY_FAILED",
+                    "package": lifecycle_identity(package),
+                }),
+                Warning::UpdateGraphChange { package, reason } => {
+                    json!({"code": warning.code(), "package": package, "reason": reason})
                 }
-                Warning::DependencyScriptsWithoutContainment => {
-                    "DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT"
-                }
-                Warning::UpdateGraphChange { .. } => "UPDATE_GRAPH_CHANGE",
-                Warning::UnverifiedRegistryArtifactsAllowed => {
-                    "UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED"
-                }
-                Warning::PreviousTransactionRecovered => "PREVIOUS_TRANSACTION_RECOVERED",
-                Warning::DependencyLifecycleHookSkipped { .. } => {
-                    "DEPENDENCY_LIFECYCLE_HOOK_SKIPPED"
-                }
-                Warning::DependencyLifecycleDiscoveryFailed { .. } => {
-                    "DEPENDENCY_LIFECYCLE_DISCOVERY_FAILED"
-                }
+                _ => json!({"code": warning.code()}),
             })
             .collect::<Vec<_>>()
     });
+    let warning_truncation_start = truncated_fields.len();
+    for (index, value) in warning_details.iter_mut().enumerate() {
+        status_text(
+            value,
+            &format!("/warning_details/{index}"),
+            &mut truncated_fields,
+        );
+    }
+    let warning_details_complete = truncated_fields.len() == warning_truncation_start
+        && changes.is_none_or(|c| c.omitted_warnings == 0 && c.warnings.len() <= 1024);
+    if let Some(changes) = changes {
+        warnings.extend(changes.omitted_warning_codes.iter().copied());
+    }
+    let mut lifecycle = changes
+        .and_then(|c| c.lifecycle.as_ref())
+        .map(lifecycle_report)
+        .unwrap_or(Value::Null);
+    let before = truncated_fields.len();
+    status_text(&mut lifecycle, "/lifecycle", &mut truncated_fields);
+    if !lifecycle.is_null() && truncated_fields.len() != before {
+        lifecycle["details_complete"] = json!(false);
+    }
     warnings.sort_unstable();
+
     warnings.dedup();
+    truncated_fields.sort_unstable();
     json!({
         "schema_version": 1,
         "operation": operation,
@@ -136,10 +163,41 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
         "changes": {"state": state, "files": files, "paths": native_files},
         "truncated_fields": truncated_fields,
         "warnings": warnings,
+        "warning_details": warning_details,
+        "warning_details_complete": warning_details_complete,
+        "warning_details_omitted": changes.map_or(0, |c| c.omitted_warnings + c.warnings.len().saturating_sub(1024)),
+        "lifecycle": lifecycle,
         "errors": [],
         "retry": null,
         "data": null,
     })
+}
+
+fn lifecycle_report(report: &crate::application::outcome::LifecycleReport) -> Value {
+    let mut packages = report.packages.iter().collect::<Vec<_>>();
+    packages.sort_by(|a, b| a.identity.key.cmp(&b.identity.key));
+    json!({"coverage": report.coverage, "reason": report.reason,
+        "selected_packages": report.selected_packages, "inspected_packages": report.inspected_packages,
+        "details_complete": report.omitted_packages == 0 && report.packages.iter().all(|p| p.omitted_hooks == 0),
+        "omitted_packages": report.omitted_packages,
+        "hooks_executed": report.executed, "generated_outputs_reused": report.reused, "hooks_skipped": report.skipped,
+        "packages": packages.into_iter().map(|p| {
+            let mut hooks = p.hooks.iter().collect::<Vec<_>>();
+            hooks.sort_by(|a,b| a.hook.cmp(&b.hook));
+            json!({"identity": lifecycle_identity(&p.identity), "discovery": p.discovery,
+                "omitted_hooks": p.omitted_hooks,
+                "hooks": hooks.into_iter().map(|h| json!({"hook": h.hook, "authorization": h.authorization,
+                    "disposition": h.disposition, "reason": h.reason})).collect::<Vec<_>>()})
+        }).collect::<Vec<_>>()})
+}
+
+fn lifecycle_identity(identity: &crate::application::outcome::LifecycleIdentity) -> Value {
+    let key = &identity.key;
+    json!({"key": key.to_string(), "name": key.name.to_string(),
+        "version": key.version.to_string(), "source": key.source.package_source().expect("verified artifact source").to_string(),
+        "archive_digest": identity.archive_digest,
+        "peer_context": key.peer_context,
+        "platform_context": key.platform_context})
 }
 
 /// Emit an unchanged-project status envelope with bounded, sanitized report strings.
@@ -428,3 +486,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;

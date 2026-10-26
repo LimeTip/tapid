@@ -1,9 +1,20 @@
+<#
+.SYNOPSIS
+Install Tapid with optional user PATH persistence.
+.DESCRIPTION
+Without -ConfigurePath, stored and process PATH remain unchanged. The installer
+prints a literal command for activation. -ConfigurePath opts into receipt-backed
+user-scope persistence; future sessions must load the updated environment.
+.PARAMETER ConfigurePath
+Persist the install directory in user PATH, preserving existing tokens and kind.
+#>
 [CmdletBinding()]
 param(
     [string]$Version = "latest",
     [string]$SourceRef,
     [string]$InstallDir = (Join-Path $HOME ".local\bin"),
-    [string]$Repo = "LimeTip/tapid"
+    [string]$Repo = "LimeTip/tapid",
+    [switch]$ConfigurePath
 )
 
 $ErrorActionPreference = "Stop"
@@ -150,24 +161,142 @@ function Test-AbsolutePath([string]$Path) {
 }
 
 $PathUpdated = $false
+# Comparison never rewrites stored tokens or resolves relative paths against cwd.
+function Get-PathComparisonKey([string]$Token, [bool]$Expand = $true) {
+    if ([string]::IsNullOrEmpty($Token) -or $Token -match '[\r\n;]' -or $Token -cne $Token.Trim()) { return $null }
+    $expanded = if ($Expand) { [Environment]::ExpandEnvironmentVariables($Token) } else { $Token }
+    if ($Expand -and $expanded -match '%[^%]*%') { return $null }
+    $literal = $expanded.Replace('/', '\')
+    if ($literal -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+(?:\\.*)?$)') { return $null }
+    if ($literal -match '[<>"|?*]' -or $literal.Substring(2).Contains(':')) { return $null }
+    # Preserve drive roots; UNC share roots compare with or without their last separator.
+    $key = $literal.TrimEnd([char]92)
+    if ($key -match '^[A-Za-z]:$') { $key += '\' }
+    return $key.ToUpperInvariant()
+}
+# Read raw registry bytes: environment expansion is only for comparison keys.
+function Read-UserPath {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+    try {
+        if ($null -eq $key -or $key.GetValueNames() -inotcontains 'Path') {
+            return [pscustomobject]@{ Present = $false; Value = ''; Kind = 'String' }
+        }
+        $kind = $key.GetValueKind('Path').ToString()
+        if ($kind -notin 'String', 'ExpandString') { Fail 'unsupported user PATH registry kind' }
+        $value = $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($value.Length -gt 4MB) { Fail 'user PATH exceeds the size limit' }
+        return [pscustomobject]@{ Present = $true; Value = [string]$value; Kind = $kind }
+    } finally { if ($key) { $key.Dispose() } }
+}
+function Write-UserPath($Snapshot) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+        if ($Snapshot.Present) {
+            $valueKind = [Microsoft.Win32.RegistryValueKind]$Snapshot.Kind
+            $key.SetValue('Path', $Snapshot.Value, $valueKind)
+        } else { $key.DeleteValue('Path', $false) }
+    } finally { $key.Dispose() }
+}
+function Test-PathSnapshot($Left, $Right) {
+    return $Left.Present -eq $Right.Present -and $Left.Kind -ceq $Right.Kind -and $Left.Value -ceq $Right.Value
+}
+function Assert-PathReceiptLocation([string]$Path, [bool]$Directory) {
+    $current = $Path
+    $first = $true
+    while (-not [string]::IsNullOrEmpty($current)) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { Fail 'unsafe PATH receipt reparse point' }
+            if ($first -and [IO.Path]::DirectorySeparatorChar -eq '\') {
+                $owner = (Get-Acl -LiteralPath $current).GetOwner([Security.Principal.SecurityIdentifier]).Value
+                $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+                try {
+                    if ($owner -cne $identity.User.Value -and $owner -cne $identity.Owner.Value) { Fail 'PATH receipt must be owned by the current user or token owner' }
+                } finally { $identity.Dispose() }
+            }
+            if (($first -and -not $Directory -and -not ($item -is [IO.FileInfo])) -or
+                ((-not $first -or $Directory) -and -not ($item -is [IO.DirectoryInfo]))) { Fail 'unsafe PATH receipt location' }
+        }
+        $first = $false
+        $parent = Split-Path -Parent $current
+        if ($parent -ceq $current) { break }
+        $current = $parent
+    }
+}
+function Read-PathReceipt([string]$Receipt, [string]$Directory) {
+    Assert-PathReceiptLocation $Receipt $true
+    $names = @('manifest', 'directory', 'before', 'after', 'present', 'kind', 'inserted', 'state')
+    $children = @(Get-ChildItem -LiteralPath $Receipt -Force)
+    if ($children.Count -ne $names.Count) { Fail 'invalid PATH receipt fields' }
+    $values = @{}
+    foreach ($name in $names) {
+        $path = Join-Path $Receipt $name
+        Assert-PathReceiptLocation $path $false
+        $limit = if ($name -in 'before', 'after') { 8MB } else { 64KB }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path -Force).Length -gt $limit) { Fail 'invalid or oversized PATH receipt field' }
+        $values[$name] = [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false, $true))
+    }
+    if ($values.manifest -cne "tapid-path-v1`nwindows`n1`n" -or $values.directory -cne $Directory -or
+        $values.present -cnotmatch '^[01]\z' -or $values.inserted -cnotmatch '^[01]\z' -or
+        $values.kind -cnotmatch '^(String|ExpandString)\z' -or $values.state -cnotmatch '^(pending|complete)\z') { Fail 'invalid PATH receipt' }
+    $expected = if ($values.inserted -ceq '0') { $values.before } elseif ($values.present -ceq '0') { $Directory } else { $values.before + ';' + $Directory }
+    if ($values.after -cne $expected -or ($values.present -ceq '0' -and ($values.before -cne '' -or $values.kind -cne 'String'))) { Fail 'inconsistent PATH receipt snapshots' }
+    return $values
+}
+function Set-PathReceiptComplete([string]$Receipt) {
+    $state = Join-Path $Receipt 'state'
+    Assert-PathReceiptLocation $state $false
+    $stage = Join-Path (Split-Path -Parent $Receipt) ('.tapid-path-state-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText($stage, 'complete', [Text.UTF8Encoding]::new($false))
+        [IO.File]::Replace($stage, $state, [System.Management.Automation.Language.NullString]::Value)
+        if ([IO.File]::ReadAllText($state) -cne 'complete') { Fail 'PATH receipt read-back failed' }
+    } finally { if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Force } }
+}
 function Configure-UserPath([string]$Directory) {
-    $normalized = ([IO.Path]::GetFullPath($Directory)).TrimEnd('\\')
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $entries = @($userPath -split ';' | Where-Object { $_ -and $_.TrimEnd('\\') })
-    $alreadyConfigured = @($entries | Where-Object { ([IO.Path]::GetFullPath($_)).TrimEnd('\\') -ieq $normalized }).Count -gt 0
-    if (-not $alreadyConfigured) {
-        [Environment]::SetEnvironmentVariable("Path", (($entries + $normalized) -join ';'), "User")
+    if (-not $ConfigurePath) { return }
+    $key = Get-PathComparisonKey $Directory $false
+    if ($null -eq $key) { Fail "install directory must be a fully qualified literal Windows PATH entry" }
+    $receipt = Join-Path $InstallDir '.tapid-path-v1'
+    Assert-PathReceiptLocation $receipt $true
+    $current = Read-UserPath
+    if (Test-Path -LiteralPath $receipt) {
+        $values = Read-PathReceipt $receipt $Directory
+    } else {
+        $entries = if ($current.Present) { $current.Value.Split([char]59) } else { @() }
+        $inserted = @($entries | Where-Object { (Get-PathComparisonKey $_) -ceq $key }).Count -eq 0
+        $after = if (-not $inserted) { $current.Value } elseif (-not $current.Present) { $Directory } else { $current.Value + ';' + $Directory }
+        $values = @{
+            manifest = "tapid-path-v1`nwindows`n1`n"; directory = $Directory; before = $current.Value; after = $after
+            present = if ($current.Present) { '1' } else { '0' }; kind = $current.Kind
+            inserted = if ($inserted) { '1' } else { '0' }; state = 'pending'
+        }
+        $stage = Join-Path $InstallDir ('.tapid-path-stage-' + [guid]::NewGuid().ToString('N'))
+        try {
+            New-Item -ItemType Directory -Path $stage | Out-Null
+            foreach ($name in $values.Keys) { [IO.File]::WriteAllText((Join-Path $stage $name), $values[$name], [Text.UTF8Encoding]::new($false)) }
+            $null = Read-PathReceipt $stage $Directory
+            Assert-PathReceiptLocation $receipt $true
+            [IO.Directory]::Move($stage, $receipt)
+        } finally { if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force } }
     }
-    if (($env:Path -split ';' | ForEach-Object { $_.TrimEnd('\\') }) -notcontains $normalized) {
-        $env:Path = if ([string]::IsNullOrEmpty($env:Path)) { $normalized } else { "$normalized;$env:Path" }
-    }
+    $before = [pscustomobject]@{ Present = $values.present -ceq '1'; Value = $values.before; Kind = $values.kind }
+    $after = [pscustomobject]@{ Present = $true; Value = $values.after; Kind = $values.kind }
+    if ($values.inserted -ceq '0') { $after.Present = $before.Present }
+    $current = Read-UserPath
+    if (Test-PathSnapshot $current $after) { }
+    elseif ($values.state -ceq 'pending' -and (Test-PathSnapshot $current $before)) { Write-UserPath $after }
+    else { Fail 'user PATH changed since the ownership receipt; preserving edits' }
+    if (-not (Test-PathSnapshot (Read-UserPath) $after)) { Fail 'user PATH read-back verification failed' }
+    Set-PathReceiptComplete $receipt
     $script:PathUpdated = $true
 }
 function Print-PathGuidance {
-    if ($PathUpdated) {
-        Write-Output "Tapid is ready in this PowerShell session and future user sessions."
-        Write-Output "Open a new terminal if another process does not see the updated PATH."
-    }
+    if ($PathUpdated) { Write-Output "User PATH persistence verified. Future sessions must load the updated user environment." }
+    Write-Output "To activate Tapid in this PowerShell session, run:"
+    $literal = $InstallDir.Replace("'", "''")
+    $quoted = "'" + $literal + "'"
+    Write-Output ('$env:Path = $(if (@($env:Path -split '';'' ) -icontains ' + $quoted + ') { $env:Path } elseif ($null -eq $env:Path) { ' + $quoted + ' } else { ' + $quoted + ' + '';'' + $env:Path })')
 }
 function Test-RegularDestination([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Any)) { return }
@@ -178,6 +307,8 @@ function Test-RegularDestination([string]$Path) {
 }
 
 if ($Repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z') { Fail "repository must be OWNER/REPO" }
+if ($ConfigurePath -and $InstallDir.Contains('%')) { Fail 'install directory containing percent characters requires manual PATH activation' }
+if ($InstallDir -match ';') { Fail "install directory must not contain the PATH delimiter" }
 if (-not (Test-AbsolutePath $InstallDir)) { Fail "install directory must be an absolute path" }
 if ($PSBoundParameters.ContainsKey("Version") -and $PSBoundParameters.ContainsKey("SourceRef")) { Fail "use either -Version or -SourceRef, not both" }
 if ($PSBoundParameters.ContainsKey("SourceRef") -and [string]::IsNullOrWhiteSpace($SourceRef)) { Fail "-SourceRef requires a non-empty value" }
@@ -215,6 +346,7 @@ if (-not [string]::IsNullOrEmpty($SourceRef)) {
             Configure-UserPath $InstallDir
         } catch {
             Write-Warning "Tapid was installed, but the user PATH could not be updated: $($_.Exception.Message)"
+            throw
         }
         Write-Output "Installed Tapid from $SourceRef into $destination"
         Print-PathGuidance
@@ -331,6 +463,7 @@ try {
         Configure-UserPath $InstallDir
     } catch {
         Write-Warning "Tapid was installed, but the user PATH could not be updated: $($_.Exception.Message)"
+        throw
     }
     Write-Output "Installed Tapid v$Version into $destination"
     Print-PathGuidance

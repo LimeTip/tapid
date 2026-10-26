@@ -203,8 +203,9 @@ const assertSourceInstallers = (sh: string, ps: string) => {
   assert(unixStart >= 0 && windowsStart >= 0);
   // Freeze only the source branches, including clone/detached checkout/fetch,
   // actual locked Cargo install (default release), fresh root, and cleanup.
+  // Windows PATH failure now propagates after reporting that executable installation succeeded.
   assert.equal(digest(sh.slice(unixStart, sh.indexOf('\ncommand -v curl', unixStart))), '983cbaca05be17464227d7cc59e358821bec7ff2f62714b00eef97ce85d2ff61');
-  assert.equal(digest(ps.slice(windowsStart, ps.indexOf('\n$legacyRelease =', windowsStart))), '6abd721ba149f4fc8b4d329e60feba702048d63bdbc01b4b3dbb2b67917c36dd');
+  assert.equal(digest(ps.slice(windowsStart, ps.indexOf('\n$legacyRelease =', windowsStart))), '1a308c309a6f904864caa53d4980d455513aa6b317ecb02052711992800cee7a');
 };
 
 test('source installer compiler reuse is step-only without changing real install or handoff provenance', async () => {

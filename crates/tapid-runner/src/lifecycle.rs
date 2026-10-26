@@ -468,6 +468,23 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
     }
 
     #[test]
+    fn approvals_require_an_exact_pinned_shell_name() {
+        let document = document();
+        for name in ["sh", "cmd"] {
+            let input = document.replace("name = \"sh\"", &format!("name = \"{name}\""));
+            assert!(DependencyLifecyclePolicy::parse(input.as_bytes()).is_ok());
+        }
+        for name in ["node", "SH", "CMD", "sh.exe"] {
+            let input = document.replace("name = \"sh\"", &format!("name = \"{name}\""));
+            assert_eq!(
+                DependencyLifecyclePolicy::parse(input.as_bytes()).unwrap_err(),
+                "lifecycle tools must pin sh or cmd",
+                "accepted tool {name} without a pinned shell"
+            );
+        }
+    }
+
+    #[test]
     fn approvals_reject_tool_names_that_collide_as_windows_executables() {
         for name in ["SH", "sh.exe", "sh.EXE"] {
             let mut input: toml::Value = toml::from_str(&document()).unwrap();

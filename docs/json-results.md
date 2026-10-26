@@ -476,3 +476,88 @@ mode and invalid arguments exit 2. Stable operation error codes are
 `LOCK_GRAPH_INVALID_SNAPSHOT`, `LOCK_GRAPH_UNSUPPORTED_FORMAT`,
 `LOCK_GRAPH_INVALID_SCOPE`, `LOCK_GRAPH_INVALID_CURSOR`,
 `LOCK_GRAPH_UNSUPPORTED_COMPARISON`, and `LOCK_GRAPH_OUTPUT_LIMIT`.
+
+## Dependency lifecycle observations
+
+Schema version 1 adds envelope fields on success and failure:
+
+- `warning_details`: ordered typed warning occurrences. Lifecycle warnings contain
+  `code`, `package` identity, and `hook` for skipped hooks. Legacy `warnings` remains
+  the sorted, deduplicated array of codes. `warning_details_omitted` counts omitted
+  occurrences; `warning_details_complete` is false after omission or scalar truncation.
+- `lifecycle`: null outside installation processing, otherwise the observations
+  established by that operation. Failure still has `data: null`.
+
+`lifecycle.coverage` is `not_performed`, `incomplete`, or `complete`. Its optional
+`reason` explains `before_discovery`, `imported_lock`, `processing_stopped`, or
+`discovery_failed`. `selected_packages` is null until a validated selection is
+available. `inspected_packages` counts attempted discovery, including failures.
+Complete coverage means all selected packages were inspected; it says nothing
+about hook success or application readiness.
+
+`packages` is sorted by the original lock instance key. Each entry has `identity`,
+`discovery` (`succeeded`, `failed`, or `not_performed`), `hooks`, and
+`omitted_hooks`. Successful discovery with an empty hook array establishes no
+hooks were discovered. Failed or unperformed discovery does not. Identity fields
+are `key`, `name`, `version`, `source`, `archive_digest`, `peer_context`, and
+`platform_context`; distinct registry, peer, and platform instances stay distinct.
+
+Hooks are sorted by hook name. They contain no raw command or environment values:
+
+| Field | Values |
+| --- | --- |
+| `authorization` | `not_evaluated`, `not_approved`, `exact_policy`, `invocation_override`, `rejected` |
+| `disposition` | `not_performed`, `skipped`, `executed`, `reused`, `blocked` |
+| `reason` | null or a stable reason from an existing check |
+
+Reasons include `default_denial`, `processing_stopped`, `approval_rejected`,
+`required_hook_unapproved`, `missing_declared_integrity`,
+`authenticated_output_missing_or_mismatched`, `tool_verification_failed`,
+`containment_unavailable`, and `execution_or_output_failed`. Missing and mismatched
+cached output intentionally share one classification. Unchecked prerequisites
+remain unknown. Invocation authorization is not exact checked-in approval or
+cache eligibility.
+
+`hooks_executed`, `generated_outputs_reused`, and `hooks_skipped` count observed
+outcomes independently of detail limits. Execution is recorded after successful
+execution and output validation. Reuse requires authenticated acceptance and
+required staging. These facts survive later failures or rollback; only
+`changes.state` establishes whether dependency files were committed. Neither a
+successful install nor any lifecycle observation establishes build, test, or
+runtime usability.
+
+Each structured collection retains at most 1,024 records while processing;
+`omitted_packages`, per-package `omitted_hooks`, and `warning_details_omitted`
+report exact omissions. Counters and installation checks continue after a limit.
+`details_complete` is independent of inspection coverage and becomes false after
+omission or scalar truncation. Scalars use the existing sanitized 4,096-byte
+limit and JSON-pointer `truncated_fields`. Display identities may be shortened;
+never use shortened values as equality keys or approval evidence. Reports exclude
+raw scripts, child output, attestations, keys, and environment values.
+
+For example, these selected fields describe one default-denied hook after files
+were committed (other identity and report fields are omitted here):
+
+```json
+{
+  "outcome": "success",
+  "changes": {"state": "committed"},
+  "warnings": ["DEPENDENCY_LIFECYCLE_HOOK_SKIPPED"],
+  "lifecycle": {
+    "coverage": "complete",
+    "hooks_executed": 0,
+    "generated_outputs_reused": 0,
+    "hooks_skipped": 1,
+    "packages": [{
+      "discovery": "succeeded",
+      "hooks": [{"hook": "install", "authorization": "not_approved", "disposition": "skipped", "reason": "default_denial"}]
+    }]
+  }
+}
+```
+
+A frozen replay with an exact approval but unavailable authenticated output instead
+has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
+`authorization: "exact_policy"`, `disposition: "blocked"`, and
+`reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
+in the report, while `changes.state` describes preservation or rollback.
