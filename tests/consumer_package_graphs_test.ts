@@ -264,3 +264,52 @@ test("peer provider mismatch fails even when dependency version is unchanged", (
       ),
     );
   }));
+test("npm may retain an unreachable foreign optional branch descendant", () =>
+  graphs((a, b) => {
+    for (const root of [a, b]) {
+      const file = join(root, root === a ? "package-lock.json" : "tapid.lock");
+      const lock = json(file),
+        npm = root === a ? lock : lock.npmLock;
+      const manifest = json(join(root, "package.json"));
+      manifest.optionalDependencies = { foreign: "1.0.0" };
+      writeJson(join(root, "package.json"), manifest);
+      npm.packages["node_modules/foreign"] = {
+        version: "1.0.0",
+        optional: true,
+        os: ["nonexistent"],
+        resolved: "https://registry.npmjs.org/foreign/-/foreign.tgz",
+        integrity: "sha512-foreign",
+        dependencies: { child: "1.0.0" },
+      };
+      npm.packages["node_modules/child"] = {
+        version: "1.0.0",
+        optional: true,
+        resolved: "https://registry.npmjs.org/child/-/child.tgz",
+        integrity: "sha512-child",
+      };
+      writeJson(file, lock);
+    }
+    writeJson(join(a, "node_modules/child/package.json"), {
+      name: "child",
+      version: "1.0.0",
+    });
+    const result = compare(a, b);
+    assert.equal(result.code, 0);
+    assert.deepEqual(
+      result.report.permittedPhysicalDifferences.npmOnly.map((r) => r.name),
+      ["child"],
+    );
+    // Removing the optional evidence must turn the same extra package into a failure.
+    const lock = json(join(a, "package-lock.json"));
+    delete lock.packages["node_modules/child"].optional;
+    writeJson(join(a, "package-lock.json"), lock);
+    assert.equal(compare(a, b).code, 1);
+    lock.packages["node_modules/child"].optional = true;
+    delete lock.packages["node_modules/foreign"].dependencies;
+    writeJson(join(a, "package-lock.json"), lock);
+    assert.equal(
+      compare(a, b).code,
+      1,
+      "an optional orphan has no platform omission evidence",
+    );
+  }));

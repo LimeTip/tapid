@@ -54,6 +54,7 @@ function evidence(root: string, npm: boolean) {
     omitted: Json[] = [],
     unsupported: Json[] = [];
   const instances: Json[] = [];
+  const retainedInapplicable: Json[] = [];
   const seen = new Set<string>(),
     nodes = new Set<string>(),
     edges = new Set<string>();
@@ -126,6 +127,7 @@ function evidence(root: string, npm: boolean) {
   };
   const rootManifest = read(join(root, "package.json"));
   const applicable = new Set<string>();
+  const inapplicableBranch = new Set<string>();
   if (!native) {
     const incompatible = (r: Json) =>
       Object.entries({
@@ -155,7 +157,24 @@ function evidence(root: string, npm: boolean) {
       };
       for (const name of Object.keys(deps)) {
         const id = provider(records, parent, name);
-        if (!id || applicable.has(id) || incompatible(records[id])) continue;
+        if (!id || applicable.has(id)) continue;
+        if (incompatible(records[id])) {
+          const branch = [id];
+          for (let j = 0; j < branch.length; j++) {
+            const child = branch[j];
+            if (inapplicableBranch.has(child)) continue;
+            inapplicableBranch.add(child);
+            const record = records[child];
+            for (const name of Object.keys({
+              ...record.dependencies,
+              ...record.optionalDependencies,
+            })) {
+              const next = provider(records, child, name);
+              if (next) branch.push(next);
+            }
+          }
+          continue;
+        }
         applicable.add(id);
         pending.push([id, records[id]]);
       }
@@ -327,22 +346,23 @@ function evidence(root: string, npm: boolean) {
   }
   if (!native)
     for (const [id, r] of Object.entries(records) as [string, Json][]) {
-      if (
-        !id ||
-        [...seen].some((v) => v.startsWith(id + ":")) ||
-        existsSync(join(root, id, "package.json"))
-      )
-        continue;
+      if (!id || [...seen].some((v) => v.startsWith(id + ":"))) continue;
       const constraints = Object.fromEntries(
         ["os", "cpu", "libc"].map((f) => [f, r[f] ?? []]),
       );
-      omitted.push({
+      const installed = existsSync(join(root, id, "package.json"));
+      const permitted =
+        r.optional === true &&
+        !applicable.has(id) &&
+        inapplicableBranch.has(id);
+      const inventory = installed ? retainedInapplicable : omitted;
+      inventory.push({
         id,
         ...token(id),
         constraints,
-        permitted: r.optional === true && !applicable.has(id),
+        permitted,
       });
-      if (!r.optional || applicable.has(id))
+      if (!permitted && !installed)
         errors.push("unexplained omitted lock package: " + id);
     }
   return {
@@ -350,6 +370,7 @@ function evidence(root: string, npm: boolean) {
     edges: [...edges].sort(),
     instances,
     omitted,
+    retainedInapplicable,
     unsupported,
     errors,
   };

@@ -105,7 +105,11 @@ replay certifies installation from verified artifacts, not all later Wrangler
 network behavior. Wrangler can perform update checks; telemetry is disabled.
 
 The npm lock includes foreign OS/CPU/libc optional binaries. Reports inventory
-omitted lock records and their constraints; applicable omissions and unexplained
+omitted lock records and their constraints. npm may retain unreachable descendants
+of a foreign-platform optional branch (for example sharp wasm and its runtime
+helpers); reports list these separately as permitted physical differences only
+when the lock proves their optional, inapplicable branch membership. Applicable
+omissions and unexplained
 graph/provenance differences fail. Tapid aborts applicable optional artifact
 verification failures where npm may skip them. Different physical hoisting is
 allowed; selected logical identities, peers, exact tarball URLs, integrity and

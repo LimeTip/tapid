@@ -378,6 +378,19 @@ export function compare(
     registryOrigins: [...(metadata.get(id)?.sources ?? [])].sort(),
     integrities: [...(metadata.get(id)?.integrities ?? [])].sort(),
   });
+  const permittedPhysical = (manager: any, reachable: Set<string>) =>
+    new Set<string>(
+      (manager?.retainedInapplicable ?? [])
+        .filter(
+          (r: Json) => r.permitted && !reachable.has(key([r.name, r.version])),
+        )
+        .map((r: Json) => key([r.name, r.version])),
+    );
+  const npmPermitted = permittedPhysical(instanceEvidence.npm, npmReachable);
+  const tapidPermitted = permittedPhysical(
+    instanceEvidence.tapid,
+    tapidReachable,
+  );
   const report = {
     schemaVersion: 2,
     instanceEvidence,
@@ -436,6 +449,20 @@ export function compare(
     },
     reachablePackageDifferences: pairDifference(npmReachable, tapidReachable),
     physicalPackageDifferences: pairDifference(npmPairs, tapidPairs),
+    permittedPhysicalDifferences: {
+      npmOnly: rows(
+        intersection(difference(npmPairs, tapidPairs), npmPermitted),
+      ),
+      tapidOnly: rows(
+        intersection(difference(tapidPairs, npmPairs), tapidPermitted),
+      ),
+    },
+    unexplainedPhysicalDifferences: {
+      npmOnly: rows(difference(difference(npmPairs, tapidPairs), npmPermitted)),
+      tapidOnly: rows(
+        difference(difference(tapidPairs, npmPairs), tapidPermitted),
+      ),
+    },
     unreachablePhysicalPackages: {
       npm: rows(difference(npmPairs, npmReachable)),
       tapid: rows(difference(tapidPairs, tapidReachable)),
@@ -465,7 +492,7 @@ export function compare(
     instanceEvidence.errors.length ||
     [
       report.reachablePackageDifferences,
-      report.physicalPackageDifferences,
+      report.unexplainedPhysicalDifferences,
       report.dependencyEdgeDifferences,
       report.peerEdgeDifferences,
       report.platformOptionalPackageDifferences,
@@ -495,6 +522,7 @@ export function compare(
       names(intersection(npmPlatform, tapidPlatform)),
     `Source mismatches: ${sourceMismatches.length}; integrity mismatches: ${integrityMismatches.length}; missing provenance fields: ${metadataMissing.length}.`,
     "",
+    `Permitted retained foreign optional packages: npm ${report.permittedPhysicalDifferences.npmOnly.length}, Tapid ${report.permittedPhysicalDifferences.tapidOnly.length}.`,
     "## Physical-only packages (reported even when unreachable)",
     "npm-only: " + names(difference(npmPairs, tapidPairs)),
     "Tapid-only: " + names(difference(tapidPairs, npmPairs)),
