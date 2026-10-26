@@ -1986,12 +1986,17 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
                 |_| {},
             )
             .unwrap();
-            assert_eq!(
-                report.outcome.warnings,
-                vec![Warning::DependencyLifecycleDiscoveryFailed {
-                    package: "plugin@1.0.0".into(),
-                }]
-            );
+            assert_eq!(report.outcome.warnings.len(), 1);
+            let Warning::DependencyLifecycleDiscoveryFailed { package } =
+                &report.outcome.warnings[0]
+            else {
+                panic!("expected discovery failure")
+            };
+            assert_eq!(package.key.name.to_string(), "plugin");
+            assert_eq!(package.key.version.to_string(), "1.0.0");
+            let lifecycle = report.outcome.lifecycle.as_ref().unwrap();
+            assert_eq!(lifecycle.coverage, "incomplete");
+            assert_eq!(lifecycle.packages[0].discovery, "failed");
             assert!(
                 report.outcome.warnings[0]
                     .to_string()
