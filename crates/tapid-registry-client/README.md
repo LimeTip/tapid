@@ -39,7 +39,7 @@ Every usable version must declare valid SHA-512 `dist.integrity` and a canonical
 
 `validate_jsr_artifact_manifest` checks the safely extracted generated `package.json` name, version, and numeric `_jsr_revision` against the selected artifact. Callers must verify compressed archive bytes against the declared integrity first. Online CLI preparation applies this check before staging live JSR trees; deterministic CLI registry fixtures remain a separate test input contract.
 
-Live JSR installation remains experimental and unverified. Compatibility metadata parsing and archive identity validation alone do not establish supported transitive installation or local-only frozen replay. Fixture tests are not live acceptance evidence.
+JSR installation remains experimental. The CLI has [pinned live installation, Node export, transitive binding, and replay evidence](../../docs/jsr.md). Fixture tests alone are not live acceptance evidence.
 
 [Acquisition receipts from 2026-10-26](../../docs/evidence/jsr-2026-10-26.json)
 record official metadata and downloaded archive SHA-512 agreement for
@@ -71,3 +71,7 @@ redirect permission, or non-HTTPS protocol permission. No checkout or package
 preparation code executes. Revision expressions and semver selectors are rejected.
 The caller pins the returned archive digest and applies archive/store verification.
 `RegistryPackageId` reuses core's source-qualified `PackageInstanceId`.
+
+`jsr_dependency_name` validates generated dependency bindings and returns their
+logical names without changing runtime bindings. Malformed reserved mappings fail;
+ordinary npm names return no JSR target. CLI composition owns source routing.

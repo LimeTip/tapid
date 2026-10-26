@@ -118,6 +118,22 @@ pub fn validate_jsr_artifact_manifest(
     Ok(())
 }
 
+/// Maps a generated JSR dependency binding to its validated logical identity.
+/// Ordinary npm names return `None`; malformed reserved JSR names are rejected.
+pub fn jsr_dependency_name(binding: &str) -> Result<Option<PackageName>, RegistryClientError> {
+    let Some(generated) = binding.strip_prefix("@jsr/") else {
+        return Ok(None);
+    };
+    let invalid =
+        || RegistryClientError::Metadata(MetadataError::InvalidPackageName(binding.into()));
+    let (scope, name) = generated.split_once("__").ok_or_else(invalid)?;
+    let logical = format!("@{scope}/{name}");
+    if compatibility_name(&logical)? != binding {
+        return Err(invalid());
+    }
+    logical.parse().map(Some).map_err(|_| invalid())
+}
+
 fn compatibility_name(package: &str) -> Result<String, RegistryClientError> {
     let invalid =
         || RegistryClientError::Metadata(MetadataError::InvalidPackageName(package.into()));
@@ -370,5 +386,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["2.0.0", "1.0.0"]
         );
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+
+    #[test]
+    fn jsr_generated_dependency_mapping_is_unambiguous() {
+        assert_eq!(
+            jsr_dependency_name("@jsr/std__internal")
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "@std/internal"
+        );
+        for ordinary in ["ordinary", "@std/internal", "@other/package"] {
+            assert_eq!(jsr_dependency_name(ordinary).unwrap(), None);
+        }
+        for malformed in [
+            "@jsr/std_internal",
+            "@jsr/std__a__b",
+            "@jsr/a__path",
+            "@jsr/std__Path",
+            "@jsr/std__",
+            "@jsr/std__a--b",
+        ] {
+            assert!(
+                jsr_dependency_name(malformed).is_err(),
+                "accepted {malformed}"
+            );
+        }
     }
 }

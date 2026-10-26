@@ -32,3 +32,11 @@ tapid-signatures = { path = "../../crates/tapid-signatures" }
 tapid-store = { path = "../../crates/tapid-store" }
 tapid-test-support = { path = "../../crates/tapid-test-support" }
 url = "2"
+
+[features]
+live-jsr = []
+
+[[test]]
+name = "jsr_live"
+path = "jsr_live.rs"
+required-features = ["live-jsr"]

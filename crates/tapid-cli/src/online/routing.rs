@@ -97,3 +97,25 @@ pub(super) fn artifact_transport_for_package<'a>(
     let route = package_registry_route(registry_config, registry, name)?;
     transport_for_route(cache, route, allowed_origins, true)
 }
+
+/// Resolve generated JSR bindings without changing the binding used by Node.
+pub(super) fn dependency_target<F>(
+    parent: &PackageSource,
+    name: &PackageName,
+    route: &mut F,
+) -> Result<(PackageSource, PackageName), String>
+where
+    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+{
+    if parent.as_str() == JSR {
+        if let Some(logical) = tapid_registry_client::jsr_dependency_name(name.as_str())
+            .map_err(|error| error.to_string())?
+        {
+            return Ok((parent.clone(), logical));
+        }
+        // Ordinary dependencies in compatibility metadata are npm dependencies.
+        let npm = super::NPM.parse().expect("constant npm source");
+        return route(&npm, name).map(|source| (source, name.clone()));
+    }
+    route(parent, name).map(|source| (source, name.clone()))
+}

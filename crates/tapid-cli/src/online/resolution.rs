@@ -237,8 +237,12 @@ where
         let mut package_metadata = record.metadata.clone();
         for (name, requirement) in &record.optional_dependencies {
             let actual_name = requirement.package_name(name);
-            let target_registry = registry_for_dependency(&package.registry, actual_name)?;
-            if candidate_matches(&target_registry, actual_name, requirement) {
+            let (target_registry, actual_name) = routing::dependency_target(
+                &package.registry,
+                actual_name,
+                registry_for_dependency,
+            )?;
+            if candidate_matches(&target_registry, &actual_name, requirement) {
                 package_metadata
                     .dependencies
                     .insert(name.clone(), requirement.clone());
@@ -296,11 +300,15 @@ where
             };
             for (name, requirement) in &parent_record.optional_dependencies {
                 let actual_name = requirement.package_name(name);
-                let target_registry = registry_for_dependency(&parent_registry, actual_name)?;
+                let (target_registry, actual_name) = routing::dependency_target(
+                    &parent_registry,
+                    actual_name,
+                    registry_for_dependency,
+                )?;
                 if inserted_names
                     .get(&target_registry.to_string())
-                    .is_some_and(|names| names.contains(actual_name))
-                    && candidate_matches(&target_registry, actual_name, requirement)
+                    .is_some_and(|names| names.contains(&actual_name))
+                    && candidate_matches(&target_registry, &actual_name, requirement)
                 {
                     parent
                         .dependencies
@@ -583,11 +591,13 @@ where
         #[cfg(test)]
         RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
 
-        match tapid_resolver::resolve_graph_with_preferences(
+        match tapid_resolver::resolve_graph_with_targets(
             &roots,
             &metadata,
             ResolutionOptions::default(),
-            |parent, dependency| registry_for_dependency(parent, dependency),
+            |parent, dependency| {
+                routing::dependency_target(parent, dependency, &mut registry_for_dependency)
+            },
             &preferred,
         ) {
             Ok(resolution) => {
@@ -609,7 +619,11 @@ where
                                 raw_requirement,
                             )?;
                             let name = requirement.package_name(&name).clone();
-                            let registry = registry_for_dependency(&parent.registry, &name)?;
+                            let (registry, name) = routing::dependency_target(
+                                &parent.registry,
+                                &name,
+                                &mut registry_for_dependency,
+                            )?;
                             if !fetched.contains(&(registry.to_string(), name.to_string())) {
                                 optional_frontier.insert((registry, name));
                             }

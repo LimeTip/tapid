@@ -270,7 +270,12 @@ pub(super) fn locked_records(
                 .iter()
                 .map(|(name, target)| {
                     let target: LockfilePackageKey = target.parse()?;
-                    let requirement = if name == target.name.as_str() {
+                    let requirement = if name == target.name.as_str()
+                        || registry.as_str() == JSR
+                            && target.source.registry().is_some_and(|origin| origin.as_str() == JSR)
+                            && tapid_registry_client::jsr_dependency_name(name)?
+                                .as_ref() == Some(&target.name)
+                    {
                         target.version.to_string()
                     } else {
                         format!("npm:{}@{}", target.name, target.version)

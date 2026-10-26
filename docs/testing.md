@@ -176,3 +176,38 @@ checkouts model worktree consumers of the same cache; they do not invoke Git.
 These are deterministic contract tests, not measurements of an external agent's
 reasoning or model tool selection. Existing transaction and containment tests
 remain responsible for their broader platform and attack-path coverage.
+
+## Live JSR integration
+
+The explicitly requested JSR acceptance lane is an exception to ordinary
+network-free tests. `jsr_live` is gated by `live-jsr`; default workspace and nested
+integration commands do not enable it. Explicit invocation fails on missing
+Node, CLI, network, versions, integrity, exports, or replay prerequisites.
+
+Build the CLI through the development wrapper and obtain its executable from the
+`compiler-artifact` record's `executable` field, rather than assuming a target
+path:
+
+```text
+node --experimental-strip-types scripts/dev.ts build -p tapid --locked --message-format=json
+```
+
+Set `TAPID_TEST_BINARY` to that absolute executable and `TAPID_TEST_NODE` to an
+absolute Node executable. Optionally set `TAPID_JSR_LIVE_RECEIPT` to a receipt
+output file. Then run:
+
+```text
+node --experimental-strip-types scripts/dev.ts test --manifest-path tests/integration/Cargo.toml --features live-jsr --test jsr_live --locked -- --nocapture
+```
+
+The Rust test uses isolated temporary projects/homes, public official metadata,
+independent Node SHA-512 calculations, and generated-manifest validation. It
+installs pinned `@std/path@1.1.6` and `@std/internal@1.0.14`, checks the real
+transitive binding and logical lock identities, executes Node exports, and
+compares selected artifact pins/tree digests with the acquired evidence. A local
+rejecting CONNECT proxy counts a cold-install control, then must observe zero
+requests during offline and frozen replay. Lock bytes must stay unchanged.
+No real credentials or user configuration are passed to the CLI. The test uses
+loopback for the proxy and public HTTPS for acquisition; an environment that
+blocks either cannot establish this lane. Native containment verification remains
+separate. See [JSR behavior and retained evidence](jsr.md).

@@ -184,7 +184,10 @@ fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
         ("/demo".into(), (200, npm_meta)),
         ("/@jsr/std__path".into(), (200, jsr_meta)),
         ("/demo/-/demo-1.0.0.tgz".into(), (200, archive.clone())),
-        ("/~/11/@jsr/std__path/1.0.0.tgz".into(), (200, archive.clone())),
+        (
+            "/~/11/@jsr/std__path/1.0.0.tgz".into(),
+            (200, archive.clone()),
+        ),
         ("/redirect".into(), (302, b"/demo".to_vec())),
         ("/large".into(), (200, vec![b'x'; 32])),
     ]));
