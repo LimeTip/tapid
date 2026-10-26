@@ -870,3 +870,105 @@ fn network_fixture_response_rejects_invalid_framing() {
         std::io::ErrorKind::InvalidData
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_managed_tree_cli_sigint_cancels_and_completes_kernel_cleanup() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    use std::process::{Child, Stdio};
+    use std::time::{Duration, Instant};
+    struct OwnedCaller(Child);
+    impl Drop for OwnedCaller {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let project = project();
+    let results = tapid_test_support::TempProject::new("managed-cancel-results").unwrap();
+    let (_runtime, node) = private_node_runtime();
+    project
+        .write(
+            "tapid.toml",
+            br#"
+[run.scripts.probe]
+assurance = "managed-tree"
+read = ["."]
+write = ["writable"]
+network = false
+subprocess = true
+timeout_seconds = 15
+max_output_bytes = 65536
+max_processes = 64
+max_memory_bytes = 536870912
+"#,
+        )
+        .unwrap();
+    fs::create_dir(project.path().join("writable")).unwrap();
+    project.write("probe.js", br#"
+const fs = require('node:fs');
+if (process.argv[2] === 'descendant') {
+  process.on('SIGINT', () => {});
+  fs.writeFileSync('writable/ready', 'ready');
+  setTimeout(() => fs.writeFileSync('writable/escaped', 'survived'), 1500);
+  setInterval(() => {}, 100);
+} else {
+  require('node:child_process').spawn(process.execPath, ['probe.js', 'descendant'], {detached:true, stdio:'ignore'}).unref();
+  setInterval(() => {}, 100);
+}
+"#).unwrap();
+    let result_path = results.path().join("cancel.json");
+    let mut caller = OwnedCaller(
+        isolated_command(
+            project.path(),
+            &[
+                "run",
+                "probe",
+                "--node-runtime",
+                node.to_str().unwrap(),
+                "--result-file",
+                result_path.to_str().unwrap(),
+            ],
+            true,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !project.path().join("writable/ready").exists() {
+        assert!(
+            caller.0.try_wait().unwrap().is_none(),
+            "caller exited before readiness"
+        );
+        assert!(Instant::now() < deadline, "descendant never became ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Signal only Tapid: cancellation must kill even a detached target that ignores SIGINT.
+    assert_eq!(unsafe { libc::kill(caller.0.id() as i32, libc::SIGINT) }, 0);
+    let status = loop {
+        if let Some(status) = caller.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "cancellation did not finish");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(130));
+    let result: serde_json::Value =
+        serde_json::from_slice(&fs::read(result_path).unwrap()).unwrap();
+    assert_eq!(result["outcome"], "completed");
+    assert_eq!(result["receipt"]["termination"], "Cancelled");
+    assert_eq!(
+        result["receipt"]["completion"]["cleanup_confidence"],
+        "KernelOwnedComplete"
+    );
+    std::thread::sleep(Duration::from_millis(1700));
+    assert!(!project.path().join("writable/escaped").exists());
+    eprintln!(
+        "Linux ManagedTree CLI SIGINT cancellation and authoritative cleanup assertions executed: {}",
+        result["receipt"]
+    );
+}

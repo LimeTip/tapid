@@ -66,3 +66,18 @@ Where Windows denies libuv's `NUL` reopen for ignored stdin, the compatibility c
 Compatibility import coverage excludes Windows system DLL internals, launches during DLL initialization, manually mapped modules, and dynamically resolved process-creation calls. These paths retain AppContainer and Job containment but are not promised Node compatibility propagation. Unrecognized application import tables or failed import patching reject startup or terminate the contained process before returning from the load.
 
 Windows `network=false` additionally requires the administrator-installed network guard. Run `tapid sandbox install` once from an administrator terminal; ordinary runs then register denial without elevation. `tapid sandbox status` inspects service state. The deny-only LocalSystem service owns persistent WFP filters for each verified execution's exact package SID and removes them only after a fresh empty-Job check. Missing guard setup fails before project code starts. Service-crash orphans retain denial and prevent blanket uninstallation. This guard is separate from the existing standard-user `network=true` socket/DNS broker. Native service installation and bind-denial acceptance are pending; see the scope document above.
+
+Linux ManagedTree handles process-directed SIGINT during owned execution and
+cleanup, then reports `Cancelled` only with checked cleanup evidence. It
+requires unblocked SIGINT on the invoking thread and the default SIGINT
+disposition before the first active attempt, and
+rejects an embedding application's custom or ignored disposition before spawn.
+Overlapping attempts share process-wide cancellation; embedders must not change
+signal ownership while attempts are active. The last scope restores the prior
+default disposition. This does not add cancellation to Linux Restricted or
+macOS. Native Ubuntu 24.04 x86_64 / Node 22 acceptance remains pending; see the
+[acceptance map](../../docs/platform-validation.md#issue-156-acceptance-coverage).
+
+ManagedTree forwards buffered output through owned bounded sinks after tree
+cleanup. An unread caller pipe returns an execution error with checked cleanup
+evidence instead of blocking indefinitely or silently dropping output.

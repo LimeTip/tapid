@@ -43,6 +43,7 @@ jobs:
         run: |
           set -euo pipefail
           node_bin=$(node -p 'process.execPath')
+          target_dir=$("$node_bin" --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked | "$node_bin" -e "let s = ''; process.stdin.on('data', x => s += x).on('end', () => process.stdout.write(JSON.parse(s).target_directory))")
           test "$(uname -m)" = x86_64
           test "$(node -p 'process.versions.node.split(".")[0]')" = 22
           git rev-parse HEAD > "$RUNNER_TEMP/linux-managed-source.txt"
@@ -61,6 +62,8 @@ jobs:
             --setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1 \
             --setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1 \
             --setenv="TAPID_TEST_NODE=$node_bin" \
+            --setenv="TAPID_NEWS_FIXTURE_BINARY=$target_dir/debug/tapid" \
+            --setenv="TAPID_MANAGED_NEWS_EVIDENCE=$RUNNER_TEMP/linux-managed-news" \
             /bin/bash -euo pipefail -c '
               uname -a
               "$TAPID_TEST_NODE" --version
@@ -74,6 +77,21 @@ jobs:
               "$TAPID_TEST_NODE" --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked managed_tree_enforces_timeout_and_cleans_detached_descendants -- --nocapture
               "$TAPID_TEST_NODE" --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked managed_ -- --nocapture
               "$TAPID_TEST_NODE" --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked linux_managed_tree_cli_ -- --nocapture
+              mkdir "$group/fixture" "$group/fixture/driver"
+              echo "+memory +pids" > "$group/fixture/cgroup.subtree_control"
+              (
+                echo "$BASHPID" > "$group/fixture/driver/cgroup.procs"
+                exec "$TAPID_TEST_NODE" --experimental-strip-types scripts/check-managed-news-site.ts --binary "$TAPID_NEWS_FIXTURE_BINARY" --node "$TAPID_TEST_NODE" --evidence "$TAPID_MANAGED_NEWS_EVIDENCE"
+              )
+              # These peaks conservatively include orchestration, Tapid and
+              # trusted supervision in addition to the application workload.
+              cat "$group/fixture/memory.peak" > "$TAPID_MANAGED_NEWS_EVIDENCE/memory.peak"
+              if test -r "$group/fixture/pids.peak"; then
+                cat "$group/fixture/pids.peak" > "$TAPID_MANAGED_NEWS_EVIDENCE/pids.peak"
+              else
+                echo "kernel does not expose pids.peak; task headroom measurement remains pending" > "$TAPID_MANAGED_NEWS_EVIDENCE/pids.peak"
+              fi
+              test -z "$(find "$group/fixture" -mindepth 1 -maxdepth 1 -name "tapid-managed-*" -print -quit)"
               test -z "$(find "$group" -mindepth 1 -maxdepth 1 -name "tapid-managed-*" -print -quit)"
             ' 2>&1 | tee "$RUNNER_TEMP/linux-managed-acceptance.log"
       - name: Retain exact-source native acceptance logs
@@ -84,6 +102,11 @@ jobs:
           path: |
             ${{ runner.temp }}/linux-managed-source.txt
             ${{ runner.temp }}/linux-managed-acceptance.log
+            ${{ runner.temp }}/linux-managed-news/*.json
+            ${{ runner.temp }}/linux-managed-news/*.log
+            ${{ runner.temp }}/linux-managed-news/policy.toml
+            ${{ runner.temp }}/linux-managed-news/acceptance.txt
+            ${{ runner.temp }}/linux-managed-news/*.peak
           retention-days: 30
           if-no-files-found: error
 

@@ -737,6 +737,7 @@ fn managed_tree_propagates_authority_to_detached_reparented_targets() {
 
 #[test]
 fn managed_tree_bounds_forwarded_combined_output_and_cleans_writers() {
+    const OVERFLOW: &str = "TAPID_TEST_MANAGED_OUTPUT_OVERFLOW";
     const ROLE: &str = "TAPID_TEST_MANAGED_OUTPUT_PROJECT";
     if let Some(path) = std::env::var_os(ROLE) {
         let project = PathBuf::from(path);
@@ -749,13 +750,19 @@ fn managed_tree_bounds_forwarded_combined_output_and_cleans_writers() {
             ExecutionLimits::new(Some(10), Some(512), Some(32), Some(128 * 1024 * 1024)).unwrap(),
         )
         .unwrap();
-        let result = execute(&request(
-            &project,
-            "setsid sh -c 'echo started > started; sleep 2; echo escaped > escaped' & while [ ! -f started ]; do sleep 0.01; done; i=0; while [ $i -lt 256 ]; do printf '\\376'; i=$((i+1)); done; i=0; while [ $i -lt 4096 ]; do printf '\\377' >&2; i=$((i+1)); done; sleep 5",
-            policy,
-        ))
-        .unwrap();
-        assert_eq!(result.termination(), &Termination::OutputLimitExceeded);
+        let overflow = std::env::var_os(OVERFLOW).is_some();
+        let stderr_bytes = if overflow { 4096 } else { 256 };
+        let ending = if overflow { "sleep 5" } else { "exit 0" };
+        let script = format!(
+            "setsid sh -c 'echo started > started; sleep 2; echo escaped > escaped' & while [ ! -f started ]; do sleep 0.01; done; i=0; while [ $i -lt 256 ]; do printf '\\376'; i=$((i+1)); done; i=0; while [ $i -lt {stderr_bytes} ]; do printf '\\377' >&2; i=$((i+1)); done; {ending}"
+        );
+        let result = execute(&request(&project, &script, policy)).unwrap();
+        let expected = if overflow {
+            Termination::OutputLimitExceeded
+        } else {
+            Termination::Exited(0)
+        };
+        assert_eq!(result.termination(), &expected);
         assert_eq!(
             result.completion().cleanup_confidence(),
             CleanupConfidence::KernelOwnedComplete
@@ -769,34 +776,41 @@ fn managed_tree_bounds_forwarded_combined_output_and_cleans_writers() {
     if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
         return;
     }
-    let project = tapid_test_support::TempProject::new("managed-forwarded-output").unwrap();
-    let output = Command::new(std::env::current_exe().unwrap())
+    for overflow in [false, true] {
+        let project = tapid_test_support::TempProject::new("managed-forwarded-output").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "execution::platform_backend::tests::managed_tree_bounds_forwarded_combined_output_and_cleans_writers",
             "--nocapture",
         ])
         .env(ROLE, project.path())
+        .envs(overflow.then_some((OVERFLOW, "1")))
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // Non-UTF-8 sentinels distinguish target bytes from libtest's own output.
-    assert_eq!(
-        output.stdout.iter().filter(|&&byte| byte == 0xfe).count(),
-        256
-    );
-    assert_eq!(
-        output.stderr.iter().filter(|&&byte| byte == 0xff).count(),
-        256
-    );
-    assert!(project.path().join("started").exists());
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    assert!(!project.path().join("escaped").exists());
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Non-UTF-8 sentinels distinguish target bytes from libtest's own output.
+        let stdout_bytes = output.stdout.iter().filter(|&&byte| byte == 0xfe).count();
+        let stderr_bytes = output.stderr.iter().filter(|&&byte| byte == 0xff).count();
+        assert_eq!(stdout_bytes + stderr_bytes, 512);
+        if !overflow {
+            assert_eq!(stdout_bytes, 256);
+            assert_eq!(stderr_bytes, 256);
+        } else {
+            // The combined ceiling does not promise which ready stream wins the
+            // final bytes when the supervisor is descheduled between drain calls.
+            assert!(stdout_bytes <= 256);
+            assert!(stderr_bytes <= 512);
+        }
+        assert!(project.path().join("started").exists());
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        assert!(!project.path().join("escaped").exists());
+    }
 }
 
 #[test]
@@ -994,10 +1008,20 @@ fn managed_tree_memory_stats_opt_in_uses_read_only_private_procfs() {
 
 #[test]
 fn managed_tree_caller_crash_kills_double_forked_descendants() {
+    assert_managed_crash_cleanup(false);
+}
+
+#[test]
+fn managed_tree_supervisor_crash_kills_double_forked_descendants() {
+    assert_managed_crash_cleanup(true);
+}
+
+fn assert_managed_crash_cleanup(crash_supervisor: bool) {
     if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
         return;
     }
     const ROLE: &str = "TAPID_TEST_MANAGED_CRASH_PROJECT";
+    const SUPERVISOR: &str = "TAPID_TEST_MANAGED_SUPERVISOR_CRASH";
     if let Some(path) = std::env::var_os(ROLE) {
         let root = PathBuf::from(path);
         let policy = SandboxPolicy::new(
@@ -1009,17 +1033,34 @@ fn managed_tree_caller_crash_kills_double_forked_descendants() {
             ExecutionLimits::new(Some(20), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
         )
         .unwrap();
-        let _ = execute(&request(
+        let result = execute(&request(
             &root,
             "setsid sh -c 'sh -c \"echo started > started; sleep 3; echo escaped > escaped\" & exit 0' & sleep 15",
             policy,
         ));
+        if std::env::var_os(SUPERVISOR).is_some() {
+            let outcome = result.unwrap();
+            assert_eq!(outcome.termination(), &Termination::Signaled(libc::SIGKILL));
+            assert_eq!(
+                outcome.completion().cleanup_confidence(),
+                CleanupConfidence::KernelOwnedComplete
+            );
+            return;
+        }
         panic!("crash fixture unexpectedly returned");
     }
     let project = tapid_test_support::TempProject::new("managed-caller-crash").unwrap();
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    struct CrashCaller(std::process::Child);
+    impl Drop for CrashCaller {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut caller = CrashCaller(Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "execution::platform_backend::tests::managed_tree_caller_crash_kills_double_forked_descendants", "--nocapture"])
-        .env(ROLE, project.path()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+        .env(ROLE, project.path()).envs(crash_supervisor.then_some((SUPERVISOR, "1"))).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
+    let child = &mut caller.0;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !project.path().join("started").exists() && std::time::Instant::now() < deadline {
         if let Some(status) = child.try_wait().unwrap() {
@@ -1028,8 +1069,107 @@ fn managed_tree_caller_crash_kills_double_forked_descendants() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(project.path().join("started").exists());
-    child.kill().unwrap();
-    child.wait().unwrap();
+    // Discover the trusted supervisor's boundary while the caller is alive,
+    // then retain the kernel events object across caller death. PID discovery
+    // alone is not cleanup evidence; populated=0 on this held boundary is.
+    let mut boundary = None;
+    for task in fs::read_dir(format!("/proc/{}/task", child.id())).unwrap() {
+        let children = fs::read_to_string(task.unwrap().path().join("children")).unwrap();
+        for pid in children.split_whitespace() {
+            let membership = fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
+            if let Some(relative) = membership
+                .lines()
+                .find_map(|line| line.strip_prefix("0::/"))
+            {
+                let path = Path::new(relative);
+                assert!(
+                    path.components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+                );
+                if path
+                    .file_name()
+                    .unwrap()
+                    .as_encoded_bytes()
+                    .starts_with(b"tapid-managed-")
+                {
+                    assert!(boundary.is_none(), "unexpected multiple managed boundaries");
+                    let path = Path::new("/sys/fs/cgroup").join(path);
+                    boundary = Some((
+                        File::open(path.join("cgroup.events")).unwrap(),
+                        path,
+                        pid.parse::<i32>().unwrap(),
+                    ));
+                }
+            }
+        }
+    }
+    let (mut events, boundary_path, supervisor_pid) =
+        boundary.expect("supervisor cgroup was not observed");
+    let supervisor_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, supervisor_pid, 0) };
+    assert!(supervisor_fd >= 0, "cannot hold supervisor identity");
+    let supervisor = unsafe { File::from_raw_fd(supervisor_fd as libc::c_int) };
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::fstatfs(events.as_raw_fd(), &mut stat) }, 0);
+    assert_eq!(stat.f_type, libc::CGROUP2_SUPER_MAGIC as libc::c_long);
+    let mut state = String::new();
+    events.read_to_string(&mut state).unwrap();
+    assert!(state.lines().any(|line| line == "populated 1"));
+    if crash_supervisor {
+        // Hold the caller's cleanup while independently observing kernel-owned
+        // descendant termination after supervisor death.
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGSTOP) }, 0);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child.id() as i32, &mut status, libc::WUNTRACED) },
+            child.id() as i32
+        );
+        assert!(libc::WIFSTOPPED(status));
+        assert_eq!(
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    supervisor.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            },
+            0
+        );
+    } else {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    let empty_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        use std::io::{Seek, SeekFrom};
+        events.seek(SeekFrom::Start(0)).unwrap();
+        state.clear();
+        events.read_to_string(&mut state).unwrap();
+        if state.lines().any(|line| line == "populated 0") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < empty_deadline,
+            "caller crash left a populated kernel boundary: {state}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // The killed caller cannot remove its now-empty cgroup directory. The
+    // observer owns fixture teardown only after kernel emptiness is established.
+    if crash_supervisor {
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGCONT) }, 0);
+        assert!(
+            child.wait().unwrap().success(),
+            "caller failed to report supervisor crash cleanup"
+        );
+        assert!(
+            !boundary_path.exists(),
+            "caller did not release the empty boundary"
+        );
+    } else {
+        fs::remove_dir(boundary_path).unwrap();
+    }
     std::thread::sleep(std::time::Duration::from_secs(4));
     assert!(
         !project.path().join("escaped").exists(),
@@ -1094,4 +1234,317 @@ fn managed_filter_denies_clone3_and_reconnectable_unix_socketpairs() {
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 0);
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn managed_tree_rejects_independently_denied_kernel_prerequisites_before_target() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    const FAULT: &str = "TAPID_TEST_MANAGED_KERNEL_FAULT";
+    let project = tapid_test_support::TempProject::new("managed-prerequisites").unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::new(Some(5), Some(4096), Some(64), Some(256 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let req = request(project.path(), "echo target > marker", policy);
+    let Some(fault) = std::env::var_os(FAULT) else {
+        // Prove the identical request can execute before denying one native
+        // prerequisite in each fresh subprocess. Unsupported-host rejection is
+        // not evidence that any particular prerequisite was tested.
+        let outcome = execute(&req).unwrap();
+        assert_eq!(outcome.termination(), &Termination::Exited(0));
+        assert_eq!(
+            outcome.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        assert!(project.path().join("marker").exists());
+        for fault in [
+            "landlock",
+            "pidfd",
+            "unshare",
+            "mount",
+            "seccomp",
+            "delegation",
+            "controllers",
+            "launcher-exec",
+        ] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "execution::platform_backend::tests::managed_tree_rejects_independently_denied_kernel_prerequisites_before_target", "--nocapture"])
+                .env(FAULT, fault).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{fault}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("kernel prerequisite rejection verified"),
+                "{fault}: helper assertions did not execute"
+            );
+        }
+        return;
+    };
+    let (syscall, argument) = match fault.to_str().unwrap() {
+        "landlock" => (libc::SYS_landlock_create_ruleset, None),
+        "pidfd" => (libc::SYS_pidfd_open, None),
+        "unshare" => (libc::SYS_unshare, None),
+        "mount" => (libc::SYS_mount, None),
+        "seccomp" => (libc::SYS_prctl, Some((16, PR_SET_SECCOMP as u32))),
+        "delegation" => (libc::SYS_mkdir, None),
+        "controllers" => (
+            libc::SYS_openat,
+            Some((
+                32,
+                (libc::O_WRONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u32,
+            )),
+        ),
+        "launcher-exec" => (libc::SYS_execve, None),
+        _ => panic!("unknown prerequisite fault"),
+    };
+    // This filter changes actual kernel results rather than mocking backend
+    // declarations. The distinctive errno proves the intended syscall was
+    // intercepted; all unrelated calls retain the supported-host behavior.
+    let statement = |code, k| libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    };
+    let mut filter = vec![
+        statement((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0),
+        libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt: 0,
+            jf: if argument.is_some() { 3 } else { 1 },
+            k: syscall as u32,
+        },
+    ];
+    if let Some((offset, argument)) = argument {
+        filter.push(statement(
+            (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+            offset,
+        ));
+        filter.push(libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt: 0,
+            jf: 1,
+            k: argument,
+        });
+    }
+    filter.push(statement(
+        (libc::BPF_RET | libc::BPF_K) as u16,
+        SECCOMP_RET_ERRNO | libc::ENOMEDIUM as u32,
+    ));
+    filter.push(statement(
+        (libc::BPF_RET | libc::BPF_K) as u16,
+        SECCOMP_RET_ALLOW,
+    ));
+    assert_eq!(unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }, 0);
+    assert_eq!(
+        unsafe {
+            libc::prctl(
+                PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                &libc::sock_fprog {
+                    len: filter.len() as u16,
+                    filter: filter.as_mut_ptr(),
+                },
+            )
+        },
+        0
+    );
+    let mut arguments = [0 as libc::c_long; 6];
+    if let Some((offset, value)) = argument {
+        arguments[((offset - 16) / 8) as usize] = value as libc::c_long;
+    }
+    assert_eq!(
+        unsafe {
+            libc::syscall(
+                syscall,
+                arguments[0],
+                arguments[1],
+                arguments[2],
+                arguments[3],
+                arguments[4],
+                arguments[5],
+            )
+        },
+        -1
+    );
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENOMEDIUM)
+    );
+    let error = execute(&req).unwrap_err();
+    assert_eq!(
+        error.category(),
+        ExecutionErrorCategory::UnsupportedContainment
+    );
+    assert!(
+        !project.path().join("marker").exists(),
+        "target ran without a prerequisite: {error}"
+    );
+    if fault == "landlock" || fault == "delegation" || fault == "controllers" {
+        let cause = if fault == "landlock" {
+            "Landlock ABI 3"
+        } else if fault == "delegation" {
+            "writable delegated cgroup v2 parent"
+        } else {
+            "required cgroup controller or interface unavailable"
+        };
+        assert!(error.to_string().contains(cause), "{error}");
+        assert!(error.completion().is_none());
+    } else {
+        let stage = if fault == "pidfd" || fault == "launcher-exec" {
+            "cannot launch managed supervisor"
+        } else {
+            "private"
+        };
+        assert!(error.to_string().contains(stage), "{fault:?}: {error}");
+        assert_eq!(
+            error
+                .completion()
+                .expect("partial launch must complete cleanup")
+                .cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+    }
+    println!("kernel prerequisite rejection verified: {fault:?}: {error}");
+}
+
+#[test]
+fn managed_tree_failed_target_exec_reports_spawn_and_kernel_cleanup() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-exec-failure").unwrap();
+    let target = project
+        .write(
+            "target",
+            format!(
+                "#!{}\necho escaped > marker\n",
+                project.path().join("missing-interpreter").display()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::new(Some(5), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let req = ExecutionRequest::builder(target)
+        .project_root(project.path())
+        .policy(policy)
+        .build()
+        .unwrap();
+    let error = execute(&req).unwrap_err();
+    assert_eq!(error.category(), ExecutionErrorCategory::Spawn, "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot exec restricted project script"),
+        "{error}"
+    );
+    assert_eq!(
+        error
+            .completion()
+            .expect("failed exec must clean its owned tree")
+            .cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+    assert!(!project.path().join("marker").exists());
+}
+
+#[test]
+fn managed_tree_completion_is_bounded_when_parent_stdout_is_unread() {
+    const DRIVER: &str = "TAPID_TEST_MANAGED_UNREAD_OUTPUT_PROJECT";
+    const WORKLOAD: &str = "TAPID_TEST_MANAGED_UNREAD_OUTPUT_TARGET";
+    const TEST: &str = "execution::platform_backend::tests::managed_tree_completion_is_bounded_when_parent_stdout_is_unread";
+    if std::env::var_os(WORKLOAD).is_some() {
+        io::stdout().write_all(&vec![b'x'; 1024 * 1024]).unwrap();
+        return;
+    }
+    if let Some(path) = std::env::var_os(DRIVER) {
+        let root = PathBuf::from(path);
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![WORKLOAD.into()],
+            true,
+            ExecutionLimits::new(
+                Some(5),
+                Some(2 * 1024 * 1024),
+                Some(32),
+                Some(128 * 1024 * 1024),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let req = ExecutionRequest::builder(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(WORKLOAD, "1")
+            .project_root(&root)
+            .policy(policy)
+            .build()
+            .unwrap();
+        let error = execute(&req).expect_err("unread output must not silently succeed");
+        assert_eq!(
+            error.category(),
+            ExecutionErrorCategory::Internal,
+            "{error}"
+        );
+        assert_eq!(
+            error
+                .completion()
+                .expect("output failure must retain cleanup evidence")
+                .cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        fs::write(root.join("verified"), "bounded output with kernel cleanup").unwrap();
+        std::process::exit(0);
+    }
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-unread-output").unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", TEST, "--nocapture"])
+        .env(DRIVER, project.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    // Deliberately retain the unread caller pipe through completion. No reader
+    // may unblock a forwarding worker and turn this into a normal-output test.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "unread-output driver failed: {status}");
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("ManagedTree completion blocked on the unread caller stdout");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        fs::read_to_string(project.path().join("verified")).unwrap(),
+        "bounded output with kernel cleanup"
+    );
 }

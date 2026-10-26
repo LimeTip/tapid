@@ -137,6 +137,18 @@ the checkout SHA, kernel/architecture, runtime/toolchain versions, controller
 observations, and test results. This configured job is **not** native acceptance
 evidence until it executes successfully on the candidate source.
 
+The ManagedTree fixture retains its exact policy, commands, selected Node version and
+binary fingerprints, logs and checked result files. Its separate candidate policy
+uses 180 seconds, 4 MiB combined output, 256 kernel tasks and 2 GiB cgroup memory.
+These are provisional ceilings, not native measurements or support evidence.
+The fixture runs in a separate delegated parent so CI can retain memory.peak
+and pids.peak when exposed by the kernel. These inclusive measurements also
+charge orchestration and Tapid; absence of pids.peak leaves task headroom
+measurement pending. Command logs retain elapsed time and output bytes.
+The build explicitly opts into read-only private process memory statistics; the
+private-procfs denial probe remains required. No new dependency-hook permission
+or Windows claim follows from reference-application success.
+
 The current acceptance map is below. Runner names refer to
 `crates/tapid-runner/src/linux_restricted/tests.rs`; the CLI invocation probe is
 in `crates/tapid-cli/tests/cli_cases/run_permissions.rs`. Presence in this table
@@ -148,15 +160,18 @@ does not imply a non-skipped native pass.
 | Working directory, allowlisted and absent values, synthetic secret non-inheritance, Node options/proxy/agent filtering, descendant writes and denied symlink reads | Same CLI probe; existing Restricted permission tests remain separate | Execute required lane; native loader controls remain separate |
 | Detached/re-parented authority and descriptor hygiene | `managed_tree_propagates_authority_to_detached_reparented_targets`: granted reads/writes, denied absolute/parent/sibling/symlink reads and writes, granted/denied loopback sockets, and an intentionally inherited denied-data descriptor; descendant observes namespace-init parent and its own session | Execute required lane; failed probes are not enforcement evidence |
 | Timeout and detached descendant termination | `managed_tree_enforces_timeout_and_cleans_detached_descendants` | Execute required lane |
-| Normal/nonzero root exit and session-changing descendant cleanup | `managed_tree_preserves_exit_codes_and_cleans_descendants_on_root_exit` | Execute required lane; cancellation and supervisor failure remain separate |
-| Combined output and task ceilings | `managed_tree_enforces_output_and_process_limits`; `managed_tree_bounds_forwarded_combined_output_and_cleans_writers` externally counts 256 non-UTF-8 stdout bytes plus 256 stderr bytes against one 512-byte ceiling and requires complete cleanup and no delayed descendant marker | Execute required lane |
+| Normal/nonzero root exit and session-changing descendant cleanup | `managed_tree_preserves_exit_codes_and_cleans_descendants_on_root_exit` | Execute required lane; SIGINT and supervisor crash are separate probes |
+| Combined output and task ceilings | `managed_tree_enforces_output_and_process_limits`; `managed_tree_bounds_forwarded_combined_output_and_cleans_writers` externally verifies 256 non-UTF-8 bytes per stream within the ceiling, then a combined 512-byte ceiling during overflow without assuming scheduler-dependent stream shares; both runs require complete cleanup and no delayed descendant marker | Execute required lane |
+| Unread caller output | `managed_tree_completion_is_bounded_when_parent_stdout_is_unread`: retain an unread caller pipe while a real target emits 1 MiB, require bounded failure with KernelOwnedComplete | Execute required lane; output remains buffered until tree cleanup |
 | Cgroup memory ceiling | `managed_tree_enforces_memory_limit_with_rust_workload` | Execute required lane; workload commits real pages and no longer requires Python |
 | Read-only metadata and kernel-control grant rejection | `managed_tree_denies_metadata_mutation_outside_write_grants`, `managed_tree_rejects_kernel_control_filesystem_write_grants` | Execute required lane |
 | Private procfs compatibility | `managed_tree_memory_stats_opt_in_uses_read_only_private_procfs` | Execute required lane, then establish fixture build compatibility |
-| Caller crash | `managed_tree_caller_crash_kills_double_forked_descendants` | Supplement delayed-marker control with authoritative post-crash accounting |
+| Caller and supervisor crash | `managed_tree_caller_crash_kills_double_forked_descendants`, `managed_tree_supervisor_crash_kills_double_forked_descendants`: retain the kernel cgroup events object, require populated=0, and reject delayed descendant markers; supervisor identity is held by pidfd | Execute required lane |
+| CLI cancellation | `linux_managed_tree_cli_sigint_cancels_and_completes_kernel_cleanup`: signal only Tapid while a detached Node descendant ignores SIGINT; require exit 130, Cancelled, KernelOwnedComplete and no delayed marker | Execute required lane; POSIX signal-scope tests do not establish Linux tree cleanup |
+| Failed target exec | `managed_tree_failed_target_exec_reports_spawn_and_kernel_cleanup`: executable script with absent interpreter | Execute required lane; require structured Spawn and KernelOwnedComplete |
 | Clone3/cgroup reassignment and Unix socket controls | `managed_filter_denies_clone3_and_reconnectable_unix_socketpairs` | Full target/descendant positive and negative network controls |
-| Missing prerequisites | `managed_tree_stays_fail_closed_before_target_execution`, `managed_tree_requires_private_launcher_with_otherwise_valid_limits` | Otherwise-valid requests independently denying remaining prerequisites and checking partial-setup cleanup |
-| Reference fixture build/test/start and cancellation | Existing news-site job uses Restricted | Separate ManagedTree policy, measured limits, isolated fixture orchestration, HTTP marker and authoritative cancellation cleanup |
+| Missing prerequisites | `managed_tree_requires_private_launcher_with_otherwise_valid_limits`; `managed_tree_rejects_independently_denied_kernel_prerequisites_before_target` first executes an identical valid request, then independently denies Landlock, pidfds, namespace creation, mount setup, seccomp installation, delegation-directory creation, controller/interface opens and launcher exec through inherited kernel filters | Execute required lane; kernel denial injection covers unavailable operations, not every host provisioning failure |
+| Reference fixture build/test/start and cancellation | `scripts/check-managed-news-site.ts` applies `tapid.linux-managed.toml` to an isolated fixture, checks build/test results and HTTP marker, cancels start, requires checked complete cleanup and connection refusal; `tests/news_site_managed_test.ts` covers orchestration failures using a synthetic CLI | Execute required lane and measure native workload headroom before treating candidate limits as final |
 
 Reconciliation of the supplied historical PR #176 concerns: current ManagedTree
 capture has a finite combined ceiling (at most 16 MiB), and the existing

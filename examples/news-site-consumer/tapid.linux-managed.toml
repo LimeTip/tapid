@@ -1,0 +1,23 @@
+# Candidate Ubuntu 24.04 x86_64 / Node 22 acceptance profile. Native workload
+# measurements and exact-source acceptance remain required before support claims.
+# Task counts include Node threads and trusted supervision; memory is cgroup-wide.
+[run.defaults]
+assurance = "managed-tree"
+read = ["."]
+environment = ["HOME", "NEXT_TELEMETRY_DISABLED", "TMPDIR"]
+subprocess = true
+network = false
+timeout_seconds = 180
+max_output_bytes = 4194304
+max_processes = 256
+max_memory_bytes = 2147483648
+
+[run.scripts.build]
+write = [".next", ".tmp"]
+
+[run.scripts.test]
+write = [".tmp"]
+
+[run.scripts.start]
+write = [".tmp"]
+network = true
