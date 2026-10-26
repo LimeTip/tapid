@@ -44,10 +44,16 @@ pub(crate) fn validate_managed_node_modules(project: &Path) -> Result<(), String
     let marker = project.join(".tapid-managed");
     let contents = match read_marker_backup(&marker) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !tree_exists => {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
             // A dangling symlink still exists and must not be treated as an absent marker.
             match fs::symlink_metadata(&marker) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return if tree_exists {
+                        Err(unmarked_node_modules(project))
+                    } else {
+                        Ok(())
+                    };
+                }
                 _ => return Err("refusing to use a non-regular .tapid-managed marker".into()),
             }
         }
@@ -59,6 +65,13 @@ pub(crate) fn validate_managed_node_modules(project: &Path) -> Result<(), String
         );
     }
     Ok(())
+}
+
+fn unmarked_node_modules(project: &Path) -> String {
+    format!(
+        "refusing to replace unmarked node_modules at {}; preserve this tree at an unused backup location outside active dependency lookup paths, retain package-lock.json, then deliberately retry installation; see docs/npm-lockfile-import.md for resolution choices and rollback",
+        project.join("node_modules").display()
+    )
 }
 
 pub(crate) fn activate_node_modules_with_preflight(
@@ -83,9 +96,7 @@ pub(crate) fn activate_node_modules_with_preflight(
         Err(error) => return Err(format!("cannot inspect .tapid-managed: {error}")),
     };
     if destination.exists() && !marker_exists {
-        return Err(
-            "refusing to replace unmarked node_modules; create .tapid-managed to opt in".into(),
-        );
+        return Err(unmarked_node_modules(project));
     }
     let owner = activation_lock.owner_name();
     let marker_backup = project.join(format!(".tapid-managed-old-{owner}"));
@@ -811,6 +822,33 @@ mod activation_tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn ownership_preflight_preserves_unmarked_trees_and_rejects_dangling_markers() {
+        let project = tapid_test_support::TempProject::new("ownership-preflight").unwrap();
+        project
+            .write("node_modules/keep", b"original install")
+            .unwrap();
+        let error = super::validate_managed_node_modules(project.path()).unwrap_err();
+        assert!(error.contains("unused backup location"), "{error}");
+        assert!(
+            error.contains(&project.path().join("node_modules").display().to_string()),
+            "{error}"
+        );
+        assert!(!project.path().join(".tapid-managed").exists());
+        symlink(
+            "missing-marker-target",
+            project.path().join(".tapid-managed"),
+        )
+        .unwrap();
+        let error = super::validate_managed_node_modules(project.path()).unwrap_err();
+        assert!(error.contains("cannot read .tapid-managed"), "{error}");
+        assert!(!error.contains("unused backup location"), "{error}");
+        assert_eq!(
+            fs::read(project.path().join("node_modules/keep")).unwrap(),
+            b"original install"
+        );
     }
 
     #[test]

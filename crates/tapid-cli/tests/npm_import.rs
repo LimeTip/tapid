@@ -351,12 +351,24 @@ fn npm_import_rejects_replay_after_imported_integrity_changes() {
 fn npm_import_preserves_nested_versions_peers_sources_and_optional_constraints() {
     let project = reference_project("npm-import-reference");
     let manifest = fs::read(project.path().join("package.json")).unwrap();
+    let npm_lock = fs::read(project.path().join("package-lock.json")).unwrap();
+    let backup = TempProject::new("npm-installation-backup").unwrap();
+    project
+        .write("node_modules/original", b"original npm installation")
+        .unwrap();
+    fs::rename(
+        project.path().join("node_modules"),
+        backup.path().join("saved-tree"),
+    )
+    .unwrap();
+    assert!(!project.path().join("tapid.lock").exists());
     let output = invoke(&project, &["import-package-lock", "package-lock.json"]);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(invoke(&project, &["lock", "verify"]).status.success());
     let imported_bytes = fs::read_to_string(project.path().join("tapid.lock")).unwrap();
     assert_eq!(
         imported_bytes,
@@ -427,6 +439,18 @@ fn npm_import_preserves_nested_versions_peers_sources_and_optional_constraints()
     if let Ok(output) = Command::new("node").args(["-e", "const assert = require('node:assert'); const {createRequire} = require('node:module'); const p = createRequire(require.resolve('parent')); const c = createRequire(require.resolve('consumer')); assert.equal(p('shared'), 'shared@2.0.0'); assert.equal(c('shared'), 'shared@1.0.0');"]).current_dir(project.path()).output() {
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     } else { assert!(std::env::var_os("TAPID_REQUIRE_NODE_ASSERTIONS").is_none(), "Node is required in CI"); }
+    assert_eq!(
+        fs::read(project.path().join(".tapid-managed")).unwrap(),
+        b"tapid-managed-v1\n"
+    );
+    assert_eq!(
+        fs::read(project.path().join("package-lock.json")).unwrap(),
+        npm_lock
+    );
+    assert_eq!(
+        fs::read(backup.path().join("saved-tree/original")).unwrap(),
+        b"original npm installation"
+    );
     project.write("registry.json", b"not JSON").unwrap();
     let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
     let output = invoke(
@@ -451,6 +475,33 @@ fn npm_import_preserves_nested_versions_peers_sources_and_optional_constraints()
     assert_eq!(
         fs::read(project.path().join("package.json")).unwrap(),
         manifest
+    );
+    // With successful replay settled, preserve the replacement and restore the saved inputs.
+    fs::rename(
+        project.path().join("node_modules"),
+        backup.path().join("replacement"),
+    )
+    .unwrap();
+    fs::rename(
+        backup.path().join("saved-tree"),
+        project.path().join("node_modules"),
+    )
+    .unwrap();
+    fs::remove_file(project.path().join(".tapid-managed")).unwrap();
+    fs::remove_file(project.path().join("tapid.lock")).unwrap();
+    assert!(!project.path().join("tapid.lock").exists());
+    assert!(!project.path().join(".tapid-managed").exists());
+    assert_eq!(
+        fs::read(project.path().join("node_modules/original")).unwrap(),
+        b"original npm installation"
+    );
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read(project.path().join("package-lock.json")).unwrap(),
+        npm_lock
     );
 }
 
@@ -903,6 +954,25 @@ fn workspace_project() -> (TempProject, TempHome) {
 #[test]
 fn npm_import_workspace_links_install_and_replay_without_resolution() {
     let (project, home) = workspace_project();
+    let backup = TempProject::new("workspace-npm-backup").unwrap();
+    let npm_lock = fs::read(project.path().join("package-lock.json")).unwrap();
+    for (ordinal, tree) in [
+        "node_modules",
+        "packages/member/node_modules",
+        "apps/node_modules",
+    ]
+    .iter()
+    .enumerate()
+    {
+        project
+            .write(format!("{tree}/original"), b"saved npm tree")
+            .unwrap();
+        fs::rename(
+            project.path().join(tree),
+            backup.path().join(ordinal.to_string()),
+        )
+        .unwrap();
+    }
     let invoke = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_tapid"))
             .args(args)
@@ -919,6 +989,7 @@ fn npm_import_workspace_links_install_and_replay_without_resolution() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(invoke(&["lock", "verify"]).status.success());
     let imported = fs::read(project.path().join("tapid.lock")).unwrap();
     assert!(
         invoke(&["import-package-lock", "package-lock.json"])
@@ -1007,6 +1078,16 @@ fn npm_import_workspace_links_install_and_replay_without_resolution() {
             .success()
     );
     assert_eq!(lock, fs::read(project.path().join("tapid.lock")).unwrap());
+    assert_eq!(
+        fs::read(project.path().join("package-lock.json")).unwrap(),
+        npm_lock
+    );
+    for ordinal in 0..3 {
+        assert_eq!(
+            fs::read(backup.path().join(ordinal.to_string()).join("original")).unwrap(),
+            b"saved npm tree"
+        );
+    }
 }
 
 #[test]
@@ -1038,6 +1119,7 @@ fn npm_import_workspace_failures_preserve_existing_project_state() {
         "dangling",
         "escape",
         "nested",
+        "ancestor-tree",
         "member-tree",
     ] {
         let mut input = npm.clone();
@@ -1065,6 +1147,11 @@ fn npm_import_workspace_failures_preserve_existing_project_state() {
                 input["packages"]["packages/member/node_modules/other"] =
                     serde_json::json!({"version":"1.0.0"})
             }
+            "ancestor-tree" => {
+                project
+                    .write("packages/node_modules/leftover", b"prior ancestor install")
+                    .unwrap();
+            }
             "member-tree" => {
                 project
                     .write(
@@ -1080,6 +1167,42 @@ fn npm_import_workspace_failures_preserve_existing_project_state() {
             .unwrap();
         let output = invoke(&project, &["import-package-lock", "package-lock.json"]);
         assert!(!output.status.success(), "{case}");
+        if case == "member-tree" || case == "ancestor-tree" {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tree = if case == "member-tree" {
+                "packages/member/node_modules"
+            } else {
+                "packages/node_modules"
+            };
+            assert!(stderr.contains("unused backup location"), "{stderr}");
+            assert!(
+                stderr.contains(&project.path().join(tree).display().to_string()),
+                "{stderr}"
+            );
+            assert_eq!(
+                fs::read(project.path().join(tree).join("leftover")).unwrap(),
+                if case == "member-tree" {
+                    b"prior member install".as_slice()
+                } else {
+                    b"prior ancestor install".as_slice()
+                }
+            );
+            assert!(
+                !project
+                    .path()
+                    .join(tree)
+                    .parent()
+                    .unwrap()
+                    .join(".tapid-managed")
+                    .exists()
+            );
+            // Each topology is checked independently.
+            fs::remove_dir_all(project.path().join(tree)).unwrap();
+        }
+        assert_eq!(
+            fs::read(project.path().join("package-lock.json")).unwrap(),
+            input.to_string().as_bytes()
+        );
         assert_eq!(
             fs::read(project.path().join("tapid.lock")).unwrap(),
             b"prior lock"
@@ -1544,4 +1667,116 @@ fn npm_import_workspace_hoisting_preserves_direct_registry_and_local_bindings() 
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn manual_migration_failures_preserve_saved_installation_and_inputs() {
+    let project = reference_project("manual-migration-failure");
+    let home = TempHome::new("manual-migration-failure").unwrap();
+    let backup = TempProject::new("manual-migration-saved").unwrap();
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
+    let npm = fs::read(project.path().join("package-lock.json")).unwrap();
+    project.write("tapid.lock", b"prior Tapid lock").unwrap();
+    project
+        .write("node_modules/original", b"original npm installation")
+        .unwrap();
+    fs::rename(
+        project.path().join("node_modules"),
+        backup.path().join("saved-tree"),
+    )
+    .unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+        command
+            .current_dir(project.path())
+            .env("HOME", home.path())
+            .env("XDG_CACHE_HOME", home.path())
+            .env("LOCALAPPDATA", home.path());
+        command
+    };
+    // Unsupported input cannot publish over the prior lock.
+    let mut unsupported: serde_json::Value = serde_json::from_slice(&npm).unwrap();
+    unsupported["lockfileVersion"] = serde_json::json!(2);
+    project
+        .write("unsupported.json", unsupported.to_string().as_bytes())
+        .unwrap();
+    assert!(
+        !command()
+            .args(["import-package-lock", "unsupported.json"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        b"prior Tapid lock"
+    );
+    assert!(
+        command()
+            .args(["import-package-lock", "package-lock.json"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let imported = fs::read(project.path().join("tapid.lock")).unwrap();
+    let store = project.path().join("store");
+    let output = command()
+        .args([
+            "install",
+            "--frozen",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ])
+        .env("TAPID_TEST_FAIL_ACTIVATION", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("activation failed (injected)"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        imported
+    );
+    assert!(!project.path().join("node_modules").exists());
+    assert!(!project.path().join(".tapid-managed").exists());
+    assert!(
+        !project
+            .path()
+            .join(".tapid-lifecycle-journal.json")
+            .exists()
+    );
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read(project.path().join("package-lock.json")).unwrap(),
+        npm
+    );
+    assert_eq!(
+        fs::read(backup.path().join("saved-tree/original")).unwrap(),
+        b"original npm installation"
+    );
+    // The failed transaction is settled; restore the saved installation and prior lock.
+    fs::rename(
+        backup.path().join("saved-tree"),
+        project.path().join("node_modules"),
+    )
+    .unwrap();
+    project.write("tapid.lock", b"prior Tapid lock").unwrap();
+    assert_eq!(
+        fs::read(project.path().join("node_modules/original")).unwrap(),
+        b"original npm installation"
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        b"prior Tapid lock"
+    );
 }
