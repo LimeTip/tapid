@@ -212,7 +212,8 @@ fn malformed_state_and_symlink_are_rejected() {
 
 #[test]
 fn interrupted_replacement_preserves_previous_state() {
-    let dir = tempfile_dir();
+    let project = tapid_test_support::TempProject::new("interrupted-release-state").unwrap();
+    let dir = project.path();
     let path = dir.join("state.json");
     let old = ReleaseState::new("0.0.6", 6, "a".repeat(64)).unwrap();
     write_release_state(&path, &old).unwrap();
@@ -221,7 +222,6 @@ fn interrupted_replacement_preserves_previous_state() {
     let newer = ReleaseState::new("0.0.7", 7, "b".repeat(64)).unwrap();
     assert!(write_release_state(&path, &newer).is_err());
     assert_eq!(read_release_state(&path).unwrap(), old);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
