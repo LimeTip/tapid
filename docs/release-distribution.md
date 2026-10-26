@@ -360,8 +360,8 @@ After environment approval, the workflow publishes one crate at a time, reads ba
 ### 9. Complete final public read-back
 
 The supplemental [public verification command](release-public-verification.md)
-is under implementation and currently reports incomplete verification. The
-manual checks below remain the normative fallback and release obligation.
+can read back a completed stable tag with anonymous requests. The manual checks
+below remain the normative fallback and release obligation.
 
 A release is complete only after verifying:
 

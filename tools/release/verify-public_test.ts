@@ -82,3 +82,42 @@ test('JSON CLI reserves stdout for the report and exits nonzero for invalid tags
   assert.equal(JSON.parse(result.stdout).checks[0].status, 'fail');
   assert.match(result.stderr, /tag=fail/);
 });
+
+test('command inspects all six target-specific archives before reporting archive safety', async () => {
+  const { createHash } = await import('node:crypto');
+  const { TARGETS } = await import('./release.ts');
+  const { readdir } = await import('node:fs/promises');
+  const { dirname, basename } = await import('node:path');
+  const tag = 'v0.0.10';
+  const names = TARGETS.map(target => `tapid-0.0.10-${target}.tar.gz`);
+  const hash = createHash('sha256').update('archive fixture').digest('hex');
+  const checksums = names.map(name => `${hash}  ${name}\n`).join('');
+  const assets = [...names, 'SHA256SUMS'].map((name, i) => ({ id: i + 1, name,
+    size: name === 'SHA256SUMS' ? Buffer.byteLength(checksums) : 15,
+    browser_download_url: `https://github.com/LimeTip/tapid/releases/download/${tag}/${name}` }));
+  const makeTransport = () => new PublicTransport({ fetch: async input => {
+    const path = new URL(String(input)).pathname;
+    if (path.includes('/releases/download/')) return new Response(path.endsWith('/SHA256SUMS') ? checksums : 'archive fixture');
+    if (path.endsWith(`/git/ref/tags/${tag}`)) return Response.json({ ref: `refs/tags/${tag}`, object: { type: 'tag', sha: object } });
+    if (path.endsWith(`/git/tags/${object}`)) return Response.json({ sha: object, tag, object: { type: 'commit', sha: commit } });
+    if (path.endsWith('/releases')) return Response.json([{ id: 42, tag_name: tag, draft: false, prerelease: false, immutable: true, assets }]);
+    return Response.json({ workflow_runs: [] });
+  } });
+  const inspected: string[] = [];
+  let directory = '';
+  const report = await verifyPublicRelease(tag, { transport: makeTransport(), verifier: async () => ({
+    async inspectArchive(path, executable) {
+      directory = dirname(path);
+      inspected.push(basename(path));
+      assert.equal(executable, path.includes('windows') ? 'tapid.exe' : 'tapid');
+    }, async verifySignature() { assert.fail('historical contract has no signature'); },
+  }) });
+  assert.deepEqual(inspected.sort(), names.sort());
+  assert.equal(report.checks.find(check => check.name === 'archives')?.status, 'pass');
+  await assert.rejects(readdir(directory), { code: 'ENOENT' });
+  const rejected = await verifyPublicRelease(tag, { transport: makeTransport(), verifier: async () => ({
+    async inspectArchive() { throw Error('native archive inspection failed'); }, async verifySignature() {},
+  }) });
+  assert.equal(rejected.checks.find(check => check.name === 'archives')?.status, 'fail');
+  assert.equal(rejected.ok, false);
+});

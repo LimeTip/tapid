@@ -7,7 +7,7 @@ import { TARGETS, checksumLines, releaseVersion } from './release.ts';
 import { compareStableVersions } from './versions.ts';
 import { PUBLIC_LIMITS, PublicTransport } from './public_transport.ts';
 
-export type AssetObservation = { id: number; name: string; size: number; sha256: string; digestEvidence: 'provider-checksum' | 'observed' };
+export type AssetObservation = { id: number; name: string; size: number; sha256: string; digestEvidence: 'provider-checksum' | 'authenticated-record' | 'observed' };
 type Download = { id: number; name: string; size: number; url: string };
 
 /** Owns temporary bytes until all offline inspection consumers have completed. */

@@ -7,7 +7,7 @@ import { verifyPublicSmoke } from './public_smoke.ts';
 const commit = 'b'.repeat(40);
 const identity = { tag: 'v0.0.11', commit, releaseId: 42, publishedAt: '2026-10-19T00:00:00Z' };
 const names = ['resolve', 'Unix installer (ubuntu-latest)', 'Unix installer (macos-latest)', 'Windows installer'];
-async function fixture(options: { coordinator?: boolean; event?: string; head?: string; missing?: string; changedWorkflow?: boolean } = {}) {
+async function fixture(options: { coordinator?: boolean; event?: string; head?: string; missing?: string; changedWorkflow?: boolean; jobAttempt?: number; jobConclusion?: string } = {}) {
   const workflow = options.coordinator ? 'crates-publication.yml' : 'release-public-smoke.yml';
   const head = options.head ?? commit;
   const run = { id: 77, run_attempt: 2, event: options.event ?? (options.coordinator ? 'push' : 'release'), head_branch: options.coordinator ? 'main' : identity.tag, head_sha: head, path: `.github/workflows/${workflow}`, status: 'completed', conclusion: 'success' };
@@ -19,7 +19,7 @@ async function fixture(options: { coordinator?: boolean; event?: string; head?: 
       return new Response(options.changedWorkflow ? 'unreviewed workflow' : await readFile(new URL(`../../${file}`, import.meta.url)));
     }
     if (url.pathname.endsWith('/runs')) return Response.json({ workflow_runs: url.pathname.includes(workflow) ? [run] : [] });
-    if (url.pathname.endsWith('/jobs')) return Response.json({ jobs: names.filter(name => name !== options.missing).map((name, index) => ({ id: index + 1, run_id: 77, run_attempt: 2, head_sha: head, name: options.coordinator ? `smoke / ${name}` : name, status: 'completed', conclusion: 'success', started_at: '2026-10-20T00:00:00Z' })) });
+    if (url.pathname.endsWith('/jobs')) return Response.json({ jobs: names.filter(name => name !== options.missing).map((name, index) => ({ id: index + 1, run_id: 77, run_attempt: index === 3 ? options.jobAttempt ?? 2 : 2, head_sha: head, name: options.coordinator ? `smoke / ${name}` : name, status: 'completed', conclusion: index === 3 ? options.jobConclusion ?? 'success' : 'success', started_at: '2026-10-20T00:00:00Z' })) });
     throw Error(`unexpected fixture request ${url.pathname}`);
   } });
   return transport;
@@ -46,6 +46,7 @@ test('rejects unobservable recovery inputs, wrong commit, schedules, changed wir
     { coordinator: true, event: 'workflow_dispatch' },
     { head: 'c'.repeat(40) }, { event: 'schedule' },
     { changedWorkflow: true }, { missing: 'resolve' }, { missing: 'Windows installer' },
+    { jobAttempt: 1 }, { jobConclusion: 'skipped' }, { jobConclusion: 'failure' },
   ]) await assert.rejects(verifyPublicSmoke(await fixture(options), identity), /no successful public smoke/);
 });
 

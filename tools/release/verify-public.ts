@@ -1,6 +1,10 @@
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { releaseVersion } from './release.ts';
+import { releaseVersion, TARGETS } from './release.ts';
+import { buildPublicVerifier, type PublicVerifier } from './public_native.ts';
+import { verifyPublicIntegrity } from './public_integrity.ts';
+import { withPublicSource } from './public_source.ts';
+import { verifyPublicPackages, type PublicPackage } from './public_packages.ts';
 import { compareStableVersions } from './versions.ts';
 import { PublicTransport } from './public_transport.ts';
 import { verifyPublicSmoke, type SmokeEvidence } from './public_smoke.ts';
@@ -15,6 +19,7 @@ export type PublicReport = {
   identity?: { tagObject: string; commit: string; releaseId: number };
   smoke?: SmokeEvidence;
   assets?: AssetObservation[];
+  packages?: PublicPackage[];
   checks: Check[];
 };
 const API = 'https://api.github.com/repos/LimeTip/tapid';
@@ -38,7 +43,7 @@ function failureDetail(error: unknown): string {
 }
 
 /** Independent public read-back; no release mutation adapter is reachable here. */
-export async function verifyPublicRelease(tag: string, options: { transport?: PublicTransport } = {}): Promise<PublicReport> {
+export async function verifyPublicRelease(tag: string, options: { transport?: PublicTransport; verifier?: (remainingMs: () => number) => Promise<PublicVerifier> } = {}): Promise<PublicReport> {
   const report: PublicReport = { schema: 'tapid-public-verification-v1', tag, ok: false, checks: [] };
   try {
     releaseVersion(tag, tag.slice(1));
@@ -46,7 +51,7 @@ export async function verifyPublicRelease(tag: string, options: { transport?: Pu
     report.checks.push({ name: 'tag', status: 'pass' });
   } catch {
     report.checks.push({ name: 'tag', status: 'fail', detail: 'expected canonical stable vX.Y.Z with unsigned 64-bit components' });
-    for (const name of ['identity', 'assets', 'integrity', 'smoke', 'packages']) report.checks.push({ name, status: 'not-performed' });
+    for (const name of ['identity', 'assets', 'archives', 'integrity', 'smoke', 'packages']) report.checks.push({ name, status: 'not-performed' });
     return report;
   }
   const transport = options.transport ?? new PublicTransport();
@@ -80,15 +85,42 @@ export async function verifyPublicRelease(tag: string, options: { transport?: Pu
   } catch (error) {
     report.checks.push({ name: 'identity', status: 'fail', detail: failureDetail(error) });
   }
+  let archives: Check = { name: 'archives', status: 'not-performed' };
+  let integrity: Check = { name: 'integrity', status: 'not-performed' };
   if (report.identity) {
     try {
-      report.assets = await verifyPublicAssets(transport, tag, releaseAssets, async () => {});
+      report.assets = await verifyPublicAssets(transport, tag, releaseAssets, async ({ directory }) => {
+        let verifier: PublicVerifier | undefined;
+        try {
+          verifier = await (options.verifier ?? buildPublicVerifier)(() => transport.remainingMs());
+          for (const target of TARGETS) {
+            await verifier.inspectArchive(join(directory, `tapid-${tag.slice(1)}-${target}.tar.gz`), target.includes('windows') ? 'tapid.exe' : 'tapid');
+          }
+          archives = { name: 'archives', status: 'pass' };
+        } catch (error) {
+          archives = { name: 'archives', status: 'fail', detail: failureDetail(error) };
+        }
+        if (report.contract === 'historical-checksums') {
+          integrity = { name: 'integrity', status: 'pass', detail: 'historical same-provider checksums; no independent signature' };
+        } else if (verifier) {
+          try {
+            await verifyPublicIntegrity(transport, verifier, { directory, tag, commit: report.identity!.commit });
+            integrity = { name: 'integrity', status: 'pass' };
+          } catch (error) {
+            integrity = { name: 'integrity', status: 'fail', detail: failureDetail(error) };
+          }
+        }
+      });
+      if (integrity.status === 'pass' && report.contract === 'signed-record-v1') {
+        for (const asset of report.assets) if (asset.name.endsWith('.tar.gz')) asset.digestEvidence = 'authenticated-record';
+      }
       report.checks.push({ name: 'assets', status: 'pass' });
     } catch (error) {
       report.checks.push({ name: 'assets', status: 'fail', detail: failureDetail(error) });
     }
   } else report.checks.push({ name: 'assets', status: 'not-performed' });
-  report.checks.push({ name: 'integrity', status: 'not-performed' });
+  report.checks.push(archives);
+  report.checks.push(integrity);
   if (report.identity) {
     try {
       if (typeof publishedAt !== 'string') throw Error('missing public release publication time');
@@ -98,7 +130,20 @@ export async function verifyPublicRelease(tag: string, options: { transport?: Pu
       report.checks.push({ name: 'smoke', status: 'fail', detail: failureDetail(error) });
     }
   } else report.checks.push({ name: 'smoke', status: 'not-performed' });
-  report.checks.push({ name: 'packages', status: 'not-performed' });
+  if (report.identity) {
+    try {
+      report.packages = await withPublicSource(transport, report.identity.commit, async metadata => {
+        const cli = metadata.packages.find(pkg => pkg.name === 'tapid');
+        if (!cli) throw Error('tagged Cargo metadata lacks tapid');
+        releaseVersion(tag, cli.version);
+        return verifyPublicPackages(transport, metadata);
+      });
+      report.checks.push({ name: 'packages', status: 'pass' });
+    } catch (error) {
+      report.checks.push({ name: 'packages', status: 'fail', detail: failureDetail(error) });
+    }
+  } else report.checks.push({ name: 'packages', status: 'not-performed' });
+  report.ok = report.checks.every(check => check.status === 'pass');
   return report;
 }
 
