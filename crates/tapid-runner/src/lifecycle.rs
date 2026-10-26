@@ -247,7 +247,7 @@ impl DependencyLifecyclePolicy {
                         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
                     || tool.name == "."
                     || tool.name == ".."
-                    || !names.insert(&tool.name)
+                    || !names.insert(tool.name.as_str())
                     || executable_name.len() > 255
                     || !portable_names.insert(executable_name.to_ascii_lowercase())
                 {
@@ -261,7 +261,7 @@ impl DependencyLifecyclePolicy {
                 }
                 check_sha256(&tool.digest)?;
             }
-            if !names.contains(&"sh".to_owned()) && !names.contains(&"cmd".to_owned()) {
+            if !names.contains("sh") && !names.contains("cmd") {
                 return Err("lifecycle tools must pin sh or cmd".into());
             }
             approvals.push(DependencyLifecycleApproval {
@@ -468,8 +468,23 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
     }
 
     #[test]
+    fn approvals_require_an_exact_shell_name() {
+        for name in ["sh", "cmd"] {
+            let input = document().replace("name = \"sh\"", &format!("name = \"{name}\""));
+            assert!(DependencyLifecyclePolicy::parse(input.as_bytes()).is_ok());
+        }
+        for name in ["node", "SH", "cmd.exe"] {
+            let input = document().replace("name = \"sh\"", &format!("name = \"{name}\""));
+            assert_eq!(
+                DependencyLifecyclePolicy::parse(input.as_bytes()).unwrap_err(),
+                "lifecycle tools must pin sh or cmd"
+            );
+        }
+    }
+
+    #[test]
     fn approvals_reject_tool_names_that_collide_as_windows_executables() {
-        for name in ["SH", "sh.exe", "sh.EXE"] {
+        for name in ["sh", "SH", "sh.exe", "sh.EXE"] {
             let mut input: toml::Value = toml::from_str(&document()).unwrap();
             let tools = input["approvals"][0]["tools"].as_array_mut().unwrap();
             let mut alias = tools[0].clone();
