@@ -9,7 +9,8 @@ const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 
 mod diagnostic;
 pub(crate) use diagnostic::{
-    Declaration, DiagnosticContext, DiagnosticPackage, RequirementDiagnostic,
+    CandidateExclusions, Declaration, DependencyCategory, DiagnosticContext, DiagnosticPackage,
+    ExcludedCandidate, ExcludedPackage, ExclusionReason, RequirementDiagnostic,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

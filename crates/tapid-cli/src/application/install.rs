@@ -31,6 +31,7 @@ pub(crate) struct ManifestEdit<'a> {
 
 #[derive(Debug)]
 pub(crate) struct InstallReport {
+    pub(crate) candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub(crate) package_count: usize,
     pub(crate) replayed: bool,
     pub(crate) package_changes: Option<PackageChanges>,
@@ -73,6 +74,7 @@ impl PackageChanges {
 }
 
 struct InstallSession {
+    candidate_exclusions: super::outcome::CandidateExclusions,
     hook_stages: Vec<super::dependency_scripts::BuildStage>,
     journal: Option<crate::filesystem::lifecycle_journal::LifecycleJournal>,
     lock_backup: Option<PathBuf>,
@@ -94,6 +96,7 @@ impl InstallSession {
             mutated: false,
             committed: false,
             package_changes: None,
+            candidate_exclusions: Default::default(),
         }
     }
 
@@ -269,6 +272,7 @@ pub(crate) fn run_with_execution(
     }
     match perform_install(&mut session, request, overrides, report_replay_progress) {
         Ok((package_count, replayed)) => Ok(InstallReport {
+            candidate_exclusions: session.candidate_exclusions,
             package_count,
             replayed,
             package_changes: session.package_changes,
@@ -546,6 +550,7 @@ fn perform_install(
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let online::PreparedInstall {
+            candidate_exclusions,
             mut lock,
             layout:
                 online::PreparedLayout {
@@ -580,6 +585,7 @@ fn perform_install(
                 &mut report_replay_progress,
             )?
         };
+        session.candidate_exclusions = candidate_exclusions;
         if let (Some(request), Some(previous)) = (update, previous_lock.as_ref()) {
             session
                 .outcome

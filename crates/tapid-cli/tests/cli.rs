@@ -3950,8 +3950,12 @@ fn lifecycle_add_rejects_invalid_fetched_range_without_state_changes() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("dependency broken"), "{stderr}");
-    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert!(
+        stderr.contains("1.0.0 (unsupported_dependency_requirement)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("dependency broken"), "{stderr}");
+    assert!(!stderr.contains("not a valid range"), "{stderr}");
     assert_eq!(
         fs::read(dir.join("package.json")).unwrap(),
         manifest.as_bytes()
@@ -4181,8 +4185,12 @@ fn invalid_fetched_dependency_range_does_not_create_store_state() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("dependency broken"), "{stderr}");
-    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert!(
+        stderr.contains("1.0.0 (unsupported_dependency_requirement)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("dependency broken"), "{stderr}");
+    assert!(!stderr.contains("not a valid range"), "{stderr}");
     assert_eq!(
         fs::read_to_string(dir.join("package.json")).unwrap(),
         manifest

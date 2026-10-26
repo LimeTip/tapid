@@ -1120,3 +1120,190 @@ fn json_import_failed_replacement_cannot_strand_the_old_lock() {
         );
     }
 }
+
+#[test]
+fn candidate_exclusions_survive_install_preview_and_replay() {
+    for preview in [false, true] {
+        let project = TempProject::new("json-candidate-exclusions").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"^1"}}"#,
+            )
+            .unwrap();
+        let mut fixture: serde_json::Value =
+            serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+        let mut rejected = fixture["packages"][0].clone();
+        rejected["version"] = "0.1.0".into();
+        rejected["dependencies"] = serde_json::json!({"hostile":"git+https://user:password@example.test/private?token=secret界\u{001b}"});
+        for n in 1..=10 {
+            let mut historical = rejected.clone();
+            historical["version"] = format!("0.1.{n}").into();
+            fixture["packages"].as_array_mut().unwrap().push(historical);
+        }
+        let mut long_version = rejected.clone();
+        long_version["version"] = format!("0.0.0-{}", "a".repeat(1024)).into();
+        fixture["packages"]
+            .as_array_mut()
+            .unwrap()
+            .extend([rejected, long_version]);
+        project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let store = project.path().join("store");
+        let store = store.to_str().unwrap();
+        let mut args = vec![
+            "install",
+            "--json",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store,
+        ];
+        if preview {
+            args.push("--dry-run");
+        }
+        let (output, result) = invoke(&project, &args);
+        assert!(output.status.success(), "{result}");
+        let evidence = &result["data"]["candidate_exclusions"];
+        assert_eq!(evidence["total_candidates"], 12, "{result}");
+        assert_eq!(evidence["omitted_candidates"], 4);
+        assert_eq!(evidence["truncated"], true);
+        assert_eq!(evidence["packages"][0]["candidates"][1]["version"], "0.1.0");
+        assert!(
+            evidence["packages"][0]["candidates"][0]["version"]
+                .as_str()
+                .unwrap()
+                .len()
+                <= 256
+        );
+        assert!(
+            result["truncated_fields"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(
+                    "/data/candidate_exclusions/packages/0/candidates/0/version"
+                ))
+        );
+        assert_eq!(
+            evidence["packages"][0]["candidates"][0]["reason_code"],
+            "unsupported_dependency_requirement"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("password"));
+        if preview {
+            assert!(!project.path().join("tapid.lock").exists());
+            assert!(!project.path().join("node_modules").exists());
+        } else {
+            let (output, replay) = invoke(&project, &args);
+            assert!(output.status.success(), "{replay}");
+            assert_eq!(replay["data"]["replayed"], true);
+            assert!(replay["data"].get("candidate_exclusions").is_none());
+            let mut lock_preview_args = args.clone();
+            lock_preview_args.push("--dry-run");
+            let (output, lock_preview) = invoke(&project, &lock_preview_args);
+            assert!(output.status.success(), "{lock_preview}");
+            assert!(lock_preview["data"].get("candidate_exclusions").is_none());
+            let (output, refreshed) = invoke(
+                &project,
+                &[
+                    "update",
+                    "--json",
+                    "--registry-fixture",
+                    "registry.json",
+                    "--store-dir",
+                    store,
+                ],
+            );
+            assert!(output.status.success(), "{refreshed}");
+            assert_eq!(
+                refreshed["data"]["candidate_exclusions"]["total_candidates"],
+                12
+            );
+            let home = TempHome::new("quiet-exclusions").unwrap();
+            let output = command(
+                &project,
+                &home,
+                &[
+                    "update",
+                    "--registry-fixture",
+                    "registry.json",
+                    "--store-dir",
+                    store,
+                ],
+            )
+            .output()
+            .unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("excluded"));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("excluded"));
+        }
+    }
+}
+
+#[test]
+fn terminal_candidate_exclusions_are_structured_in_json() {
+    for mode in ["missing", "conflict", "all-excluded"] {
+        let project = TempProject::new("json-terminal-exclusions").unwrap();
+        let manifest = if mode == "conflict" {
+            serde_json::json!({"name":"app","version":"1.0.0","dependencies":{"h3":"^1"},"devDependencies":{"h3":"^2"}})
+        } else {
+            serde_json::json!({"name":"app","version":"1.0.0","dependencies":{"h3":"^9"}})
+        };
+        project
+            .write("package.json", manifest.to_string().as_bytes())
+            .unwrap();
+        let mut fixture: serde_json::Value =
+            serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+        let template = fixture["packages"][0].clone();
+        if mode == "all-excluded" {
+            fixture["packages"] = serde_json::json!([]);
+        }
+        for n in 0..12 {
+            let mut rejected = template.clone();
+            rejected["version"] = format!("0.1.{n}").into();
+            rejected["dependencies"] = serde_json::json!({"../rejected-name":"git+https://user:password@example.test/private?token=secret界\u{001b}"});
+            fixture["packages"].as_array_mut().unwrap().push(rejected);
+        }
+        project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let (output, result) = invoke(
+            &project,
+            &["install", "--json", "--registry-fixture", "registry.json"],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        let context = &result["errors"][0]["context"];
+        assert_eq!(result["errors"][0]["code"], "RESOLUTION_FAILED");
+        assert_eq!(context["package"]["name"], "h3");
+        let evidence = &context["candidate_exclusions"];
+        assert_eq!(evidence["total_candidates"], 12);
+        assert_eq!(evidence["omitted_candidates"], 4);
+        assert_eq!(
+            evidence["packages"][0]["candidates"][0]["reason_code"],
+            "unsupported_dependency_name"
+        );
+        if mode == "all-excluded" {
+            assert_eq!(context["available"], serde_json::json!([]));
+        } else {
+            assert_eq!(
+                context["available"],
+                serde_json::json!(["1.0.0", "2.0.0", "2.0.1-rc.20"])
+            );
+        }
+        if mode == "conflict" {
+            assert_eq!(context["requirements"].as_array().unwrap().len(), 2);
+        }
+        for secret in [
+            "password",
+            "rejected-name",
+            "example.test",
+            "token",
+            "\u{001b}",
+        ] {
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains(secret),
+                "{result}"
+            );
+        }
+    }
+}
