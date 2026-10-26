@@ -185,29 +185,30 @@ fn rejects_oversized_manifest_before_parsing() {
 }
 
 #[test]
-fn last_known_good_round_trips_and_replaces_atomically() { let state = LastKnownGood { version: "0.0.6".into(), artifact_sha256: "a".repeat(64) }; let dir = std::env::temp_dir().join(format!("tapid-release-{}", std::process::id())); let _ = std::fs::create_dir_all(&dir); let path = dir.join("state.json"); write_last_known_good(&path, &state).unwrap(); assert_eq!(read_last_known_good(&path).unwrap(), state); let _ = std::fs::remove_dir_all(dir); }
+fn last_known_good_round_trips_and_replaces_atomically() { let state = LastKnownGood { version: "0.0.6".into(), artifact_sha256: "a".repeat(64) }; let project = tapid_test_support::TempProject::new("last-known-good").unwrap(); let path = project.path().join("state.json"); write_last_known_good(&path, &state).unwrap(); assert_eq!(read_last_known_good(&path).unwrap(), state); }
 
 #[test]
 fn release_state_rejects_replay_and_downgrade() {
-    let dir = tempfile_dir(); let path = dir.join("state.json");
+    let project = tapid_test_support::TempProject::new("release-state-replay").unwrap();
+    let path = project.path().join("state.json");
     let state = ReleaseState::new("0.0.6", 6, "a".repeat(64)).unwrap();
     write_release_state(&path, &state).unwrap();
     assert!(matches!(accept_release(&state, "0.0.6", 6, "b".repeat(64)), Err(Error::ReleaseReplay { .. })));
     assert!(matches!(accept_release(&state, "0.0.5", 7, "b".repeat(64)), Err(Error::ReleaseDowngrade { .. })));
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[cfg(unix)]
 #[test]
 fn malformed_state_and_symlink_are_rejected() {
-    let dir = tempfile_dir(); let path = dir.join("state.json");
+    let project = tapid_test_support::TempProject::new("malformed-release-state").unwrap();
+    let dir = project.path(); let path = dir.join("state.json");
     std::fs::write(&path, b"{\"schema\":\"tapid-release-state-v2\"}").unwrap();
     assert!(matches!(read_release_state(&path), Err(Error::State(_))));
     let target = dir.join("target"); std::fs::write(&target, b"old").unwrap();
     let link = dir.join("link"); std::os::unix::fs::symlink(&target, &link).unwrap();
     let state = ReleaseState::new("0.0.6", 6, "a".repeat(64)).unwrap();
     assert!(matches!(write_release_state(&link, &state), Err(Error::State(_))));
-    assert_eq!(std::fs::read(&target).unwrap(), b"old"); let _ = std::fs::remove_dir_all(dir);
+    assert_eq!(std::fs::read(&target).unwrap(), b"old");
 }
 
 #[test]
@@ -230,8 +231,6 @@ fn all_endpoints_fail_with_deterministic_error() {
     let err = discover(&mut f, &["https://one.test/stable.json", "https://two.test/stable.json"], &keyring(), TARGET, NOW, None).unwrap_err();
     assert!(matches!(err, Error::AllEndpointsFailed { attempts: 2 }));
 }
-
-fn tempfile_dir() -> std::path::PathBuf { let d = std::env::temp_dir().join(format!("tapid-release-test-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())); std::fs::create_dir_all(&d).unwrap(); d }
 
 #[test]
 fn release_state_accepts_stable_major_versions_and_rejects_downgrades() {

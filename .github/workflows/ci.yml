@@ -405,7 +405,7 @@ jobs:
           }
 
   platform-consumer-validation:
-    name: Consumer validation (${{ matrix.os }})
+    name: Consumer validation (${{ matrix.os }}, Node ${{ matrix.node-version }})
     runs-on: ${{ matrix.os }}
     outputs:
       windows-image-version: ${{ steps.windows-cli-provenance.outputs.image-version }}
@@ -414,6 +414,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Keep all released, non-EOL majors from https://nodejs.org/en/about/previous-releases.
+        node-version: ['26', '24', '22']
         include:
           - os: ubuntu-latest
             shell: bash
@@ -435,7 +438,8 @@ jobs:
       - name: Install Node.js fixture runtime
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
+          check-latest: true
       - name: Build Tapid binary
         run: cargo build --bin tapid --locked
       - name: Install Windows network guard for consumer validation
@@ -460,14 +464,14 @@ jobs:
         if: runner.os == 'macOS'
         run: node tests/fixtures/validate_consumer_project.js
       - name: Prepare same-run Windows CLI handoff
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.node-version == '26'
         id: windows-cli-provenance
         run: |
           node --experimental-strip-types tools/release/ci_binary.ts prepare --directory "$env:RUNNER_TEMP/tapid-ci-cli" --binary target/debug/tapid.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "image-version=$env:ImageVersion" >> $env:GITHUB_OUTPUT
       - name: Retain same-run Windows CLI
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.node-version == '26'
         id: windows-cli
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -478,7 +482,7 @@ jobs:
           compression-level: 0
           overwrite: false
       - name: Record Windows handoff artifact identity
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.node-version == '26'
         env:
           ARTIFACT_ID: ${{ steps.windows-cli.outputs.artifact-id }}
           ARTIFACT_DIGEST: ${{ steps.windows-cli.outputs.artifact-digest }}
@@ -488,6 +492,22 @@ jobs:
         run: |
           & target/debug/tapid.exe sandbox uninstall
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  consumer-validation:
+    name: Consumer validation (${{ matrix.os }})
+    needs: [platform-consumer-validation]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Require all native consumer legs to succeed
+        shell: bash
+        env:
+          CONSUMER_RESULT: ${{ needs.platform-consumer-validation.result }}
+        run: test "$CONSUMER_RESULT" = success
 
   pr-published-binary-smoke:
     # Exact PR runner + immutable published binary: pre-merge regression evidence only.

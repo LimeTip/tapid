@@ -32,10 +32,8 @@ impl LocalHttpFixture {
         let routes = Arc::new(routes);
         let server_routes = Arc::clone(&routes);
         thread::spawn(move || {
-            for stream in listener.incoming().take(16) {
-                if let Ok(mut stream) = stream {
-                    serve_once(&mut stream, &server_routes);
-                }
+            for mut stream in listener.incoming().take(16).flatten() {
+                serve_once(&mut stream, &server_routes);
             }
         });
         Self { address }
@@ -209,7 +207,7 @@ fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
         "https://npm.jsr.io/~/std__path/1.0.0.tgz"
     );
     assert!(matches!(
-        transport.get(&format!("https://registry.npmjs.org/redirect")),
+        transport.get("https://registry.npmjs.org/redirect"),
         Err(TransportError::InvalidResponse(_))
     ));
     let bounded = LocalTransport {
