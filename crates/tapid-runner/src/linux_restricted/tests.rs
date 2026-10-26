@@ -586,6 +586,220 @@ fn managed_tree_enforces_output_and_process_limits() {
 }
 
 #[test]
+fn managed_tree_propagates_authority_to_detached_reparented_targets() {
+    const ROLE: &str = "TAPID_TEST_MANAGED_AUTHORITY_ROLE";
+    const PROJECT: &str = "TAPID_TEST_MANAGED_AUTHORITY_PROJECT";
+    const OUTSIDE: &str = "TAPID_TEST_MANAGED_AUTHORITY_OUTSIDE";
+    const NETWORK: &str = "TAPID_TEST_MANAGED_AUTHORITY_NETWORK";
+    const TEST: &str = "execution::platform_backend::tests::managed_tree_propagates_authority_to_detached_reparented_targets";
+    let role = std::env::var(ROLE).unwrap_or_default();
+    if role == "target" || role == "descendant" {
+        if role == "descendant" {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while unsafe { libc::getppid() } != 1 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "probe was not reparented to namespace init"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(unsafe { libc::getsid(0) }, unsafe { libc::getpid() });
+        }
+        let outside = PathBuf::from(std::env::var_os(OUTSIDE).unwrap());
+        assert_eq!(unsafe { libc::fcntl(9, libc::F_GETFD) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        assert_eq!(fs::read("allowed").unwrap(), b"allowed read");
+        for path in [
+            outside.join("secret"),
+            PathBuf::from("outside-link/secret"),
+            PathBuf::from("..")
+                .join(outside.file_name().unwrap())
+                .join("secret"),
+        ] {
+            assert_eq!(
+                fs::read(&path).unwrap_err().raw_os_error(),
+                Some(libc::EACCES)
+            );
+            assert!(matches!(
+                fs::write(&path, b"escape").unwrap_err().raw_os_error(),
+                Some(libc::EACCES | libc::EROFS)
+            ));
+        }
+        assert!(matches!(
+            fs::write("denied", b"escape").unwrap_err().raw_os_error(),
+            Some(libc::EACCES | libc::EROFS)
+        ));
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0));
+        if std::env::var(NETWORK).unwrap() == "true" {
+            assert!(listener.is_ok(), "{listener:?}");
+        } else {
+            assert_eq!(listener.unwrap_err().raw_os_error(), Some(libc::EPERM));
+        }
+        fs::write(format!("writable/{role}"), b"authority checked").unwrap();
+        if role == "target" {
+            // setsid --fork exits while the new session continues under the
+            // private namespace init. Wait for that reparented target's proof.
+            assert!(
+                Command::new("/usr/bin/setsid")
+                    .arg("--fork")
+                    .arg(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(ROLE, "descendant")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while fs::read("writable/descendant").ok().as_deref() != Some(b"authority checked") {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "detached authority probe failed"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        return;
+    }
+    if role == "driver" {
+        assert!(unsafe { libc::fcntl(9, libc::F_GETFD) } >= 0);
+        let project = PathBuf::from(std::env::var_os(PROJECT).unwrap());
+        let outside = std::env::var_os(OUTSIDE).unwrap();
+        for network in [false, true] {
+            let policy = SandboxPolicy::new(
+                SandboxMode::Required,
+                FilesystemPolicy::new(vec![".".into()], vec!["writable".into()]).unwrap(),
+                network,
+                vec![ROLE.into(), OUTSIDE.into(), NETWORK.into()],
+                true,
+                ExecutionLimits::new(Some(10), Some(8192), Some(64), Some(128 * 1024 * 1024))
+                    .unwrap(),
+            )
+            .unwrap();
+            let req = ExecutionRequest::builder(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(ROLE, "target")
+                .env(OUTSIDE, outside.clone())
+                .env(NETWORK, network.to_string())
+                .project_root(&project)
+                .policy(policy)
+                .build()
+                .unwrap();
+            let result = execute(&req).unwrap();
+            assert_eq!(result.termination(), &Termination::Exited(0));
+            assert_eq!(
+                result.completion().cleanup_confidence(),
+                CleanupConfidence::KernelOwnedComplete
+            );
+            for name in ["target", "descendant"] {
+                let marker = project.join("writable").join(name);
+                assert_eq!(fs::read(&marker).unwrap(), b"authority checked");
+                fs::remove_file(marker).unwrap();
+            }
+        }
+        return;
+    }
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-authority").unwrap();
+    let outside = tapid_test_support::TempProject::new("managed-authority-outside").unwrap();
+    let secret = outside
+        .write("secret", b"synthetic outside secret")
+        .unwrap();
+    project.write("allowed", b"allowed read").unwrap();
+    fs::create_dir(project.path().join("writable")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), project.path().join("outside-link")).unwrap();
+    // The driver receives an intentionally inheritable descriptor containing
+    // denied data. Target setup must close it, even though the caller did not.
+    let output = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "exec 9<\"$1\"; exec \"$2\" --exact \"$3\" --nocapture",
+            "managed-authority",
+        ])
+        .arg(&secret)
+        .arg(std::env::current_exe().unwrap())
+        .arg(TEST)
+        .env(ROLE, "driver")
+        .env(PROJECT, project.path())
+        .env(OUTSIDE, outside.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(secret).unwrap(), b"synthetic outside secret");
+    assert!(!project.path().join("denied").exists());
+}
+
+#[test]
+fn managed_tree_bounds_forwarded_combined_output_and_cleans_writers() {
+    const ROLE: &str = "TAPID_TEST_MANAGED_OUTPUT_PROJECT";
+    if let Some(path) = std::env::var_os(ROLE) {
+        let project = PathBuf::from(path);
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(Some(10), Some(512), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap();
+        let result = execute(&request(
+            &project,
+            "setsid sh -c 'echo started > started; sleep 2; echo escaped > escaped' & while [ ! -f started ]; do sleep 0.01; done; i=0; while [ $i -lt 256 ]; do printf '\\376'; i=$((i+1)); done; i=0; while [ $i -lt 4096 ]; do printf '\\377' >&2; i=$((i+1)); done; sleep 5",
+            policy,
+        ))
+        .unwrap();
+        assert_eq!(result.termination(), &Termination::OutputLimitExceeded);
+        assert_eq!(
+            result.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        // ManagedTree forwards its bounded buffer after cleanup rather than
+        // returning it in the outcome. The parent observes the actual streams.
+        assert!(result.stdout().is_empty());
+        assert!(result.stderr().is_empty());
+        std::process::exit(0);
+    }
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-forwarded-output").unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "execution::platform_backend::tests::managed_tree_bounds_forwarded_combined_output_and_cleans_writers",
+            "--nocapture",
+        ])
+        .env(ROLE, project.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Non-UTF-8 sentinels distinguish target bytes from libtest's own output.
+    assert_eq!(
+        output.stdout.iter().filter(|&&byte| byte == 0xfe).count(),
+        256
+    );
+    assert_eq!(
+        output.stderr.iter().filter(|&&byte| byte == 0xff).count(),
+        256
+    );
+    assert!(project.path().join("started").exists());
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert!(!project.path().join("escaped").exists());
+}
+
+#[test]
 fn managed_tree_enforces_memory_limit_with_rust_workload() {
     const WORKLOAD: &str = "TAPID_MANAGED_MEMORY_WORKLOAD";
     if std::env::var_os(WORKLOAD).is_some() {
