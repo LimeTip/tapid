@@ -1540,3 +1540,114 @@ fn npm_import_workspace_hoisting_preserves_direct_registry_and_local_bindings() 
         );
     }
 }
+
+#[test]
+fn npm_import_nonstandard_archive_root_installs_and_replays() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use sha2::{Digest, Sha512};
+    for (label, artifact, expected_error) in [
+        (
+            "wrapped",
+            "H4sIAAAAAAAAEysvSiwoSE3RL0hMzk5MT9XLKs7PY6AyMDAwMDAzMQHTBgYG6LSBAUIOIm5oaGZuzKBgQG2HYAOlxSWJRQwGdLFrEIJqpbzE3FQlK6VySEJQ0lEqSy0qzszPU7JSMtQz0DNQqh1oN46CUTAKRsEooD4AAFafpxkACAAA",
+            None,
+        ),
+        (
+            "ambiguous",
+            "H4sIAAAAAAAAEysvSiwoSE3RL0hMzk5MT9XLKs7PY6AyMDAwMDAzMQHTBgYG6LSBAUIOIm5oaGZuzKBgQG2HYAOlxSWJRQwGdLFrEIJqpbzE3FQlK6VySEJQ0lEqSy0qzszPU7JSMtQz0DNQqh1oN44C2oH8kozUIprmfrLyv7Gp0Wj+pwcYzf+jYBSMglEwMgEAmTzX2AAMAAA=",
+            Some("multiple manifest roots"),
+        ),
+        (
+            "wrong-identity",
+            "H4sIAAAAAAAAE+3OwQrCMBAE0HyK7FnSCcQI/ZulLkWLaUhSPYj/LnopiMegHvZdZpnLzjVzSnLoEg8Tj2JPZY6mMQAI3r8SwHsCfrfez965sPdmg9ZDPllK5WzwlV9/6EaRz0I9ca08TJJpSxfJ5ThH6slZWND91yOVUko19wCosxWbAAgAAA==",
+            Some("archive identity"),
+        ),
+    ] {
+        let project = TempProject::new(label).unwrap();
+        let home = TempHome::new("npm-import-wrapped-root").unwrap();
+        let bytes = STANDARD.decode(artifact).unwrap();
+        let integrity = format!("sha512-{}", STANDARD.encode(Sha512::digest(&bytes)));
+        let manifest = serde_json::json!({"name":"fixture","version":"1.0.0","dependencies":{"wrapped":"1.0.0"}});
+        project
+            .write("package.json", manifest.to_string().as_bytes())
+            .unwrap();
+        let npm = serde_json::json!({"lockfileVersion":3,"packages":{"":manifest,"node_modules/wrapped":{"version":"1.0.0","resolved":"https://registry.npmjs.org/wrapped/-/wrapped-1.0.0.tgz","integrity":integrity}}});
+        project
+            .write("package-lock.json", npm.to_string().as_bytes())
+            .unwrap();
+        let fixture = serde_json::json!({"packages":[{"registry":"https://registry.npmjs.org","name":"wrapped","version":"1.0.0","integrity":integrity,"artifact":format!("base64:{}", STANDARD.encode(&bytes))}]});
+        project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let invoke = |args: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_tapid"))
+                .args(args)
+                .env("HOME", home.path())
+                .env("XDG_CACHE_HOME", home.path())
+                .env("LOCALAPPDATA", home.path())
+                .current_dir(project.path())
+                .output()
+                .unwrap()
+        };
+        assert!(
+            invoke(&["import-package-lock", "package-lock.json"])
+                .status
+                .success()
+        );
+        let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+        let store = project.path().join("store");
+        let output = invoke(&[
+            "install",
+            "--frozen",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ]);
+        if let Some(expected) = expected_error {
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(expected),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                fs::read(project.path().join("tapid.lock")).unwrap(),
+                lock_before
+            );
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                manifest.to_string().as_bytes()
+            );
+            assert_eq!(
+                fs::read(project.path().join("package-lock.json")).unwrap(),
+                npm.to_string().as_bytes()
+            );
+            assert!(!project.path().join("node_modules").exists());
+            continue;
+        }
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+        assert_eq!(
+            fs::read(project.path().join("node_modules/wrapped/package.json")).unwrap(),
+            br#"{"name":"wrapped","version":"1.0.0"}"#
+        );
+        fs::remove_dir_all(project.path().join("node_modules")).unwrap();
+        let output = invoke(&[
+            "install",
+            "--frozen",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    }
+}

@@ -176,3 +176,16 @@ checkouts model worktree consumers of the same cache; they do not invoke Git.
 These are deterministic contract tests, not measurements of an external agent's
 reasoning or model tool selection. Existing transaction and containment tests
 remain responsible for their broader platform and attack-path coverage.
+
+## Workers consumer
+
+The `workers-consumer` Ubuntu 24.04 lane pins Node 22.23.3 and npm 11.12.1 and runs
+`tests/workers*_test.ts` plus the shared graph tests. Set
+`TAPID_WORKERS_FIXTURE_BINARY` to a source-built CLI for the native pin probe;
+CI requires it. The full `scripts/check-workers-consumer.ts` harness requires
+`--binary`, `--npm-cli` and `--artifacts`; see the
+[fixture instructions](../examples/workers-consumer/README.md). It tests cold
+native installation, npm v3 migration, reconstructed frozen/offline replay,
+empty-store failure, strict npm comparison, type-check, dry-run bundle and
+loopback workerd response. The lane always retains evidence. No deployment or
+Cloudflare credentials are used.

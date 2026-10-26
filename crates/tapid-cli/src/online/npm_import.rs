@@ -225,8 +225,9 @@ pub(crate) fn fetch_imported(
                 (digest, ImportedTree::Extracted(temp))
             }
         };
+        let content_root = crate::filesystem::tree::package_content_root(temp.path())?;
         let artifact_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(temp.path().join("package/package.json")).map_err(|e| e.to_string())?,
+            &fs::read(content_root.join("package.json")).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
         if artifact_manifest["name"].as_str() != Some(package.name.as_str())

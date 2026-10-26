@@ -508,3 +508,33 @@ fn graph_cache_is_reused_and_deserialization_still_validates_graph() {
     let unchecked: ImportedNpmLockfile = serde_json::from_value(invalid).unwrap();
     assert!(unchecked.graph().is_err());
 }
+
+#[test]
+fn npm_import_retains_inert_optional_peer_metadata_without_creating_a_peer() {
+    let mut input: Value = serde_json::from_str(INPUT).unwrap();
+    input["packages"]["node_modules/consumer"]["peerDependenciesMeta"] =
+        serde_json::json!({"@types/node":{"optional":true}});
+    let lock = import(input.clone()).unwrap();
+    let graph = lock.graph().unwrap();
+    assert!(
+        !graph.packages["node_modules/consumer"]
+            .peers
+            .contains_key("@types/node")
+    );
+    assert!(
+        !graph.packages["node_modules/consumer"]
+            .optional_peers
+            .contains("@types/node")
+    );
+    let restored: Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    assert_eq!(restored["npmLock"], input);
+    for meta in [
+        serde_json::json!({"@types/node":{"optional":false}}),
+        serde_json::json!({"@types/node":{"optional":"true"}}),
+        serde_json::json!({"@types/node":{"optional":true,"unknown":true}}),
+        serde_json::json!({"../invalid":{"optional":true}}),
+    ] {
+        input["packages"]["node_modules/consumer"]["peerDependenciesMeta"] = meta;
+        assert!(import(input.clone()).is_err());
+    }
+}
