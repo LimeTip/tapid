@@ -47,12 +47,13 @@ const assertStandaloneTestOwners = (ci: string) => {
           if-no-files-found: warn
           retention-days: 1`);
   ci = ci.replace(failureCapture, '');
-  assert.doesNotMatch(ci, /nextest-coverage-pilot|stage5-|cargo llvm-cov nextest|cargo nextest list|cargo llvm-cov report|cargo llvm-cov show-env|--no-report|-- --list|\.profraw|tee /);
+  assert.doesNotMatch(ci, /nextest-coverage-pilot|stage5-|cargo llvm-cov nextest|cargo nextest list|cargo llvm-cov report|cargo llvm-cov show-env|--no-report|-- --list|\.profraw/);
   for (const [id, name, command, tool] of [
     ['nextest', 'Run tests with nextest', 'cargo nextest run --workspace --all-features --locked', 'cargo-nextest'],
     ['coverage', 'Generate LCOV coverage report', 'cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info', 'cargo-llvm-cov'],
   ] as const) {
     const owner = job(ci, id);
+    assert.doesNotMatch(owner, /tee /);
     assert.match(owner, /runs-on: ubuntu-latest/);
     assert.match(owner, /TAPID_REQUIRE_NODE_ASSERTIONS: '1'/);
     assert.doesNotMatch(owner, /\n    (?:if|needs|continue-on-error):|\n        (?:if|continue-on-error):|--exclude|--skip|--ignored|\|\| true/);
@@ -636,5 +637,17 @@ test('stable consumer shell gate rejects failure cancellation skipped and absent
   await execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: 'success' } });
   for (const result of ['failure', 'cancelled', 'skipped', '']) {
     await assert.rejects(execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: result } }));
+  }
+});
+
+test('standalone output pipeline restriction permits ManagedTree evidence only outside coverage owners', async () => {
+  const ci = await workflow('ci');
+  assert.match(job(ci, 'linux-managed-tree'), /\| tee /);
+  assertStandaloneTestOwners(ci);
+  for (const id of ['nextest', 'coverage']) {
+    const owner = job(ci, id);
+    const changed = owner.replace('    steps:', '    steps:\n      - name: Copy output\n        run: echo evidence | tee evidence.log\n');
+    assert.notEqual(changed, owner);
+    assert.throws(() => assertStandaloneTestOwners(ci.replace(owner, changed)), undefined, id);
   }
 });
