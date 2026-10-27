@@ -452,6 +452,7 @@ pub(crate) fn fetch_imported(
             .contains_key(&format!("node_modules/{}", link.name))
     });
     Ok(PreparedInstall {
+        candidate_exclusions: Default::default(),
         lock,
         layout: PreparedLayout {
             input: pinned_layout(roots, &instances, &edges),
