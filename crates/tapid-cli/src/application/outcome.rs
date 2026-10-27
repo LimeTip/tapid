@@ -8,9 +8,12 @@ use std::{
 const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 
 mod diagnostic;
+mod lifecycle;
 pub(crate) use diagnostic::{
-    Declaration, DiagnosticContext, DiagnosticPackage, RequirementDiagnostic,
+    CandidateExclusions, Declaration, DependencyCategory, DiagnosticContext, DiagnosticPackage,
+    ExcludedCandidate, ExcludedPackage, ExclusionReason, RequirementDiagnostic,
 };
+pub(crate) use lifecycle::LifecycleReport;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorKind {
@@ -318,15 +321,58 @@ pub(crate) enum RetryAdvice {
     RecoverFirst,
 }
 
+/// Identity is retained from the verified lock selection, never from display text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LifecycleIdentity {
+    pub(crate) key: tapid_lockfile::LockfilePackageKey,
+    pub(crate) archive_digest: String,
+}
+impl LifecycleIdentity {
+    pub(crate) fn new(key: &str, package: &tapid_lockfile::LockedPackage) -> Self {
+        Self {
+            key: key.parse().expect("validated lock instance key"),
+            archive_digest: package.artifact_integrity().into(),
+        }
+    }
+}
+impl fmt::Display for LifecycleIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.key.name, self.key.version)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Warning {
     UnapprovedDependencyScriptsAllowed,
     DependencyScriptsWithoutContainment,
-    UpdateGraphChange { package: String, reason: String },
+    UpdateGraphChange {
+        package: String,
+        reason: String,
+    },
     UnverifiedRegistryArtifactsAllowed,
     PreviousTransactionRecovered,
-    DependencyLifecycleHookSkipped { package: String, hook: String },
-    DependencyLifecycleDiscoveryFailed { package: String },
+    DependencyLifecycleHookSkipped {
+        package: Box<LifecycleIdentity>,
+        hook: String,
+    },
+    DependencyLifecycleDiscoveryFailed {
+        package: Box<LifecycleIdentity>,
+    },
+}
+impl Warning {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::UnapprovedDependencyScriptsAllowed => "UNAPPROVED_DEPENDENCY_SCRIPTS_ALLOWED",
+            Self::DependencyScriptsWithoutContainment => "DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT",
+            Self::UpdateGraphChange { .. } => "UPDATE_GRAPH_CHANGE",
+            Self::UnverifiedRegistryArtifactsAllowed => "UNVERIFIED_REGISTRY_ARTIFACTS_ALLOWED",
+            Self::PreviousTransactionRecovered => "PREVIOUS_TRANSACTION_RECOVERED",
+            Self::DependencyLifecycleHookSkipped { .. } => "DEPENDENCY_LIFECYCLE_HOOK_SKIPPED",
+            Self::DependencyLifecycleDiscoveryFailed { .. } => {
+                "DEPENDENCY_LIFECYCLE_DISCOVERY_FAILED"
+            }
+        }
+    }
 }
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -363,14 +409,29 @@ pub(crate) struct OperationOutcome {
     /// Shared-store effects are represented by state, not attributed to project paths.
     pub(crate) changed_files: Vec<PathBuf>,
     pub(crate) warnings: Vec<Warning>,
+    pub(crate) lifecycle: Option<LifecycleReport>,
+    pub(crate) omitted_warnings: usize,
+    pub(crate) omitted_warning_codes: std::collections::BTreeSet<&'static str>,
 }
 impl OperationOutcome {
+    pub(crate) fn lifecycle_warning(&mut self, warning: Warning) {
+        if self.warnings.len() < 1024 {
+            self.warnings.push(warning);
+        } else {
+            self.omitted_warnings += 1;
+            self.omitted_warning_codes.insert(warning.code());
+        }
+    }
+
     pub(crate) fn unchanged(project: &Path) -> Self {
         Self {
             project_dir: project.to_owned(),
             state: ChangeState::Unchanged,
             changed_files: Vec::new(),
             warnings: Vec::new(),
+            lifecycle: None,
+            omitted_warnings: 0,
+            omitted_warning_codes: Default::default(),
         }
     }
 }
