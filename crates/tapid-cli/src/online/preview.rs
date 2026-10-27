@@ -73,7 +73,15 @@ pub(crate) fn resolve(
     config: &crate::registry::RegistryConfig,
     previous: Option<&Lockfile>,
     update: Option<UpdateRequest<'_>>,
-) -> Result<(GraphSnapshot, usize, Option<PackageManifest>), OperationalError> {
+) -> Result<
+    (
+        GraphSnapshot,
+        usize,
+        Option<PackageManifest>,
+        crate::application::outcome::CandidateExclusions,
+    ),
+    OperationalError,
+> {
     let workspace =
         workspace_materialization_with_manifest(project, config, Some((target, updated)))?;
     let resolved = graph::resolve_package_graph(
@@ -209,6 +217,7 @@ pub(crate) fn resolve(
         snapshot,
         resolved.metadata_lookups,
         resolved.updated_manifest,
+        resolved.candidate_exclusions,
     ))
 }
 
