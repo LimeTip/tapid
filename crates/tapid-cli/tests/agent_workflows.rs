@@ -17,6 +17,10 @@ struct Measurements {
 impl Measurements {
     /// Run one isolated CLI call and record its protocol, byte, and retry measurements.
     fn call(&mut self, project: &TempProject, home: &TempHome, args: &[&str]) -> Value {
+        self.record(command(project, home, args).output().unwrap(), args)
+    }
+
+    fn record(&mut self, output: std::process::Output, args: &[&str]) -> Value {
         if self
             .previous_failure
             .as_ref()
@@ -24,7 +28,6 @@ impl Measurements {
         {
             self.retries += 1;
         }
-        let output = command(project, home, args).output().unwrap();
         self.calls += 1;
         self.bytes += output.stdout.len() + output.stderr.len();
         assert!(output.stderr.is_empty(), "{output:?}");
@@ -386,6 +389,7 @@ fn agent_same_project_contention_stops_before_dependency_edit() {
     let lock = fs::File::create(project.path().join(".tapid-activation.lock")).unwrap();
     FileExt::lock(&lock).unwrap();
     let mut metrics = Measurements::default();
+    let started = std::time::Instant::now();
     let result = metrics.call(
         &project,
         &home,
@@ -393,12 +397,20 @@ fn agent_same_project_contention_stops_before_dependency_edit() {
     );
     assert_eq!(result["errors"][0]["code"], "PROJECT_BUSY");
     assert_eq!(result["retry"], "after_contention");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
     assert_eq!(
         fs::read(project.path().join("package.json")).unwrap(),
         manifest
     );
     assert!(!project.path().join("tapid.lock").exists());
-    metrics.finish(1);
+    FileExt::unlock(&lock).unwrap();
+    metrics.previous_failure = None;
+    success(&metrics.call(
+        &project,
+        &home,
+        &["--json", "import-package-lock", "package-lock.json"],
+    ));
+    metrics.finish(2);
 }
 
 /// Recover a lost commit response through the documented install caller before another mutation.
@@ -426,6 +438,7 @@ fn agent_lost_commit_response_recovers_before_repeating_mutation() {
         .unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty(), "commit result was lost");
+    assert!(output.stdout.len() + output.stderr.len() <= 8192);
     let pinned = fs::read(project.path().join("tapid.lock")).unwrap();
     let mut metrics = Measurements {
         calls: 1,
@@ -458,4 +471,297 @@ fn agent_lost_commit_response_recovers_before_repeating_mutation() {
     );
     assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), pinned);
     metrics.finish(3);
+}
+
+/// Isolated projects still contend on one store; the holder is ready before spawn.
+#[test]
+fn agent_shared_store_contention_expires_and_release_allows_retry() {
+    use fs4::FileExt;
+    use std::time::{Duration, Instant};
+    let first = npm_project();
+    let second = npm_project();
+    let home = TempHome::new("agent-store-contention").unwrap();
+    let store = home.path().join("store");
+    let store_arg = store.to_str().unwrap();
+    let args = [
+        "--json",
+        "install",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+        store_arg,
+    ];
+    let mut metrics = Measurements::default();
+    success(&metrics.call(&first, &home, &args));
+    let manifest = fs::read(second.path().join("package.json")).unwrap();
+    second.write("node_modules/KEEP", b"previous").unwrap();
+    second
+        .write(".tapid-managed", b"tapid-managed-v1\n")
+        .unwrap();
+    let holder = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(store.join(".store.lock"))
+        .unwrap();
+    FileExt::lock(&holder).unwrap();
+    let started = Instant::now();
+    let mut child = command(&second, &home, &args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(9) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("shared-store contender exceeded watchdog");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let elapsed = started.elapsed();
+    let result = metrics.record(child.wait_with_output().unwrap(), &args);
+    assert_eq!(result["errors"][0]["code"], "STORE_BUSY", "{result}");
+    assert_eq!(result["changes"]["state"], "unchanged", "{result}");
+    assert_eq!(result["retry"], "after_contention");
+    assert!(elapsed >= Duration::from_secs(5));
+    assert!(elapsed < Duration::from_secs(7), "{elapsed:?}");
+    assert_eq!(
+        fs::read(second.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!second.path().join("tapid.lock").exists());
+    assert_eq!(
+        fs::read(second.path().join("node_modules/KEEP")).unwrap(),
+        b"previous"
+    );
+    // A new attempt may proceed once contention is resolved, without a failed retry.
+    let mut child = command(&second, &home, &args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    FileExt::unlock(&holder).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(9);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("released store contender exceeded watchdog");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // This retry follows observed release and is necessary, rather than blind repetition.
+    metrics.previous_failure = None;
+    success(&metrics.record(child.wait_with_output().unwrap(), &args));
+    metrics.finish(3);
+    println!("shared_store_expiry_ms={}", elapsed.as_millis());
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum EntrySnapshot {
+    Directory,
+    File(Vec<u8>),
+    Link(std::path::PathBuf),
+}
+
+/// Compare entries and bytes, excluding timestamps (reads may update access time).
+fn snapshot(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, EntrySnapshot> {
+    fn visit(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        entries: &mut std::collections::BTreeMap<std::path::PathBuf, EntrySnapshot>,
+    ) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            let kind = fs::symlink_metadata(&path).unwrap().file_type();
+            let value = if kind.is_symlink() {
+                EntrySnapshot::Link(fs::read_link(&path).unwrap())
+            } else if kind.is_dir() {
+                visit(root, &path, entries);
+                EntrySnapshot::Directory
+            } else {
+                EntrySnapshot::File(fs::read(&path).unwrap())
+            };
+            entries.insert(path.strip_prefix(root).unwrap().to_owned(), value);
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    visit(root, root, &mut entries);
+    entries
+}
+
+#[test]
+fn agent_interruptions_preserve_durable_decision_and_status_is_read_only() {
+    for checkpoint in [
+        "activation_complete",
+        "commit_decision",
+        "post_commit_cleanup",
+    ] {
+        let project = TempProject::new("agent-interrupted").unwrap();
+        let home = TempHome::new("agent-interrupted").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+            )
+            .unwrap();
+        project
+            .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+            .unwrap();
+        let store = project.path().join("store");
+        let store_arg = store.to_str().unwrap();
+        let output = command(
+            &project,
+            &home,
+            &[
+                "--json",
+                "install",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                store_arg,
+            ],
+        )
+        .env("TAPID_TEST_CRASH_POINT", checkpoint)
+        .output()
+        .unwrap();
+        assert!(
+            !output.status.success(),
+            "missing interruption at {checkpoint}"
+        );
+        assert!(output.stdout.is_empty());
+        assert!(output.stdout.len() + output.stderr.len() <= 8192);
+        let pending = fs::read(project.path().join("tapid.lock")).unwrap();
+        let mut metrics = Measurements {
+            calls: 1,
+            bytes: output.stdout.len() + output.stderr.len(),
+            ..Measurements::default()
+        };
+        let before = snapshot(project.path());
+        let status = metrics.call(&project, &home, &["--json", "status"]);
+        assert_eq!(status["outcome"], "failure", "{status}");
+        assert_eq!(status["data"]["recovery"], "pending");
+        assert_eq!(
+            snapshot(project.path()),
+            before,
+            "inspection changed {checkpoint}"
+        );
+        // The recovery-only debug seam exercises settlement without a fresh mutation.
+        let recovery = command(
+            &project,
+            &home,
+            &["--json", "install", "--offline", "--store-dir", store_arg],
+        )
+        .env("TAPID_TEST_RECOVER_ONLY", "1")
+        .output()
+        .unwrap();
+        success(&metrics.record(
+            recovery,
+            &["--json", "install", "--offline", "--store-dir", store_arg],
+        ));
+        if checkpoint == "activation_complete" {
+            assert!(!project.path().join("tapid.lock").exists());
+            assert!(!project.path().join("node_modules").exists());
+            assert!(!store.join("trees").exists());
+        } else {
+            assert_eq!(
+                fs::read(project.path().join("tapid.lock")).unwrap(),
+                pending
+            );
+            assert!(
+                project
+                    .path()
+                    .join("node_modules/h3/package.json")
+                    .is_file()
+            );
+            assert!(store.join("trees").is_dir());
+        }
+        assert!(!store.join(".tapid-transaction.json").exists());
+        assert!(
+            !project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
+        metrics.finish(3);
+        println!("interruption_checkpoint={checkpoint}");
+    }
+}
+
+#[test]
+fn agent_response_lost_after_cleanup_reconciles_current_state_without_attribution() {
+    let project = TempProject::new("agent-loss").unwrap();
+    let home = TempHome::new("agent-loss").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let store = project.path().join("store");
+    let args = [
+        "--json",
+        "install",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+        store.to_str().unwrap(),
+    ];
+    let output = command(&project, &home, &args).output().unwrap();
+    // The harness observes completion, then withholds the result from reconciliation.
+    assert!(output.status.success(), "{output:?}");
+    let mut metrics = Measurements {
+        calls: 1,
+        bytes: output.stdout.len() + output.stderr.len(),
+        ..Measurements::default()
+    };
+    assert!(output.stdout.len() <= 8192);
+    assert!(output.stderr.is_empty());
+    assert!(
+        !project
+            .path()
+            .join(".tapid-lifecycle-journal.json")
+            .exists()
+    );
+    let pinned = fs::read(project.path().join("tapid.lock")).unwrap();
+    let before = snapshot(project.path());
+    let status = metrics.call(&project, &home, &["--json", "status"]);
+    success(&status);
+    assert_eq!(status["changes"]["state"], "unchanged");
+    assert_eq!(snapshot(project.path()), before);
+    assert!(
+        project
+            .path()
+            .join("node_modules/h3/package.json")
+            .is_file()
+    );
+    success(&metrics.call(
+        &project,
+        &home,
+        &[
+            "--json",
+            "add",
+            "@actual/scoped@1.2.0",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    ));
+    assert_ne!(fs::read(project.path().join("tapid.lock")).unwrap(), pinned);
+    let before = snapshot(project.path());
+    success(&metrics.call(&project, &home, &["--json", "status"]));
+    assert_eq!(snapshot(project.path()), before);
+    metrics.finish(4);
 }

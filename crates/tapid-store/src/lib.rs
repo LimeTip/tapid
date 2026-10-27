@@ -55,6 +55,7 @@ const REPLAY_LEASE: &str = ".tapid-replay-lease";
 thread_local! {
     static SNAPSHOT_BYTE_COPY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SNAPSHOT_CLONE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static STORE_RECOVERY_CHECKPOINT: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1604,11 +1605,47 @@ fn open_store_lock(root: &Path, create: bool) -> io::Result<File> {
 }
 
 fn lock_file(root: &Path, exclusive: bool) -> io::Result<File> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    lock_file_until(root, exclusive, deadline)
+}
+
+fn acquire_store_lock(
+    file: &File,
+    exclusive: bool,
+    deadline: std::time::Instant,
+) -> io::Result<()> {
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "store lock acquisition budget exhausted",
+            ));
+        }
+        let attempt = if exclusive {
+            FileExt::try_lock(file)
+        } else {
+            FileExt::try_lock_shared(file)
+        };
+        match attempt {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::Error(error)) => return Err(error),
+            Err(TryLockError::WouldBlock) => {
+                std::thread::sleep(
+                    std::time::Duration::from_millis(25)
+                        .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                );
+            }
+        }
+    }
+}
+
+fn lock_file_until(root: &Path, exclusive: bool, deadline: std::time::Instant) -> io::Result<File> {
     fs::create_dir_all(root)?;
     let open = || open_store_lock(root, true);
     if exclusive {
         let file = open()?;
-        FileExt::lock(&file)?;
+        acquire_store_lock(&file, true, deadline)?;
         if let Err(error) = recover_store_journal(root) {
             let _ = FileExt::unlock(&file);
             return Err(error);
@@ -1617,7 +1654,7 @@ fn lock_file(root: &Path, exclusive: bool) -> io::Result<File> {
     }
     loop {
         let file = open()?;
-        FileExt::lock_shared(&file)?;
+        acquire_store_lock(&file, false, deadline)?;
         if !root.join(STORE_JOURNAL).exists() {
             return Ok(file);
         }
@@ -1625,8 +1662,14 @@ fn lock_file(root: &Path, exclusive: bool) -> io::Result<File> {
         drop(file);
 
         let recovery_lock = open()?;
-        FileExt::lock(&recovery_lock)?;
+        acquire_store_lock(&recovery_lock, true, deadline)?;
         let recovery = recover_store_journal(root);
+        #[cfg(test)]
+        STORE_RECOVERY_CHECKPOINT.with(|checkpoint| {
+            if let Some(checkpoint) = checkpoint.get() {
+                checkpoint(root);
+            }
+        });
         let _ = FileExt::unlock(&recovery_lock);
         recovery?;
     }

@@ -1357,3 +1357,148 @@ fn snapshot_drop_preserves_a_replaced_reservation() {
     drop(snapshot);
     assert_eq!(fs::read(reservation.join("replacement")).unwrap(), b"keep");
 }
+
+/// A separate process makes an unbounded acquisition fail under a watchdog.
+#[test]
+fn store_contention_has_a_finite_acquisition_budget() {
+    if let Some(root) = std::env::var_os("TAPID_TEST_CONTENDED_STORE") {
+        let started = std::time::Instant::now();
+        let error = Store::new(PathBuf::from(root))
+            .read_guard()
+            .err()
+            .expect("contention must expire");
+        assert!(
+            matches!(error, IngestError::Io(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+        assert!(started.elapsed() < std::time::Duration::from_secs(7));
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("store-contention").unwrap();
+    let holder = open_store_lock(project.path(), true).unwrap();
+    FileExt::lock(&holder).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests::store_contention_has_a_finite_acquisition_budget",
+        ])
+        .env("TAPID_TEST_CONTENDED_STORE", project.path())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(9);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "contention child failed: {status}");
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("store acquisition exceeded watchdog");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn store_lock_budget_covers_exclusive_and_recovery_escalation() {
+    use std::time::{Duration, Instant};
+    let project = tapid_test_support::TempProject::new("store-lock-transitions").unwrap();
+    let holder = open_store_lock(project.path(), true).unwrap();
+    FileExt::lock_shared(&holder).unwrap();
+    // Compatible readers succeed, but both publication and recovery need exclusion.
+    drop(lock_file(project.path(), false).unwrap());
+    for recovery in [false, true] {
+        if recovery {
+            fs::write(project.path().join(STORE_JOURNAL), b"pending").unwrap();
+        }
+        let start = Instant::now();
+        let error = lock_file_until(project.path(), !recovery, start + Duration::from_millis(80))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(start.elapsed() >= Duration::from_millis(80));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+    fs::remove_file(project.path().join(STORE_JOURNAL)).unwrap();
+    FileExt::unlock(&holder).unwrap();
+    // An expired deadline forbids another attempt, even on a now-free lock.
+    assert_eq!(
+        lock_file_until(project.path(), false, Instant::now())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WouldBlock
+    );
+    drop(lock_file(project.path(), true).unwrap());
+}
+
+#[test]
+fn store_lock_release_before_expiry_allows_acquisition() {
+    use std::time::{Duration, Instant};
+    let project = tapid_test_support::TempProject::new("store-lock-release").unwrap();
+    for exclusive in [false, true] {
+        let holder = open_store_lock(project.path(), true).unwrap();
+        FileExt::lock(&holder).unwrap();
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // This is the synchronized holder's duration, not a startup delay.
+                std::thread::sleep(Duration::from_millis(100));
+                FileExt::unlock(&holder).unwrap();
+            });
+            drop(
+                lock_file_until(project.path(), exclusive, started + Duration::from_secs(2))
+                    .unwrap(),
+            );
+        });
+        assert!(started.elapsed() >= Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn store_lock_preserves_non_contention_errors() {
+    let project = tapid_test_support::TempProject::new("store-lock-invalid").unwrap();
+    fs::create_dir(project.path().join(".store.lock")).unwrap();
+    assert_eq!(
+        lock_file(project.path(), true).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+
+#[test]
+fn store_recovery_retries_do_not_restart_the_acquisition_budget() {
+    use std::time::{Duration, Instant};
+    thread_local! {
+        static RECOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    let project = tapid_test_support::TempProject::new("store-budget-recovery").unwrap();
+    let root = project.path().join("store");
+    fs::create_dir(&root).unwrap();
+    let coordinator = coordinator(project.path(), "Prepared");
+    write_store_journal(&root, &coordinator, &[], false).unwrap();
+    fs::copy(root.join(STORE_JOURNAL), root.join("fixture-journal")).unwrap();
+    STORE_RECOVERY_CHECKPOINT.with(|checkpoint| {
+        checkpoint.set(Some(|root| {
+            let count = RECOVERIES.with(|count| {
+                count.set(count.get() + 1);
+                count.get()
+            });
+            assert!(
+                !root.join(STORE_JOURNAL).exists(),
+                "recovery must finish before expiry is enforced"
+            );
+            if count == 1 {
+                fs::copy(root.join("fixture-journal"), root.join(STORE_JOURNAL)).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }))
+    });
+    let started = Instant::now();
+    let result = lock_file_until(&root, false, started + Duration::from_millis(150));
+    STORE_RECOVERY_CHECKPOINT.with(|checkpoint| checkpoint.set(None));
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    assert_eq!(RECOVERIES.with(|count| count.get()), 2);
+    assert!(!root.join(STORE_JOURNAL).exists());
+    // Recovery finished after the budget, but no subsequent shared attempt began.
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    drop(lock_file(&root, false).unwrap());
+}
