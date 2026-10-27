@@ -511,6 +511,14 @@ ManagedTree and configured resource limits produce typed static blockers without
 installing a native probe profile. Absence of these exclusions remains unchecked
 host support, never evidence of enforcement.
 
+Preflight dimension declarations remain request-specific: a static platform
+exclusion marks affected dimensions as `unsupported`, with
+`evidence: "static_declaration"` and the same stable reason as the blocker.
+A rejected assurance request identifies descendant cleanup; a rejected resource
+limit identifies only configured limit dimensions. Other dimensions remain
+`unchecked` with launch evidence deferred. Neither state establishes enforcement,
+and the first static blocker does not enumerate every possible launch failure.
+
 `tapid --json capabilities` requires no project, configuration, credentials,
 store or network. Its `tapid.capabilities` contract version 1 reports the actual
 Tapid version separately. Clap supplies public command paths, aliases, argument

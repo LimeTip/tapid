@@ -123,6 +123,18 @@ fn preflight_schema_validates_success_failure_and_truncated_payloads() {
         *changed.pointer_mut(pointer).unwrap() = invalid;
         assert!(!validator.is_valid(&changed), "accepted invalid {pointer}");
     }
+    let mut declaration = success["data"].clone();
+    declaration["dimensions"][0]["support"] = json!("unsupported");
+    assert!(!validator.is_valid(&declaration));
+    declaration["dimensions"][0]["evidence"] = json!("static_declaration");
+    assert!(!validator.is_valid(&declaration));
+    declaration["dimensions"][0]["reason"] = json!("PLATFORM_UNSUPPORTED");
+    assert!(!validator.is_valid(&declaration));
+    declaration["assessment"] = json!("blocked");
+    declaration["blockers"] = failure["data"]["blockers"].clone();
+    assert!(validator.is_valid(&declaration));
+    declaration["dimensions"][0]["support"] = json!("unchecked");
+    assert!(!validator.is_valid(&declaration));
     let mut missing = success["data"].clone();
     missing.as_object_mut().unwrap().remove("assessment");
     assert!(!validator.is_valid(&missing));

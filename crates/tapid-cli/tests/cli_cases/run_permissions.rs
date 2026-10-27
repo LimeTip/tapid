@@ -968,6 +968,35 @@ fn run_preflight_reports_static_platform_blockers() {
         assert_eq!(value["data"]["blockers"][0]["code"], reason);
         assert_eq!(value["data"]["enforcement_established"], false);
         assert_eq!(value["data"]["platform"]["evidence"], "static_declaration");
+        let dimensions = value["data"]["dimensions"].as_array().unwrap();
+        let affected = if reason == "PLATFORM_LIMITS_UNSUPPORTED" {
+            "timeout"
+        } else {
+            "descendant_cleanup"
+        };
+        let dimension = dimensions
+            .iter()
+            .find(|item| item["dimension"] == affected)
+            .unwrap();
+        assert_eq!(dimension["support"], "unsupported");
+        assert_eq!(dimension["evidence"], "static_declaration");
+        assert_eq!(dimension["reason"], reason);
+        assert!(
+            dimensions
+                .iter()
+                .filter(|item| item["dimension"] == "filesystem")
+                .all(|item| item["support"] == "unchecked")
+        );
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../schemas/cli/run-preflight.v1.schema.json"
+        ))
+        .unwrap();
+        assert!(
+            jsonschema::validator_for(&schema)
+                .unwrap()
+                .is_valid(&value["data"])
+        );
+
         assert_eq!(
             fs::read(project.path().join("tapid.toml")).unwrap(),
             configuration.as_bytes()

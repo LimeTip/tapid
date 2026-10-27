@@ -38,6 +38,28 @@ pub(super) fn run(args: &Args, machine: bool) -> ExitCode {
         let blocker = prepared.request().static_platform_blocker();
         data["platform"] = json!({"os": std::env::consts::OS, "evidence": "static_declaration", "support": if blocker.is_some() { "unsupported" } else { "unchecked" }});
         if let Some(blocker) = blocker {
+            // Project only exclusions already established by the maintained
+            // request model. Other dimensions still require launch evidence.
+            let limits = prepared.request().policy().limits();
+            for dimension in data["dimensions"].as_array_mut().expect("dimension array") {
+                let affected = match blocker.code() {
+                    "PLATFORM_UNSUPPORTED" => true,
+                    "PLATFORM_ASSURANCE_UNSUPPORTED" => dimension["dimension"] == "descendant_cleanup",
+                    "PLATFORM_LIMITS_UNSUPPORTED" => match dimension["dimension"].as_str() {
+                        Some("timeout") => limits.timeout_seconds().is_some(),
+                        Some("output") => limits.max_output_bytes().is_some(),
+                        Some("process_count") => limits.max_processes().is_some(),
+                        Some("memory") => limits.max_memory_bytes().is_some(),
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if affected {
+                    dimension["support"] = json!("unsupported");
+                    dimension["evidence"] = json!("static_declaration");
+                    dimension["reason"] = json!(blocker.code());
+                }
+            }
             preparation_reason = Some((blocker.code(), "select_supported_platform_or_policy", blocker.description()));
             return Err(super::RunFailure::PreparationFailed);
         }
