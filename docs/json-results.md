@@ -363,9 +363,9 @@ Mutations report committed state only after the global command decision. Retaine
 
 ## Historical candidate exclusions
 
-Successful dependency operations that resolve registry metadata, including resolved
-dry runs, include nonempty `data.candidate_exclusions`. Ordinary human success
-output stays quiet. Replay and lock-only previews have no newly observed exclusions
+Successful dependency operations that resolve registry metadata, including structured
+dependency edits and resolved dry runs, include nonempty `data.candidate_exclusions`.
+Ordinary human success output stays quiet. Replay and lock-only previews have no newly observed exclusions
 and omit this field. Terminal missing-candidate, conflicting-requirement, and
 all-excluded metadata errors include `errors[].context.candidate_exclusions` for
 only the affected exact registry origin and package. Human errors summarize the

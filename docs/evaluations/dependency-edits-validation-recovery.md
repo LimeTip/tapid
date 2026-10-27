@@ -128,3 +128,71 @@ Changed files for this repair:
 
 The complete pending diff was reviewed. No commit, push, merge, deployment,
 external message, or privileged service installation was performed.
+
+## Current-main integration and exclusion reporting
+
+Starting revision: `8ab38b097e58af8f846ee967a0ea87ab87bb2ec2`, an engine-owned
+merge of main `0542aa7742f74597a1d48005083c3ef9189a6847` into the managed
+feature branch. No conflicts or unmerged files remained. Inspection covered the
+pending feature diff, including decoding, complete planning, section operations,
+installer graph comparison, transaction tests, instrumentation and documentation.
+Main's typed candidate-exclusion evidence and the batch's graph evidence both
+survive installation. No resolver or transaction implementation was added.
+
+The batch renderer did omit main's successful-operation exclusion evidence.
+A public CLI regression with 12 excluded historical candidates first failed:
+1 failed, 0 passed, because `data.candidate_exclusions` was absent despite a
+committed batch. The renderer now shares ordinary dependency output's existing
+serialization and truncation-pointer operation. The regression checks eight
+retained candidates, four omissions, bounded version text, a valid full JSON
+pointer, credential redaction, committed edit disposition and complete graph
+reporting. The ordinary mixed-case test checks omission of empty evidence.
+The renderer test constructor supplies main's new report field.
+
+Changed files in this repair: `src/output/json/dependency.rs`,
+`src/output/json/dependency_edits.rs`, and `tests/cli_cases/dependency_edits.rs`
+under `crates/tapid-cli`, plus `docs/json-results.md` and this report.
+The JSON contract explicitly includes structured edits among resolving operations.
+No terminal-error behavior, input limit, containment or advisory policy changed.
+
+Live refresh of [PR #360](https://github.com/LimeTip/tapid/pull/360) found no
+review threads. The [approved review](https://github.com/LimeTip/tapid/pull/360#pullrequestreview-5661436273)
+contains no actionable defect. Published successful checks still identify old
+HEAD `cd32ef2bf1751475522ff3bb2c74d4b74784d72b`; they do not validate this
+integrated snapshot. No commit, push, merge or publication was performed here.
+
+The retained benchmark sample files and fingerprints remain historical. The
+integrated-source measurement test is a fresh final-state/operation-count check,
+not a replacement latency dataset or a claim of universal tool-call savings.
+
+### Integrated-source validation
+
+All commands used the supplied absolute Node 22 runtime with its directory first
+in `PATH`, `CARGO_TARGET_DIR=target`, and sequential `scripts/dev.ts` invocations.
+
+| Check | Actual result |
+| --- | --- |
+| New public exclusion regression before implementation | 1 failed as expected: missing success evidence (`/tmp/tapid-exclusions-red.log`) |
+| Public CLI `dependency_edits_` after implementation | 8 passed (`/tmp/tapid-exclusions-green.log`) |
+| Library `batch_` | 11 passed, including five crash checkpoints |
+| Library `dependency_edit` | 8 passed, including the 60-sample final-state/operation-count matrix |
+| JSON results `candidate_exclusions` | 2 passed, preserving ordinary success/replay and terminal-error behavior |
+| Agent workflows | 6 passed |
+| Workspace formatting | Passed |
+| Workspace all-target/all-feature Clippy, warnings denied | Passed |
+| Workspace all-feature tests with `--no-fail-fast` | Exit 101, only the three native containment targets failed; CLI library 300 passed, CLI integration 276 passed / 5 failed, run planning 11 passed / 2 failed, runner 152 passed / 25 failed. |
+| Separate integration workspace | Passed: 1 consumer-install and 4 contract tests |
+| Architecture | Passed: 191 production Rust files scanned; existing size recommendations retained |
+| Diff whitespace and documentation review | Passed; existing protocol links and commands retained |
+
+Focused logs are `/tmp/tapid-integrated-{batch_,dependency_edit,exclusions,agents}.log`.
+Full-lane logs are `/tmp/tapid-round2-{fmt,clippy,workspace,integration,architecture}.log`.
+The native failures report `UnsupportedContainment`, native probe profile
+installation failure and unavailable enforcement receipts. No assertions were
+skipped or weakened. No product failure was identified by these diagnostics.
+
+Coding is complete. Request engine-isolated validation of the exact final source
+using the full lane in `docs/testing.md`, with writable execution-enabled scratch
+and `TMPDIR` configured as documented. Linux validation cannot establish native
+macOS or Windows behavior; retain the existing exact-candidate hosted gates.
+Earlier receipts and published old-head workflows do not validate this source.

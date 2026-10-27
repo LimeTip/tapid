@@ -70,6 +70,7 @@ fn dependency_edits_install_mixed_sections_and_report_each_input_and_graph() {
     }
     assert_eq!(result["data"]["graph"]["complete"], true);
     assert_eq!(result["data"]["graph"]["omitted"], 0);
+    assert!(result["data"].get("candidate_exclusions").is_none());
     assert!(
         !result["data"]["graph"]["changes"]
             .as_array()
@@ -382,4 +383,65 @@ fn dependency_edits_workspace_move_preserves_alias_and_unselected_member() {
         fs::read(fixture.project.path().join(".tapid-lifecycle-journal.json")).unwrap(),
         b"pending"
     );
+}
+
+#[test]
+fn dependency_edits_preserve_bounded_candidate_exclusions() {
+    let fixture = command_support::CliFixture::new("edit-exclusions");
+    fixture
+        .project
+        .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+        .unwrap();
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../fixtures/npm-aliases.json")).unwrap();
+    for n in 0..12 {
+        let mut rejected = registry["packages"][0].clone();
+        rejected["version"] = if n == 0 {
+            format!("0.0.0-{}", "a".repeat(1024))
+        } else {
+            format!("0.1.{n}")
+        }
+        .into();
+        rejected["dependencies"] = serde_json::json!({"hostile":"git+https://user:password@example.test/private?token=secret"});
+        registry["packages"].as_array_mut().unwrap().push(rejected);
+    }
+    fixture
+        .project
+        .write("registry.json", registry.to_string().as_bytes())
+        .unwrap();
+    fixture
+        .project
+        .write(
+            "request.json",
+            br#"{"version":1,"edits":[{"op":"add","section":"dependencies","spec":"h3@^1"}]}"#,
+        )
+        .unwrap();
+    let output = fixture
+        .command(&[
+            "edit-dependencies",
+            "--file",
+            "request.json",
+            "--registry-fixture",
+            "registry.json",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{result}");
+    let evidence = &result["data"]["candidate_exclusions"];
+    assert_eq!(evidence["total_candidates"], 12, "{result}");
+    assert_eq!(evidence["omitted_candidates"], 4);
+    assert_eq!(evidence["truncated"], true);
+    let pointer = "/data/candidate_exclusions/packages/0/candidates/0/version";
+    assert!(
+        result["truncated_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(pointer))
+    );
+    assert!(result.pointer(pointer).unwrap().as_str().unwrap().len() <= 256);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("password"));
+    assert_eq!(result["data"]["edits"][0]["disposition"], "committed");
+    assert_eq!(result["data"]["graph"]["complete"], true);
 }

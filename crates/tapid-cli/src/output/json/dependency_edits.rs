@@ -56,6 +56,9 @@ fn render(result: &Result<InstallReport, OperationFailure>, mut edits: Value) ->
         .as_array_mut()
         .expect("truncation list")
         .extend(truncated.into_iter().map(Value::String));
+    if let Ok(report) = result {
+        super::dependency::candidate_exclusions(&mut output, &report.candidate_exclusions);
+    }
     output
 }
 
@@ -112,6 +115,7 @@ mod tests {
                 ..Default::default()
             };
             let report = Ok(InstallReport {
+                candidate_exclusions: Default::default(),
                 package_count: 1,
                 replayed: false,
                 package_changes: Some(changes),
