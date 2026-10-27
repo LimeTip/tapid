@@ -13,6 +13,10 @@ pub(crate) struct Args {
 
 const SCHEMAS: &[(&str, &str)] = &[
     (
+        "tapid.schema-export.v1",
+        include_str!("../../schemas/cli/schema-export.v1.schema.json"),
+    ),
+    (
         "tapid.status.v1",
         include_str!("../../schemas/cli/status.v1.schema.json"),
     ),
@@ -116,7 +120,9 @@ pub(crate) fn run(args: Args, machine: bool) -> ExitCode {
     println!(
         "Help/version support JSON envelopes. Ordinary run has separate result-file/receipt channels."
     );
-    println!("JSON Schema coverage: partial; status, discovery and run-preflight v1 are embedded.");
+    println!(
+        "JSON Schema coverage: partial; status, discovery, schema export and run-preflight v1 are embedded."
+    );
     println!(
         "Static declarations only; project compatibility and process enforcement are unchecked."
     );
@@ -193,6 +199,8 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         modes[0]["when"] = json!({"schema": "absent"});
         let mut export = mode("schema_export", "inspection", "stdout_envelope");
         export["when"] = json!({"schema": "present"});
+        export["schema_coverage"] = json!("payload");
+        export["schema"] = json!("tapid.schema-export.v1");
         modes.push(export);
     }
     let arguments = command.get_arguments().filter(|arg| !arg.is_hide_set()).map(|arg| {
@@ -248,7 +256,12 @@ fn discover() -> Value {
         "help_and_version": {"channel": "human_text", "json": "stdout_envelope", "effects": "no_project_mutation"},
         "schema_catalog": SCHEMAS.iter().map(|(id, source)| {
             let schema: Value = serde_json::from_str(source).expect("embedded schema is valid JSON");
-            json!({"id": id, "target": "data", "contract": if *id == "tapid.status.v1" { json!("tapid.status") } else { schema["properties"]["contract"]["const"].clone() }, "schema_version": 1})
+            let contract = match *id {
+                "tapid.status.v1" => json!("tapid.status"),
+                "tapid.schema-export.v1" => json!("tapid.schema-export"),
+                _ => schema["properties"]["contract"]["const"].clone(),
+            };
+            json!({"id": id, "target": "data", "contract": contract, "schema_version": 1})
         }).collect::<Vec<_>>(), "schema_coverage": "partial",
         "assurance": {"package_manager_support": "separate_from_runner", "process_enforcement": "not_established", "project_compatibility": "unchecked"}
     })

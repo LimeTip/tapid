@@ -519,12 +519,13 @@ possible effects and additional application constraints. Ordinary run uses its
 separate result/receipt channels; only preflight accepts global JSON.
 
 Schema coverage is currently `partial`. The catalog advertises
-`tapid.run-preflight.v1`, `tapid.capabilities.v1`, and `tapid.status.v1`, targeting
-the envelope's `data` payload for preflight, default discovery, and status respectively.
+`tapid.run-preflight.v1`, `tapid.capabilities.v1`, `tapid.status.v1`, and
+`tapid.schema-export.v1`, targeting the envelope's `data` payload for preflight,
+default discovery, status, and schema export respectively.
 Status preserves its existing payload fields: select its version using the catalog
 and envelope version, rather than requiring a new payload contract field. The separate
-`schema_export` mode returns an export wrapper whose schema coverage remains
-unpublished. Export an advertised schema with
+`schema_export` mode returns a wrapper covered by `tapid.schema-export.v1`.
+Export an advertised schema with
 `tapid --json capabilities --schema tapid.run-preflight.v1`; the envelope contains
 `data.id` and `data.schema`. Only advertised identifiers are accepted; paths,
 URLs and unknown versions return `SCHEMA_UNKNOWN` without fetching anything.
@@ -537,3 +538,11 @@ observations as unchecked. Unknown contract versions are unsupported; unknown
 additive fields may be ignored. Contract versions are independent of Tapid release
 versions. These declarations neither prove project compatibility nor establish
 runner assurance.
+
+`tapid.schema-export.v1` describes the `data` wrapper returned by
+`tapid --json capabilities --schema <ID>`: `id` names the selected contract and
+`schema` contains its embedded object schema. This wrapper has no additional
+`contract` or `schema_version` fields; the advertised identifier selects its
+version. Validate the exported schema's payload separately. Wrapper validation
+does not establish project compatibility or process enforcement. Unknown
+additive fields may be ignored; unknown identifiers require explicit handling.

@@ -164,8 +164,8 @@ fn capabilities_distinguishes_schema_export_from_discovery_payload() {
         .expect("separate schema-export payload mode");
     assert_eq!(export["when"]["schema"], "present");
     assert_eq!(export["json"], "stdout_envelope");
-    assert_eq!(export["schema_coverage"], "not_yet_published");
-    assert!(export.get("schema").is_none());
+    assert_eq!(export["schema_coverage"], "payload");
+    assert_eq!(export["schema"], "tapid.schema-export.v1");
     assert_eq!(export["effects"]["network_possible"], false);
     assert_eq!(export["effects"]["project_writes_possible"], false);
 }

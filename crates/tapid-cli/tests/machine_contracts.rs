@@ -137,7 +137,7 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
     let project = TempProject::new("schema-catalog").unwrap();
     let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
     let catalog = discovery["data"]["schema_catalog"].as_array().unwrap();
-    assert_eq!(catalog.len(), 3);
+    assert_eq!(catalog.len(), 4);
     let advertised = catalog
         .iter()
         .map(|entry| entry["id"].as_str().unwrap())
@@ -150,12 +150,17 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
         .filter_map(|mode| mode["schema"].as_str())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(advertised, referenced);
+    let wrapper: Value =
+        serde_json::from_str(include_str!("../schemas/cli/schema-export.v1.schema.json")).unwrap();
+    let wrapper_validator = jsonschema::validator_for(&wrapper).unwrap();
     for entry in catalog {
         let id = entry["id"].as_str().unwrap();
         let (output, exported) = invoke(&project, &["--json", "capabilities", "--schema", id]);
         assert!(output.status.success());
         assert!(output.stdout.len() < 64 * 1024);
+        assert!(wrapper_validator.is_valid(&exported["data"]), "{exported}");
         let source: Value = serde_json::from_str(match id {
+            "tapid.schema-export.v1" => include_str!("../schemas/cli/schema-export.v1.schema.json"),
             "tapid.status.v1" => include_str!("../schemas/cli/status.v1.schema.json"),
             "tapid.run-preflight.v1" => PREFLIGHT,
             "tapid.capabilities.v1" => include_str!("../schemas/cli/capabilities.v1.schema.json"),
@@ -283,4 +288,40 @@ fn status_schema_validates_local_and_blocked_reports() {
         additive["future"] = json!(true);
         assert!(validator.is_valid(&additive));
     }
+}
+
+#[test]
+fn schema_export_contract_validates_wrappers_and_rejects_invalid_identifiers() {
+    let project = TempProject::new("schema-export-contract").unwrap();
+    let (output, exported) = invoke(
+        &project,
+        &[
+            "--json",
+            "capabilities",
+            "--schema",
+            "tapid.schema-export.v1",
+        ],
+    );
+    assert!(output.status.success(), "{exported}");
+    let validator = jsonschema::validator_for(&exported["data"]["schema"]).unwrap();
+    assert!(validator.is_valid(&exported["data"]));
+    let example: Value = serde_json::from_str(include_str!(
+        "../schemas/cli/examples/schema-export.v1.json"
+    ))
+    .unwrap();
+    assert!(validator.is_valid(&example));
+    for (key, value) in [
+        ("id", json!("https://example.invalid/schema")),
+        ("schema", json!(null)),
+    ] {
+        let mut invalid = exported["data"].clone();
+        invalid[key] = value;
+        assert!(!validator.is_valid(&invalid), "accepted {key}");
+    }
+    let mut missing = exported["data"].clone();
+    missing.as_object_mut().unwrap().remove("schema");
+    assert!(!validator.is_valid(&missing));
+    let mut additive = exported["data"].clone();
+    additive["future"] = json!(true);
+    assert!(validator.is_valid(&additive));
 }
