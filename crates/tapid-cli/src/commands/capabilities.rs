@@ -11,10 +11,16 @@ pub(crate) struct Args {
     schema: Option<String>,
 }
 
-const SCHEMAS: &[(&str, &str)] = &[(
-    "tapid.run-preflight.v1",
-    include_str!("../../schemas/cli/run-preflight.v1.schema.json"),
-)];
+const SCHEMAS: &[(&str, &str)] = &[
+    (
+        "tapid.run-preflight.v1",
+        include_str!("../../schemas/cli/run-preflight.v1.schema.json"),
+    ),
+    (
+        "tapid.capabilities.v1",
+        include_str!("../../schemas/cli/capabilities.v1.schema.json"),
+    ),
+];
 
 // Every public path, including parents with no executable default, is reviewed.
 const COVERAGE: &[(&str, &str, &str)] = &[
@@ -106,7 +112,7 @@ pub(crate) fn run(args: Args, machine: bool) -> ExitCode {
     println!(
         "Help/version support JSON envelopes. Ordinary run has separate result-file/receipt channels."
     );
-    println!("JSON Schema coverage: partial; run-preflight v1 is embedded.");
+    println!("JSON Schema coverage: partial; discovery and run-preflight v1 are embedded.");
     println!(
         "Static declarations only; project compatibility and process enforcement are unchecked."
     );
@@ -173,6 +179,14 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         preflight["schema"] = json!("tapid.run-preflight.v1");
         modes.push(preflight);
     }
+    if path == "capabilities" {
+        modes[0]["schema_coverage"] = json!("payload");
+        modes[0]["schema"] = json!("tapid.capabilities.v1");
+        modes[0]["when"] = json!({"schema": "absent"});
+        let mut export = mode("schema_export", "inspection", "stdout_envelope");
+        export["when"] = json!({"schema": "present"});
+        modes.push(export);
+    }
     let arguments = command.get_arguments().filter(|arg| !arg.is_hide_set()).map(|arg| {
         json!({
             "id": arg.get_id().as_str(), "long": arg.get_long(), "short": arg.get_short(),
@@ -224,7 +238,10 @@ fn discover() -> Value {
             {"command": "run", "preflight_defers": ["environment_values", "backend_probes", "enforcement", "cleanup"]}
         ],
         "help_and_version": {"channel": "human_text", "json": "stdout_envelope", "effects": "no_project_mutation"},
-        "schema_catalog": SCHEMAS.iter().map(|(id, _)| json!({"id": id, "target": "data", "contract": "tapid.run-preflight", "schema_version": 1})).collect::<Vec<_>>(), "schema_coverage": "partial",
+        "schema_catalog": SCHEMAS.iter().map(|(id, source)| {
+            let schema: Value = serde_json::from_str(source).expect("embedded schema is valid JSON");
+            json!({"id": id, "target": "data", "contract": schema["properties"]["contract"]["const"], "schema_version": 1})
+        }).collect::<Vec<_>>(), "schema_coverage": "partial",
         "assurance": {"package_manager_support": "separate_from_runner", "process_enforcement": "not_established", "project_compatibility": "unchecked"}
     })
 }

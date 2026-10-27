@@ -137,7 +137,7 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
     let project = TempProject::new("schema-catalog").unwrap();
     let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
     let catalog = discovery["data"]["schema_catalog"].as_array().unwrap();
-    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog.len(), 2);
     let advertised = catalog
         .iter()
         .map(|entry| entry["id"].as_str().unwrap())
@@ -155,10 +155,67 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
         let (output, exported) = invoke(&project, &["--json", "capabilities", "--schema", id]);
         assert!(output.status.success());
         assert!(output.stdout.len() < 64 * 1024);
-        let source: Value = serde_json::from_str(PREFLIGHT).unwrap();
+        let source: Value = serde_json::from_str(match id {
+            "tapid.run-preflight.v1" => PREFLIGHT,
+            "tapid.capabilities.v1" => include_str!("../schemas/cli/capabilities.v1.schema.json"),
+            _ => panic!("unrecognized advertised schema {id}"),
+        })
+        .unwrap();
         assert_eq!(exported["data"]["schema"], source);
         assert_eq!(exported["data"]["id"], id);
         assert!(jsonschema::validator_for(&source).is_ok());
     }
     assert!(serde_json::to_vec(&discovery).unwrap().len() < 512 * 1024);
+}
+
+#[test]
+fn discovery_schema_validates_all_public_modes() {
+    let project = TempProject::new("discovery-schema").unwrap();
+    let (output, exported) = invoke(
+        &project,
+        &[
+            "--json",
+            "capabilities",
+            "--schema",
+            "tapid.capabilities.v1",
+        ],
+    );
+    assert!(output.status.success(), "{exported}");
+    let validator = jsonschema::validator_for(&exported["data"]["schema"]).unwrap();
+    let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
+    assert!(validator.is_valid(&discovery["data"]), "{discovery}");
+    for (pointer, invalid) in [
+        ("/schema_version", json!(2)),
+        ("/assurance/process_enforcement", json!("established")),
+        ("/commands/0/modes/0/json", json!("unknown")),
+        (
+            "/commands/0/modes/0/effects/network_possible",
+            json!("false"),
+        ),
+    ] {
+        let mut changed = discovery["data"].clone();
+        *changed.pointer_mut(pointer).unwrap() = invalid;
+        assert!(!validator.is_valid(&changed), "accepted {pointer}");
+    }
+    let mut missing = discovery["data"].clone();
+    missing["commands"][0]["modes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("effects");
+    assert!(!validator.is_valid(&missing));
+    let mut missing_reference = discovery["data"].clone();
+    let command = missing_reference["commands"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|command| command["path"] == "capabilities")
+        .unwrap();
+    command["modes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("schema");
+    assert!(!validator.is_valid(&missing_reference));
+    let mut additive = discovery["data"].clone();
+    additive["future"] = json!(true);
+    assert!(validator.is_valid(&additive));
 }

@@ -142,3 +142,30 @@ fn capabilities_disclose_git_hydration_helpers_and_tool_list_recovery() {
         .unwrap();
     assert_eq!(list["modes"][0]["effects"]["other_writes_possible"], true);
 }
+
+#[test]
+fn capabilities_distinguishes_schema_export_from_discovery_payload() {
+    let project = tapid_test_support::TempProject::new("capabilities-export-mode").unwrap();
+    let output = isolated_command(project.path(), &["--json", "capabilities"], true)
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let command = value["data"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["path"] == "capabilities")
+        .unwrap();
+    let export = command["modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mode| mode["id"] == "schema_export")
+        .expect("separate schema-export payload mode");
+    assert_eq!(export["when"]["schema"], "present");
+    assert_eq!(export["json"], "stdout_envelope");
+    assert_eq!(export["schema_coverage"], "not_yet_published");
+    assert!(export.get("schema").is_none());
+    assert_eq!(export["effects"]["network_possible"], false);
+    assert_eq!(export["effects"]["project_writes_possible"], false);
+}
