@@ -14,15 +14,24 @@ Use `tapid-test-support` for integration-test setup:
 
 Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, or a user-specific home. Never use the network or real credentials. Fixture writers reject absolute paths and parent-directory components.
 
-Unix validation workers must permit execution from the platform temporary directory.
-Installer, verified-tool, and package-bin tests execute temporary scripts after
-setting their executable permissions. A `noexec` temporary mount can therefore
-produce `Permission denied` even when the permission bits are correct. Configure
-the worker's `TMPDIR` to a private writable directory on an executable filesystem
-before starting Cargo, and verify direct execution of a temporary script there.
-Retain the execution assertions; invoking the scripts through a shell would bypass
-the behavior these tests verify. This prerequisite does not replace native
-containment setup or establish macOS or Windows enforcement on a Linux worker.
+The runtime temporary directory must permit executing generated files. Unix
+installer, verified-tool, and package-bin tests directly execute fixture scripts
+after setting their executable bits. A `noexec` temporary mount causes
+`Permission denied` even when those bits are correct. In an isolated validation
+worker, provision a writable, execution-enabled scratch directory and export
+`TMPDIR` to it before starting Cargo. For example, when the build filesystem
+permits execution, run from the repository root:
+
+```sh
+mkdir -p target/test-tmp
+TMPDIR="$PWD/target/test-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test -p tapid --all-features --locked
+```
+
+This changes fixture placement, not test behavior or containment policy. Do not
+invoke scripts through an interpreter to bypass direct-execution assertions or
+skip failed execution tests. A worker must permit executing its scratch files;
+changing `TMPDIR` cannot override a sandbox execution denial. Native containment
+tests still require the supported platform environment described below.
 
 ## Development prerequisites and build reuse
 
