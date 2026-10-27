@@ -1121,7 +1121,8 @@ fn run_preflight_handles_non_utf8_paths_without_launching() {
         .path()
         .join(OsString::from_vec(b"project-\xff".to_vec()));
     fs::create_dir(&path).unwrap();
-    let manifest = br#"{"name":"probe","scripts":{"probe":"node probe.js"}}"#;
+    let path = fs::canonicalize(path).unwrap();
+    let manifest = br#"{"name":"probe","version":"1.0.0","scripts":{"probe":"node probe.js"}}"#;
     fs::write(path.join("package.json"), manifest).unwrap();
     fs::write(
         path.join("tapid.toml"),
@@ -1135,6 +1136,7 @@ fn run_preflight_handles_non_utf8_paths_without_launching() {
     fs::create_dir(&runtime_dir).unwrap();
     let runtime = runtime_dir.join("node");
     fs::copy(node, &runtime).unwrap();
+    let runtime = fs::canonicalize(runtime).unwrap();
     for script in ["probe", "missing"] {
         for machine in [false, true] {
             let mut command = isolated_command(&path, &[], true);
@@ -1166,8 +1168,25 @@ fn run_preflight_handles_non_utf8_paths_without_launching() {
                 );
                 if script == "missing" {
                     assert_eq!(value["data"]["blockers"][0]["code"], "SCRIPT_MISSING");
+                    assert_eq!(
+                        value["data"]["blockers"][0]["location"]["selected_manifest"],
+                        path.join("package.json").display().to_string()
+                    );
                 } else {
-                    assert!(value["data"]["runtime"]["path"].is_string());
+                    assert!(output.status.success(), "{value}");
+                    assert_eq!(value["data"]["assessment"], "no_local_blockers");
+                    assert_eq!(
+                        value["data"]["script"]["project"],
+                        path.display().to_string()
+                    );
+                    assert_eq!(
+                        value["data"]["script"]["working_directory"],
+                        path.display().to_string()
+                    );
+                    assert_eq!(
+                        value["data"]["runtime"]["path"],
+                        runtime.display().to_string()
+                    );
                 }
             } else {
                 assert!(
