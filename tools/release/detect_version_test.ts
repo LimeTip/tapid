@@ -54,7 +54,7 @@ for (const engine of ["shell", "PowerShell"] as const) {
         equal(result.status, 0, result.stderr);
         equal(result.stdout + result.stderr, "");
       }
-      for (const output of ["", "tapid 1.2.3\n\n", "tapid 1.2.3\r\n\r\n", "tapid 1.2.3\nextra", " tapid 1.2.3", "tapid 1.2.3 ", "prefix tapid 1.2.3", "tapid 1.2.3-beta", "tapid 1.2.3+build", "tapid 01.2.3", "tapid 1.2.3\r", "tapid 1.2.3\0"]) {
+      for (const output of ["", "\uFEFFtapid 1.2.3\n", "tapid 1.2.3\n\n", "tapid 1.2.3\r\n\r\n", "tapid 1.2.3\nextra", " tapid 1.2.3", "tapid 1.2.3 ", "prefix tapid 1.2.3", "tapid 1.2.3-beta", "tapid 1.2.3+build", "tapid 01.2.3", "tapid 1.2.3\r", "tapid 1.2.3\0"]) {
         await writeFile(executable, `#!/bin/sh\nprintf '%b' '${output.replaceAll("\0", "\\000")}'\n`);
         failure(invoke());
       }

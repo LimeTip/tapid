@@ -21,18 +21,21 @@ try {
     $info.RedirectStandardError = $true
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $info
+    $bytes = [IO.MemoryStream]::new()
     try {
         if (-not $process.Start()) { throw 'Invocation failed' }
-        $stdout = $process.StandardOutput.ReadToEndAsync()
+        # Read raw bytes: StreamReader decoding can silently remove a BOM.
+        $stdout = $process.StandardOutput.BaseStream.CopyToAsync($bytes)
         $stderr = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
-        $output = $stdout.GetAwaiter().GetResult()
+        $null = $stdout.GetAwaiter().GetResult()
+        $output = [Convert]::ToBase64String($bytes.ToArray())
         $null = $stderr.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0 -or
-            (-not [string]::Equals($output, "tapid $version", [StringComparison]::Ordinal) -and
-             -not [string]::Equals($output, "tapid $version`n", [StringComparison]::Ordinal) -and
-             -not [string]::Equals($output, "tapid $version`r`n", [StringComparison]::Ordinal))) { throw 'Failed or mismatched version' }
-    } finally { $process.Dispose() }
+            ($output -cne [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("tapid $version")) -and
+             $output -cne [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("tapid $version`n")) -and
+             $output -cne [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("tapid $version`r`n")))) { throw 'Failed or mismatched version' }
+    } finally { $bytes.Dispose(); $process.Dispose() }
     exit 0
 } catch {
     [Console]::Error.WriteLine('tapid detection: missing, invalid, failed, or mismatched version')

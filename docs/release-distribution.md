@@ -697,7 +697,8 @@ invoke only the selected absolute executable with `--version`.
 ### Evidence and ownership
 
 The [detection suite](../tools/release/detect_version_test.ts) executes success,
-argument, path, output and failure cases, including spaces and extra newlines.
+argument, path, output and failure cases, including spaces, extra newlines and
+BOM-prefixed output. Both detectors compare stdout bytes without decoding.
 The shared output matrix runs shell and PowerShell on Unix; Windows has native
 failure probes. PowerShell-on-macOS results do not establish native Windows
 compatibility. Full native Windows success/output evidence remains a platform
