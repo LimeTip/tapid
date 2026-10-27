@@ -134,7 +134,7 @@ The single-section batch has modest extra median cost in these samples and no gr
 | `fmt --all --check` | Passed |
 | `clippy --workspace --all-targets --all-features --locked -- -D warnings` | Passed |
 | `test --workspace --all-features --locked --no-fail-fast` | CLI library 294 passed; CLI integration 275 passed, 5 native containment failures; JSON 31, npm import 20, release verification 1, upgrade 14 passed; run planning 11 passed, 2 native containment failures; runner 152 passed, 25 native containment failures. Other crate targets and doc tests passed, including manifest 38. |
-| Agent workflows after guide correction | 6 passed. The full run first caught the guide exceeding its existing 6000-byte limit; the addition was shortened to keep 5956 bytes and the complete affected target was rerun. No test limit was changed. |
+| Agent workflows after initial guide correction | 6 passed locally at 5956 LF bytes. Later Windows CI exposed 6059 CRLF bytes; the [checkout-format repair](dependency-edits-validation-recovery.md#windows-checkout-guide-budget-repair) adds both-format coverage and shortens the guide to 5698 LF / 5797 CRLF bytes. No test limit was changed. |
 | `test --manifest-path tests/integration/Cargo.toml --locked` | consumer_install 1 passed; contracts 4 passed |
 | `tools/check_architecture.ts` | Passed, with existing source-size review recommendations |
 | `node --experimental-strip-types --test tests/doc_examples_test.ts` | 46 passed; 5 native PowerShell cases skipped by their existing local conditions |
@@ -147,7 +147,7 @@ Source-size review kept the existing exact-lock comparator with installer report
 
 ## Validation handoff and remaining gates
 
-Implementation is complete, but the required local lane is **not green**. Current native macOS failures reproduce `UnsupportedContainment`, `native probe profile installation failed`, and `no enforcement receipt was issued`. Runner/containment implementation, tests and advisory policy were not changed, suppressed or weakened. The guide regression is fixed and is not an outstanding failure.
+At this report's original snapshot, implementation was complete but the required local lane was **not green**. Native macOS failures reproduced `UnsupportedContainment`, `native probe profile installation failed`, and `no enforcement receipt was issued`. Runner/containment implementation, tests and advisory policy were not changed, suppressed or weakened. See the [recovery report](dependency-edits-validation-recovery.md) for subsequent repairs and validation; the original local guide fix alone did not cover Windows checkout bytes.
 
 Use the engine's isolated Linux validation lane on this exact source snapshot, with Node/Rust and cached locked dependencies, to run:
 

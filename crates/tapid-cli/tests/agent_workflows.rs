@@ -117,6 +117,17 @@ fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
     let guide = include_str!("../../../docs/agent-guide.md");
     assert!(guide.contains(&format!("CLI source version {}", env!("CARGO_PKG_VERSION"))));
     assert!(guide.len() < 6000, "keep the shared guide compact");
+    let lf_guide = guide.replace("\r\n", "\n");
+    for (format, text) in [
+        ("LF", lf_guide.clone()),
+        ("CRLF", lf_guide.replace('\n', "\r\n")),
+    ] {
+        assert!(
+            text.len() < 6000,
+            "keep the shared guide compact with {format} line endings: {} bytes",
+            text.len()
+        );
+    }
     let project = npm_project();
     let home = TempHome::new("agent-guide").unwrap();
     let original_npm = fs::read(project.path().join("package-lock.json")).unwrap();
