@@ -15,7 +15,7 @@ Use `tapid-test-support` for integration-test setup:
 Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, or a user-specific home. Never use the network or real credentials. Fixture writers reject absolute paths and parent-directory components.
 
 On Unix, the runtime temporary directory must permit executing fixture files.
-Some installer and package-bin tests deliberately launch freshly written scripts
+Installer, verified-tool, and package-bin tests deliberately launch freshly written scripts
 directly, so a `noexec` temporary mount produces `PermissionDenied` even with the
 correct executable mode. For an isolated worker with a non-executable default
 temporary mount, configure `TMPDIR` before starting Node/Cargo to an absolute,

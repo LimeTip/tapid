@@ -65,6 +65,8 @@ pub(crate) struct Effects {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct PreviewReport {
+    #[serde(skip_serializing_if = "super::outcome::CandidateExclusions::is_empty")]
+    pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     #[serde(skip)]
     pub outcome: OperationOutcome,
     preview_kind: &'static str,
@@ -182,6 +184,7 @@ fn inspect(
     let preserve =
         matches!(mode, InstallMode::Online) || update.is_some_and(|request| request.named);
     let mut updated_manifest = None;
+    let mut candidate_exclusions = super::outcome::CandidateExclusions::default();
 
     let policy = super::dependency_scripts::load_policy(project)?;
     let matching = if let Some(lock) = &previous {
@@ -227,7 +230,7 @@ fn inspect(
             "lockfile",
         )
     } else {
-        let (graph, count, saved) = online::resolve_preview_graph(
+        let (graph, count, saved, exclusions) = online::resolve_preview_graph(
             project,
             &manifest,
             &target,
@@ -239,6 +242,7 @@ fn inspect(
             update,
         )?;
         updated_manifest = saved;
+        candidate_exclusions = exclusions;
         (
             graph,
             count,
@@ -300,6 +304,7 @@ fn inspect(
             .push(super::outcome::Warning::UnverifiedRegistryArtifactsAllowed);
     }
     Ok(PreviewReport {
+        candidate_exclusions,
         outcome,
         preview_kind: "resolved_graph",
         artifacts_prepared: false,
