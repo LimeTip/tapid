@@ -349,13 +349,15 @@ fn windows_network_grant_runs_stock_node_loopback_tcp() {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let host_cancel = cancel.clone();
         let host = std::thread::spawn(move || -> Result<(), String> {
-            let deadline = std::time::Instant::now() + Duration::from_secs(8);
             while !host_cancel.load(std::sync::atomic::Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream.set_nonblocking(false).map_err(|e| e.to_string())?;
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
+                            .map_err(|e| e.to_string())?;
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(3)))
                             .map_err(|e| e.to_string())?;
                         let mut payload = [0; 4];
                         stream.read_exact(&mut payload).map_err(|e| e.to_string())?;
@@ -367,9 +369,6 @@ fn windows_network_grant_runs_stock_node_loopback_tcp() {
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(e) => return Err(e.to_string()),
-                }
-                if std::time::Instant::now() > deadline {
-                    return Err("Node never reached host".into());
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -383,14 +382,21 @@ fn windows_network_grant_runs_stock_node_loopback_tcp() {
         } else {
             payload.to_owned()
         };
+        // Exceed the former fixture deadline before containment preparation even starts.
+        if address == "127.0.0.1" && !descendant {
+            std::thread::sleep(Duration::from_secs(9));
+        }
         let outcome = execute(&fixture.request(&script, &endpoint, true, 12));
         cancel.store(true, std::sync::atomic::Ordering::Release);
-        let host_result = host.join().unwrap();
+        let host_result = host.join();
+        assert!(
+            matches!(&host_result, Ok(Ok(()))),
+            "host control failed: {host_result:?}; contained outcome: {outcome:?}"
+        );
         assert_node_network_success(
             outcome.expect("network=true must run contained stock Node"),
             "NODE_NETWORK_GRANTED",
         );
-        host_result.unwrap();
     }
 }
 #[test]
@@ -403,15 +409,33 @@ fn windows_network_grant_runs_stock_node_udp_and_controlled_dns() {
         let fixture = NodeNetworkProject::new();
         let socket = std::net::UdpSocket::bind((address, 0)).unwrap();
         socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(Duration::from_millis(50)))
             .unwrap();
         let endpoint = format!(
             "{{\"host\":{address:?},\"port\":{},\"kind\":{kind:?}}}",
             socket.local_addr().unwrap().port()
         );
-        let host = std::thread::spawn(move || {
+        socket
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host_cancel = cancel.clone();
+        let host = std::thread::spawn(move || -> Result<(), String> {
             let mut bytes = [0; 1500];
-            let (length, peer) = socket.recv_from(&mut bytes).unwrap();
+            let (length, peer) = loop {
+                if host_cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err("control cancelled before client traffic".into());
+                }
+                match socket.recv_from(&mut bytes) {
+                    Ok(received) => break received,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+            };
             if dns {
                 assert!(length >= 17);
                 let mut at = 12;
@@ -430,24 +454,33 @@ fn windows_network_grant_runs_stock_node_udp_and_controlled_dns() {
                 reply.extend_from_slice(&bytes[12..at + 4]);
                 reply
                     .extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 127, 0, 0, 42]);
-                socket.send_to(&reply, peer).unwrap();
+                socket.send_to(&reply, peer).map_err(|e| e.to_string())?;
             } else {
                 assert_eq!(&bytes[..length], b"NODE");
-                socket.send_to(b"HOST", peer).unwrap();
+                socket.send_to(b"HOST", peer).map_err(|e| e.to_string())?;
             }
+            Ok(())
         });
         let script = if dns {
             r#"const dns=require('node:dns');const p=JSON.parse(process.env.TAPID_NETWORK_ENDPOINT);const r=new dns.Resolver();r.setServers([p.host+':'+p.port]);r.resolve4('tapid-probe.invalid',(e,a)=>{if(e)throw e;if(a.join()!=='127.0.0.42')throw Error('wrong DNS reply');console.log('NODE_NETWORK_GRANTED')});"#
         } else {
             r#"const d=require('node:dgram');const p=JSON.parse(process.env.TAPID_NETWORK_ENDPOINT);const s=d.createSocket(p.kind);s.on('error',e=>{throw e});s.on('message',b=>{if(b.toString()!=='HOST')throw Error('wrong UDP reply');console.log('NODE_NETWORK_GRANTED');s.close()});s.send('NODE',p.port,p.host);"#
         };
+        // Regression control: preparation may take longer than the old receive timeout.
+        if address == "127.0.0.1" && !dns {
+            std::thread::sleep(Duration::from_secs(6));
+        }
         let outcome = execute(&fixture.request(script, &endpoint, true, 10));
+        cancel.store(true, std::sync::atomic::Ordering::Release);
         let host_result = host.join();
+        assert!(
+            matches!(&host_result, Ok(Ok(()))),
+            "host control failed: {host_result:?}; contained outcome: {outcome:?}"
+        );
         assert_node_network_success(
             outcome.expect("UDP/DNS must be contained"),
             "NODE_NETWORK_GRANTED",
         );
-        host_result.unwrap();
     }
 }
 #[test]
