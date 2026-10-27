@@ -13,6 +13,10 @@ pub(crate) struct Args {
 
 const SCHEMAS: &[(&str, &str)] = &[
     (
+        "tapid.package-manifest.v1",
+        include_str!("../../schemas/cli/package-manifest.v1.schema.json"),
+    ),
+    (
         "tapid.manifest-validation.v1",
         include_str!("../../schemas/cli/manifest-validation.v1.schema.json"),
     ),
@@ -137,7 +141,7 @@ pub(crate) fn run(args: Args, machine: bool) -> ExitCode {
         "Help/version support JSON envelopes. Ordinary run has separate result-file/receipt channels."
     );
     println!(
-        "JSON Schema coverage: partial; common envelope, manifest validation, status, discovery, schema export, run-preflight and run result/receipt v1 are embedded."
+        "JSON Schema coverage: partial; common envelope, package manifest input, manifest validation, status, discovery, schema export, run-preflight and run result/receipt v1 are embedded."
     );
     println!(
         "Static declarations only; project compatibility and process enforcement are unchecked."
@@ -156,7 +160,13 @@ fn mode(id: &str, family: &str, channel: &str) -> Value {
     );
     let network = matches!(
         family,
-        "install" | "replay" | "registry_inspection" | "tool_install" | "upgrade" | "execution"
+        "install"
+            | "replay"
+            | "registry_inspection"
+            | "dependency_preview"
+            | "tool_install"
+            | "upgrade"
+            | "execution"
     );
     json!({
         "id": id, "json": channel, "maturity": "experimental",
@@ -174,6 +184,7 @@ fn mode(id: &str, family: &str, channel: &str) -> Value {
                 "execution" => "Child behavior depends on requested permissions and established backend authority. A result file is created before launch when requested. This declaration establishes no enforcement.",
                 "cache_clean" => "Default and --dry-run preview only; --yes removes published store entries.",
                 "registry_inspection" => "Network depends on command, --offline and registry fixtures; no dependency installation is performed.",
+                "dependency_preview" => "Read-only resolution preview; registry metadata may be fetched unless a local fixture is supplied. No recovery, artifact preparation, installation or hooks are performed.",
                 "parent" => "A subcommand is required; see the selected subcommand's effects.",
                 "upgrade" => "May update release cache and executable destination; --dry-run does not replace the executable.",
                 "tool_install" => "May recover and write standalone tool environments, bins and verified store; accesses registry unless using a fixture. Hooks never run.",
@@ -197,9 +208,16 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         Some((_, family, channel)) => mode("default", family, channel),
         None => json!({"id": "default", "json": "unknown", "coverage": "unclassified"}),
     }];
+    if matches!(path, "add" | "remove" | "update") {
+        modes[0]["when"] = json!({"dry_run": false});
+        let mut preview = mode("dry_run", "dependency_preview", "stdout_envelope");
+        preview["when"] = json!({"dry_run": true});
+        modes.push(preview);
+    }
     if path == "manifest validate" {
         modes[0]["schema_coverage"] = json!("payload");
         modes[0]["schema"] = json!("tapid.manifest-validation.v1");
+        modes[0]["input_schemas"] = json!(["tapid.package-manifest.v1"]);
     }
     if path == "status" {
         modes[0]["schema_coverage"] = json!("payload");
@@ -301,6 +319,7 @@ fn discover() -> Value {
         "schema_catalog": SCHEMAS.iter().map(|(id, source)| {
             let schema: Value = serde_json::from_str(source).expect("embedded schema is valid JSON");
             let contract = match *id {
+                "tapid.package-manifest.v1" => json!("tapid.package-manifest"),
                 "tapid.envelope.v1" => json!("tapid.envelope"),
                 "tapid.manifest-validation.v1" => json!("tapid.manifest-validation"),
                 "tapid.status.v1" => json!("tapid.status"),
@@ -309,7 +328,7 @@ fn discover() -> Value {
                 "tapid.schema-export.v1" => json!("tapid.schema-export"),
                 _ => schema["properties"]["contract"]["const"].clone(),
             };
-            json!({"id": id, "target": if *id == "tapid.envelope.v1" { "envelope" } else if *id == "tapid.run-result.v1" { "result_file" } else if *id == "tapid.run-receipt.v1" { "stderr_receipt" } else { "data" }, "contract": contract, "schema_version": 1})
+            json!({"id": id, "target": if *id == "tapid.package-manifest.v1" { "input" } else if *id == "tapid.envelope.v1" { "envelope" } else if *id == "tapid.run-result.v1" { "result_file" } else if *id == "tapid.run-receipt.v1" { "stderr_receipt" } else { "data" }, "contract": contract, "schema_version": 1})
         }).collect::<Vec<_>>(), "schema_coverage": "partial",
         "assurance": {"package_manager_support": "separate_from_runner", "process_enforcement": "not_established", "project_compatibility": "unchecked"}
     })

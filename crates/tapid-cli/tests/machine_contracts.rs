@@ -137,7 +137,7 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
     let project = TempProject::new("schema-catalog").unwrap();
     let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
     let catalog = discovery["data"]["schema_catalog"].as_array().unwrap();
-    assert_eq!(catalog.len(), 8);
+    assert_eq!(catalog.len(), 9);
     let advertised = catalog
         .iter()
         .map(|entry| entry["id"].as_str().unwrap())
@@ -151,6 +151,13 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
             [mode["schema"].as_str(), mode["envelope_schema"].as_str()]
                 .into_iter()
                 .flatten()
+                .chain(
+                    mode["input_schemas"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str),
+                )
         })
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(advertised, referenced);
@@ -166,6 +173,9 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
         let source: Value = serde_json::from_str(match id {
             "tapid.manifest-validation.v1" => {
                 include_str!("../schemas/cli/manifest-validation.v1.schema.json")
+            }
+            "tapid.package-manifest.v1" => {
+                include_str!("../schemas/cli/package-manifest.v1.schema.json")
             }
             "tapid.envelope.v1" => include_str!("../schemas/cli/envelope.v1.schema.json"),
             "tapid.schema-export.v1" => include_str!("../schemas/cli/schema-export.v1.schema.json"),
@@ -555,4 +565,95 @@ fn manifest_validation_schema_covers_success_without_claiming_failure_payloads()
             .is_valid(&failure)
     );
     assert!(!validator.is_valid(&failure["data"]));
+}
+
+#[test]
+fn package_manifest_input_schema_checks_structure_without_claiming_semantics() {
+    let project = TempProject::new("manifest-input-contract").unwrap();
+    let (output, exported) = invoke(
+        &project,
+        &[
+            "--json",
+            "capabilities",
+            "--schema",
+            "tapid.package-manifest.v1",
+        ],
+    );
+    assert!(output.status.success(), "{exported}");
+    let validator = jsonschema::validator_for(&exported["data"]["schema"]).unwrap();
+    let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
+    let input = discovery["data"]["schema_catalog"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "tapid.package-manifest.v1")
+        .unwrap();
+    assert_eq!(input["target"], "input");
+    assert_eq!(input["contract"], "tapid.package-manifest");
+    for valid in [
+        json!({"name":"app","version":"1.0.0"}),
+        json!({"name":"@scope/app","version":"1.0.0","private":true,"dependencies":{"npm:kleur":"^4"},"scripts":{"test":"node test.js"},"bin":{"app":"./cli.js"},"workspaces":["packages/*"],"future":{"any":true}}),
+    ] {
+        assert!(tapid_manifest::PackageManifest::parse(&valid.to_string()).is_ok());
+        assert!(validator.is_valid(&valid), "{valid}");
+    }
+    for invalid in [
+        json!([]),
+        json!({"name":"app"}),
+        json!({"name":"app","version":1}),
+        json!({"name":"app","version":"1.0.0","private":null}),
+        json!({"name":"app","version":"1.0.0","scripts":{"test":false}}),
+        json!({"name":"app","version":"1.0.0","bin":{}}),
+    ] {
+        assert!(tapid_manifest::PackageManifest::parse(&invalid.to_string()).is_err());
+        assert!(!validator.is_valid(&invalid), "{invalid}");
+    }
+    let example: Value = serde_json::from_str(include_str!(
+        "../schemas/cli/examples/package-manifest.v1.json"
+    ))
+    .unwrap();
+    assert!(validator.is_valid(&example));
+    assert!(tapid_manifest::PackageManifest::parse(&example.to_string()).is_ok());
+    let semantic_failure = json!({"name":"app","version":"not-semver","bin":"../escape"});
+    assert!(validator.is_valid(&semantic_failure));
+    assert!(tapid_manifest::PackageManifest::parse(&semantic_failure.to_string()).is_err());
+}
+
+#[test]
+fn discovery_distinguishes_dependency_preview_effects_from_mutation() {
+    let project = TempProject::new("preview-discovery").unwrap();
+    let (_, report) = invoke(&project, &["--json", "capabilities"]);
+    for path in ["add", "remove", "update"] {
+        let command = report["data"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["path"] == path)
+            .unwrap();
+        let modes = command["modes"].as_array().unwrap();
+        let preview = modes
+            .iter()
+            .find(|mode| mode["id"] == "dry_run")
+            .expect("preview mode");
+        assert_eq!(preview["when"]["dry_run"], true);
+        assert_eq!(modes[0]["when"]["dry_run"], false);
+        for effect in [
+            "project_writes_possible",
+            "store_writes_possible",
+            "other_writes_possible",
+            "child_execution_possible",
+            "hook_execution_possible",
+        ] {
+            assert_eq!(preview["effects"][effect], false, "{path}: {effect}");
+        }
+        assert_eq!(preview["effects"]["network_possible"], true);
+        assert_eq!(preview["schema_coverage"], "envelope_only");
+        // The real command rejects missing packages without project writes;
+        // discovery describes a possible effect, not a claim it occurred.
+        if path != "update" {
+            let (output, failure) = invoke(&project, &["--json", path, "--dry-run"]);
+            assert!(!output.status.success());
+            assert_eq!(failure["changes"]["state"], "unchanged");
+        }
+    }
 }

@@ -567,4 +567,21 @@ These are local selection facts, not proof that runtime launch checks passed.
 `action: "validate"` and `valid: true`. Validation failures carry null data and
 use the common failure envelope instead. This contract describes manifest parsing,
 not dependency resolution, workspace discovery, launch assurance, or complete
-project compatibility. Structured package.json inputs remain unpublished.
+project compatibility. The structural input contract is described below.
+
+`tapid.package-manifest.v1` is a structural input schema for `package.json`,
+exported offline through `capabilities --schema`. Discovery lists it under
+`input_schemas` for `manifest validate`, with catalog target `input`, separately
+from the result payload schema. It checks required string name/version fields,
+metadata types, string-valued maps and bin shapes. Passing this schema is only a
+necessary condition: the maintained manifest parser still validates names,
+versions and executable paths. Workspace declarations and unknown fields are
+preserved without validation by this structural schema; discovery, resolution,
+routing and launch checks remain separate. The identifier selects v1 independently
+of the Tapid version and permits additive unknown fields.
+
+Discovery separates `add`, `remove` and `update` into ordinary mutation and
+`dry_run` modes. Preview modes may fetch registry metadata but declare no project,
+store or other writes, child execution or hook execution. Their result coverage
+remains `envelope_only`; this metadata does not claim a payload schema or an
+executable installation plan.

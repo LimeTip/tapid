@@ -521,3 +521,8 @@ separate advertised payload schema where available. Export remains offline.
 `capabilities --schema tapid.manifest-validation.v1` exports the successful
 `manifest validate` payload schema offline. Failure data remains null and uses
 the common envelope; successful parsing does not establish project compatibility.
+
+`capabilities --schema tapid.package-manifest.v1` exports the structural
+`package.json` input schema. Discovery advertises it separately in `input_schemas`
+for `manifest validate`. Passing it does not establish semantic validity or
+project compatibility: use the maintained manifest parser and status checks.

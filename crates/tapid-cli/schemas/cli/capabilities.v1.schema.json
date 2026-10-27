@@ -300,6 +300,13 @@
                 },
                 "envelope_schema": {
                   "const": "tapid.envelope.v1"
+                },
+                "input_schemas": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Structured input schema identifiers; separate from result payload coverage."
                 }
               },
               "allOf": [
@@ -472,7 +479,8 @@
               "data",
               "result_file",
               "stderr_receipt",
-              "envelope"
+              "envelope",
+              "input"
             ]
           },
           "contract": {
