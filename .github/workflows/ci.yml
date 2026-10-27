@@ -47,12 +47,18 @@ jobs:
           test "$(uname -m)" = x86_64
           test "$(node -p 'process.versions.node.split(".")[0]')" = 22
           git rev-parse HEAD > "$RUNNER_TEMP/linux-managed-source.txt"
-          # Delegate only this transient unit. Move the driver into a leaf so
-          # memory/pids can be enabled for sibling execution boundaries. No
-          # host-wide sysctl, cgroup remount or privileged container is needed.
+          systemd --version
+          systemd_version=$(systemd --version | head -n 1 | awk '{print $2}')
+          if ! [[ "$systemd_version" =~ ^[0-9]+$ ]] || ! (( systemd_version >= 254 )); then
+            echo "ManagedTree acceptance requires systemd >= 254 for DelegateSubgroup" >&2
+            exit 1
+          fi
+          # systemd places the driver in a leaf before exec. The delegation
+          # parent remains empty so memory/pids can serve execution siblings.
           sudo -n systemd-run --wait --pipe --collect \
             --unit="tapid-managed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --property=Delegate=yes --property=KillMode=control-group \
+            --property=Delegate=yes --property=DelegateSubgroup=driver \
+            --property=KillMode=control-group --property=RuntimeMaxSec=25min \
             --working-directory="$PWD" \
             --setenv="PATH=$PATH" \
             --setenv="CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
@@ -68,9 +74,17 @@ jobs:
               uname -a
               "$TAPID_TEST_NODE" --version
               rustc --version
-              group=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
-              mkdir "$group/driver"
-              echo $$ > "$group/driver/cgroup.procs"
+              systemd --version
+              driver=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
+              test "${driver##*/}" = driver
+              group=${driver%/driver}
+              test "$group" != /sys/fs/cgroup
+              echo "delegation parent=$group driver=$driver"
+              cat "$group/cgroup.type" "$driver/cgroup.type"
+              cat "$group/cgroup.controllers" "$driver/cgroup.controllers"
+              cat "$group/cgroup.procs" "$driver/cgroup.procs" /proc/self/cgroup
+              test -z "$(cat "$group/cgroup.procs")"
+              grep -Fx "$$" "$driver/cgroup.procs"
               echo "+memory +pids" > "$group/cgroup.subtree_control"
               cat "$group/cgroup.controllers" "$group/cgroup.subtree_control" /proc/self/cgroup
               unshare --mount --pid --fork --mount-proc /bin/true

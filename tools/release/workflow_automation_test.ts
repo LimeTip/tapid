@@ -651,3 +651,44 @@ test('standalone output pipeline restriction permits ManagedTree evidence only o
     assert.throws(() => assertStandaloneTestOwners(ci.replace(owner, changed)), undefined, id);
   }
 });
+
+const assertManagedDelegation = (ci: string) => {
+  const owner = job(ci, 'linux-managed-tree');
+  const setup = step(owner, 'Require native ManagedTree execution in a delegated host context');
+  for (const required of [
+    '--property=Delegate=yes', '--property=DelegateSubgroup=driver',
+    '--property=KillMode=control-group', '--property=RuntimeMaxSec=25min',
+    '--setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1', '--setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1',
+    'systemd_version >= 254', 'systemd --version',
+    'driver=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)',
+    'test "${driver##*/}" = driver', 'group=${driver%/driver}',
+    'test "$group" != /sys/fs/cgroup', 'test -z "$(cat "$group/cgroup.procs")"',
+    'grep -Fx "$$" "$driver/cgroup.procs"',
+    'cat "$group/cgroup.type" "$driver/cgroup.type"',
+    'echo "+memory +pids" > "$group/cgroup.subtree_control"',
+    'unshare --mount --pid --fork --mount-proc /bin/true',
+  ]) assert(setup.includes(required), `missing ManagedTree setup: ${required}`);
+  assert.doesNotMatch(setup, /mkdir "\$group\/driver"|echo \$\$ > /);
+  assert(setup.indexOf('group=${driver%/driver}') < setup.indexOf('echo "+memory +pids"'));
+  assert.match(owner, /timeout-minutes: 30/);
+  assert.match(step(owner, 'Retain exact-source native acceptance logs'), /if: always\(\)/);
+};
+
+test('ManagedTree delegation uses a systemd-owned driver leaf and an empty parent', async () => {
+  assertManagedDelegation(await workflow('ci'));
+});
+
+test('ManagedTree delegation rejects missing prerequisites and driver-parent confusion', async () => {
+  const ci = await workflow('ci');
+  assertManagedDelegation(ci);
+  for (const required of [
+    '--property=Delegate=yes', '--property=DelegateSubgroup=driver',
+    '--setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1', '--setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1',
+    'group=${driver%/driver}', 'test "${driver##*/}" = driver',
+    'test -z "$(cat "$group/cgroup.procs")"', 'systemd_version >= 254',
+  ]) {
+    const broken = ci.replace(required, '');
+    assert.notEqual(broken, ci, required);
+    assert.throws(() => assertManagedDelegation(broken), undefined, required);
+  }
+});

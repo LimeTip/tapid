@@ -128,8 +128,10 @@ The reserved-Node lifecycle regression launches a detached descendant with redir
 The `linux-managed-tree` CI job targets Ubuntu 24.04 x86_64 with externally
 supplied Node 22. It requires `TAPID_REQUIRE_MANAGED_ASSERTIONS=1` and
 `TAPID_REQUIRE_NODE_ASSERTIONS=1`; unavailable prerequisites fail the job.
-A transient systemd unit owns the delegation, moves its trusted driver into a
-leaf, enables memory/pids controllers for sibling execution boundaries, and
+A transient systemd unit owns the delegation and uses systemd 254 or newer's
+`DelegateSubgroup=driver` to place its trusted driver in a leaf before execution.
+The harness validates the empty delegation parent and driver membership, records
+cgroup types and controllers, enables memory/pids for sibling boundaries, and
 actually attempts private PID/mount namespace creation. It does not remount the
 host cgroup filesystem or change host-wide namespace policy. The runner still
 performs its own request-specific checks before target execution. Logs retain
