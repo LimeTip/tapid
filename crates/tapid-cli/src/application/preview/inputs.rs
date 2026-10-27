@@ -111,7 +111,7 @@ impl Inputs {
                 unreachable!("workspace package")
             };
             let path = self.root.join(source.path()).join("package.json");
-            if !replacement.is_some_and(|(target, _)| target == path)
+            if replacement.is_none_or(|(target, _)| target != path)
                 && self.files.get(&path).and_then(|d| d.as_deref())
                     != Some(package.manifest_digest())
             {
