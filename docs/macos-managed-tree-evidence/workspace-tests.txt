@@ -1,0 +1,304 @@
+warning: crates/tapid-registry-client/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-registry-client` (manifest) generated 1 warning
+warning: crates/tapid-attestations/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-attestations` (manifest) generated 1 warning
+warning: crates/tapid-cli/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid` (manifest) generated 1 warning
+warning: crates/tapid-release-client/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-release-client` (manifest) generated 1 warning
+warning: crates/tapid-store/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-store` (manifest) generated 1 warning
+warning: crates/tapid-runner/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-runner` (manifest) generated 1 warning
+warning: crates/tapid-protocol/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-protocol` (manifest) generated 1 warning
+warning: crates/tapid-resolver/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-resolver` (manifest) generated 1 warning
+warning: crates/tapid-archive/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-archive` (manifest) generated 1 warning
+warning: crates/tapid-test-support/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-test-support` (manifest) generated 1 warning
+warning: crates/tapid-manifest/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-manifest` (manifest) generated 1 warning
+warning: crates/tapid-lockfile/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-lockfile` (manifest) generated 1 warning
+warning: crates/tapid-policy/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-policy` (manifest) generated 1 warning
+warning: crates/tapid-core/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-core` (manifest) generated 1 warning
+warning: crates/tapid-signatures/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-signatures` (manifest) generated 1 warning
+warning: crates/tapid-linker/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-linker` (manifest) generated 1 warning
+warning: crates/tapid-publish/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-publish` (manifest) generated 1 warning
+warning: crates/tapid-transparency/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-transparency` (manifest) generated 1 warning
+   Compiling cfg-if v1.0.4
+   Compiling stable_deref_trait v1.2.1
+   Compiling itoa v1.0.18
+   Compiling subtle v2.6.1
+   Compiling libc v0.2.189
+   Compiling serde_core v1.0.229
+   Compiling memchr v2.8.3
+   Compiling zerofrom v0.1.8
+   Compiling smallvec v1.16.0
+   Compiling writeable v0.6.4
+   Compiling yoke v0.8.3
+   Compiling litemap v0.8.3
+   Compiling utf8_iter v1.0.4
+   Compiling percent-encoding v2.3.2
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling zmij v1.0.23
+   Compiling form_urlencoded v1.2.2
+   Compiling base64 v0.22.1
+   Compiling typenum v1.20.1
+   Compiling zeroize v1.9.0
+   Compiling bitflags v2.13.1
+   Compiling once_cell v1.21.4
+   Compiling bytes v1.12.1
+   Compiling pin-project-lite v0.2.17
+   Compiling cpufeatures v0.2.17
+   Compiling errno v0.3.14
+   Compiling futures-core v0.3.34
+   Compiling mio v1.2.3
+   Compiling rustix v1.1.4
+   Compiling socket2 v0.6.5
+   Compiling tapid-test-support v0.0.3 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-test-support)
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling generic-array v0.14.7
+   Compiling time-core v0.1.9
+   Compiling powerfmt v0.2.0
+   Compiling num-conv v0.2.2
+   Compiling deranged v0.5.8
+   Compiling futures-sink v0.3.34
+   Compiling tokio v1.53.3
+   Compiling http v1.5.0
+   Compiling getrandom v0.2.17
+   Compiling rustls-pki-types v1.15.1
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling futures-task v0.3.34
+   Compiling icu_provider v2.3.1
+   Compiling sha2 v0.10.9
+   Compiling futures-io v0.3.34
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling http-body v1.1.0
+   Compiling slab v0.4.12
+   Compiling time v0.3.55
+   Compiling untrusted v0.9.0
+   Compiling signature v2.2.0
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling futures-util v0.3.34
+   Compiling ring v0.17.14
+   Compiling tower-service v0.3.3
+   Compiling try-lock v0.2.5
+   Compiling ed25519 v2.2.3
+   Compiling want v0.3.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling httparse v1.10.1
+   Compiling futures-channel v0.3.34
+   Compiling tracing-core v0.1.36
+   Compiling idna_adapter v1.2.2
+   Compiling atomic-waker v1.1.2
+   Compiling idna v1.1.0
+   Compiling ryu-js v0.2.2
+   Compiling tracing v0.1.44
+   Compiling rustls-webpki v0.103.16
+   Compiling serde_jcs v0.2.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling sync_wrapper v1.0.2
+   Compiling ipnet v2.12.2
+   Compiling url v2.5.8
+   Compiling tower-layer v0.3.3
+   Compiling base64 v0.23.1
+   Compiling getrandom v0.3.4
+   Compiling webpki-roots v1.0.10
+   Compiling ryu v1.0.23
+   Compiling rustls v0.23.46
+   Compiling serde_urlencoded v0.7.1
+   Compiling tapid-signatures v0.0.4 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-signatures)
+   Compiling tapid-core v0.0.7 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-core)
+   Compiling http-body-util v0.1.5
+   Compiling log v0.4.34
+   Compiling winnow v1.0.4
+   Compiling httpdate v1.0.3
+   Compiling rand_core v0.9.5
+   Compiling tapid-policy v0.0.4 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-policy)
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling tapid-runner v0.0.7 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-runner)
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling zerocopy v0.8.59
+   Compiling simd-adler32 v0.3.10
+   Compiling fastrand v2.5.0
+   Compiling adler2 v2.0.1
+   Compiling crc32fast v1.5.1
+   Compiling hyper v1.11.1
+   Compiling tower v0.5.3
+   Compiling tempfile v3.27.0
+   Compiling miniz_oxide v0.9.1
+   Compiling toml v1.1.5+spec-1.1.0
+   Compiling tapid-manifest v0.0.10 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-manifest)
+   Compiling xattr v1.6.1
+   Compiling tower-http v0.6.11
+   Compiling wait-timeout v0.2.1
+   Compiling filetime v0.2.29
+   Compiling fnv v1.0.7
+   Compiling bit-vec v0.8.0
+   Compiling quick-error v1.2.3
+   Compiling tar v0.4.46
+   Compiling hyper-util v0.1.20
+   Compiling bit-set v0.8.0
+   Compiling rusty-fork v0.3.1
+   Compiling flate2 v1.1.10
+   Compiling num-traits v0.2.19
+   Compiling rand v0.9.5
+   Compiling rand_xorshift v0.4.0
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.11
+   Compiling hex v0.4.3
+   Compiling tapid-archive v0.0.6 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-archive)
+   Compiling utf8parse v0.2.2
+   Compiling fs4 v1.1.0
+   Compiling anstyle-parse v1.0.0
+   Compiling hmac v0.12.1
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling colorchoice v1.0.5
+   Compiling anstyle v1.0.14
+   Compiling same-file v1.0.6
+   Compiling anstyle-query v1.1.5
+   Compiling strsim v0.11.1
+   Compiling clap_lex v1.1.0
+   Compiling anstream v1.0.0
+   Compiling tapid-store v0.0.8 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-store)
+   Compiling tapid-linker v0.0.8 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-linker)
+   Compiling clap_builder v4.6.6
+   Compiling tapid-release-client v0.0.5 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-release-client)
+   Compiling tokio-rustls v0.26.5
+   Compiling tapid v0.0.13 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-cli)
+   Compiling hyper-rustls v0.27.9
+   Compiling tapid-protocol v0.0.6 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-protocol)
+   Compiling tapid-publish v0.0.5 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-publish)
+   Compiling reqwest v0.12.28
+   Compiling tapid-transparency v0.0.4 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-transparency)
+   Compiling tapid-attestations v0.0.5 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-attestations)
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling proptest v1.11.0
+   Compiling tapid-registry-client v0.0.7 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-registry-client)
+   Compiling clap v4.6.6
+   Compiling tapid-resolver v0.0.8 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-resolver)
+   Compiling tapid-lockfile v0.0.13 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-lockfile)
+error: linking with `cc` failed: exit status: 1
+  |
+  = note:  "cc" "/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/rustcJAJfGT/symbols.o" "<17 object files omitted>" "<sysroot>/lib/rustlib/aarch64-apple-darwin/lib/{libtest-*,libgetopts-*,librustc_std_workspace_std-*}.rlib" "/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/{libproptest-a007472bc386f363,libunarray-b671dce54b1330c2,libregex_syntax-14dd235571cfeab7,librand_xorshift-4804c426a33335f1,librand_chacha-fd47af67dadb19d1,libppv_lite86-43283b09c24ca79f,libzerocopy-fd03af995a06011b,librand-7fd119abe2413810,librand_core-386b96e5c4c5bbb4,librusty_fork-9a20faf435b91696,libwait_timeout-c594613c4bd13c14,libtempfile-8c72d744d3e9a952,libgetrandom-9c976c1978984ccc,libfastrand-557a20363b40454c,libfnv-8df44e2fb6be64da,libquick_error-49c42f579af2075b,libbit_set-7fb11e4250e3ed28,libbit_vec-4a2f6ab15f52362e,libtapid_release_client-60aa0c445019cd91,libtapid_signatures-3fee186652b0a9ea,libserde_jcs-504be8917a25178e,libryu_js-1f7711151a2c6904,libed25519_dalek-bf83c7dba2fbc70f,libcurve25519_dalek-ec689d57c99cf9c4,libed25519-1cb300297d1f7610,libsignature-7aad02259333b206,libtapid_test_support-acf2a4ce0920ec8f,libbase64-1f9060e62c1731c0,libtapid_store-9e9fe4a75d727d2a,libtapid_archive-d7f197afb7f7697d,libtar-d09c60c4a24e54c4,libxattr-5421e7d6b67569f5,libfiletime-b83073b83daa644f,libflate2-06fca6634fb3deca,libminiz_oxide-615004cfcfaa6ab3,libsimd_adler32-89cba279cbc5dfaa,libcrc32fast-fcb1bd26d4ae8302,libhex-1c5d67a19befce31,libhmac-c812664074443412,libsame_file-d2bfb550aca03a71,libfs4-9f94a46f40620bf4,librustix-80cdcd8e4610b03c,liberrno-d0f2eecff473f285,libtapid_runner-b066116ed0f0cd7f,libtoml-4c25733adf6cfa55,libtoml_writer-ed07fbddf48d9ef2,libtoml_parser-9b5adfac9afdc3fa,libwinnow-c18250e62d1b9c15,libserde_spanned-41912d97f4b45b0b,libtoml_datetime-0a019f99a252c9ae,libtapid_policy-624f819790ad78d7,libtapid_lockfile-b74f8ae3fd872852,libtapid_resolver-040207fe9071d9ae,libtapid_registry_client-482ac2f790041ce0,libhttpdate-01c0576cf3761db1,libreqwest-e7c4da2086a62ea6,libhyper_rustls-45e7080ed6684e06,libwebpki_roots-3add1a1a2a49f39d,libtokio_rustls-592c94764c1d19e8,librustls-76a75066c651f315,libwebpki-aa659f0b5d07869c,libring-3b112f26ac61c95e,libgetrandom-4c32b94c939ff947,libuntrusted-2ed596c83354a52a,librustls_pki_types-6e3fb3de96960c78,libzeroize-b9f1677bf8e3dce9,libserde_urlencoded-f70b45108a9a57f2,libryu-13a065e9740c9a2a,libtower_http-242d67898a079eb6,libbitflags-7229ea5108aa1158,libtower-23d91cb6521a1828,libtower_layer-8b8990b7b6f084e2,libhyper_util-689e77c899f94d58,libipnet-a79b747e736207e6,libtower_service-95075bf7bb19e1cc,libtracing-8d17d80d43d3344c,libtracing_core-80af918788d4bef5,libonce_cell-7940d055b546478a,libhyper-c37a91e5d9c3b3bf,libwant-0a704e4a8fc136c2,libtry_lock-97c05761c91766f7,libhttparse-324d5be9c9df961f,libatomic_waker-39bf82ad455470ea,libfutures_channel-8b3ab8e7a7792aed,libtokio-61af5fc232761f97,libsocket2-df3ca5bbcdbf0706,libmio-fc62ade0787a8187,libhttp_body_util-f0a3ac8597491342,libhttp_body-0b07dd76c2482871,liblog-eb304496061c1e19,libfutures_util-a094f413a3498aa6,libfutures_io-01fb23e98849f61e,libslab-41bf46bc60fc2de1,libpin_project_lite-b9d2425a4e56a603,libfutures_sink-df71390dc7c8f411,libfutures_task-bc2999479aea0b83,libhttp-d32504ee1738beb3,libbytes-592824a0cc8e2ec7,libsync_wrapper-914a36123a341635,libfutures_core-c41e908b9736e7a3,libtime-5633252881cd20a8,libpowerfmt-e4e595bcfe6768ef,libnum_conv-5a9c8fb54abd3738,libderanged-746da6b3f140bc8e,libtime_core-045fd9cdf52e8e29,libtapid_linker-f55b23ac5ef2c952,libtapid_manifest-5c6059f0e27a534b,liblibc-62afd874690efe50,libserde_json-8cb0410f35612c05,libmemchr-28c77ecc7701eba2,libzmij-53814c0d755cfbd4,libitoa-9a3607861fdd286e,libserde-cfed803e815e4c66,libserde_core-c34e0ab2afc831a1,libtapid_core-21bb999a27ec01ee,libsemver-d3701eb18e0bce2a,libbase64-edc9610e43b77be8,liburl-a33c216f912fd82d,libidna-e523aa2b256ad2cb,libidna_adapter-46573598ea3a68a9,libicu_properties-0b305193ed89a287,libicu_properties_data-5eefc57b7d8ab8c7,libicu_normalizer-93951e05630c4b73,libsmallvec-17b2edbdc6bdaf61,libicu_normalizer_data-7d1ca8cf936b2a74,libicu_collections-5dfbd984aa26cea9,libutf8_iter-80b8aa1dc7fc7413,libpotential_utf-fc9765a00d908744,libicu_provider-205a1a3d5291760f,libicu_locale_core-8ae1c8861af61cf8,libtinystr-2cba810054e90ad0,liblitemap-2ebfba45cd731695,libwriteable-a24ce3bc24d43f19,libzerovec-1c736527c8118e24,libzerotrie-b0abc90e4ec8efa4,libyoke-2659f77cebd43bdd,libstable_deref_trait-a5e566d161e5b0e8,libzerofrom-23e531a762469037,libform_urlencoded-11fdca464aa1b478,libpercent_encoding-a09a570b00ccfb30,libsha2-261982f7cc54e9c1,libcfg_if-0dfb86f17dc0cad9,libdigest-11df31687ce4938b,libsubtle-d2a354866a82c66f,libblock_buffer-464951f6d168738e,libcrypto_common-95d45e8ab135101e,libgeneric_array-09624c96ade7bf13,libtypenum-759971b3bc394642,libclap-a1d6bedbf738e064,libclap_builder-2add2988175e7613,libstrsim-c059a7bc8fc370ec,libanstream-06b466295f3bb382,libanstyle_query-9a1d8f8cc8e95f7d,libis_terminal_polyfill-0514b14954ffc2d4,libcolorchoice-461b05b249188070,libanstyle_parse-f855df6c388743f0,libutf8parse-e61215401ad7613e,libclap_lex-8d8485bd885eeb15,libanstyle-70a083f78efd2210}.rlib" "<sysroot>/lib/rustlib/aarch64-apple-darwin/lib/{libstd-*,libpanic_unwind-*,libobject-*,libmemchr-*,libaddr2line-*,libgimli-*,libcfg_if-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libminiz_oxide-*,libadler2-*,libunwind-*,liblibc-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "-lsandbox" "-liconv" "-lSystem" "-lc" "-lm" "-arch" "arm64" "-mmacosx-version-min=11.0.0" "-L" "/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/build/ring-3ded7425ae28a3c1/out" "-o" "/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/tapid-aa433156e7197efa" "-Wl,-dead_strip" "-nodefaultlibs"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libtest-f9d4fbf9a69c5589.rlib[4](test-f9d4fbf9a69c5589.test.2e9bdec6e1c36934-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libgetopts-7be57150a0ecb1fa.rlib[4](getopts-7be57150a0ecb1fa.getopts.9c784e23a62272e0-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[20](25ac62e5b3c53843-curve25519.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[21](0bbbd18bda93c05b-aes_nohw.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[22](00c879ee3285a50d-montgomery.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[23](00c879ee3285a50d-montgomery_inv.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[24](a0330e891e733f4e-ecp_nistz.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[26](a0330e891e733f4e-gfp_p384.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[28](aaa1ba3e455ee2e1-limbs.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[29](a4019cc0736b0423-mem.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[30](d5a9841f3dc6e253-poly1305.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[31](a0330e891e733f4e-p256-nistz.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[32](c322a0bcc369f531-chacha-armv8-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[33](c322a0bcc369f531-chacha20_poly1305_armv8-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[34](c322a0bcc369f531-aesv8-armx-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[35](c322a0bcc369f531-aesv8-gcm-armv8-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[36](c322a0bcc369f531-ghash-neon-armv8-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[37](c322a0bcc369f531-ghashv8-armx-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[38](c322a0bcc369f531-vpaes-armv8-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[39](c322a0bcc369f531-armv8-mont-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[40](c322a0bcc369f531-p256-armv8-asm-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[41](c322a0bcc369f531-sha512-armv8-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/deps/libring-3b112f26ac61c95e.rlib[42](c322a0bcc369f531-sha256-armv8-ios64.o)) was built for newer 'macOS' version (26.5) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libstd-84d93391dbfcb1f6.rlib[4](std-84d93391dbfcb1f6.std.13ff499bfa5c4ad9-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libpanic_unwind-816e8c2b2d2ee216.rlib[4](panic_unwind-816e8c2b2d2ee216.panic_unwind.631ee80fb2fe623f-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libobject-f00c4ef9fed0b725.rlib[4](object-f00c4ef9fed0b725.object.6fb9430a3486a816-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libaddr2line-d121c3f7e6cc9e99.rlib[4](addr2line-d121c3f7e6cc9e99.addr2line.6fb2d98c211b9e7a-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libgimli-3670407c2408c84d.rlib[4](gimli-3670407c2408c84d.gimli.20639b23bbf8c9b3-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/librustc_demangle-c986b9eee46979b0.rlib[4](rustc_demangle-c986b9eee46979b0.rustc_demangle.1f063fb1f7da027d-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libhashbrown-b4e9c27ba1781930.rlib[4](hashbrown-b4e9c27ba1781930.hashbrown.224b4baf80939b85-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libminiz_oxide-a71e0b0ac681e2e1.rlib[4](miniz_oxide-a71e0b0ac681e2e1.miniz_oxide.41e5210234b66d5e-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libadler2-7535affa9e27fab4.rlib[4](adler2-7535affa9e27fab4.adler2.25e419b3e0951860-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/liballoc-946c281971126d3c.rlib[4](alloc-946c281971126d3c.alloc.5ea372fd361bcb50-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libcore-150ecee34d254669.rlib[4](core-150ecee34d254669.core.2399d0a7b562ce5e-cgu.0.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libcompiler_builtins-188933bf9d87beb6.rlib[20](compiler_builtins-188933bf9d87beb6.compiler_builtins.d663ec93ef99bc60-cgu.016.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libcompiler_builtins-188933bf9d87beb6.rlib[115](compiler_builtins-188933bf9d87beb6.compiler_builtins.d663ec93ef99bc60-cgu.111.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libcompiler_builtins-188933bf9d87beb6.rlib[191](compiler_builtins-188933bf9d87beb6.compiler_builtins.d663ec93ef99bc60-cgu.187.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libcompiler_builtins-188933bf9d87beb6.rlib[215](compiler_builtins-188933bf9d87beb6.compiler_builtins.d663ec93ef99bc60-cgu.211.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: warning: object file (/opt/homebrew/Cellar/rust/1.99.0_1/lib/rustlib/aarch64-apple-darwin/lib/libcompiler_builtins-188933bf9d87beb6.rlib[224](compiler_builtins-188933bf9d87beb6.compiler_builtins.d663ec93ef99bc60-cgu.220.rcgu.o)) was built for newer 'macOS' version (26.0) than being linked (11.0)
+          ld: write() failed, errno=28 (No space left on device)
+          clang: error: linker command failed with exit code 1 (use -v to see invocation)
+          
+
+error: could not compile `tapid` (lib test) due to 1 previous error

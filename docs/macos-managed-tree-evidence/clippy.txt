@@ -1,0 +1,269 @@
+warning: crates/tapid-registry-client/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-registry-client` (manifest) generated 1 warning
+warning: crates/tapid-attestations/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-attestations` (manifest) generated 1 warning
+warning: crates/tapid-cli/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid` (manifest) generated 1 warning
+warning: crates/tapid-release-client/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-release-client` (manifest) generated 1 warning
+warning: crates/tapid-store/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-store` (manifest) generated 1 warning
+warning: crates/tapid-runner/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-runner` (manifest) generated 1 warning
+warning: crates/tapid-protocol/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-protocol` (manifest) generated 1 warning
+warning: crates/tapid-resolver/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-resolver` (manifest) generated 1 warning
+warning: crates/tapid-archive/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-archive` (manifest) generated 1 warning
+warning: crates/tapid-test-support/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-test-support` (manifest) generated 1 warning
+warning: crates/tapid-manifest/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-manifest` (manifest) generated 1 warning
+warning: crates/tapid-lockfile/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-lockfile` (manifest) generated 1 warning
+warning: crates/tapid-policy/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-policy` (manifest) generated 1 warning
+warning: crates/tapid-core/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-core` (manifest) generated 1 warning
+warning: crates/tapid-signatures/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-signatures` (manifest) generated 1 warning
+warning: crates/tapid-linker/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-linker` (manifest) generated 1 warning
+warning: crates/tapid-publish/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-publish` (manifest) generated 1 warning
+warning: crates/tapid-transparency/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-transparency` (manifest) generated 1 warning
+    Checking cfg-if v1.0.4
+    Checking stable_deref_trait v1.2.1
+    Checking itoa v1.0.18
+    Checking subtle v2.6.1
+    Checking libc v0.2.189
+    Checking serde_core v1.0.229
+    Checking memchr v2.8.3
+   Compiling syn v3.0.5
+    Checking zerofrom v0.1.8
+    Checking litemap v0.8.3
+    Checking smallvec v1.16.0
+    Checking yoke v0.8.3
+    Checking writeable v0.6.4
+    Checking utf8_iter v1.0.4
+    Checking percent-encoding v2.3.2
+    Checking icu_properties_data v2.3.0
+    Checking icu_normalizer_data v2.3.0
+   Compiling serde_json v1.0.151
+    Checking zmij v1.0.23
+    Checking form_urlencoded v1.2.2
+    Checking typenum v1.20.1
+    Checking base64 v0.22.1
+    Checking semver v1.0.28
+    Checking cpufeatures v0.2.17
+    Checking zeroize v1.9.0
+    Checking bitflags v2.13.1
+    Checking bytes v1.12.1
+    Checking once_cell v1.21.4
+    Checking pin-project-lite v0.2.17
+   Compiling find-msvc-tools v0.1.12
+   Compiling shlex v2.0.1
+    Checking futures-core v0.3.34
+   Compiling rustix v1.1.4
+    Checking socket2 v0.6.5
+   Compiling cc v1.4.5
+    Checking mio v1.2.3
+    Checking errno v0.3.14
+    Checking futures-sink v0.3.34
+    Checking generic-array v0.14.7
+    Checking http v1.5.0
+   Compiling rustc_version v0.4.1
+    Checking tokio v1.53.3
+    Checking rustls-pki-types v1.15.1
+    Checking getrandom v0.2.17
+    Checking deranged v0.5.8
+    Checking crypto-common v0.1.7
+    Checking block-buffer v0.10.4
+    Checking http-body v1.1.0
+    Checking digest v0.10.7
+    Checking untrusted v0.9.0
+    Checking futures-io v0.3.34
+    Checking sha2 v0.10.9
+    Checking time-core v0.1.9
+   Compiling ring v0.17.14
+    Checking slab v0.4.12
+    Checking powerfmt v0.2.0
+   Compiling httparse v1.10.1
+    Checking num-conv v0.2.2
+    Checking futures-task v0.3.34
+    Checking futures-util v0.3.34
+   Compiling curve25519-dalek v4.1.3
+    Checking time v0.3.55
+   Compiling rustls v0.23.46
+    Checking tower-service v0.3.3
+    Checking try-lock v0.2.5
+    Checking want v0.3.1
+    Checking futures-channel v0.3.34
+    Checking tracing-core v0.1.36
+    Checking atomic-waker v1.1.2
+   Compiling getrandom v0.3.4
+    Checking signature v2.2.0
+    Checking ed25519 v2.2.3
+    Checking tracing v0.1.44
+    Checking sync_wrapper v1.0.2
+    Checking ipnet v2.12.2
+    Checking ryu-js v0.2.2
+    Checking tapid-test-support v0.0.3 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-test-support)
+    Checking tower-layer v0.3.3
+    Checking webpki-roots v1.0.10
+    Checking base64 v0.23.1
+    Checking ed25519-dalek v2.2.0
+    Checking winnow v1.0.4
+    Checking ryu v1.0.23
+    Checking serde_spanned v1.1.1
+    Checking toml_datetime v1.1.1+spec-1.1.0
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+    Checking toml_parser v1.1.3+spec-1.1.0
+    Checking hyper v1.11.1
+    Checking http-body-util v0.1.5
+    Checking toml_writer v1.1.2+spec-1.1.0
+   Compiling tapid-runner v0.0.7 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-runner)
+    Checking zerotrie v0.2.5
+    Checking log v0.4.34
+    Checking toml v1.1.5+spec-1.1.0
+   Compiling crc32fast v1.5.1
+   Compiling zerocopy v0.8.59
+    Checking httpdate v1.0.3
+    Checking tower v0.5.3
+    Checking zerovec v0.11.8
+    Checking hyper-util v0.1.20
+    Checking rand_core v0.9.5
+    Checking simd-adler32 v0.3.10
+   Compiling autocfg v1.5.1
+    Checking adler2 v2.0.1
+    Checking miniz_oxide v0.9.1
+    Checking xattr v1.6.1
+    Checking tinystr v0.8.4
+    Checking potential_utf v0.1.6
+   Compiling num-traits v0.2.19
+    Checking icu_collections v2.3.0
+    Checking icu_locale_core v2.3.0
+    Checking filetime v0.2.29
+    Checking fastrand v2.5.0
+    Checking tar v0.4.46
+    Checking flate2 v1.1.10
+    Checking tempfile v3.27.0
+    Checking rustls-webpki v0.103.16
+    Checking wait-timeout v0.2.1
+    Checking utf8parse v0.2.2
+    Checking quick-error v1.2.3
+    Checking bit-vec v0.8.0
+    Checking hex v0.4.3
+    Checking fnv v1.0.7
+    Checking anstyle-parse v1.0.0
+    Checking rusty-fork v0.3.1
+    Checking bit-set v0.8.0
+    Checking icu_provider v2.3.1
+    Checking rand_xorshift v0.4.0
+    Checking rand v0.9.5
+    Checking unarray v0.1.4
+    Checking colorchoice v1.0.5
+    Checking anstyle v1.0.14
+    Checking anstyle-query v1.1.5
+    Checking serde v1.0.229
+    Checking icu_properties v2.3.0
+    Checking icu_normalizer v2.3.0
+    Checking regex-syntax v0.8.11
+    Checking is_terminal_polyfill v1.70.2
+    Checking tapid-archive v0.0.6 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-archive)
+    Checking fs4 v1.1.0
+    Checking anstream v1.0.0
+    Checking hmac v0.12.1
+    Checking same-file v1.0.6
+    Checking strsim v0.11.1
+   Compiling heck v0.5.0
+    Checking serde_jcs v0.2.0
+    Checking serde_urlencoded v0.7.1
+    Checking tapid-policy v0.0.4 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-policy)
+    Checking tapid-signatures v0.0.4 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-signatures)
+    Checking clap_lex v1.1.0
+   Compiling clap_derive v4.6.4
+   Compiling tapid v0.0.13 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-cli)
+    Checking clap_builder v4.6.6
+    Checking tapid-release-client v0.0.5 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-release-client)
+    Checking tapid-transparency v0.0.4 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-transparency)
+    Checking idna_adapter v1.2.2
+    Checking idna v1.1.0
+    Checking url v2.5.8
+    Checking tapid-core v0.0.7 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-core)
+    Checking tower-http v0.6.11
+    Checking tapid-manifest v0.0.10 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-manifest)
+    Checking tapid-store v0.0.8 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-store)
+    Checking tapid-protocol v0.0.6 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-protocol)
+    Checking tapid-linker v0.0.8 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-linker)
+    Checking clap v4.6.6
+    Checking tokio-rustls v0.26.5
+    Checking tapid-publish v0.0.5 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-publish)
+    Checking tapid-attestations v0.0.5 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-attestations)
+    Checking ppv-lite86 v0.2.21
+    Checking hyper-rustls v0.27.9
+    Checking rand_chacha v0.9.0
+    Checking reqwest v0.12.28
+    Checking proptest v1.11.0
+    Checking tapid-registry-client v0.0.7 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-registry-client)
+    Checking tapid-resolver v0.0.8 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-resolver)
+    Checking tapid-lockfile v0.0.13 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-lockfile)
+    Finished `dev` profile [unoptimized] target(s) in 23.23s

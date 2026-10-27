@@ -90,6 +90,10 @@ A future `--no-sandbox` path requires separate tests. It must be explicit and pr
 
 ### macOS 26
 
+The disposable [native ManagedTree investigation](macos-managed-tree-feasibility.md)
+records research fixtures, development evidence and remaining gaps. It does not
+change this platform gate or establish native ManagedTree support.
+
 The Restricted backend is experimental Seatbelt installed by deprecated `sandbox-exec`, with path-based parameter grants and a current-executable private helper. Native syscall probes also use private Seatbelt APIs. Startup probes sample generated deny-default filesystem/network controls, descendant writes, explicit environment, descriptor hygiene, and exec replacement. Each negative syscall control requires permission denial and its own successful positive control. They require no Ruby, Python, compiler, or network service. These samples are support gates, not an exhaustive proof of Seatbelt behavior. Broader development tests may use system Ruby and must fail rather than skip when it is absent. Native acceptance must still be rerun at each exact commit being claimed.
 
 Native ManagedTree remains unsupported. Process groups are escapable with `setsid` and `setpgid`; Darwin has not supported recursive `EVFILT_PROC` tracking through `NOTE_TRACK`, `NOTE_TRACKERR`, or `NOTE_CHILD` since macOS 10.5; and `NOTE_FORK` plus process-table or `p_puniqueid` scans retains a rapid double-fork/intermediate-exit race. An optional strict Linux VM through Virtualization.framework is a separate future backend that changes platform, startup, filesystem-sharing, and network semantics; it must not be reported as native macOS ManagedTree.
