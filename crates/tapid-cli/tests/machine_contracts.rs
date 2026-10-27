@@ -137,7 +137,7 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
     let project = TempProject::new("schema-catalog").unwrap();
     let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
     let catalog = discovery["data"]["schema_catalog"].as_array().unwrap();
-    assert_eq!(catalog.len(), 9);
+    assert_eq!(catalog.len(), 10);
     let advertised = catalog
         .iter()
         .map(|entry| entry["id"].as_str().unwrap())
@@ -171,6 +171,9 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
         assert!(output.stdout.len() < 64 * 1024);
         assert!(wrapper_validator.is_valid(&exported["data"]), "{exported}");
         let source: Value = serde_json::from_str(match id {
+            "tapid.dependency-preview.v1" => {
+                include_str!("../schemas/cli/dependency-preview.v1.schema.json")
+            }
             "tapid.manifest-validation.v1" => {
                 include_str!("../schemas/cli/manifest-validation.v1.schema.json")
             }
@@ -623,7 +626,7 @@ fn package_manifest_input_schema_checks_structure_without_claiming_semantics() {
 fn discovery_distinguishes_dependency_preview_effects_from_mutation() {
     let project = TempProject::new("preview-discovery").unwrap();
     let (_, report) = invoke(&project, &["--json", "capabilities"]);
-    for path in ["add", "remove", "update"] {
+    for path in ["install", "add", "remove", "update"] {
         let command = report["data"]["commands"]
             .as_array()
             .unwrap()
@@ -647,13 +650,90 @@ fn discovery_distinguishes_dependency_preview_effects_from_mutation() {
             assert_eq!(preview["effects"][effect], false, "{path}: {effect}");
         }
         assert_eq!(preview["effects"]["network_possible"], true);
-        assert_eq!(preview["schema_coverage"], "envelope_only");
+        assert_eq!(preview["schema_coverage"], "payload");
+        assert_eq!(preview["schema"], "tapid.dependency-preview.v1");
         // The real command rejects missing packages without project writes;
         // discovery describes a possible effect, not a claim it occurred.
-        if path != "update" {
+        if matches!(path, "add" | "remove") {
             let (output, failure) = invoke(&project, &["--json", path, "--dry-run"]);
             assert!(!output.status.success());
             assert_eq!(failure["changes"]["state"], "unchanged");
         }
     }
+}
+
+#[test]
+fn dependency_preview_schema_covers_read_only_resolution() {
+    let project = TempProject::new("preview-contract").unwrap();
+    project
+        .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+        .unwrap();
+    let fixture = json!({"packages": [{
+        "registry": "https://registry.npmjs.org", "name": "parent",
+        "version": "1.0.0", "artifact": "never-download",
+        "integrity": "sha512-AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=="
+    }]});
+    project
+        .write("registry.json", &serde_json::to_vec(&fixture).unwrap())
+        .unwrap();
+    let (output, exported) = invoke(
+        &project,
+        &[
+            "--json",
+            "capabilities",
+            "--schema",
+            "tapid.dependency-preview.v1",
+        ],
+    );
+    assert!(output.status.success(), "{exported}");
+    let validator = jsonschema::validator_for(&exported["data"]["schema"]).unwrap();
+    let example: Value = serde_json::from_str(include_str!(
+        "../schemas/cli/examples/dependency-preview.v1.json"
+    ))
+    .unwrap();
+    assert!(validator.is_valid(&example));
+    let (output, preview) = invoke(
+        &project,
+        &[
+            "--json",
+            "add",
+            "parent@1.0.0",
+            "--dry-run",
+            "--registry-fixture",
+            "registry.json",
+        ],
+    );
+    assert!(output.status.success(), "{preview}");
+    assert!(validator.is_valid(&preview["data"]), "{preview}");
+    for (pointer, invalid) in [
+        ("/effects/project_writes", json!(true)),
+        ("/effects/artifact_requests", json!(1)),
+        ("/artifacts_prepared", json!(true)),
+        ("/packages", json!([{}])),
+        ("/packages/0/after/dependencies", json!([])),
+        ("/packages/0/reasons/0/graph", json!("launch")),
+    ] {
+        let mut broken = preview["data"].clone();
+        *broken.pointer_mut(pointer).unwrap() = invalid;
+        assert!(!validator.is_valid(&broken), "{pointer}");
+    }
+    let mut additive = preview["data"].clone();
+    additive["future"] = json!(true);
+    assert!(validator.is_valid(&additive));
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"parent":"1.0.0"}}"#,
+        )
+        .unwrap();
+    for args in [vec!["install"], vec!["remove", "parent"], vec!["update"]] {
+        let mut arguments = vec!["--json"];
+        arguments.extend(args);
+        arguments.extend(["--dry-run", "--registry-fixture", "registry.json"]);
+        let (output, result) = invoke(&project, &arguments);
+        assert!(output.status.success(), "{result}");
+        assert!(validator.is_valid(&result["data"]), "{result}");
+    }
+    assert!(!project.path().join("tapid.lock").exists());
+    assert!(!project.path().join("node_modules").exists());
 }

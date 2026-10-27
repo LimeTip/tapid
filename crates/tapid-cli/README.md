@@ -526,3 +526,8 @@ the common envelope; successful parsing does not establish project compatibility
 `package.json` input schema. Discovery advertises it separately in `input_schemas`
 for `manifest validate`. Passing it does not establish semantic validity or
 project compatibility: use the maintained manifest parser and status checks.
+
+`capabilities --schema tapid.dependency-preview.v1` exports the successful
+dependency-preview payload schema. Discovery references it for `install`, `add`,
+`remove` and `update` dry runs. Metadata observations do not establish artifact
+availability or successful installation; failure data uses the common envelope.

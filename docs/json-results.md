@@ -580,8 +580,12 @@ preserved without validation by this structural schema; discovery, resolution,
 routing and launch checks remain separate. The identifier selects v1 independently
 of the Tapid version and permits additive unknown fields.
 
-Discovery separates `add`, `remove` and `update` into ordinary mutation and
+Discovery separates `install`, `add`, `remove` and `update` into ordinary mutation and
 `dry_run` modes. Preview modes may fetch registry metadata but declare no project,
-store or other writes, child execution or hook execution. Their result coverage
-remains `envelope_only`; this metadata does not claim a payload schema or an
-executable installation plan.
+store or other writes, child execution or hook execution. Their successful `data` payload is covered by the offline-exportable
+`tapid.dependency-preview.v1` schema. It describes declaration, root and package
+changes, before/after graph reasons, and metadata effects. Failure data remains
+null under the common envelope. Neither schema validation nor a successful
+preview establishes artifact availability, runtime compatibility or an executable
+installation plan. The identifier selects v1 independently of the Tapid version;
+consumers must allow additive fields.

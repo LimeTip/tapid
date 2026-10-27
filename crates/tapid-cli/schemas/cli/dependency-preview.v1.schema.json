@@ -1,0 +1,300 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tapid:dependency-preview:v1",
+  "title": "Tapid dependency preview payload v1",
+  "description": "Metadata-only observation of current inputs; does not establish artifact availability, installation success or runtime compatibility. Failure data may be null in the common envelope.",
+  "type": "object",
+  "required": [
+    "preview_kind",
+    "artifacts_prepared",
+    "target",
+    "declarations",
+    "packages",
+    "root_changes",
+    "effects",
+    "limitations"
+  ],
+  "properties": {
+    "preview_kind": {
+      "const": "resolved_graph"
+    },
+    "artifacts_prepared": {
+      "const": false
+    },
+    "target": {
+      "type": "string"
+    },
+    "declarations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "section",
+          "name",
+          "before",
+          "after"
+        ],
+        "properties": {
+          "section": {
+            "enum": [
+              "dependencies",
+              "devDependencies",
+              "optionalDependencies",
+              "peerDependencies"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "before": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "packages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "source",
+          "name",
+          "version",
+          "integrity",
+          "dependencies",
+          "change",
+          "before",
+          "after",
+          "reasons"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "integrity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dependencies": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "change": {
+            "enum": [
+              "added",
+              "removed",
+              "changed",
+              "unchanged"
+            ]
+          },
+          "before": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/package"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "after": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/package"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "graph",
+                "relation",
+                "parent",
+                "dependency",
+                "requirement"
+              ],
+              "properties": {
+                "graph": {
+                  "enum": [
+                    "before",
+                    "after"
+                  ]
+                },
+                "relation": {
+                  "enum": [
+                    "direct",
+                    "dependency"
+                  ]
+                },
+                "parent": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "dependency": {
+                  "type": "string"
+                },
+                "requirement": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "root_changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "before",
+          "after"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "before": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "effects": {
+      "type": "object",
+      "required": [
+        "network_allowed",
+        "metadata_source",
+        "metadata_lookups",
+        "artifact_requests",
+        "cache_reads",
+        "cache_writes",
+        "project_writes",
+        "recovery",
+        "scripts"
+      ],
+      "properties": {
+        "network_allowed": {
+          "type": "boolean"
+        },
+        "metadata_source": {
+          "enum": [
+            "lockfile",
+            "fixture",
+            "registry"
+          ]
+        },
+        "metadata_lookups": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "artifact_requests": {
+          "const": 0
+        },
+        "cache_reads": {
+          "const": false
+        },
+        "cache_writes": {
+          "const": false
+        },
+        "project_writes": {
+          "const": false
+        },
+        "recovery": {
+          "const": false
+        },
+        "scripts": {
+          "const": false
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "package": {
+      "type": "object",
+      "required": [
+        "key",
+        "source",
+        "name",
+        "version",
+        "integrity",
+        "dependencies"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "integrity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

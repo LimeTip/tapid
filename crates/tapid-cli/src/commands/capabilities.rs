@@ -13,6 +13,10 @@ pub(crate) struct Args {
 
 const SCHEMAS: &[(&str, &str)] = &[
     (
+        "tapid.dependency-preview.v1",
+        include_str!("../../schemas/cli/dependency-preview.v1.schema.json"),
+    ),
+    (
         "tapid.package-manifest.v1",
         include_str!("../../schemas/cli/package-manifest.v1.schema.json"),
     ),
@@ -208,10 +212,12 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         Some((_, family, channel)) => mode("default", family, channel),
         None => json!({"id": "default", "json": "unknown", "coverage": "unclassified"}),
     }];
-    if matches!(path, "add" | "remove" | "update") {
+    if matches!(path, "install" | "add" | "remove" | "update") {
         modes[0]["when"] = json!({"dry_run": false});
         let mut preview = mode("dry_run", "dependency_preview", "stdout_envelope");
         preview["when"] = json!({"dry_run": true});
+        preview["schema_coverage"] = json!("payload");
+        preview["schema"] = json!("tapid.dependency-preview.v1");
         modes.push(preview);
     }
     if path == "manifest validate" {
@@ -319,6 +325,7 @@ fn discover() -> Value {
         "schema_catalog": SCHEMAS.iter().map(|(id, source)| {
             let schema: Value = serde_json::from_str(source).expect("embedded schema is valid JSON");
             let contract = match *id {
+                "tapid.dependency-preview.v1" => json!("tapid.dependency-preview"),
                 "tapid.package-manifest.v1" => json!("tapid.package-manifest"),
                 "tapid.envelope.v1" => json!("tapid.envelope"),
                 "tapid.manifest-validation.v1" => json!("tapid.manifest-validation"),
