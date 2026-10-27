@@ -363,6 +363,56 @@ Tool commands use operation `tool`. Their `changes.files` and `changes.paths` re
 
 Mutations report committed state only after the global command decision. Retained in-use environments or cleanup failures produce `committed_cleanup_pending`; inconsistent pending publication produces recovery failure instead of overwriting unknown files. Listing may settle a previous transaction or clean inactive owned environments. Installed package scripts are never run by these operations. Execution of an installed command is a normal user process and has no sandbox receipt.
 
+## Historical candidate exclusions
+
+Successful dependency operations that resolve registry metadata, including resolved
+dry runs, include nonempty `data.candidate_exclusions`. Ordinary human success
+output stays quiet. Replay and lock-only previews have no newly observed exclusions
+and omit this field. Terminal missing-candidate, conflicting-requirement, and
+all-excluded metadata errors include `errors[].context.candidate_exclusions` for
+only the affected exact registry origin and package. Human errors summarize the
+same evidence. Excluded versions remain absent from `context.available`.
+
+The summary contains `total_packages`, `total_candidates`, `omitted_packages`,
+`omitted_candidates`, `truncated`, and `packages`. Each package group contains
+`source`, `name`, `total_candidates`, `omitted_candidates`, `truncated`,
+`truncated_fields`, and `candidates`. Each candidate contains `version`,
+`reason_code`, `truncated_fields`, and, when applicable, `dependency_category`.
+The category is `dependency`, `peer_dependency`, `optional_dependency`, or
+`optional_peer`. Stable reason codes are:
+
+- `unsupported_dependency_name`
+- `empty_dependency_requirement`
+- `unsupported_dependency_requirement`
+- `platform_mismatch`
+- `undeclared_optional_peer`
+- `unsupported_jsr_alias`
+
+One primary reason follows normalization's first failure: platform compatibility,
+required dependencies, peers, optional peer markers, optional dependencies, then
+JSR alias restrictions. Dependency maps use canonical name order. Parsing and
+candidate filtering remain fail closed. Rejected names, requirements, parser
+explanations, and metadata URLs are never included in exclusion evidence.
+
+Counts describe distinct observed rejected registry/package/version identities,
+not all registry history or versions that would otherwise satisfy the graph.
+Summary omissions include candidates in omitted groups; group omissions count
+only unsampled candidates within that group. Repeated records do not inflate
+counts. A truncated sample is not exhaustive history.
+
+Collection retains at most 16 package groups, eight candidates per group, and
+100 candidates overall. Terminal evidence independently retains up to eight
+candidates for the affected package, even if global sampling would omit it.
+Selection and ordering use full canonical source/name/version strings before
+sanitizing or shortening display fields; version ordering here is lexical, not
+SemVer precedence. Display fields are limited to 256 UTF-8 bytes. Local
+`truncated_fields` lists identify shortened identity fields; the envelope also
+records their full JSON pointers. `truncated` covers omissions and shortened
+fields. Human exclusion summaries use at most 2,048 UTF-8 bytes and report how
+many candidates were omitted from that rendering, which may exceed the structured
+sample's omissions. Collection scans the normalization cache at return points;
+these bounds do not limit the existing metadata cache itself.
+
 ## Dependency lifecycle observations
 
 Schema version 1 adds envelope fields on success and failure:
