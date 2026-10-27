@@ -517,3 +517,7 @@ or turn a completed nonzero child exit into success.
 `envelope_schema` on stdout-envelope modes. `envelope_only` coverage leaves
 command payloads and detailed diagnostic/lifecycle evidence unchecked; use the
 separate advertised payload schema where available. Export remains offline.
+
+`capabilities --schema tapid.manifest-validation.v1` exports the successful
+`manifest validate` payload schema offline. Failure data remains null and uses
+the common envelope; successful parsing does not establish project compatibility.

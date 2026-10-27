@@ -137,7 +137,7 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
     let project = TempProject::new("schema-catalog").unwrap();
     let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
     let catalog = discovery["data"]["schema_catalog"].as_array().unwrap();
-    assert_eq!(catalog.len(), 7);
+    assert_eq!(catalog.len(), 8);
     let advertised = catalog
         .iter()
         .map(|entry| entry["id"].as_str().unwrap())
@@ -164,6 +164,9 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
         assert!(output.stdout.len() < 64 * 1024);
         assert!(wrapper_validator.is_valid(&exported["data"]), "{exported}");
         let source: Value = serde_json::from_str(match id {
+            "tapid.manifest-validation.v1" => {
+                include_str!("../schemas/cli/manifest-validation.v1.schema.json")
+            }
             "tapid.envelope.v1" => include_str!("../schemas/cli/envelope.v1.schema.json"),
             "tapid.schema-export.v1" => include_str!("../schemas/cli/schema-export.v1.schema.json"),
             "tapid.run-receipt.v1" => include_str!("../schemas/cli/run-receipt.v1.schema.json"),
@@ -508,4 +511,48 @@ fn envelope_schema_covers_protocol_results_without_claiming_payload_coverage() {
     assert_eq!(install["modes"][0]["schema_coverage"], "envelope_only");
     assert_eq!(install["modes"][0]["envelope_schema"], "tapid.envelope.v1");
     assert!(install["modes"][0].get("schema").is_none());
+}
+
+#[test]
+fn manifest_validation_schema_covers_success_without_claiming_failure_payloads() {
+    let project = TempProject::new("manifest-contract").unwrap();
+    let (output, exported) = invoke(
+        &project,
+        &[
+            "--json",
+            "capabilities",
+            "--schema",
+            "tapid.manifest-validation.v1",
+        ],
+    );
+    assert!(output.status.success(), "{exported}");
+    let validator = jsonschema::validator_for(&exported["data"]["schema"]).unwrap();
+    project
+        .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+        .unwrap();
+    let (output, success) = invoke(&project, &["--json", "manifest", "validate"]);
+    assert!(output.status.success());
+    assert!(validator.is_valid(&success["data"]));
+    for invalid in [
+        json!({"action":"validate","valid":false}),
+        json!({"valid":true}),
+        json!({"action":"install","valid":true}),
+    ] {
+        assert!(!validator.is_valid(&invalid));
+    }
+    let mut additive = success["data"].clone();
+    additive["future"] = json!(true);
+    assert!(validator.is_valid(&additive));
+    project.write("package.json", br#"{"name":false}"#).unwrap();
+    let (output, failure) = invoke(&project, &["--json", "manifest", "validate"]);
+    assert!(!output.status.success());
+    assert!(failure["data"].is_null());
+    let envelope: Value =
+        serde_json::from_str(include_str!("../schemas/cli/envelope.v1.schema.json")).unwrap();
+    assert!(
+        jsonschema::validator_for(&envelope)
+            .unwrap()
+            .is_valid(&failure)
+    );
+    assert!(!validator.is_valid(&failure["data"]));
 }

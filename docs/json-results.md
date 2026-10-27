@@ -562,3 +562,9 @@ Preflight blocker locations also include `selected_manifest` when shared script
 selection identified it; otherwise this value is null. A missing script identifies
 `field: "scripts"` and the requested `key`, including for selected workspace members.
 These are local selection facts, not proof that runtime launch checks passed.
+
+`tapid.manifest-validation.v1` describes successful `manifest validate` data:
+`action: "validate"` and `valid: true`. Validation failures carry null data and
+use the common failure envelope instead. This contract describes manifest parsing,
+not dependency resolution, workspace discovery, launch assurance, or complete
+project compatibility. Structured package.json inputs remain unpublished.

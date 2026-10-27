@@ -13,6 +13,10 @@ pub(crate) struct Args {
 
 const SCHEMAS: &[(&str, &str)] = &[
     (
+        "tapid.manifest-validation.v1",
+        include_str!("../../schemas/cli/manifest-validation.v1.schema.json"),
+    ),
+    (
         "tapid.envelope.v1",
         include_str!("../../schemas/cli/envelope.v1.schema.json"),
     ),
@@ -133,7 +137,7 @@ pub(crate) fn run(args: Args, machine: bool) -> ExitCode {
         "Help/version support JSON envelopes. Ordinary run has separate result-file/receipt channels."
     );
     println!(
-        "JSON Schema coverage: partial; common envelope, status, discovery, schema export, run-preflight and run result/receipt v1 are embedded."
+        "JSON Schema coverage: partial; common envelope, manifest validation, status, discovery, schema export, run-preflight and run result/receipt v1 are embedded."
     );
     println!(
         "Static declarations only; project compatibility and process enforcement are unchecked."
@@ -193,6 +197,10 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         Some((_, family, channel)) => mode("default", family, channel),
         None => json!({"id": "default", "json": "unknown", "coverage": "unclassified"}),
     }];
+    if path == "manifest validate" {
+        modes[0]["schema_coverage"] = json!("payload");
+        modes[0]["schema"] = json!("tapid.manifest-validation.v1");
+    }
     if path == "status" {
         modes[0]["schema_coverage"] = json!("payload");
         modes[0]["schema"] = json!("tapid.status.v1");
@@ -294,6 +302,7 @@ fn discover() -> Value {
             let schema: Value = serde_json::from_str(source).expect("embedded schema is valid JSON");
             let contract = match *id {
                 "tapid.envelope.v1" => json!("tapid.envelope"),
+                "tapid.manifest-validation.v1" => json!("tapid.manifest-validation"),
                 "tapid.status.v1" => json!("tapid.status"),
                 "tapid.run-result.v1" => json!("tapid.run-result"),
                 "tapid.run-receipt.v1" => json!("tapid.run-receipt"),
