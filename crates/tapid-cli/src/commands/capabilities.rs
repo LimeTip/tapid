@@ -220,6 +220,13 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         preview["schema"] = json!("tapid.dependency-preview.v1");
         modes.push(preview);
     }
+    if matches!(path, "cache clean" | "clean") {
+        modes[0]["when"] = json!({"yes": false});
+        modes[0]["effects"]["store_writes_possible"] = json!(false);
+        let mut removal = mode("remove", "cache_clean", "stdout_envelope");
+        removal["when"] = json!({"yes": true});
+        modes.push(removal);
+    }
     if path == "manifest validate" {
         modes[0]["schema_coverage"] = json!("payload");
         modes[0]["schema"] = json!("tapid.manifest-validation.v1");

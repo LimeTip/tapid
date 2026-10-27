@@ -58,6 +58,11 @@ tapid run <SCRIPT> --preflight [--json] [PERMISSION FLAGS] [--workspace <NAME>] 
 tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json | --result-file <PATH>] [-- <ARGS>...]
 ```
 
+Capabilities distinguish read-only cache-clean previews from `--yes` removal,
+and advertise schema coverage per mode. See the [machine contract acceptance
+boundaries](../../docs/json-results.md) for maintained inspection fixtures and
+checks deferred until launch or external evaluation.
+
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
 
 `tapid manifest validate` rejects symlinks and other non-regular files before

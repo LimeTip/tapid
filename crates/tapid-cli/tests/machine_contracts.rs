@@ -13,6 +13,7 @@ fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, Value)
         .env("USERPROFILE", home.path())
         .env("XDG_CACHE_HOME", home.path())
         .env("LOCALAPPDATA", home.path())
+        .env("TAPID_DISCOVERY_TOKEN", "credential-value-canary")
         .current_dir(project.path())
         .args(args);
     #[cfg(windows)]
@@ -225,6 +226,28 @@ fn discovery_schema_validates_all_public_modes() {
     let validator = jsonschema::validator_for(&exported["data"]["schema"]).unwrap();
     let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
     assert!(validator.is_valid(&discovery["data"]), "{discovery}");
+    for command in discovery["data"]["commands"].as_array().unwrap() {
+        let arguments = command["arguments"].as_array().unwrap();
+        for mode in command["modes"].as_array().unwrap() {
+            for predicate in mode.get("when").into_iter().chain(
+                mode["conditional_effects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|rule| &rule["when"]),
+            ) {
+                for id in predicate.as_object().unwrap().keys() {
+                    assert!(
+                        arguments
+                            .iter()
+                            .any(|argument| argument["id"] == id.as_str()),
+                        "{}: {id}",
+                        command["path"]
+                    );
+                }
+            }
+        }
+    }
     for (pointer, invalid) in [
         ("/schema_version", json!(2)),
         ("/assurance/process_enforcement", json!("established")),
@@ -901,4 +924,278 @@ fn discovery_guides_read_only_project_and_script_inspection() {
         manifest
     );
     assert_eq!(fs::read_dir(project.path()).unwrap().count(), 1);
+
+    // Use the same member/peer declarations as the focused status fixtures,
+    // but select contracts through discovery as an automation client would.
+    let root = br#"{"name":"root","version":"1.0.0","workspaces":["member","provider"]}"#;
+    let member = br#"{"name":"member","version":"1.0.0","dependencies":{"provider":"workspace:^2"},"peerDependencies":{"react":"workspace:*"},"scripts":{"postinstall":"HOOK_BODY_CANARY"}}"#;
+    let config = b"[registries.default]\nurl = \"https://registry.example\"\ntoken-env = \"TAPID_DISCOVERY_TOKEN\"\n";
+    project.write("package.json", root).unwrap();
+    project.write("member/package.json", member).unwrap();
+    project
+        .write(
+            "provider/package.json",
+            br#"{"name":"provider","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    project.write("tapid.toml", config).unwrap();
+    project
+        .write(".tapid-lifecycle-journal.json", b"interrupted")
+        .unwrap();
+    for (path, mode_id, args) in [
+        (
+            "status",
+            "default",
+            vec!["--json", "status", "--workspace", "member"],
+        ),
+        (
+            "run",
+            "preflight",
+            vec![
+                "--json",
+                "run",
+                "missing",
+                "--preflight",
+                "--workspace",
+                "member",
+            ],
+        ),
+    ] {
+        let command = discovery["data"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["path"] == path)
+            .unwrap();
+        let mode = command["modes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mode| mode["id"] == mode_id)
+            .unwrap();
+        let (_, schema) = invoke(
+            &project,
+            &[
+                "--json",
+                "capabilities",
+                "--schema",
+                mode["schema"].as_str().unwrap(),
+            ],
+        );
+        let (output, report) = invoke(&project, &args);
+        assert!(!output.status.success(), "{report}");
+        assert!(
+            jsonschema::validator_for(&schema["data"]["schema"])
+                .unwrap()
+                .is_valid(&report["data"]),
+            "{report}"
+        );
+        assert!(!report.to_string().contains("credential-value-canary"));
+        assert!(!report.to_string().contains("HOOK_BODY_CANARY"));
+        let data = &report["data"];
+        if path == "status" {
+            assert_eq!(data["workspace"]["selected"], "member");
+            assert_eq!(data["workspace"]["linking"], "not_verified");
+            assert_eq!(data["capabilities"]["runner"], "not_assessed");
+            assert_eq!(
+                data["registries"]["default_origin"],
+                "https://registry.example"
+            );
+            assert_eq!(
+                data["registries"]["credential_environment_names"],
+                json!(["TAPID_DISCOVERY_TOKEN"])
+            );
+            assert_eq!(
+                data["lifecycle"]["backend_and_toolchain_prerequisites"],
+                "unchecked"
+            );
+            assert_eq!(
+                data["lifecycle"]["manifest_declarations"][1]["hooks"],
+                json!(["postinstall"])
+            );
+            for field in ["/dependencies/provider", "/peerDependencies/react"] {
+                let blocker = data["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|b| {
+                        b["code"] == "UNSUPPORTED_SPEC"
+                            && b["action"]["parameters"]["field"] == field
+                    })
+                    .unwrap();
+                assert_eq!(
+                    blocker["operations"],
+                    json!(["native_resolution", "dependency_mutation"])
+                );
+                assert_eq!(blocker["action"]["id"], "review_manifest_requirement");
+                assert!(blocker["location"].as_str().unwrap().contains("member"));
+            }
+        } else {
+            assert_eq!(data["enforcement_established"], false);
+            assert_eq!(data["blockers"][0]["code"], "SCRIPT_MISSING");
+            assert!(
+                data["blockers"][0]["location"]["selected_manifest"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(
+                        &std::path::Path::new("member")
+                            .join("package.json")
+                            .display()
+                            .to_string()
+                    )
+            );
+        }
+    }
+    let home = TempHome::new("discovery-human").unwrap();
+    let human = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .env_clear()
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("TAPID_DISCOVERY_TOKEN", "credential-value-canary")
+        .current_dir(project.path())
+        .args(["status", "--workspace", "member"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(human.stdout).unwrap();
+    for expected in [
+        "UNSUPPORTED_SPEC",
+        "review_manifest_requirement",
+        "Workspace selection: member",
+        "Workspace linking: not verified",
+        "Migration guide:",
+        "unchecked",
+    ] {
+        assert!(text.contains(expected), "{text}");
+    }
+    assert!(!text.contains("credential-value-canary"));
+    assert!(!text.contains("HOOK_BODY_CANARY"));
+    for (path, bytes) in [
+        ("package.json", root.as_slice()),
+        ("member/package.json", member.as_slice()),
+        ("tapid.toml", config.as_slice()),
+        (".tapid-lifecycle-journal.json", b"interrupted".as_slice()),
+    ] {
+        assert_eq!(fs::read(project.path().join(path)).unwrap(), bytes);
+    }
+    assert!(!project.path().join("node_modules").exists());
+    assert!(!project.path().join("tapid.lock").exists());
+}
+
+#[test]
+fn discovery_distinguishes_cache_preview_from_authorized_removal() {
+    let project = TempProject::new("discovery-cache-modes").unwrap();
+    let (_, report) = invoke(&project, &["--json", "capabilities"]);
+    for path in ["cache clean", "clean"] {
+        let command = report["data"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["path"] == path)
+            .unwrap();
+        let modes = command["modes"].as_array().unwrap();
+        let preview = modes.iter().find(|mode| mode["id"] == "default").unwrap();
+        assert_eq!(preview["when"], json!({"yes": false}));
+        assert_eq!(preview["effects"]["store_writes_possible"], false);
+        let removal = modes.iter().find(|mode| mode["id"] == "remove").unwrap();
+        assert_eq!(removal["when"], json!({"yes": true}));
+        assert_eq!(removal["effects"]["store_writes_possible"], true);
+        let yes = command["arguments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|argument| argument["id"] == "yes")
+            .unwrap();
+        assert!(
+            yes["conflicts"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("dry_run"))
+        );
+        for mode in modes {
+            assert_eq!(mode["schema_coverage"], "envelope_only");
+            assert_eq!(mode["effects"]["network_possible"], false);
+            assert_eq!(mode["effects"]["child_execution_possible"], false);
+        }
+        let mut args = vec!["--json"];
+        args.extend(path.split(' '));
+        args.extend(["--store-dir", "cache", "--dry-run"]);
+        let (output, _) = invoke(&project, &args);
+        assert!(output.status.success());
+        assert!(!project.path().join("cache").exists());
+        args.pop();
+        args.push("--yes");
+        let (output, result) = invoke(&project, &args);
+        assert!(output.status.success(), "{result}");
+    }
+}
+
+#[test]
+fn discovery_guides_imported_replay_without_promising_native_mutation() {
+    use sha2::{Digest, Sha256};
+    let project = TempProject::new("discovery-imported-operations").unwrap();
+    // Reuse the focused status fixture's imported graph with a native-only
+    // override exclusion. Import acceptance must not bless later mutations.
+    let root = r#"{"name":"root","version":"1.0.0","overrides":{"jsr:@std/path":"1"}}"#;
+    let npm =
+        json!({"lockfileVersion":3,"packages":{"":{"name":"root","version":"1.0.0"}}}).to_string();
+    let lock = tapid_lockfile::ImportedNpmLockfile::import(
+        &npm,
+        root,
+        &format!("sha256-{:x}", Sha256::digest(root.as_bytes())),
+    )
+    .unwrap()
+    .to_json()
+    .unwrap();
+    project.write("package.json", root.as_bytes()).unwrap();
+    project.write("package-lock.json", npm.as_bytes()).unwrap();
+    project.write("tapid.lock", lock.as_bytes()).unwrap();
+    let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
+    let status = discovery["data"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["path"] == "status")
+        .unwrap();
+    let id = status["modes"][0]["schema"].as_str().unwrap();
+    let (_, schema) = invoke(&project, &["--json", "capabilities", "--schema", id]);
+    let (output, report) = invoke(&project, &["--json", "status"]);
+    assert!(!output.status.success());
+    assert!(
+        jsonschema::validator_for(&schema["data"]["schema"])
+            .unwrap()
+            .is_valid(&report["data"])
+    );
+    let data = &report["data"];
+    assert_eq!(data["manifest_lock_agreement"], "match");
+    assert_eq!(
+        data["operations"]["imported_replay"]["support"],
+        "supported"
+    );
+    assert_eq!(
+        data["operations"]["imported_replay"]["scope"],
+        "manifest_receipts_only"
+    );
+    for operation in ["native_resolution", "dependency_mutation"] {
+        assert_eq!(data["operations"][operation]["support"], "unsupported");
+    }
+    let blocker = data["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["code"] == "UNSUPPORTED_OVERRIDE")
+        .unwrap();
+    assert_eq!(blocker["action"]["parameters"]["field"], "/overrides");
+    assert_eq!(blocker["action"]["id"], "review_manifest_requirement");
+    assert_eq!(
+        blocker["operations"],
+        json!(["native_resolution", "dependency_mutation"])
+    );
+    for (path, bytes) in [
+        ("package.json", root.as_bytes()),
+        ("package-lock.json", npm.as_bytes()),
+        ("tapid.lock", lock.as_bytes()),
+    ] {
+        assert_eq!(fs::read(project.path().join(path)).unwrap(), bytes);
+    }
+    assert!(!project.path().join("node_modules").exists());
 }

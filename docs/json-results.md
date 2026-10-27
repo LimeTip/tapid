@@ -551,12 +551,35 @@ means the command payload has no published schema. The envelope checks framing,
 change states, native path encodings, warning/error code presence and retry values.
 It deliberately leaves `data`, diagnostic contexts, lifecycle records and
 warning-specific details opaque. Validate a published payload schema separately.
-Other payload families and structured inputs still require schemas to finish issue #195. Consumers must treat
+The first discovery slice intentionally leaves other payload families and structured inputs without published schemas. Consumers must treat
 missing schema coverage, unknown reason/command identifiers and unavailable
 observations as unchecked. Unknown contract versions are unsupported; unknown
 additive fields may be ignored. Contract versions are independent of Tapid release
 versions. These declarations neither prove project compatibility nor establish
 runner assurance.
+
+Cache cleaning has separate `default` (`yes: false`, including `--dry-run`)
+and `remove` (`yes: true`) modes. Only removal declares possible store writes;
+both remain offline with envelope-only schema coverage. Clap advertises the
+`--yes`/`--dry-run` conflict. Installation declarations remain conservative:
+possible hook execution requires the existing lifecycle authorization policy;
+a static declaration does not grant that authorization.
+
+The public contract fixtures maintain the following acceptance boundaries:
+
+| Requirement | Maintained evidence | Limit |
+| --- | --- | --- |
+| Selected member, conflicting workspace ranges and peer exclusions | `machine_contracts::discovery_guides_read_only_project_and_script_inspection`, focused `cli` status fixtures | Selection does not verify workspace linking or transitive resolution. |
+| Imported replay versus native resolution and mutation | `machine_contracts::discovery_guides_imported_replay_without_promising_native_mutation` | Matching receipts do not verify installed bytes or future mutations. |
+| Registry origins, credential names, hooks and recovery files | Discovery-guided inspection plus focused status fixtures | Values and hook bodies are withheld; dependency source discovery and backend/toolchain prerequisites remain unchecked. |
+| Script permissions and request-specific platform exclusions | Focused `run_preflight_` fixtures and preflight schema negative tests | No code runs; enforcement and cleanup require launch evidence. |
+| Mode effects, conflicts and schema coverage | Discovery mode, replay, cache and catalog fixtures | Unknown identifiers and uncovered payloads require conservative handling. |
+
+Reports link to the maintained [npm migration guide](npm-lockfile-import.md).
+Source-verified dependency hook discovery remains follow-up work in
+[#310](https://github.com/LimeTip/tapid/issues/310); external corpus comparison
+requires pinned pilot inputs from [#307](https://github.com/LimeTip/tapid/issues/307).
+Neither missing evidence is replaced with a compatibility claim.
 
 `tapid.schema-export.v1` describes the `data` wrapper returned by
 `tapid --json capabilities --schema <ID>`: `id` names the selected contract and
