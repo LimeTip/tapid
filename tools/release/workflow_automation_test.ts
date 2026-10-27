@@ -660,16 +660,18 @@ const assertManagedDelegation = (ci: string) => {
     '--property=KillMode=control-group', '--property=RuntimeMaxSec=25min',
     '--setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1', '--setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1',
     'systemd_version >= 254', 'systemd --version',
-    'driver=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)',
-    'test "${driver##*/}" = driver', 'group=${driver%/driver}',
-    'test "$group" != /sys/fs/cgroup', 'test -z "$(cat "$group/cgroup.procs")"',
+    '--setenv="TAPID_MANAGED_UNIT=tapid-managed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.service"',
+    'systemctl show --property=ControlGroup --value "$TAPID_MANAGED_UNIT"',
+    'driver=/sys/fs/cgroup$member_path',
+    'test "$member_path" = "$unit_path/driver"', 'group=/sys/fs/cgroup$unit_path',
+    'test -z "$(cat "$group/cgroup.procs")"',
     'grep -Fx "$$" "$driver/cgroup.procs"',
     'cat "$group/cgroup.type" "$driver/cgroup.type"',
     'echo "+memory +pids" > "$group/cgroup.subtree_control"',
     'unshare --mount --pid --fork --mount-proc /bin/true',
   ]) assert(setup.includes(required), `missing ManagedTree setup: ${required}`);
   assert.doesNotMatch(setup, /mkdir "\$group\/driver"|echo \$\$ > /);
-  assert(setup.indexOf('group=${driver%/driver}') < setup.indexOf('echo "+memory +pids"'));
+  assert(setup.indexOf('group=/sys/fs/cgroup$unit_path') < setup.indexOf('echo "+memory +pids"'));
   assert.match(owner, /timeout-minutes: 30/);
   assert.match(step(owner, 'Retain exact-source native acceptance logs'), /if: always\(\)/);
 };
@@ -684,11 +686,54 @@ test('ManagedTree delegation rejects missing prerequisites and driver-parent con
   for (const required of [
     '--property=Delegate=yes', '--property=DelegateSubgroup=driver',
     '--setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1', '--setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1',
-    'group=${driver%/driver}', 'test "${driver##*/}" = driver',
+    'group=/sys/fs/cgroup$unit_path', 'test "$member_path" = "$unit_path/driver"',
     'test -z "$(cat "$group/cgroup.procs")"', 'systemd_version >= 254',
   ]) {
     const broken = ci.replace(required, '');
     assert.notEqual(broken, ci, required);
     assert.throws(() => assertManagedDelegation(broken), undefined, required);
   }
+});
+
+test('ManagedTree discovery corroborates unit ownership before controller writes', { skip: process.platform === 'win32' ? 'Linux harness requires POSIX Bash' : false }, async () => {
+  const setup = step(job(await workflow('ci'), 'linux-managed-tree'), 'Require native ManagedTree execution in a delegated host context');
+  const start = setup.indexOf('              # Discovery observations');
+  const end = setup.indexOf('              unshare --mount');
+  assert(start >= 0 && end > start);
+  const directory = await mkdtemp(join(tmpdir(), 'tapid-delegation-'));
+  try {
+    for (const [name, membership, unit, parentPids, driverPids, error] of [
+      ['valid', '0::/system.slice/test.service/driver', '/system.slice/test.service', '', '4242', ''],
+      ['missing', '1:cpu:/other', '/system.slice/test.service', '', '4242', 'discovery:'],
+      ['unexpected', '0::/system.slice/test.service/other', '/system.slice/test.service', '', '4242', 'hierarchy:'],
+      ['empty', '0::', '/system.slice/test.service', '', '4242', 'discovery:'],
+      ['malformed', '0::/system.slice/../test.service/driver', '/system.slice/test.service', '', '4242', 'discovery:'],
+      ['nonempty', '0::/system.slice/test.service/driver', '/system.slice/test.service', '55', '4242', 'membership:'],
+      ['mismatch', '0::/system.slice/test.service/driver', '/system.slice/test.service', '', '99', 'membership:'],
+      ['wrong-unit', '0::/system.slice/test.service/driver', '/system.slice/other.service', '', '4242', 'hierarchy:'],
+    ]) {
+      const root = join(directory, name);
+      const group = join(root, 'system.slice/test.service');
+      await mkdir(join(group, 'driver'), { recursive: true });
+      for (const leaf of ['', '/driver']) {
+        for (const [file, value] of [['cgroup.type', 'domain'], ['cgroup.controllers', 'memory pids'], ['cgroup.procs', leaf ? driverPids : parentPids], ['cgroup.subtree_control', '']]) {
+          await writeFile(`${group}${leaf}/${file}`, value + (value ? '\n' : ''));
+        }
+      }
+      await writeFile(join(root, 'membership'), membership + '\n');
+      const script = `systemctl() { printf '%s\\n' '${unit}'; }\n` + setup.slice(start, end)
+        .replaceAll('/sys/fs/cgroup', root).replaceAll('/proc/self/cgroup', join(root, 'membership')).replaceAll('$$', '4242');
+      const result = await execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', script], { env: { ...process.env, TAPID_MANAGED_UNIT: 'test.service' } })
+        .then(value => ({ ...value, code: 0 }), failure => failure);
+      assert.match(result.stdout, /0::|1:cpu:/, name);
+      if (error) {
+        assert.notEqual(result.code, 0, name);
+        assert(result.stderr.includes(error), `${name}: ${result.stderr}`);
+        assert.equal(await readFile(join(group, 'cgroup.subtree_control'), 'utf8'), '', name);
+      } else {
+        assert.equal(result.code, 0, result.stderr);
+        assert.equal(await readFile(join(group, 'cgroup.subtree_control'), 'utf8'), '+memory +pids\n');
+      }
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

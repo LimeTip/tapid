@@ -60,6 +60,7 @@ jobs:
             --property=Delegate=yes --property=DelegateSubgroup=driver \
             --property=KillMode=control-group --property=RuntimeMaxSec=25min \
             --working-directory="$PWD" \
+            --setenv="TAPID_MANAGED_UNIT=tapid-managed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.service" \
             --setenv="PATH=$PATH" \
             --setenv="CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
             --setenv="RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
@@ -75,16 +76,31 @@ jobs:
               "$TAPID_TEST_NODE" --version
               rustc --version
               systemd --version
-              driver=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
-              test "${driver##*/}" = driver
-              group=${driver%/driver}
-              test "$group" != /sys/fs/cgroup
+              # Discovery observations must survive even a failed assertion.
+              cat /proc/self/cgroup
+              unit_path=$(systemctl show --property=ControlGroup --value "$TAPID_MANAGED_UNIT") || {
+                echo "discovery: cannot query unit $TAPID_MANAGED_UNIT" >&2; exit 1;
+              }
+              member_path=$(sed -n "s/^0:://p" /proc/self/cgroup)
+              echo "unit=$TAPID_MANAGED_UNIT unit_path=$unit_path membership=$member_path"
+              for observed in "$unit_path" "$member_path"; do
+                if ! [[ "$observed" =~ ^/([a-zA-Z0-9_.:@-]+/)*[a-zA-Z0-9_.:@-]+$ ]] ||
+                   [[ "$observed" = */../* || "$observed" = */./* || "$observed" = */.. || "$observed" = */. ]]; then
+                  echo "discovery: missing or malformed unified cgroup path" >&2; exit 1;
+                fi
+              done
+              driver=/sys/fs/cgroup$member_path
+              group=/sys/fs/cgroup$unit_path
               echo "delegation parent=$group driver=$driver"
+              if ! test "$member_path" = "$unit_path/driver"; then
+                echo "hierarchy: unit delegation parent does not own the driver leaf" >&2; exit 1;
+              fi
               cat "$group/cgroup.type" "$driver/cgroup.type"
               cat "$group/cgroup.controllers" "$driver/cgroup.controllers"
-              cat "$group/cgroup.procs" "$driver/cgroup.procs" /proc/self/cgroup
-              test -z "$(cat "$group/cgroup.procs")"
-              grep -Fx "$$" "$driver/cgroup.procs"
+              cat "$group/cgroup.procs" "$driver/cgroup.procs"
+              if ! test -z "$(cat "$group/cgroup.procs")" || ! grep -Fx "$$" "$driver/cgroup.procs"; then
+                echo "membership: parent must be empty and driver must contain the supervisor" >&2; exit 1;
+              fi
               echo "+memory +pids" > "$group/cgroup.subtree_control"
               cat "$group/cgroup.controllers" "$group/cgroup.subtree_control" /proc/self/cgroup
               unshare --mount --pid --fork --mount-proc /bin/true

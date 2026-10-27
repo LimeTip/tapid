@@ -130,8 +130,11 @@ supplied Node 22. It requires `TAPID_REQUIRE_MANAGED_ASSERTIONS=1` and
 `TAPID_REQUIRE_NODE_ASSERTIONS=1`; unavailable prerequisites fail the job.
 A transient systemd unit owns the delegation and uses systemd 254 or newer's
 `DelegateSubgroup=driver` to place its trusted driver in a leaf before execution.
-The harness validates the empty delegation parent and driver membership, records
-cgroup types and controllers, enables memory/pids for sibling boundaries, and
+The harness logs raw unified membership and unit identity before validation,
+corroborates the systemd-reported delegation parent with the driver path, and
+rejects malformed paths or membership mismatches before controller writes. It
+validates the empty delegation parent, records cgroup types and controllers,
+enables memory/pids for sibling boundaries, and
 actually attempts private PID/mount namespace creation. It does not remount the
 host cgroup filesystem or change host-wide namespace policy. The runner still
 performs its own request-specific checks before target execution. Logs retain
