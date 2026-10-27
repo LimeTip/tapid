@@ -129,16 +129,17 @@ function evidence(root: string, npm: boolean) {
   const applicable = new Set<string>();
   const inapplicableBranch = new Set<string>();
   if (!native) {
+    const hostEntries = Object.entries({
+      os: process.platform,
+      cpu: process.arch,
+      libc:
+        process.platform === "linux" &&
+        (process.report.getReport() as any).header.glibcVersionRuntime
+          ? "glibc"
+          : "",
+    });
     const incompatible = (r: Json) =>
-      Object.entries({
-        os: process.platform,
-        cpu: process.arch,
-        libc:
-          process.platform === "linux" &&
-          (process.report.getReport() as any).header.glibcVersionRuntime
-            ? "glibc"
-            : "",
-      }).some(([f, value]) => {
+      hostEntries.some(([f, value]) => {
         const list = r[f] ?? [];
         return (
           list.includes("!" + value) ||
