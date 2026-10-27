@@ -35,6 +35,12 @@ pub(super) fn run(args: &Args, machine: bool) -> ExitCode {
             })?;
         data["runtime"] = json!({"path": prepared.node_runtime(), "selection": "locally_validated_path", "identity": "deferred_until_launch"});
         data["script"]["working_directory"] = json!(prepared.request().working_directory());
+        let blocker = prepared.request().static_platform_blocker();
+        data["platform"] = json!({"os": std::env::consts::OS, "evidence": "static_declaration", "support": if blocker.is_some() { "unsupported" } else { "unchecked" }});
+        if let Some(blocker) = blocker {
+            preparation_reason = Some((blocker.code(), "select_supported_platform_or_policy", blocker.description()));
+            return Err(super::RunFailure::PreparationFailed);
+        }
         Ok(())
     });
     if let Some(inputs) = policy_inputs {

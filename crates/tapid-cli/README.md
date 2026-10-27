@@ -488,10 +488,13 @@ and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installat
 Read-only script planning uses `tapid --json run build --preflight`. It shares
 selection and policy/request preparation with launch, reports environment names
 without reading their values, and never starts a child, creates a run result file,
-or recovers a transaction. Actual backend support, enforcement, cleanup and
-value-dependent limits remain unchecked; exit 0 is not launch assurance.
+or recovers a transaction. Runner-owned static exclusions reject macOS ManagedTree
+and resource-limit requests before native probes. Actual host support, enforcement,
+cleanup and value-dependent limits remain unchecked; exit 0 is not launch assurance.
 
 `tapid --json capabilities` discovers command structure, result channels and
 possible effects without reading a project or accessing the network. Schema
-coverage is currently explicitly unpublished. See [JSON results](../../docs/json-results.md)
+coverage is partial: `tapid --json capabilities --schema tapid.run-preflight.v1`
+exports the embedded preflight payload schema by its advertised identifier.
+Other result families are explicitly unpublished. See [JSON results](../../docs/json-results.md)
 for contract/version compatibility and the remaining discovery limits.

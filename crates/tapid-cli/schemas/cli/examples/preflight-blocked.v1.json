@@ -1,0 +1,29 @@
+{
+  "contract": "tapid.run-preflight",
+  "schema_version": 1,
+  "tapid_version": "0.0.13",
+  "assessment": "blocked",
+  "enforcement_established": false,
+  "script": {"name": "build", "workspace": null},
+  "policy_inputs": null,
+  "runtime": null,
+  "blockers": [{
+    "code": "MANIFEST_INVALID",
+    "location": {"project": ".", "manifest": "package.json", "configuration": "tapid.toml"},
+    "action": {"id": "review_run_inputs", "description": "Review the project manifest; launch checks remain deferred."}
+  }],
+  "snapshot": "not_atomic",
+  "checks_not_performed": ["environment_values_and_value_dependent_limits", "runtime_identity_at_launch", "backend_prerequisites_and_native_probes", "filesystem_binding_at_launch", "enforcement", "descendant_cleanup", "script_success"],
+  "dimensions": [
+    {"dimension": "filesystem", "support": "unchecked", "evidence": "deferred_until_launch"},
+    {"dimension": "network", "support": "unchecked", "evidence": "deferred_until_launch"},
+    {"dimension": "environment", "support": "unchecked", "evidence": "deferred_until_launch"},
+    {"dimension": "subprocess", "support": "unchecked", "evidence": "deferred_until_launch"},
+    {"dimension": "timeout", "support": "unchecked", "evidence": "deferred_until_launch"},
+    {"dimension": "output", "support": "unchecked", "evidence": "deferred_until_launch"},
+    {"dimension": "process_count", "support": "unchecked", "evidence": "deferred_until_launch"},
+    {"dimension": "memory", "support": "unchecked", "evidence": "deferred_until_launch"},
+    {"dimension": "descendant_cleanup", "support": "unchecked", "evidence": "deferred_until_launch"}
+  ],
+  "truncated_fields": []
+}

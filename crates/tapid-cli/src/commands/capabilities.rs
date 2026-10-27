@@ -4,6 +4,18 @@ use clap::CommandFactory;
 use serde_json::{Value, json};
 use std::process::ExitCode;
 
+#[derive(Debug, clap::Args)]
+pub(crate) struct Args {
+    /// Export one advertised, embedded JSON Schema by identifier (never a path or URL).
+    #[arg(long, value_name = "ID")]
+    schema: Option<String>,
+}
+
+const SCHEMAS: &[(&str, &str)] = &[(
+    "tapid.run-preflight.v1",
+    include_str!("../../schemas/cli/run-preflight.v1.schema.json"),
+)];
+
 // Every public path, including parents with no executable default, is reviewed.
 const COVERAGE: &[(&str, &str, &str)] = &[
     ("", "help", "unsupported"),
@@ -42,7 +54,27 @@ const COVERAGE: &[(&str, &str, &str)] = &[
     ("upgrade", "upgrade", "unsupported"),
 ];
 
-pub(crate) fn run(machine: bool) -> ExitCode {
+pub(crate) fn run(args: Args, machine: bool) -> ExitCode {
+    if let Some(id) = args.schema {
+        let Some((id, source)) = SCHEMAS.iter().find(|(known, _)| *known == id) else {
+            if machine {
+                return crate::output::json::protocol_error("capabilities", "SCHEMA_UNKNOWN", 1);
+            }
+            eprintln!(
+                "error: unknown schema identifier; list capabilities for supported identifiers"
+            );
+            return ExitCode::from(1);
+        };
+        let schema: Value = serde_json::from_str(source).expect("embedded schema is valid JSON");
+        if machine {
+            return crate::output::json::information(
+                "capabilities",
+                json!({"id": id, "schema": schema}),
+            );
+        }
+        println!("{schema}");
+        return ExitCode::SUCCESS;
+    }
     let data = discover();
     if machine {
         return crate::output::json::information("capabilities", data);
@@ -74,7 +106,7 @@ pub(crate) fn run(machine: bool) -> ExitCode {
     println!(
         "Help/version support JSON envelopes. Ordinary run has separate result-file/receipt channels."
     );
-    println!("JSON Schema coverage: not yet published.");
+    println!("JSON Schema coverage: partial; run-preflight v1 is embedded.");
     println!(
         "Static declarations only; project compatibility and process enforcement are unchecked."
     );
@@ -137,6 +169,8 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         modes[0]["separate_channels"] = json!(["result-file", "receipt-json"]);
         let mut preflight = mode("preflight", "inspection", "stdout_envelope");
         preflight["when"] = json!({"preflight": true});
+        preflight["schema_coverage"] = json!("payload");
+        preflight["schema"] = json!("tapid.run-preflight.v1");
         modes.push(preflight);
     }
     let arguments = command.get_arguments().filter(|arg| !arg.is_hide_set()).map(|arg| {
@@ -190,7 +224,7 @@ fn discover() -> Value {
             {"command": "run", "preflight_defers": ["environment_values", "backend_probes", "enforcement", "cleanup"]}
         ],
         "help_and_version": {"channel": "human_text", "json": "stdout_envelope", "effects": "no_project_mutation"},
-        "schema_catalog": [], "schema_coverage": "not_yet_published",
+        "schema_catalog": SCHEMAS.iter().map(|(id, _)| json!({"id": id, "target": "data", "contract": "tapid.run-preflight", "schema_version": 1})).collect::<Vec<_>>(), "schema_coverage": "partial",
         "assurance": {"package_manager_support": "separate_from_runner", "process_enforcement": "not_established", "project_compatibility": "unchecked"}
     })
 }

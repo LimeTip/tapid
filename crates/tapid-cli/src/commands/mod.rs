@@ -57,7 +57,7 @@ impl Cli {
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     /// Discover installed-binary command structure and static effects offline.
-    Capabilities,
+    Capabilities(capabilities::Args),
     /// Inspect local project readiness without installing or recovering.
     #[command(
         long_about = "Inspect project/workspace selection, manifest and lock agreement, installation ownership, pending project recovery, registry configuration, and local compatibility blockers. Offline and read-only. Does not verify installed trees, inspect the shared store, assess runner assurance, or exclude concurrent writers. Exit 0 means no local blockers were found; complete compatibility remains unchecked.",
@@ -196,7 +196,7 @@ pub(crate) enum Command {
 impl Command {
     fn operation(&self) -> &'static str {
         match self {
-            Self::Capabilities => "capabilities",
+            Self::Capabilities(_) => "capabilities",
             Self::Status(_) => "status",
 
             Self::Tool(_) => "tool",
@@ -233,7 +233,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         && !matches!(
             command,
             Some(
-                Command::Capabilities
+                Command::Capabilities(_)
                     | Command::Status(_)
                     | Command::Ci(_)
                     | Command::Manifest(_)
@@ -261,7 +261,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         );
     }
     match command {
-        Some(Command::Capabilities) => capabilities::run(json),
+        Some(Command::Capabilities(args)) => capabilities::run(args, json),
         Some(Command::Status(args)) => status::run(args, json),
 
         Some(Command::Tool(args)) => tool::run(args, json),

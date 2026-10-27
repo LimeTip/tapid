@@ -505,7 +505,11 @@ typed next actions. Exit 1 reports a local blocker or shortened output. Exit 0
 means only that the listed local checks found no blockers. Backend prerequisites,
 native probes, actual enforcement, descendant cleanup and environment-value
 limits remain explicitly unchecked. The snapshot is not atomic. A successful
-preflight must never be used as permission to bypass checked launch.
+preflight must never be used as permission to bypass checked launch. The runner
+also supplies side-effect-free platform exclusions reused by launch. On macOS,
+ManagedTree and configured resource limits produce typed static blockers without
+installing a native probe profile. Absence of these exclusions remains unchecked
+host support, never evidence of enforcement.
 
 `tapid --json capabilities` requires no project, configuration, credentials,
 store or network. Its `tapid.capabilities` contract version 1 reports the actual
@@ -514,9 +518,15 @@ defaults, arity, groups and conflicts. Explicit metadata describes result channe
 possible effects and additional application constraints. Ordinary run uses its
 separate result/receipt channels; only preflight accepts global JSON.
 
-The discovery implementation currently marks schema coverage
-`not_yet_published` and exposes an empty schema catalog. It does not yet provide
-the complete offline schema export required by issue #195. Consumers must treat
+Schema coverage is currently `partial`. The catalog advertises
+`tapid.run-preflight.v1`, targeting the envelope's `data` payload. Export it with
+`tapid --json capabilities --schema tapid.run-preflight.v1`; the envelope contains
+`data.id` and `data.schema`. Only advertised identifiers are accepted; paths,
+URLs and unknown versions return `SCHEMA_UNKNOWN` without fetching anything.
+Human-mode export prints the schema object directly. The schema and an example
+are packaged under `crates/tapid-cli/schemas/cli/` and embedded into the binary.
+The envelope and other payload families remain outside this initial catalog;
+their complete schemas are still required to finish issue #195. Consumers must treat
 missing schema coverage, unknown reason/command identifiers and unavailable
 observations as unchecked. Unknown contract versions are unsupported; unknown
 additive fields may be ignored. Contract versions are independent of Tapid release

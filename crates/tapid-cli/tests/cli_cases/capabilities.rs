@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn capabilities_export_only_advertised_embedded_schemas() {
+    let project = tapid_test_support::TempProject::new("schema-export").unwrap();
+    let output = isolated_command(
+        project.path(),
+        &[
+            "--json",
+            "capabilities",
+            "--schema",
+            "tapid.run-preflight.v1",
+        ],
+        true,
+    )
+    .output()
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["id"], "tapid.run-preflight.v1");
+    assert_eq!(
+        value["data"]["schema"]["properties"]["contract"]["const"],
+        "tapid.run-preflight"
+    );
+    for id in [
+        "../../package.json",
+        "https://example.invalid/schema",
+        "tapid.run-preflight.v2",
+    ] {
+        let output = isolated_command(
+            project.path(),
+            &["--json", "capabilities", "--schema", id],
+            true,
+        )
+        .output()
+        .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["errors"][0]["code"], "SCHEMA_UNKNOWN");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(id));
+    }
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn capabilities_are_offline_and_classify_public_commands_and_run_modes() {
     let project = tapid_test_support::TempProject::new("capabilities-offline").unwrap();
     project

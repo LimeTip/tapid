@@ -710,7 +710,7 @@ fn network_fixture_response_rejects_invalid_framing() {
 fn run_preflight_is_read_only_and_never_collects_environment_values() {
     let project = project();
     let (_runtime, node) = private_node_runtime();
-    project.write("tapid.toml", b"[run.scripts.probe]\nread=['.']\nwrite=['.']\nenvironment=['TAPID_FLAG_VISIBLE']\nsubprocess=true\n").unwrap();
+    project.write("tapid.toml", b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nwrite=['.']\nenvironment=['TAPID_FLAG_VISIBLE']\nsubprocess=true\n").unwrap();
     project
         .write(
             "probe.js",
@@ -912,6 +912,48 @@ fn run_preflight_defers_environment_value_limits_instead_of_collecting_values() 
     );
     assert!(output.stdout.len() < 16 * 1024);
     assert!(!project.path().join("tapid.toml").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn run_preflight_reports_static_platform_blockers() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    for (configuration, reason) in [
+        (
+            "[run.scripts.probe]\nassurance='restricted'\nread=['.']\ntimeout_seconds=5\n",
+            "PLATFORM_LIMITS_UNSUPPORTED",
+        ),
+        (
+            "[run.scripts.probe]\nassurance='managed-tree'\nread=['.']\ntimeout_seconds=5\nmax_output_bytes=65536\nmax_processes=8\nmax_memory_bytes=536870912\n",
+            "PLATFORM_ASSURANCE_UNSUPPORTED",
+        ),
+    ] {
+        project
+            .write("tapid.toml", configuration.as_bytes())
+            .unwrap();
+        let output = invoke(
+            project.path(),
+            &[
+                "--json",
+                "run",
+                "probe",
+                "--preflight",
+                "--node-runtime",
+                node.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["data"]["blockers"][0]["code"], reason);
+        assert_eq!(value["data"]["enforcement_established"], false);
+        assert_eq!(value["data"]["platform"]["evidence"], "static_declaration");
+        assert_eq!(
+            fs::read(project.path().join("tapid.toml")).unwrap(),
+            configuration.as_bytes()
+        );
+        assert_eq!(fs::read_dir(project.path()).unwrap().count(), 2);
+    }
 }
 
 #[test]

@@ -153,18 +153,8 @@ pub(super) fn containment_support(request: &ExecutionRequest) -> ContainmentSupp
             "current-executable private launcher was not initialized as the first operation in main",
         );
     }
-    if request.policy().assurance() != AssuranceLevel::Restricted {
-        return unsupported("native macOS ManagedTree containment is unsupported");
-    }
-    let limits = request.policy().limits();
-    if limits.timeout_seconds().is_some()
-        || limits.max_output_bytes().is_some()
-        || limits.max_processes().is_some()
-        || limits.max_memory_bytes().is_some()
-    {
-        return unsupported(
-            "native macOS Restricted cannot enforce configured timeout, output, process-count, or memory limits",
-        );
+    if let Some(blocker) = request.static_platform_blocker() {
+        return unsupported(blocker.description());
     }
     if let Err(reason) = support_probes() {
         return unsupported(reason);
