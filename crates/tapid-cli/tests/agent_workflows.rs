@@ -459,3 +459,142 @@ fn agent_lost_commit_response_recovers_before_repeating_mutation() {
     assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), pinned);
     metrics.finish(3);
 }
+
+/// Refresh a selected root while newer compatible metadata leaves unrelated records pinned.
+#[test]
+fn agent_named_update_refreshes_selection_and_preserves_unrelated_records() {
+    let project = TempProject::new("agent-update").unwrap();
+    let home = TempHome::new("agent-update").unwrap();
+    let manifest =
+        br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"*","@actual/scoped":"^1"}}"#;
+    project.write("package.json", manifest).unwrap();
+    let mut fixture: Value =
+        serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+    let initial = serde_json::json!({"packages": fixture["packages"].as_array().unwrap()
+        .iter().filter(|p| p["version"] == "1.0.0" || p["version"] == "1.2.0")
+        .cloned().collect::<Vec<_>>()});
+    project
+        .write("registry.json", initial.to_string().as_bytes())
+        .unwrap();
+    let store = project.path().join("store");
+    let mut metrics = Measurements::default();
+    success(&metrics.call(
+        &project,
+        &home,
+        &[
+            "--json",
+            "install",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    ));
+    let before = tapid_lockfile::Lockfile::from_json(
+        &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+    )
+    .unwrap();
+    let mut newer = fixture["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == "@actual/scoped")
+        .unwrap()
+        .clone();
+    newer["version"] = serde_json::json!("1.3.0");
+    fixture["packages"].as_array_mut().unwrap().push(newer);
+    project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
+    success(&metrics.call(
+        &project,
+        &home,
+        &[
+            "--json",
+            "update",
+            "h3",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    ));
+    let after = tapid_lockfile::Lockfile::from_json(
+        &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+    )
+    .unwrap();
+    let selected = |lock: &tapid_lockfile::Lockfile| {
+        lock.packages()
+            .values()
+            .find(|package| package.name() == "h3")
+            .unwrap()
+            .version()
+            .to_string()
+    };
+    assert_eq!(selected(&before), "1.0.0");
+    assert_eq!(selected(&after), "2.0.0");
+    for (key, package) in before.packages() {
+        if package.name() != "h3" {
+            assert_eq!(after.packages().get(key), Some(package));
+        }
+    }
+    assert_eq!(after.packages().len(), before.packages().len());
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    metrics.finish(2);
+}
+
+/// Exercise the guide's separate run channel before launch, without requiring native containment.
+#[test]
+fn agent_run_example_reads_complete_typed_result_file() {
+    let guide = include_str!("../../../docs/agent-guide.md");
+    let example = guide
+        .lines()
+        .find(|line| line.starts_with("tapid run "))
+        .unwrap();
+    assert_eq!(example, "tapid run SCRIPT --result-file PATH");
+    let project = npm_project();
+    let home = TempHome::new("agent-run-result").unwrap();
+    let path = home.path().join("result.json");
+    let args = example
+        .strip_prefix("tapid ")
+        .unwrap()
+        .split_whitespace()
+        .map(|arg| match arg {
+            "SCRIPT" => "missing",
+            "PATH" => path.to_str().unwrap(),
+            other => other,
+        })
+        .collect::<Vec<_>>();
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
+    let npm_lock = fs::read(project.path().join("package-lock.json")).unwrap();
+    let output = command(&project, &home, &args).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let bytes = fs::read(&path).unwrap();
+    assert!(bytes.ends_with(b"\n"));
+    let result: Value = serde_json::from_slice(&bytes).expect("one complete run result");
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["operation"], "run");
+    assert_eq!(result["outcome"], "prelaunch_failure");
+    assert_eq!(result["error"]["code"], "SCRIPT_MISSING");
+    assert!(result["receipt"].is_null());
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read(project.path().join("package-lock.json")).unwrap(),
+        npm_lock
+    );
+    assert!(!project.path().join("tapid.lock").exists());
+    assert!(!project.path().join("node_modules").exists());
+    Measurements {
+        calls: 1,
+        bytes: output.stdout.len() + output.stderr.len() + bytes.len(),
+        ..Measurements::default()
+    }
+    .finish(1);
+}
