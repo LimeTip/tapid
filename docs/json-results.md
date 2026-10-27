@@ -360,3 +360,138 @@ locally computed registry integrity. Status reports those separately.
 Tool commands use operation `tool`. Their `changes.files` and `changes.paths` report affected or recovery paths under the tools root: `catalog.json`, `pending.json`, `committed`, `bin`, and `environments`. The `data.tools` array is sorted by npm package name and contains `name`, `version`, `requirement`, `environment`, `lockfile`, and a sorted `commands` array of `name`/`target` mappings. Targets are relative to the recorded environment. `data.bin_dir` identifies the PATH directory. Text follows the same bounded/sanitized presentation rules as other results.
 
 Mutations report committed state only after the global command decision. Retained in-use environments or cleanup failures produce `committed_cleanup_pending`; inconsistent pending publication produces recovery failure instead of overwriting unknown files. Listing may settle a previous transaction or clean inactive owned environments. Installed package scripts are never run by these operations. Execution of an installed command is a normal user process and has no sandbox receipt.
+
+## Historical candidate exclusions
+
+Successful dependency operations that resolve registry metadata, including resolved
+dry runs, include nonempty `data.candidate_exclusions`. Ordinary human success
+output stays quiet. Replay and lock-only previews have no newly observed exclusions
+and omit this field. Terminal missing-candidate, conflicting-requirement, and
+all-excluded metadata errors include `errors[].context.candidate_exclusions` for
+only the affected exact registry origin and package. Human errors summarize the
+same evidence. Excluded versions remain absent from `context.available`.
+
+The summary contains `total_packages`, `total_candidates`, `omitted_packages`,
+`omitted_candidates`, `truncated`, and `packages`. Each package group contains
+`source`, `name`, `total_candidates`, `omitted_candidates`, `truncated`,
+`truncated_fields`, and `candidates`. Each candidate contains `version`,
+`reason_code`, `truncated_fields`, and, when applicable, `dependency_category`.
+The category is `dependency`, `peer_dependency`, `optional_dependency`, or
+`optional_peer`. Stable reason codes are:
+
+- `unsupported_dependency_name`
+- `empty_dependency_requirement`
+- `unsupported_dependency_requirement`
+- `platform_mismatch`
+- `undeclared_optional_peer`
+- `unsupported_jsr_alias`
+
+One primary reason follows normalization's first failure: platform compatibility,
+required dependencies, peers, optional peer markers, optional dependencies, then
+JSR alias restrictions. Dependency maps use canonical name order. Parsing and
+candidate filtering remain fail closed. Rejected names, requirements, parser
+explanations, and metadata URLs are never included in exclusion evidence.
+
+Counts describe distinct observed rejected registry/package/version identities,
+not all registry history or versions that would otherwise satisfy the graph.
+Summary omissions include candidates in omitted groups; group omissions count
+only unsampled candidates within that group. Repeated records do not inflate
+counts. A truncated sample is not exhaustive history.
+
+Collection retains at most 16 package groups, eight candidates per group, and
+100 candidates overall. Terminal evidence independently retains up to eight
+candidates for the affected package, even if global sampling would omit it.
+Selection and ordering use full canonical source/name/version strings before
+sanitizing or shortening display fields; version ordering here is lexical, not
+SemVer precedence. Display fields are limited to 256 UTF-8 bytes. Local
+`truncated_fields` lists identify shortened identity fields; the envelope also
+records their full JSON pointers. `truncated` covers omissions and shortened
+fields. Human exclusion summaries use at most 2,048 UTF-8 bytes and report how
+many candidates were omitted from that rendering, which may exceed the structured
+sample's omissions. Collection scans the normalization cache at return points;
+these bounds do not limit the existing metadata cache itself.
+
+## Dependency lifecycle observations
+
+Schema version 1 adds envelope fields on success and failure:
+
+- `warning_details`: ordered typed warning occurrences. Lifecycle warnings contain
+  `code`, `package` identity, and `hook` for skipped hooks. Legacy `warnings` remains
+  the sorted, deduplicated array of codes. `warning_details_omitted` counts omitted
+  occurrences; `warning_details_complete` is false after omission or scalar truncation.
+- `lifecycle`: null outside installation processing, otherwise the observations
+  established by that operation. Failure still has `data: null`.
+
+`lifecycle.coverage` is `not_performed`, `incomplete`, or `complete`. Its optional
+`reason` explains `before_discovery`, `imported_lock`, `processing_stopped`, or
+`discovery_failed`. `selected_packages` is null until a validated selection is
+available. `inspected_packages` counts attempted discovery, including failures.
+Complete coverage means all selected packages were inspected; it says nothing
+about hook success or application readiness.
+
+`packages` is sorted by the original lock instance key. Each entry has `identity`,
+`discovery` (`succeeded`, `failed`, or `not_performed`), `hooks`, and
+`omitted_hooks`. Successful discovery with an empty hook array establishes no
+hooks were discovered. Failed or unperformed discovery does not. Identity fields
+are `key`, `name`, `version`, `source`, `archive_digest`, `peer_context`, and
+`platform_context`; distinct registry, peer, and platform instances stay distinct.
+
+Hooks are sorted by hook name. They contain no raw command or environment values:
+
+| Field | Values |
+| --- | --- |
+| `authorization` | `not_evaluated`, `not_approved`, `exact_policy`, `invocation_override`, `rejected` |
+| `disposition` | `not_performed`, `skipped`, `executed`, `reused`, `blocked` |
+| `reason` | null or a stable reason from an existing check |
+
+Reasons include `default_denial`, `processing_stopped`, `approval_rejected`,
+`required_hook_unapproved`, `missing_declared_integrity`,
+`authenticated_output_missing_or_mismatched`, `tool_verification_failed`,
+`containment_unavailable`, and `execution_or_output_failed`. Missing and mismatched
+cached output intentionally share one classification. Unchecked prerequisites
+remain unknown. Invocation authorization is not exact checked-in approval or
+cache eligibility.
+
+`hooks_executed`, `generated_outputs_reused`, and `hooks_skipped` count observed
+outcomes independently of detail limits. Execution is recorded after successful
+execution and output validation. Reuse requires authenticated acceptance and
+required staging. These facts survive later failures or rollback; only
+`changes.state` establishes whether dependency files were committed. Neither a
+successful install nor any lifecycle observation establishes build, test, or
+runtime usability.
+
+Each structured collection retains at most 1,024 records while processing;
+`omitted_packages`, per-package `omitted_hooks`, and `warning_details_omitted`
+report exact omissions. Counters and installation checks continue after a limit.
+`details_complete` is independent of inspection coverage and becomes false after
+omission or scalar truncation. Scalars use the existing sanitized 4,096-byte
+limit and JSON-pointer `truncated_fields`. Display identities may be shortened;
+never use shortened values as equality keys or approval evidence. Reports exclude
+raw scripts, child output, attestations, keys, and environment values.
+
+For example, these selected fields describe one default-denied hook after files
+were committed (other identity and report fields are omitted here):
+
+```json
+{
+  "outcome": "success",
+  "changes": {"state": "committed"},
+  "warnings": ["DEPENDENCY_LIFECYCLE_HOOK_SKIPPED"],
+  "lifecycle": {
+    "coverage": "complete",
+    "hooks_executed": 0,
+    "generated_outputs_reused": 0,
+    "hooks_skipped": 1,
+    "packages": [{
+      "discovery": "succeeded",
+      "hooks": [{"hook": "install", "authorization": "not_approved", "disposition": "skipped", "reason": "default_denial"}]
+    }]
+  }
+}
+```
+
+A frozen replay with an exact approval but unavailable authenticated output instead
+has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
+`authorization: "exact_policy"`, `disposition: "blocked"`, and
+`reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
+in the report, while `changes.state` describes preservation or rollback.

@@ -19,8 +19,11 @@ mod command_fixture_tests;
 mod command_support;
 #[path = "cli_cases/explain.rs"]
 mod explain_tests;
+#[path = "cli_cases/lifecycle_reporting.rs"]
+mod lifecycle_reporting_tests;
 #[path = "cli_cases/run_permissions.rs"]
 mod run_permission_tests;
+
 #[path = "cli_cases/status.rs"]
 mod status_tests;
 
@@ -3947,8 +3950,12 @@ fn lifecycle_add_rejects_invalid_fetched_range_without_state_changes() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("dependency broken"), "{stderr}");
-    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert!(
+        stderr.contains("1.0.0 (unsupported_dependency_requirement)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("dependency broken"), "{stderr}");
+    assert!(!stderr.contains("not a valid range"), "{stderr}");
     assert_eq!(
         fs::read(dir.join("package.json")).unwrap(),
         manifest.as_bytes()
@@ -4178,8 +4185,12 @@ fn invalid_fetched_dependency_range_does_not_create_store_state() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("dependency broken"), "{stderr}");
-    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert!(
+        stderr.contains("1.0.0 (unsupported_dependency_requirement)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("dependency broken"), "{stderr}");
+    assert!(!stderr.contains("not a valid range"), "{stderr}");
     assert_eq!(
         fs::read_to_string(dir.join("package.json")).unwrap(),
         manifest
@@ -6045,6 +6056,26 @@ fn dependency_lifecycle_required_native_build_fails_without_approval() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("lifecycle tool digest mismatch for sh")
     );
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--json",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+        ])
+        .arg(home.path().join("store"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"], serde_json::Value::Null);
+    let hook = &result["lifecycle"]["packages"][0]["hooks"][0];
+    assert_eq!(hook["authorization"], "exact_policy");
+    assert_eq!(hook["disposition"], "blocked");
+    assert_eq!(hook["reason"], "tool_verification_failed");
 }
 
 fn write_dependency_script_fixture(project: &tapid_test_support::TempProject, archive: &str) {
@@ -6091,6 +6122,9 @@ fn dependency_lifecycle_failed_unsafe_hook_preserves_previous_install() {
     project
         .write("node_modules/previous-marker", b"preserved")
         .unwrap();
+    project
+        .write("package-lock.json", b"npm lock sentinel\n")
+        .unwrap();
     let lock = fs::read(project.path().join("tapid.lock")).unwrap();
     let output = install(&[
         "--allow-unapproved-dependency-scripts",
@@ -6107,6 +6141,40 @@ fn dependency_lifecycle_failed_unsafe_hook_preserves_previous_install() {
         fs::read(project.path().join("node_modules/previous-marker")).unwrap(),
         b"preserved"
     );
+    let output = install(&[
+        "--allow-unapproved-dependency-scripts",
+        "--unsafe-no-dependency-sandbox",
+        "--json",
+    ]);
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["hooks_executed"], 0);
+    assert_eq!(
+        result["lifecycle"]["packages"][0]["hooks"][0]["disposition"],
+        "blocked"
+    );
+    assert_eq!(
+        result["lifecycle"]["packages"][0]["hooks"][0]["reason"],
+        "execution_or_output_failed"
+    );
+    assert_eq!(
+        fs::read(project.path().join("package-lock.json")).unwrap(),
+        b"npm lock sentinel\n"
+    );
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/previous-marker")).unwrap(),
+        b"preserved"
+    );
+    for package in Lockfile::from_json(std::str::from_utf8(&lock).unwrap())
+        .unwrap()
+        .packages()
+        .values()
+    {
+        tapid_store::Store::new(home.path().join("store"))
+            .verified_tree_path(&package.tree_digest().parse().unwrap())
+            .unwrap();
+    }
     assert!(!home.path().join("store/.tapid-lifecycle-key").exists());
 }
 
@@ -6422,6 +6490,7 @@ fn dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations() 
             ])
             .arg(home.path().join("store"))
             .args(flags)
+            .env_remove("PATH")
             .output()
             .unwrap()
     };
@@ -6482,6 +6551,10 @@ fn dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations() 
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("3 hook(s) executed, 0 authenticated output(s) reused")
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("without containment"));
     assert!(
         project
@@ -6520,6 +6593,20 @@ fn dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations() 
         String::from_utf8_lossy(&output.stderr)
     );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["hooks_executed"], 3);
+    assert_eq!(result["lifecycle"]["generated_outputs_reused"], 0);
+    let hooks = result["lifecycle"]["packages"][0]["hooks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        hooks
+            .iter()
+            .filter(
+                |h| h["authorization"] == "invocation_override" && h["disposition"] == "executed"
+            )
+            .count(),
+        3
+    );
     let text = result.to_string();
     assert!(text.contains("DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT"));
     assert!(text.contains("UNAPPROVED_DEPENDENCY_SCRIPTS_ALLOWED"));
@@ -6678,6 +6765,16 @@ fn dependency_lifecycle_sandbox_only_override_warns_on_discovery_failure() {
             .join("node_modules/broken/package.json")
             .is_file()
     );
+    let output = fixture
+        .command(&["install", "--offline", "--frozen", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["coverage"], "incomplete");
+    assert_eq!(result["lifecycle"]["reason"], "discovery_failed");
+    assert_eq!(result["lifecycle"]["packages"][0]["discovery"], "failed");
+    assert_eq!(result["warning_details"][0]["package"]["name"], "broken");
     let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
     let output = fixture
         .command(&[
@@ -6703,6 +6800,22 @@ fn dependency_lifecycle_sandbox_only_override_warns_on_discovery_failure() {
             .join("node_modules/broken/SHOULD_NOT_EXIST")
             .exists()
     );
+    let fatal = fixture
+        .command(&[
+            "install",
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+            "--registry-fixture",
+            "registry.json",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!fatal.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&fatal.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["packages"][0]["discovery"], "failed");
+    assert_eq!(result["lifecycle"]["reason"], "discovery_failed");
+    assert_eq!(result["lifecycle"]["hooks_executed"], 0);
     assert_eq!(
         fs::read(project.path().join("tapid.lock")).unwrap(),
         lock_before
@@ -6713,9 +6826,21 @@ fn dependency_lifecycle_sandbox_only_override_warns_on_discovery_failure() {
 fn dependency_lifecycle_hooks_are_reported_and_never_run_by_default() {
     let project = tapid_test_support::TempProject::new("dependency-hooks-denied").unwrap();
     let home = tapid_test_support::TempHome::new("dependency-hooks-denied").unwrap();
-    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"},"scripts":{"install":"echo root > ROOT_SCRIPT_RAN"}}"#).unwrap();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0","second-demo":"1.0.0"},"scripts":{"install":"echo root > ROOT_SCRIPT_RAN"}}"#).unwrap();
     let archive = "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=";
     write_dependency_script_fixture(&project, archive);
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("registry.json")).unwrap()).unwrap();
+    let second = "H4sIAC6v32oAA+3QwUoDMRCA4T5KyFnXLFsqePCkoCD20AreSsgOutomIdmKUPruZit4EA8Wi3r4v8uEyQwzTLTu2T7ISXyP1VMOfnRgppiMx7tYfI6mOW0+3rt8XU+aeqTMoRf5yjr3NpXxvzHrH9pob1eiz5TO4oJvj1tZBX2k9Iuk3AU//NSVqcyQyy51sc8lt9ExSefL7ZbLoUTcY1DyKm7dS6vO1exqendzsbidzheX99ez+dC9Z3kMud+3JUm0Sb5Vvt3+9ekBAAAAAAAAAAAAAAAA4EfeACIMKbwAKAAA";
+    registry["packages"].as_array_mut().unwrap().push(serde_json::json!({
+        "registry":"https://registry.npmjs.org", "name":"second-demo", "version":"1.0.0",
+        "integrity": format!("sha512-{}", STANDARD.encode(Sha512::digest(STANDARD.decode(second).unwrap()))),
+        "artifact": format!("base64:{second}")
+    }));
+    project
+        .write("registry.json", &serde_json::to_vec(&registry).unwrap())
+        .unwrap();
+
     for flags in [
         vec!["install", "--registry-fixture", "registry.json"],
         vec!["install", "--offline", "--frozen"],
@@ -6743,6 +6868,12 @@ fn dependency_lifecycle_hooks_are_reported_and_never_run_by_default() {
                 "{stderr}"
             );
         }
+        assert!(
+            !project
+                .path()
+                .join("node_modules/second-demo/SHOULD_NOT_EXIST")
+                .exists()
+        );
         assert!(!project.path().join("ROOT_SCRIPT_RAN").exists());
         assert!(!project.path().join("SHOULD_NOT_EXIST").exists());
         assert!(
@@ -6751,6 +6882,55 @@ fn dependency_lifecycle_hooks_are_reported_and_never_run_by_default() {
                 .join("node_modules/native-demo/SHOULD_NOT_EXIST")
                 .exists()
         );
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args(["install", "--offline", "--frozen", "--json", "--store-dir"])
+        .arg(home.path().join("store"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["warnings"],
+        serde_json::json!(["DEPENDENCY_LIFECYCLE_HOOK_SKIPPED"])
+    );
+    assert_eq!(result["lifecycle"]["coverage"], "complete");
+    assert_eq!(result["lifecycle"]["packages"][0]["discovery"], "succeeded");
+    assert_eq!(
+        result["lifecycle"]["packages"][0]["hooks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(
+        result["lifecycle"]["packages"][0]["hooks"][0]["authorization"],
+        "not_approved"
+    );
+    assert_eq!(
+        result["lifecycle"]["packages"][0]["hooks"][0]["disposition"],
+        "skipped"
+    );
+    let details = result["warning_details"]
+        .as_array()
+        .expect("structured warning occurrences");
+    assert_eq!(details.len(), 8);
+    for package in ["native-demo", "second-demo"] {
+        for hook in ["preinstall", "install", "postinstall", "prepare"] {
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail["package"]["name"] == package && detail["hook"] == hook)
+            );
+        }
+    }
+    for detail in details {
+        assert!(
+            ["native-demo", "second-demo"].contains(&detail["package"]["name"].as_str().unwrap())
+        );
+        assert_eq!(detail["package"]["version"], "1.0.0");
+        assert!(detail["package"]["key"].as_str().unwrap().contains("-demo"));
     }
     project
         .write(
@@ -6783,6 +6963,24 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
         )
         .unwrap();
     let before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .current_dir(project.path())
+        .args(["install", "--offline", "--frozen", "--json", "--store-dir"])
+        .arg(home.path().join("store"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"], serde_json::Value::Null);
+    assert_eq!(result["lifecycle"]["coverage"], "incomplete");
+    assert_eq!(result["lifecycle"]["hooks_skipped"], 1);
+    assert_eq!(result["warning_details"][0]["hook"], "preinstall");
+    let hooks = result["lifecycle"]["packages"][0]["hooks"]
+        .as_array()
+        .unwrap();
+    assert!(hooks.iter().any(|h| h["hook"] == "install"
+        && h["authorization"] == "rejected"
+        && h["reason"] == "approval_rejected"));
     for args in [
         vec!["install", "--offline", "--frozen"],
         vec!["ci", "--registry-fixture", "registry.json"],
@@ -7424,11 +7622,18 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
     project
         .write("tapid.lifecycle.toml", policy.as_bytes())
         .unwrap();
-    let first = install(&["--registry-fixture", "registry.json"]);
+    let first = install(&["--registry-fixture", "registry.json", "--json"]);
     assert!(
         first.status.success(),
         "{}",
         String::from_utf8_lossy(&first.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["hooks_executed"], 1);
+    assert_eq!(result["lifecycle"]["generated_outputs_reused"], 0);
+    assert_eq!(
+        result["lifecycle"]["packages"][0]["hooks"][0]["authorization"],
+        "exact_policy"
     );
     let package = project.path().join("node_modules/native-demo");
     assert_eq!(
@@ -7459,7 +7664,7 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
     ] {
         let replay = Command::new(env!("CARGO_BIN_EXE_tapid"))
             .current_dir(project.path())
-            .arg("ci")
+            .args(["ci", "--json"])
             .args(flags)
             .arg("--store-dir")
             .arg(home.path().join("store"))
@@ -7469,6 +7674,13 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
             replay.status.success(),
             "{}",
             String::from_utf8_lossy(&replay.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+        assert_eq!(result["lifecycle"]["hooks_executed"], 0);
+        assert_eq!(result["lifecycle"]["generated_outputs_reused"], 1);
+        assert_eq!(
+            result["lifecycle"]["packages"][0]["hooks"][0]["disposition"],
+            "reused"
         );
         assert_eq!(
             fs::read(project.path().join("tapid.lock")).unwrap(),
@@ -7525,6 +7737,14 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
     assert!(
         String::from_utf8_lossy(&rejected.stderr)
             .contains("missing or mismatched verified lifecycle output")
+    );
+    let failed = install(&["--offline", "--frozen", "--json"]);
+    assert!(!failed.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["hooks_executed"], 0);
+    assert_eq!(
+        result["lifecycle"]["packages"][0]["hooks"][0]["reason"],
+        "authenticated_output_missing_or_mismatched"
     );
     assert_eq!(
         fs::read(project.path().join("tapid.lock")).unwrap(),
