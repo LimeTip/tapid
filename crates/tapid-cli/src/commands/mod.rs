@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 mod cache;
 mod ci;
+mod completions;
 mod explain;
 pub(crate) mod init;
 pub(crate) mod install;
@@ -80,6 +81,11 @@ pub(crate) enum Command {
     Cache(cache::Args),
     /// Preview package-cache removal. Pass --yes to delete published cache entries.
     Clean(cache::CleanArgs),
+    /// Generate static shell completion scripts from the CLI command definitions.
+    #[command(
+        long_about = "Generate a static completion script for Bash, Elvish, Fish, PowerShell, or Zsh. Writes only to stdout; it does not inspect or modify project files, user profiles, configuration, credentials, or the package store. Redirect output to the shell's completion directory and source it manually."
+    )]
+    Completions(completions::Args),
     /// Print the Apache-2.0 license and copyright attribution.
     License,
     /// Manage the administrator-installed Windows network guard for unattended contained runs.
@@ -200,6 +206,7 @@ impl Command {
             Self::Explain(_) => "explain",
             Self::Cache(_) => "cache",
             Self::Clean(_) => "clean",
+            Self::Completions(_) => "completions",
             Self::License => "license",
             Self::Sandbox(_) => "sandbox",
             Self::VerifyReleaseRecord(_) => "__verify-release-record",
@@ -262,6 +269,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::Explain(args)) => explain::run(args, json),
         Some(Command::Cache(args)) => cache::run(args, json),
         Some(Command::Clean(args)) => cache::clean(args, json),
+        Some(Command::Completions(args)) => completions::run(args),
         Some(Command::License) => license::run(),
         Some(Command::Sandbox(args)) => sandbox::run(args),
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
